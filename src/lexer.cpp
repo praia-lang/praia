@@ -42,6 +42,13 @@ static const std::unordered_map<std::string, TokenType> keywords = {
 Lexer::Lexer(const std::string& source) : source(source) {}
 
 std::vector<Token> Lexer::tokenize() {
+    // Skip shebang line (#!/usr/bin/env praia)
+    if (current + 1 < static_cast<int>(source.size()) &&
+        source[0] == '#' && source[1] == '!') {
+        while (!isAtEnd() && source[current] != '\n') current++;
+        if (!isAtEnd()) { current++; line++; lineStart = current; }
+    }
+
     while (!isAtEnd()) {
         start = current;
         scanToken();
