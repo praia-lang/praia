@@ -6,6 +6,9 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <set>
 #include "../gc_heap.h"
 
 struct AddrGuard {
@@ -227,6 +230,81 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 throw RuntimeError(sysErr("Cannot bind UDP to port " + std::to_string(port)), 0);
             }
             return Value(static_cast<int64_t>(sock));
+        }));
+
+    // net.bindInterface(sock, ifname) — bind a socket to a specific network interface.
+    // Must be called immediately after net.udp(), before any send/recv.
+    // On Linux, requires root or CAP_NET_RAW for SO_BINDTODEVICE.
+    // On macOS/BSD, binds to the interface's IPv4 address.
+    netMap->entries[Value("bindInterface")] = Value(makeNative("net.bindInterface", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isNumber()) throw RuntimeError("net.bindInterface() requires a socket", 0);
+            if (!args[1].isString()) throw RuntimeError("net.bindInterface() requires an interface name", 0);
+            int sock = static_cast<int>(args[0].asNumber());
+            std::string ifname = args[1].asString();
+
+#ifdef __linux__
+            // Linux: use SO_BINDTODEVICE (requires root or CAP_NET_RAW)
+            if (setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(), static_cast<socklen_t>(ifname.size() + 1)) < 0) {
+                if (errno == EPERM)
+                    throw RuntimeError("net.bindInterface() requires root or CAP_NET_RAW on Linux for '" + ifname + "'", 0);
+                throw RuntimeError(sysErr("net.bindInterface() failed for '" + ifname + "'"), 0);
+            }
+#else
+            // macOS/BSD: look up the interface's IPv4 address and bind to it
+            struct ifaddrs* ifas = nullptr;
+            if (getifaddrs(&ifas) != 0)
+                throw RuntimeError(sysErr("net.bindInterface() getifaddrs failed"), 0);
+            bool found = false;
+            for (auto* ifa = ifas; ifa; ifa = ifa->ifa_next) {
+                if (ifa->ifa_name && ifname == ifa->ifa_name &&
+                    ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET) {
+                    if (bind(sock, ifa->ifa_addr, sizeof(struct sockaddr_in)) < 0) {
+                        int err = errno;
+                        freeifaddrs(ifas);
+                        if (err == EINVAL)
+                            throw RuntimeError("net.bindInterface() socket already bound — call before send/recv", 0);
+                        throw RuntimeError(sysErr("net.bindInterface() bind failed for '" + ifname + "'"), 0);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            freeifaddrs(ifas);
+            if (!found)
+                throw RuntimeError("net.bindInterface() interface '" + ifname + "' not found or has no IPv4 address", 0);
+#endif
+            return Value();
+        }));
+
+    // net.interfaces() — list network interfaces with their addresses
+    netMap->entries[Value("interfaces")] = Value(makeNative("net.interfaces", 0,
+        [](const std::vector<Value>&) -> Value {
+            struct ifaddrs* ifas = nullptr;
+            if (getifaddrs(&ifas) != 0)
+                throw RuntimeError(sysErr("net.interfaces() failed"), 0);
+            auto result = gcNew<PraiaArray>();
+            std::set<std::string> seen;
+            for (auto* ifa = ifas; ifa; ifa = ifa->ifa_next) {
+                if (!ifa->ifa_name || !ifa->ifa_addr) continue;
+                if (ifa->ifa_addr->sa_family != AF_INET) continue;
+                std::string name = ifa->ifa_name;
+                if (seen.count(name)) continue;
+                seen.insert(name);
+                char addrBuf[INET_ADDRSTRLEN];
+                auto* sa = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+                inet_ntop(AF_INET, &sa->sin_addr, addrBuf, sizeof(addrBuf));
+                auto entry = gcNew<PraiaMap>();
+                entry->entries[Value("name")] = Value(name);
+                entry->entries[Value("address")] = Value(std::string(addrBuf));
+                bool up = (ifa->ifa_flags & IFF_UP) != 0;
+                bool loopback = (ifa->ifa_flags & IFF_LOOPBACK) != 0;
+                entry->entries[Value("up")] = Value(up);
+                entry->entries[Value("loopback")] = Value(loopback);
+                result->elements.push_back(Value(entry));
+            }
+            freeifaddrs(ifas);
+            return Value(result);
         }));
 
     netMap->entries[Value("sendTo")] = Value(makeNative("net.sendTo", 4,
