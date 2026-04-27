@@ -31,13 +31,13 @@ jobs:
 
       - name: Install dependencies (macOS)
         if: startsWith(matrix.os, 'macos')
-        run: brew install openssl@3 readline sqlite utf8proc
+        run: brew install openssl@3 readline sqlite utf8proc re2
 
       - name: Install dependencies (Linux)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev libreadline-dev libsqlite3-dev libutf8proc-dev
+          sudo apt-get install -y libssl-dev libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev
 
       - name: Build
         run: make clean && make
