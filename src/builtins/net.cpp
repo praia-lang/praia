@@ -281,8 +281,10 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             socklen_t fromLen = sizeof(from);
             ssize_t n = recvfrom(sock, buf.data(), buf.size(), 0,
                                   (struct sockaddr*)&from, &fromLen);
-            if (n < 0)
+            if (n < 0) {
+                if (errno == EINTR) throw RuntimeError("Interrupted", 0);
                 throw RuntimeError(sysErr("recvFrom failed"), 0);
+            }
 
             // Extract sender address (IPv4 or IPv6)
             char addrBuf[INET6_ADDRSTRLEN];

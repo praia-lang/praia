@@ -503,6 +503,7 @@ Interpreter::Interpreter() {
             // Read both pipes concurrently with poll() to avoid deadlock
             // when the child fills one pipe while we're blocked reading the other.
             std::string outStr, errStr;
+            bool interrupted = false;
             {
                 struct pollfd fds[2];
                 fds[0] = {stdoutPipe[0], POLLIN, 0};
@@ -510,14 +511,21 @@ Interpreter::Interpreter() {
                 int openCount = 2;
                 char buf[4096];
                 while (openCount > 0) {
-                    poll(fds, 2, -1);
+                    int pr = poll(fds, 2, -1);
+                    if (pr < 0 && errno == EINTR) {
+                        if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+                            kill(pid, SIGINT);
+                            interrupted = true;
+                            break;
+                        }
+                        continue;
+                    }
                     for (int i = 0; i < 2; i++) {
                         if (fds[i].revents & (POLLIN | POLLHUP)) {
                             ssize_t n = read(fds[i].fd, buf, sizeof(buf));
                             if (n > 0) {
                                 (i == 0 ? outStr : errStr).append(buf, n);
                             } else {
-                                // EOF or error — stop polling this fd
                                 close(fds[i].fd);
                                 fds[i].fd = -1;
                                 openCount--;
@@ -525,6 +533,8 @@ Interpreter::Interpreter() {
                         }
                     }
                 }
+                if (fds[0].fd >= 0) close(fds[0].fd);
+                if (fds[1].fd >= 0) close(fds[1].fd);
                 if (!outStr.empty() && outStr.back() == '\n') outStr.pop_back();
                 if (!errStr.empty() && errStr.back() == '\n') errStr.pop_back();
             }
@@ -532,6 +542,10 @@ Interpreter::Interpreter() {
             int status = 0;
             waitpid(pid, &status, 0);
             int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+            // If interrupted, let the interpreter's checkInterrupt handle it
+            if (interrupted)
+                throw RuntimeError("Interrupted", 0);
 
             auto result = gcNew<PraiaMap>();
             result->entries[Value("stdout")] = Value(std::move(outStr));
@@ -1424,8 +1438,15 @@ Interpreter::Interpreter() {
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isNumber())
                 throw RuntimeError("time.sleep() requires milliseconds", 0);
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(static_cast<int>(args[0].asNumber())));
+            // Sleep in short bursts to remain responsive to SIGINT
+            int remaining = static_cast<int>(args[0].asNumber());
+            while (remaining > 0) {
+                int chunk = remaining > 100 ? 100 : remaining;
+                std::this_thread::sleep_for(std::chrono::milliseconds(chunk));
+                remaining -= chunk;
+                if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT))
+                    throw RuntimeError("Interrupted", 0);
+            }
             return Value();
         }));
 

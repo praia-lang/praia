@@ -722,6 +722,8 @@ void Interpreter::execute(const Stmt* stmt) {
 // ── Expression evaluation ────────────────────────────────────
 
 Value Interpreter::evaluate(const Expr* expr) {
+    checkInterrupt(expr->line, expr->column);
+
     switch (expr->type) {
     // ── Literals ──
 
