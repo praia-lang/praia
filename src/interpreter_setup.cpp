@@ -43,11 +43,11 @@
 namespace fs = std::filesystem;
 
 // ── Signal handling infrastructure ──
-// Registered Praia callbacks per signal, invoked from the main thread.
-// The C signal handler just sets a flag; the callbacks run at safe points.
-static std::mutex g_signalMutex;
-static std::unordered_map<int, std::shared_ptr<Callable>> g_signalHandlers;
-static std::atomic<uint32_t> g_pendingSignals{0}; // bitmask of pending signals
+// Defined here, declared extern in signal_state.h for use by interpreter.cpp and vm.cpp.
+#include "signal_state.h"
+std::mutex g_signalMutex;
+std::unordered_map<int, std::shared_ptr<Callable>> g_signalHandlers;
+std::atomic<uint32_t> g_pendingSignals{0};
 
 // ── Plugin loading infrastructure ──
 static std::mutex g_pluginMutex;
@@ -74,10 +74,18 @@ static std::string signalNumToName(int sig) {
     }
 }
 
-static void praiaSignalHandler(int sig) {
+void praiaSignalHandler(int sig) {
     // Async-signal-safe: only set atomic flag
     if (sig >= 0 && sig < 32)
         g_pendingSignals.fetch_or(1u << sig);
+}
+
+void installDefaultSignalHandlers() {
+    struct sigaction sa = {};
+    sa.sa_handler = praiaSignalHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
 }
 
 Interpreter::Interpreter() {

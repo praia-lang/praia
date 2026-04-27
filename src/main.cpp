@@ -1,6 +1,7 @@
 #include "ast.h"
 #include "grain_resolve.h"
 #include "interpreter.h"
+#include "signal_state.h"
 #include "lexer.h"
 #include "parser.h"
 #include "vm/compiler.h"
@@ -711,6 +712,8 @@ static int runTestsCommand(const std::string& dir, bool useVm) {
 }
 
 int main(int argc, char* argv[]) {
+    installDefaultSignalHandlers();
+
     // Resolve the directory where the praia binary lives.
     // Used by grain resolution to find bundled stdlib grains.
     {

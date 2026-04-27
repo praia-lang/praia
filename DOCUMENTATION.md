@@ -854,6 +854,23 @@ func processAge(age) {
 }
 ```
 
+### Interrupts (Ctrl+C)
+
+Pressing Ctrl+C throws `"Interrupted"`, which is catchable with `try/catch`:
+
+```
+try {
+    for (i in 0..999999999) {
+        doWork(i)
+    }
+} catch (err) {
+    print("stopped: " + str(err))   // "stopped: Interrupted"
+    cleanup()
+}
+```
+
+Without a `try/catch`, Ctrl+C prints `Uncaught error: Interrupted` and exits. This is similar to Python's `KeyboardInterrupt`.
+
 ---
 
 ## Loops

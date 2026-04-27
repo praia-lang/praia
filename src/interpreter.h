@@ -195,6 +195,7 @@ public:
 
     // Public so PraiaFunction::call can use it
     void executeBlock(const BlockStmt* block, std::shared_ptr<Environment> env);
+    void checkInterrupt(int line, int column);
     std::shared_ptr<Environment> getGlobals() { return globals; }
 
 private:

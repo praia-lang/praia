@@ -3,6 +3,7 @@
 #include "gc_heap.h"
 #include "grain_resolve.h"
 #include "interpreter.h"
+#include "signal_state.h"
 #include "lexer.h"
 #include "parser.h"
 #include "unicode.h"
@@ -323,9 +324,30 @@ void Interpreter::executeBlock(const BlockStmt* block,
     savedEnvStack_.pop_back();
 }
 
+// ── SIGINT check — called from execute() and tight loops ──
+
+void Interpreter::checkInterrupt(int line, int column) {
+    if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+        g_pendingSignals.fetch_and(~(1u << SIGINT));
+        std::shared_ptr<Callable> handler;
+        {
+            std::lock_guard<std::mutex> lock(g_signalMutex);
+            auto it = g_signalHandlers.find(SIGINT);
+            if (it != g_signalHandlers.end()) handler = it->second;
+        }
+        if (handler) {
+            handler->call(*this, {Value("SIGINT")});
+        } else {
+            throw ThrowSignal{Value("Interrupted"), line, column};
+        }
+    }
+}
+
 // ── Statement execution ──────────────────────────────────────
 
 void Interpreter::execute(const Stmt* stmt) {
+    checkInterrupt(stmt->line, stmt->column);
+
     switch (stmt->type) {
     case StmtType::Expr: {
         auto* s = static_cast<const ExprStmt*>(stmt);
@@ -460,6 +482,7 @@ void Interpreter::execute(const Stmt* stmt) {
 
         try {
             for (int64_t i = from; i < to; i++) {
+                checkInterrupt(s->line, s->column);
                 auto iterEnv = gcNew<Environment>(env);
                 iterEnv->define(s->varName, Value(i));
                 try { executeBlock(bodyBlock, iterEnv); }

@@ -1,6 +1,7 @@
 #include "vm.h"
 #include "../builtins.h"
 #include "../gc_heap.h"
+#include "../signal_state.h"
 #include "../grain_resolve.h"
 #include "../interpreter.h"
 #include "../lexer.h"
@@ -632,6 +633,21 @@ VM::Result VM::execute(int baseFrameCount_) {
         if (--gcCounter_ <= 0) {
             gcCounter_ = 1024;
             GcHeap::current().collectIfNeeded();
+            // Check for pending SIGINT — makes Ctrl+C catchable by try/catch
+            if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+                g_pendingSignals.fetch_and(~(1u << SIGINT));
+                bool hasUserHandler = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_signalMutex);
+                    hasUserHandler = g_signalHandlers.count(SIGINT) > 0;
+                }
+                if (!hasUserHandler) {
+                    if (tryHandleError(Value(std::string("Interrupted")))) continue;
+                    runtimeError("Interrupted", CURRENT_LINE(), CURRENT_COLUMN());
+                    return Result::RUNTIME_ERROR;
+                }
+                // User handler exists — handled by sys.checkSignals()
+            }
         }
         uint8_t instruction = READ_BYTE();
 
