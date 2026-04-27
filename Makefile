@@ -136,6 +136,8 @@ install:
 	cp $(SRC_DIR)/environment.h $(DESTDIR)$(LIBDIR)/include/
 	cp $(SRC_DIR)/ast.h $(DESTDIR)$(LIBDIR)/include/
 	cp $(SRC_DIR)/token.h $(DESTDIR)$(LIBDIR)/include/
+	cp $(SRC_DIR)/fiber.h $(DESTDIR)$(LIBDIR)/include/
+	cp $(SRC_DIR)/signal_state.h $(DESTDIR)$(LIBDIR)/include/
 	install -d $(DESTDIR)$(LIBDIR)/grains
 	cp -R grains/* $(DESTDIR)$(LIBDIR)/grains/
 	install -d $(DESTDIR)$(LIBDIR)/sand
