@@ -6,7 +6,7 @@ Praia is a dynamically typed, interpreted programming language written in C++ fr
 
 A web server:
 
-```
+```praia
 let server = http.createServer(lam{ req in
     let name = "world"
     if (req.query.contains("name=")) {
@@ -20,7 +20,7 @@ server.listen(8080)
 
 A data pipeline:
 
-```
+```praia
 let adults = sys.read("users.json")
     |> json.parse
     |> filter(lam{ u in u.age >= 18 })
