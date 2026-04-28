@@ -108,17 +108,21 @@ static uint16_t icmpChecksum(const void* data, int len) {
 
 // Create an ICMP socket — tries SOCK_DGRAM first (unprivileged on macOS),
 // falls back to SOCK_RAW (requires root/CAP_NET_RAW on Linux).
+// ICMP socket: returns fd. Sets isRaw to true if SOCK_RAW (Linux with root).
+// SOCK_DGRAM: kernel filters replies by ID, no IP header in recv.
+// SOCK_RAW: receives ALL ICMP, includes IP header, kernel may rewrite our ID.
+static bool g_icmpIsRaw = false;
+
 static int createIcmpSocket(const char* caller = "net.ping()") {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
-    if (sock >= 0) return sock;
+    if (sock >= 0) { g_icmpIsRaw = false; return sock; }
     sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
-    if (sock >= 0) return sock;
+    if (sock >= 0) { g_icmpIsRaw = true; return sock; }
     if (errno == EPERM || errno == EACCES)
         throw RuntimeError(std::string(caller) + ": permission denied — requires root or CAP_NET_RAW on Linux", 0);
     throw RuntimeError(sysErr(std::string(caller) + ": cannot create ICMP socket"), 0);
 }
 
-// Milliseconds elapsed since a timeval
 static int msElapsed(const struct timeval& start) {
     struct timeval now;
     gettimeofday(&now, nullptr);
@@ -142,21 +146,18 @@ static int buildEchoRequest(uint8_t* pkt, uint16_t id, uint16_t seq) {
     return pktLen;
 }
 
-// Parse an ICMP echo reply from a receive buffer.
-// Handles both raw (with IP header) and DGRAM (without) transparently.
-// Returns true if it's a valid echo reply matching our id.
-static bool parseEchoReply(const uint8_t* buf, int n, uint16_t expectId, double& rttMs) {
+// Parse ICMP echo reply. With SOCK_RAW the kernel may rewrite our ID,
+// so we only check type == ECHOREPLY (and optionally ID for SOCK_DGRAM).
+static bool parseEchoReply(const uint8_t* buf, int n, uint16_t expectId,
+                           bool checkId, double& rttMs) {
     int offset = 0;
-    // Detect IP header: first nibble == 4 (IPv4)
-    if (n > 0 && (buf[0] >> 4) == 4) {
+    if (n > 0 && (buf[0] >> 4) == 4)
         offset = (buf[0] & 0x0F) * 4;
-    }
     if (n < offset + 8) return false;
     auto* reply = (const struct icmp*)(buf + offset);
     if (reply->icmp_type != ICMP_ECHOREPLY) return false;
-    if (ntohs(reply->icmp_id) != expectId) return false;
+    if (checkId && ntohs(reply->icmp_id) != expectId) return false;
 
-    // Extract RTT from timestamp payload
     if (n >= offset + 8 + static_cast<int>(sizeof(struct timeval))) {
         struct timeval sent;
         memcpy(&sent, buf + offset + 8, sizeof(sent));
@@ -1283,6 +1284,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             result->entries[Value("alive")] = Value(false);
 
             int sock = createIcmpSocket();
+            bool isRaw = g_icmpIsRaw;
             uint16_t id = static_cast<uint16_t>(getpid() & 0xFFFF);
 
             uint8_t pkt[64] = {};
@@ -1293,7 +1295,6 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 return Value(result);
             }
 
-            // Poll for reply, checking SIGINT
             struct pollfd pfd = {sock, POLLIN, 0};
             struct timeval deadline;
             gettimeofday(&deadline, nullptr);
@@ -1308,12 +1309,16 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                     socklen_t fromLen = sizeof(from);
                     int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &fromLen);
                     double rtt = 0;
-                    if (n > 0 && parseEchoReply(buf, n, id, rtt)) {
-                        result->entries[Value("alive")] = Value(true);
-                        result->entries[Value("rtt")] = Value(rtt);
-                        break;
+                    // SOCK_RAW: kernel rewrites ID, match by sender IP instead
+                    // SOCK_DGRAM: kernel filters by ID, safe to check
+                    if (n > 0 && parseEchoReply(buf, n, id, !isRaw, rtt)) {
+                        if (!isRaw || from.sin_addr.s_addr == dest.sin_addr.s_addr) {
+                            result->entries[Value("alive")] = Value(true);
+                            result->entries[Value("rtt")] = Value(rtt);
+                            break;
+                        }
                     }
-                    continue; // not our reply — remaining recalculated from wall clock
+                    continue;
                 }
                 if (pr < 0 && errno != EINTR) break;
                 if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
@@ -1378,9 +1383,17 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
 
             // Single ICMP socket for all pings
             int sock = createIcmpSocket("net.pingAll()");
+            bool isRaw = g_icmpIsRaw;
             uint16_t baseId = static_cast<uint16_t>(getpid() & 0xFFFF);
 
-            // Send all echo requests — use sequence number to identify which host
+            // Build address lookup for SOCK_RAW (match replies by sender IP)
+            std::unordered_map<uint32_t, size_t> addrToIdx;
+            for (size_t i = 0; i < targets.size(); i++) {
+                if (!targets[i].resolved) continue;
+                addrToIdx[targets[i].addr.sin_addr.s_addr] = i;
+            }
+
+            // Send all echo requests
             for (size_t i = 0; i < targets.size(); i++) {
                 if (!targets[i].resolved) continue;
                 uint8_t pkt[64] = {};
@@ -1416,14 +1429,25 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                     if (n < offset + 8) continue;
                     auto* reply = (const struct icmp*)(buf + offset);
                     if (reply->icmp_type != ICMP_ECHOREPLY) continue;
-                    if (ntohs(reply->icmp_id) != baseId) continue;
 
-                    uint16_t seq = ntohs(reply->icmp_seq);
-                    if (seq < 1 || seq > targets.size()) continue;
-                    auto& t = targets[seq - 1];
+                    // Identify which target replied
+                    size_t idx;
+                    if (isRaw) {
+                        // SOCK_RAW: kernel rewrites ID/seq, match by sender IP
+                        auto it = addrToIdx.find(from.sin_addr.s_addr);
+                        if (it == addrToIdx.end()) continue;
+                        idx = it->second;
+                    } else {
+                        // SOCK_DGRAM: kernel filters by ID, use seq to identify
+                        if (ntohs(reply->icmp_id) != baseId) continue;
+                        uint16_t seq = ntohs(reply->icmp_seq);
+                        if (seq < 1 || seq > targets.size()) continue;
+                        idx = seq - 1;
+                    }
+
+                    auto& t = targets[idx];
                     if (t.alive) continue; // duplicate
 
-                    // Compute RTT from timestamp payload
                     if (n >= offset + 8 + static_cast<int>(sizeof(struct timeval))) {
                         struct timeval sent;
                         memcpy(&sent, buf + offset + 8, sizeof(sent));
@@ -1434,7 +1458,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                     }
                     t.alive = true;
                     repliesGot++;
-                    continue; // remaining recalculated from wall clock
+                    continue;
                 }
                 if (pr < 0 && errno != EINTR) break;
                 if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
