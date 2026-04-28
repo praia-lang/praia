@@ -19,6 +19,64 @@
 #include <arpa/nameser.h>
 #include "../gc_heap.h"
 #include "../signal_state.h"
+#include <mutex>
+#include <map>
+
+#ifdef HAVE_OPENSSL
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/x509v3.h>
+#endif
+
+// ── TLS connection registry ──
+// TLS handles are negative integers to distinguish from raw FDs.
+// net.send/recv/close check this registry to route through SSL.
+
+#ifdef HAVE_OPENSSL
+struct TlsConn {
+    SSL* ssl = nullptr;
+    SSL_CTX* ctx = nullptr;
+    int fd = -1;       // underlying TCP socket
+};
+
+static std::mutex g_tlsMutex;
+static std::map<int, TlsConn> g_tlsConns;
+static int g_nextTlsId = -1;  // decrements: -1, -2, -3, ...
+
+static std::once_flag g_sslInitFlag;
+static void ensureSSLInit() {
+    std::call_once(g_sslInitFlag, [] {
+        SSL_library_init();
+        SSL_load_error_strings();
+        OpenSSL_add_all_algorithms();
+    });
+}
+
+static int registerTls(TlsConn conn) {
+    std::lock_guard<std::mutex> lock(g_tlsMutex);
+    int id = g_nextTlsId--;
+    g_tlsConns[id] = conn;
+    return id;
+}
+
+static TlsConn* lookupTls(int id) {
+    if (id >= 0) return nullptr;
+    std::lock_guard<std::mutex> lock(g_tlsMutex);
+    auto it = g_tlsConns.find(id);
+    return (it != g_tlsConns.end()) ? &it->second : nullptr;
+}
+
+static void closeTls(int id) {
+    std::lock_guard<std::mutex> lock(g_tlsMutex);
+    auto it = g_tlsConns.find(id);
+    if (it == g_tlsConns.end()) return;
+    auto& c = it->second;
+    if (c.ssl) { SSL_shutdown(c.ssl); SSL_free(c.ssl); }
+    if (c.ctx) SSL_CTX_free(c.ctx);
+    if (c.fd >= 0) ::close(c.fd);
+    g_tlsConns.erase(it);
+}
+#endif
 
 struct AddrGuard {
     struct addrinfo* res = nullptr;
@@ -316,9 +374,24 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 throw RuntimeError("net.send() requires a string", 0);
             int fd = static_cast<int>(args[0].asNumber());
             auto& data = args[1].asString();
-            ssize_t sent = ::send(fd, data.c_str(), data.size(), 0);
-            if (sent < 0)
-                throw RuntimeError(sysErr("Send failed"), 0);
+            ssize_t sent;
+#ifdef HAVE_OPENSSL
+            if (auto* tls = lookupTls(fd)) {
+                sent = SSL_write(tls->ssl, data.c_str(), static_cast<int>(data.size()));
+                if (sent <= 0) {
+                    int err = SSL_get_error(tls->ssl, static_cast<int>(sent));
+                    if (err == SSL_ERROR_WANT_WRITE ||
+                        (err == SSL_ERROR_SYSCALL && (errno == EAGAIN || errno == EWOULDBLOCK)))
+                        throw RuntimeError("TLS send timed out", 0);
+                    throw RuntimeError("TLS send failed (SSL error " + std::to_string(err) + ")", 0);
+                }
+            } else
+#endif
+            {
+                sent = ::send(fd, data.c_str(), data.size(), 0);
+                if (sent < 0)
+                    throw RuntimeError(sysErr("Send failed"), 0);
+            }
             return Value(static_cast<int64_t>(sent));
         }));
 
@@ -332,9 +405,29 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 maxBytes = static_cast<int>(args[1].asNumber());
 
             std::vector<char> buf(maxBytes);
-            ssize_t n = ::recv(fd, buf.data(), buf.size(), 0);
-            if (n < 0)
-                throw RuntimeError(sysErr("Recv failed"), 0);
+            ssize_t n;
+#ifdef HAVE_OPENSSL
+            if (auto* tls = lookupTls(fd)) {
+                n = SSL_read(tls->ssl, buf.data(), static_cast<int>(buf.size()));
+                if (n <= 0) {
+                    int err = SSL_get_error(tls->ssl, static_cast<int>(n));
+                    if (err == SSL_ERROR_ZERO_RETURN) return Value(std::string(""));
+                    // Timeout: WANT_READ (OpenSSL 1.x) or SYSCALL+EAGAIN (OpenSSL 3.x)
+                    if (err == SSL_ERROR_WANT_READ) return Value(std::string(""));
+                    if (err == SSL_ERROR_SYSCALL && (errno == EAGAIN || errno == EWOULDBLOCK))
+                        return Value(std::string(""));
+                    throw RuntimeError("TLS recv failed (SSL error " + std::to_string(err) + ")", 0);
+                }
+            } else
+#endif
+            {
+                n = ::recv(fd, buf.data(), buf.size(), 0);
+                if (n < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        return Value(std::string("")); // timeout — not an error
+                    throw RuntimeError(sysErr("Recv failed"), 0);
+                }
+            }
             if (n == 0) return Value(std::string(""));
             return Value(std::string(buf.data(), n));
         }));
@@ -347,8 +440,16 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             std::string data;
             char buf[4096];
             ssize_t n;
-            while ((n = ::recv(fd, buf, sizeof(buf), 0)) > 0)
-                data.append(buf, n);
+#ifdef HAVE_OPENSSL
+            if (auto* tls = lookupTls(fd)) {
+                while ((n = SSL_read(tls->ssl, buf, sizeof(buf))) > 0)
+                    data.append(buf, n);
+            } else
+#endif
+            {
+                while ((n = ::recv(fd, buf, sizeof(buf), 0)) > 0)
+                    data.append(buf, n);
+            }
             return Value(std::move(data));
         }));
 
@@ -356,8 +457,96 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isNumber())
                 throw RuntimeError("net.close() requires a socket", 0);
-            close(static_cast<int>(args[0].asNumber()));
+            int fd = static_cast<int>(args[0].asNumber());
+#ifdef HAVE_OPENSSL
+            if (fd < 0) {
+                closeTls(fd); // no-op if not found
+                return Value();
+            }
+#endif
+            ::close(fd);
             return Value();
+        }));
+
+    // ── TLS ──
+
+    // net.tls(sock, hostname?) — wrap a TCP socket with TLS.
+    // Returns a TLS handle (negative integer) that works with send/recv/close.
+    // hostname enables SNI and certificate verification.
+    netMap->entries[Value("tls")] = Value(makeNative("net.tls", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || args.size() > 2)
+                throw RuntimeError("net.tls(sock, hostname?) takes 1-2 arguments", 0);
+            if (!args[0].isNumber())
+                throw RuntimeError("net.tls() requires a socket", 0);
+            int fd = static_cast<int>(args[0].asNumber());
+            if (fd < 0)
+                throw RuntimeError("net.tls() requires a plain TCP socket, not a TLS handle", 0);
+            std::string hostname;
+            if (args.size() == 2) {
+                if (!args[1].isString())
+                    throw RuntimeError("net.tls() hostname must be a string", 0);
+                hostname = args[1].asString();
+            }
+#ifdef HAVE_OPENSSL
+            ensureSSLInit();
+            SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+            if (!ctx)
+                throw RuntimeError("net.tls(): failed to create SSL context", 0);
+            SSL_CTX_set_default_verify_paths(ctx);
+            if (!hostname.empty())
+                SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+
+            SSL* ssl = SSL_new(ctx);
+            if (!ssl) {
+                SSL_CTX_free(ctx);
+                throw RuntimeError("net.tls(): failed to create SSL object", 0);
+            }
+            SSL_set_fd(ssl, fd);
+            if (!hostname.empty()) {
+                SSL_set_tlsext_host_name(ssl, hostname.c_str()); // SNI
+                SSL_set1_host(ssl, hostname.c_str());            // hostname verification
+            }
+
+            if (SSL_connect(ssl) <= 0) {
+                unsigned long err = ERR_get_error();
+                char errBuf[256];
+                ERR_error_string_n(err, errBuf, sizeof(errBuf));
+                SSL_free(ssl);
+                SSL_CTX_free(ctx);
+                throw RuntimeError("TLS handshake failed: " + std::string(errBuf), 0);
+            }
+
+            if (!hostname.empty()) {
+                long vr = SSL_get_verify_result(ssl);
+                if (vr != X509_V_OK) {
+                    std::string reason = X509_verify_cert_error_string(vr);
+                    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx);
+                    throw RuntimeError("TLS certificate verification failed: " + reason, 0);
+                }
+                // Verify hostname matches certificate CN/SAN
+                X509* cert = SSL_get_peer_certificate(ssl);
+                if (!cert) {
+                    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx);
+                    throw RuntimeError("TLS: server presented no certificate", 0);
+                }
+                int match = X509_check_host(cert, hostname.c_str(), hostname.size(), 0, nullptr);
+                X509_free(cert);
+                if (match != 1) {
+                    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx);
+                    throw RuntimeError("TLS hostname mismatch: certificate does not match '" + hostname + "'", 0);
+                }
+            }
+
+            TlsConn conn;
+            conn.ssl = ssl;
+            conn.ctx = ctx;
+            conn.fd = fd;
+            return Value(static_cast<int64_t>(registerTls(conn)));
+#else
+            (void)fd; (void)hostname;
+            throw RuntimeError("net.tls() requires OpenSSL (build with HAVE_OPENSSL)", 0);
+#endif
         }));
 
     // ── UDP ──
@@ -932,11 +1121,16 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 throw RuntimeError("net.setTimeout(socket, ms) requires two numbers", 0);
             int sock = static_cast<int>(args[0].asNumber());
             int ms = static_cast<int>(args[1].asNumber());
+            // For TLS handles, set timeout on the underlying TCP socket
+            int rawFd = sock;
+#ifdef HAVE_OPENSSL
+            if (auto* tls = lookupTls(sock)) rawFd = tls->fd;
+#endif
             struct timeval tv;
             tv.tv_sec = ms / 1000;
             tv.tv_usec = (ms % 1000) * 1000;
-            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            setsockopt(rawFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(rawFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             return Value();
         }));
 

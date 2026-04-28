@@ -3831,9 +3831,11 @@ net.setTimeout(sock, 5000)     // 5 second timeout for send/recv
 | `net.connectAll(targets, timeout)` | Concurrent TCP connect scan. targets: array of `{host, port}` or `[host, port]`. Returns `[{host, port, open}]` |
 | `net.listen(port)` | Bind and listen on a port, returns server socket |
 | `net.accept(server)` | Wait for and accept a connection, returns client socket |
-| `net.send(sock, data)` | Send a string, returns bytes sent |
-| `net.recv(sock, maxBytes?)` | Receive data (default 4096 bytes max), returns string |
-| `net.recvAll(sock)` | Read until the connection closes, returns string |
+| `net.send(sock, data)` | Send a string, returns bytes sent. Works with TLS handles |
+| `net.recv(sock, maxBytes?)` | Receive data (default 4096 bytes). Returns `""` on timeout or close. Works with TLS handles |
+| `net.recvAll(sock)` | Read until the connection closes, returns string. Works with TLS handles |
+| **TLS** | |
+| `net.tls(sock, hostname?)` | Wrap a TCP socket with TLS, returns TLS handle. Hostname enables SNI + cert verification |
 | **UDP** | |
 | `net.udp()` | Create an IPv4 UDP socket |
 | `net.udp6()` | Create an IPv6 UDP socket |
@@ -3948,6 +3950,33 @@ let ns = net.query("example.com", "NS")       // target field
 let cn = net.query("www.github.com", "CNAME")  // target field
 let v6 = net.query("example.com", "AAAA")      // address field
 ```
+
+### TLS
+
+`net.tls(sock, hostname?)` wraps an existing TCP socket with TLS. Returns a TLS handle that works transparently with `net.send()`, `net.recv()`, `net.recvAll()`, `net.setTimeout()`, and `net.close()`.
+
+When `hostname` is provided, SNI is sent and the server certificate is verified against that hostname. Without it, TLS is established but the certificate is not verified against a specific hostname (useful for pentesting).
+
+```
+// HTTPS banner grab
+let sock = net.connect("example.com", 443, 3000)
+let tls = net.tls(sock, "example.com")
+net.setTimeout(tls, 2000)
+net.send(tls, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+let response = net.recv(tls)
+print(response.split("\r\n")[0])  // "HTTP/1.1 200 OK"
+net.close(tls)
+
+// TLS without hostname verification
+let sock2 = net.connect("192.168.1.1", 443, 1000)
+let tls2 = net.tls(sock2)  // no cert check
+net.setTimeout(tls2, 1000)
+net.send(tls2, "GET / HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n")
+print(net.recv(tls2))
+net.close(tls2)
+```
+
+Requires OpenSSL (optional build dependency). Throws if OpenSSL is not available.
 
 ### Connection Timeouts
 
