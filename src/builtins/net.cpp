@@ -738,6 +738,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                                   (struct sockaddr*)&from, &fromLen);
             if (n < 0) {
                 if (errno == EINTR) throw RuntimeError("Interrupted", 0);
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return Value(); // timeout → nil
                 throw RuntimeError(sysErr("recvFrom failed"), 0);
             }
 

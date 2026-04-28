@@ -38,13 +38,8 @@ testing.test("DNS resolve localhost", lam{ in
 testing.test("net.setTimeout", lam{ in
     let sock = net.udpBind(19878)
     net.setTimeout(sock, 100)
-    let threw = false
-    try {
-        net.recvFrom(sock)
-    } catch (e) {
-        threw = true
-    }
-    testing.assert(threw, "recv should timeout and throw")
+    let result = net.recvFrom(sock)
+    testing.assert(result == nil, "recvFrom should return nil on timeout")
     net.close(sock)
 })
 
