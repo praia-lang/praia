@@ -62,7 +62,7 @@ void vmRegisterNatives(VM& vm) {
 
     std::vector<std::string> globalNames = {
         "print", "len", "push", "pop", "type", "str", "num", "fromCharCode",
-        "Lock", "Channel", "futures", "sort", "filter", "map", "each", "keys", "values",
+        "Lock", "Channel", "futures", "sort", "filter", "map", "each", "reduce", "any", "all", "keys", "values",
         "sys", "http", "json", "yaml", "base64", "path", "url", "net",
         "bytes", "crypto", "random", "time", "math",
         "loadNative",
@@ -241,6 +241,61 @@ void vmRegisterNatives(VM& vm) {
                     });
             }
             return Value(sorted);
+        }));
+
+    vm.defineNative("reduce", makeNat("reduce", -1,
+        [](const std::vector<Value>& args) -> Value {
+            VM* vm = VM::current();
+            if (!vm) throw RuntimeError("reduce() requires VM context", 0);
+            if (args.empty() || !args[0].isArray())
+                throw RuntimeError("reduce() requires an array as first argument", 0);
+            if (args.size() < 2 || !args[1].isCallable())
+                throw RuntimeError("reduce() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto fn = args[1].asCallable();
+            size_t start = 0;
+            Value acc;
+            if (args.size() > 2) {
+                acc = args[2];
+            } else {
+                if (src.empty())
+                    throw RuntimeError("reduce() of empty array with no initial value", 0);
+                acc = src[0];
+                start = 1;
+            }
+            for (size_t i = start; i < src.size(); i++)
+                acc = callWithVM(*vm, fn, {acc, src[i]});
+            return acc;
+        }));
+
+    vm.defineNative("any", makeNat("any", 2,
+        [](const std::vector<Value>& args) -> Value {
+            VM* vm = VM::current();
+            if (!vm) throw RuntimeError("any() requires VM context", 0);
+            if (!args[0].isArray())
+                throw RuntimeError("any() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("any() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto pred = args[1].asCallable();
+            for (auto& elem : src)
+                if (callWithVM(*vm, pred, {elem}).isTruthy()) return Value(true);
+            return Value(false);
+        }));
+
+    vm.defineNative("all", makeNat("all", 2,
+        [](const std::vector<Value>& args) -> Value {
+            VM* vm = VM::current();
+            if (!vm) throw RuntimeError("all() requires VM context", 0);
+            if (!args[0].isArray())
+                throw RuntimeError("all() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("all() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto pred = args[1].asCallable();
+            for (auto& elem : src)
+                if (!callWithVM(*vm, pred, {elem}).isTruthy()) return Value(false);
+            return Value(true);
         }));
 
     // Convert any iterable to an array for for-in loops.

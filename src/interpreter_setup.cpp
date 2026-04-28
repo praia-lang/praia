@@ -262,24 +262,28 @@ Interpreter::Interpreter() {
     // ── Functional built-ins (work great with |>) ──
 
     globals->define("sort", Value(makeNative("sort", -1,
-        [](const std::vector<Value>& args) -> Value {
+        [this](const std::vector<Value>& args) -> Value {
             if (args.empty() || !args[0].isArray())
                 throw RuntimeError("sort() requires an array", 0);
-            // Copy the array to avoid mutating the original
             auto sorted = gcNew<PraiaArray>();
             sorted->elements = args[0].asArray()->elements;
             auto& elems = sorted->elements;
 
             if (args.size() > 1 && args[1].isCallable()) {
-                // Custom comparator — can't call Praia functions from here without interpreter
-                // so we only support native comparators. Use array.sort() for custom.
-                throw RuntimeError("sort() with comparator not supported in pipe context. Use a plain sort.", 0);
+                auto cmp = args[1].asCallable();
+                Interpreter* interp = this;
+                std::sort(elems.begin(), elems.end(),
+                    [interp, &cmp](const Value& a, const Value& b) -> bool {
+                        Value result = callSafe(*interp, cmp, {a, b});
+                        if (result.isNumber()) return result.asNumber() < 0;
+                        return result.isTruthy();
+                    });
+            } else {
+                std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
+                    if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
+                    return a.toString() < b.toString();
+                });
             }
-            // Default sort: numbers ascending, strings alphabetical
-            std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
-                if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
-                return a.toString() < b.toString();
-            });
             return Value(sorted);
         })));
 
@@ -324,6 +328,55 @@ Interpreter::Interpreter() {
             for (auto& elem : src)
                 callSafe(*this, fn, {elem});
             return args[0]; // return the array for chaining
+        })));
+
+    globals->define("reduce", Value(makeNative("reduce", -1,
+        [this](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isArray())
+                throw RuntimeError("reduce() requires an array as first argument", 0);
+            if (args.size() < 2 || !args[1].isCallable())
+                throw RuntimeError("reduce() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto fn = args[1].asCallable();
+            size_t start = 0;
+            Value acc;
+            if (args.size() > 2) {
+                acc = args[2];
+            } else {
+                if (src.empty())
+                    throw RuntimeError("reduce() of empty array with no initial value", 0);
+                acc = src[0];
+                start = 1;
+            }
+            for (size_t i = start; i < src.size(); i++)
+                acc = callSafe(*this, fn, {acc, src[i]});
+            return acc;
+        })));
+
+    globals->define("any", Value(makeNative("any", 2,
+        [this](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("any() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("any() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto pred = args[1].asCallable();
+            for (auto& elem : src)
+                if (callSafe(*this, pred, {elem}).isTruthy()) return Value(true);
+            return Value(false);
+        })));
+
+    globals->define("all", Value(makeNative("all", 2,
+        [this](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("all() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("all() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto pred = args[1].asCallable();
+            for (auto& elem : src)
+                if (!callSafe(*this, pred, {elem}).isTruthy()) return Value(false);
+            return Value(true);
         })));
 
     globals->define("keys", Value(makeNative("keys", 1,
@@ -1475,6 +1528,35 @@ Interpreter::Interpreter() {
     timeMap->entries[Value("epoch")] = Value(makeNative("time.epoch", 0,
         [](const std::vector<Value>&) -> Value {
             return Value(static_cast<int64_t>(std::time(nullptr)));
+        }));
+
+    timeMap->entries[Value("parse")] = Value(makeNative("time.parse", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("time.parse() requires a date string", 0);
+            const std::string& dateStr = args[0].asString();
+
+            auto parseWith = [&](const std::string& format) -> std::pair<bool, int64_t> {
+                std::tm tm = {};
+                tm.tm_isdst = -1;
+                std::istringstream iss(dateStr);
+                iss >> std::get_time(&tm, format.c_str());
+                if (iss.fail()) return {false, 0};
+                std::time_t t = std::mktime(&tm);
+                if (t == -1) return {false, 0};
+                return {true, static_cast<int64_t>(t) * 1000};
+            };
+
+            if (args.size() > 1 && args[1].isString()) {
+                auto [ok, ms] = parseWith(args[1].asString());
+                if (!ok) throw RuntimeError("time.parse() failed to parse '" + dateStr + "'", 0);
+                return Value(ms);
+            }
+            auto [ok1, ms1] = parseWith("%Y-%m-%d %H:%M:%S");
+            if (ok1) return Value(ms1);
+            auto [ok2, ms2] = parseWith("%Y-%m-%d");
+            if (ok2) return Value(ms2);
+            throw RuntimeError("time.parse() could not parse '" + dateStr + "'", 0);
         }));
 
     globals->define("time", Value(timeMap));

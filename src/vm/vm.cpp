@@ -845,10 +845,10 @@ VM::Result VM::execute(int baseFrameCount_) {
             }
             break;
         }
-        case OpCode::OP_LESS:          { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__lt",{b});if(ok){push(r);break;}} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '<' must be numbers");} push(Value(a.asNumber()<b.asNumber())); break; }
-        case OpCode::OP_GREATER:       { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__gt",{b});if(ok){push(r);break;}} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '>' must be numbers");} push(Value(a.asNumber()>b.asNumber())); break; }
-        case OpCode::OP_LESS_EQUAL:    { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__gt",{b});if(ok){push(Value(!r.isTruthy()));break;}} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '<=' must be numbers");} push(Value(a.asNumber()<=b.asNumber())); break; }
-        case OpCode::OP_GREATER_EQUAL: { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__lt",{b});if(ok){push(Value(!r.isTruthy()));break;}} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '>=' must be numbers");} push(Value(a.asNumber()>=b.asNumber())); break; }
+        case OpCode::OP_LESS:          { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__lt",{b});if(ok){push(r);break;}} if(a.isString()&&b.isString()){push(Value(a.asString()<b.asString()));break;} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '<' must be numbers or strings");} push(Value(a.asNumber()<b.asNumber())); break; }
+        case OpCode::OP_GREATER:       { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__gt",{b});if(ok){push(r);break;}} if(a.isString()&&b.isString()){push(Value(a.asString()>b.asString()));break;} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '>' must be numbers or strings");} push(Value(a.asNumber()>b.asNumber())); break; }
+        case OpCode::OP_LESS_EQUAL:    { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__gt",{b});if(ok){push(Value(!r.isTruthy()));break;}} if(a.isString()&&b.isString()){push(Value(a.asString()<=b.asString()));break;} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '<=' must be numbers or strings");} push(Value(a.asNumber()<=b.asNumber())); break; }
+        case OpCode::OP_GREATER_EQUAL: { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__lt",{b});if(ok){push(Value(!r.isTruthy()));break;}} if(a.isString()&&b.isString()){push(Value(a.asString()>=b.asString()));break;} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '>=' must be numbers or strings");} push(Value(a.asNumber()>=b.asNumber())); break; }
         case OpCode::OP_NOT: { push(Value(!pop().isTruthy())); break; }
 
         // ── Variables ──
@@ -1224,11 +1224,15 @@ VM::Result VM::execute(int baseFrameCount_) {
                 // Fall through to universal methods below
             }
 
-            // Map fields take priority over universal methods
+            // Map fields take priority over methods
             if (obj.isMap()) {
                 auto& entries = obj.asMap()->entries;
                 auto it = entries.find(Value(name));
                 if (it != entries.end()) { push(it->second); break; }
+                if (name == "has" || name == "get") {
+                    push(getMapMethod(obj.asMap(), name, CURRENT_LINE()));
+                    break;
+                }
                 // Fall through to universal methods below
             }
 

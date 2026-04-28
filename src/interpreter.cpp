@@ -981,19 +981,27 @@ Value Interpreter::evaluate(const Expr* expr) {
         case TokenType::LT:
             if (left.isNumber() && right.isNumber())
                 return Value(left.asNumber() < right.asNumber());
-            throw RuntimeError("Operands of '<' must be numbers", e->line, e->column);
+            if (left.isString() && right.isString())
+                return Value(left.asString() < right.asString());
+            throw RuntimeError("Operands of '<' must be numbers or strings", e->line, e->column);
         case TokenType::GT:
             if (left.isNumber() && right.isNumber())
                 return Value(left.asNumber() > right.asNumber());
-            throw RuntimeError("Operands of '>' must be numbers", e->line, e->column);
+            if (left.isString() && right.isString())
+                return Value(left.asString() > right.asString());
+            throw RuntimeError("Operands of '>' must be numbers or strings", e->line, e->column);
         case TokenType::LTE:
             if (left.isNumber() && right.isNumber())
                 return Value(left.asNumber() <= right.asNumber());
-            throw RuntimeError("Operands of '<=' must be numbers", e->line, e->column);
+            if (left.isString() && right.isString())
+                return Value(left.asString() <= right.asString());
+            throw RuntimeError("Operands of '<=' must be numbers or strings", e->line, e->column);
         case TokenType::GTE:
             if (left.isNumber() && right.isNumber())
                 return Value(left.asNumber() >= right.asNumber());
-            throw RuntimeError("Operands of '>=' must be numbers", e->line, e->column);
+            if (left.isString() && right.isString())
+                return Value(left.asString() >= right.asString());
+            throw RuntimeError("Operands of '>=' must be numbers or strings", e->line, e->column);
         case TokenType::EQ:  return Value(left == right);
         case TokenType::NEQ: return Value(left != right);
         case TokenType::IS:
@@ -1412,11 +1420,13 @@ Value Interpreter::evaluate(const Expr* expr) {
             // Fall through to universal methods below
         }
 
-        // Map fields take priority over universal methods
+        // Map fields take priority over methods
         if (obj.isMap()) {
             auto& entries = obj.asMap()->entries;
             auto it = entries.find(Value(e->field));
             if (it != entries.end()) return it->second;
+            if (e->field == "has" || e->field == "get")
+                return getMapMethod(obj.asMap(), e->field, e->line);
             // Fall through to universal methods below
         }
 
