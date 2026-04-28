@@ -3840,6 +3840,9 @@ net.setTimeout(sock, 5000)     // 5 second timeout for send/recv
 | `net.udpBind(port)` | Create and bind a UDP socket to a port |
 | `net.sendTo(sock, host, port, data)` | Send a UDP datagram |
 | `net.recvFrom(sock, maxBytes?)` | Receive a datagram, returns `{data, host, port}` |
+| **ICMP** | |
+| `net.ping(host, timeout?)` | ICMP echo, returns `{alive, rtt}`. Timeout defaults to 1500ms |
+| `net.pingAll(hosts, timeout?)` | Concurrent ping sweep, returns `[{host, alive, rtt?}]` |
 | **Raw sockets** | |
 | `net.rawSocket(protocol)` | Create a raw socket. Protocol: `"icmp"`, `"icmp6"`, `"tcp"`, `"udp"`, `"raw"`, or a number |
 | `net.rawSend(sock, host, data)` | Send raw data to a host |
@@ -3853,6 +3856,28 @@ net.setTimeout(sock, 5000)     // 5 second timeout for send/recv
 | **General** | |
 | `net.setTimeout(sock, ms)` | Set send/recv timeout in milliseconds |
 | `net.close(sock)` | Close a socket |
+
+### ICMP Ping
+
+`net.ping(host, timeout?)` sends an ICMP echo request and returns `{alive, rtt}`. Works unprivileged on macOS. Requires root or `CAP_NET_RAW` on Linux.
+
+```
+let r = net.ping("8.8.8.8")
+if (r.alive) { print("up, rtt=" + str(r.rtt) + "ms") }
+```
+
+`net.pingAll(hosts, timeout?)` pings multiple hosts concurrently using a single ICMP socket. All echo requests are sent first, then replies are collected via poll(). Much faster than sequential pinging.
+
+```
+// Sweep a /24 subnet
+let hosts = []
+for (i in 1..255) { push(hosts, "192.168.1." + str(i)) }
+
+let results = net.pingAll(hosts, 500)
+for (r in results) {
+    if (r.alive) { print(r.host + " up (" + str(r.rtt) + "ms)") }
+}
+```
 
 ### Raw Sockets
 

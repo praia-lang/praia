@@ -12,6 +12,9 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <sys/resource.h>
+#include <sys/time.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
 #include <resolv.h>
 #include <arpa/nameser.h>
 #include "../gc_heap.h"
@@ -33,6 +36,80 @@ static int validatePort(double val, const char* funcName) {
     if (port < 0 || port > 65535)
         throw RuntimeError(std::string(funcName) + " port must be 0–65535, got " + std::to_string(port), 0);
     return port;
+}
+
+static uint16_t icmpChecksum(const void* data, int len) {
+    auto* p = (const uint16_t*)data;
+    uint32_t sum = 0;
+    for (; len > 1; len -= 2) sum += *p++;
+    if (len == 1) sum += *(const uint8_t*)p;
+    sum = (sum >> 16) + (sum & 0xFFFF);
+    sum += (sum >> 16);
+    return static_cast<uint16_t>(~sum);
+}
+
+// Create an ICMP socket — tries SOCK_DGRAM first (unprivileged on macOS),
+// falls back to SOCK_RAW (requires root/CAP_NET_RAW on Linux).
+static int createIcmpSocket(const char* caller = "net.ping()") {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    if (sock >= 0) return sock;
+    sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (sock >= 0) return sock;
+    if (errno == EPERM || errno == EACCES)
+        throw RuntimeError(std::string(caller) + ": permission denied — requires root or CAP_NET_RAW on Linux", 0);
+    throw RuntimeError(sysErr(std::string(caller) + ": cannot create ICMP socket"), 0);
+}
+
+// Milliseconds elapsed since a timeval
+static int msElapsed(const struct timeval& start) {
+    struct timeval now;
+    gettimeofday(&now, nullptr);
+    return static_cast<int>((now.tv_sec - start.tv_sec) * 1000 +
+                            (now.tv_usec - start.tv_usec) / 1000);
+}
+
+// Build an ICMP echo request. Returns packet length.
+static int buildEchoRequest(uint8_t* pkt, uint16_t id, uint16_t seq) {
+    auto* hdr = (struct icmp*)pkt;
+    hdr->icmp_type = ICMP_ECHO;
+    hdr->icmp_code = 0;
+    hdr->icmp_id = htons(id);
+    hdr->icmp_seq = htons(seq);
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    memcpy(pkt + 8, &tv, sizeof(tv));
+    int pktLen = 8 + static_cast<int>(sizeof(tv));
+    hdr->icmp_cksum = 0;
+    hdr->icmp_cksum = icmpChecksum(pkt, pktLen);
+    return pktLen;
+}
+
+// Parse an ICMP echo reply from a receive buffer.
+// Handles both raw (with IP header) and DGRAM (without) transparently.
+// Returns true if it's a valid echo reply matching our id.
+static bool parseEchoReply(const uint8_t* buf, int n, uint16_t expectId, double& rttMs) {
+    int offset = 0;
+    // Detect IP header: first nibble == 4 (IPv4)
+    if (n > 0 && (buf[0] >> 4) == 4) {
+        offset = (buf[0] & 0x0F) * 4;
+    }
+    if (n < offset + 8) return false;
+    auto* reply = (const struct icmp*)(buf + offset);
+    if (reply->icmp_type != ICMP_ECHOREPLY) return false;
+    if (ntohs(reply->icmp_id) != expectId) return false;
+
+    // Extract RTT from timestamp payload
+    if (n >= offset + 8 + static_cast<int>(sizeof(struct timeval))) {
+        struct timeval sent;
+        memcpy(&sent, buf + offset + 8, sizeof(sent));
+        struct timeval now;
+        gettimeofday(&now, nullptr);
+        rttMs = (now.tv_sec - sent.tv_sec) * 1000.0 +
+                (now.tv_usec - sent.tv_usec) / 1000.0;
+    } else {
+        rttMs = 0;
+    }
+    return true;
 }
 
 static int dnsTypeFromString(const std::string& type) {
@@ -971,6 +1048,217 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             auto result = gcNew<PraiaMap>();
             result->entries[Value("data")] = Value(std::string(buf.data(), n));
             result->entries[Value("host")] = Value(std::string(addrBuf));
+            return Value(result);
+        }));
+
+    // ── ICMP Ping ──
+
+    // net.ping(host, timeout?) — send ICMP echo request, return {alive, rtt}
+    // timeout defaults to 1500ms. Unprivileged on macOS, needs root on Linux.
+    netMap->entries[Value("ping")] = Value(makeNative("net.ping", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || args.size() > 2)
+                throw RuntimeError("net.ping(host, timeout?) takes 1-2 arguments", 0);
+            if (!args[0].isString())
+                throw RuntimeError("net.ping() requires a host string", 0);
+            std::string host = args[0].asString();
+            int timeoutMs = 1500;
+            if (args.size() == 2) {
+                if (!args[1].isNumber())
+                    throw RuntimeError("net.ping() timeout must be a number (ms)", 0);
+                timeoutMs = static_cast<int>(args[1].asNumber());
+                if (timeoutMs < 0)
+                    throw RuntimeError("net.ping() timeout must be >= 0", 0);
+            }
+
+            // Resolve host to IPv4
+            struct sockaddr_in dest = {};
+            dest.sin_family = AF_INET;
+            if (inet_pton(AF_INET, host.c_str(), &dest.sin_addr) != 1) {
+                struct addrinfo hints = {};
+                hints.ai_family = AF_INET;
+                AddrGuard ag;
+                if (getaddrinfo(host.c_str(), nullptr, &hints, &ag.res) != 0 || !ag.get())
+                    throw RuntimeError("net.ping(): cannot resolve host: " + host, 0);
+                auto* addr = (struct sockaddr_in*)ag.get()->ai_addr;
+                dest.sin_addr = addr->sin_addr;
+            }
+
+            auto result = gcNew<PraiaMap>();
+            result->entries[Value("alive")] = Value(false);
+
+            int sock = createIcmpSocket();
+            uint16_t id = static_cast<uint16_t>(getpid() & 0xFFFF);
+
+            uint8_t pkt[64] = {};
+            int pktLen = buildEchoRequest(pkt, id, 1);
+
+            if (sendto(sock, pkt, pktLen, 0, (struct sockaddr*)&dest, sizeof(dest)) < 0) {
+                close(sock);
+                return Value(result);
+            }
+
+            // Poll for reply, checking SIGINT
+            struct pollfd pfd = {sock, POLLIN, 0};
+            struct timeval deadline;
+            gettimeofday(&deadline, nullptr);
+            for (;;) {
+                int remaining = timeoutMs - msElapsed(deadline);
+                if (remaining <= 0) break;
+                int chunk = (remaining > 100) ? 100 : remaining;
+                int pr = poll(&pfd, 1, chunk);
+                if (pr > 0) {
+                    uint8_t buf[256];
+                    struct sockaddr_in from = {};
+                    socklen_t fromLen = sizeof(from);
+                    int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &fromLen);
+                    double rtt = 0;
+                    if (n > 0 && parseEchoReply(buf, n, id, rtt)) {
+                        result->entries[Value("alive")] = Value(true);
+                        result->entries[Value("rtt")] = Value(rtt);
+                        break;
+                    }
+                    continue; // not our reply — remaining recalculated from wall clock
+                }
+                if (pr < 0 && errno != EINTR) break;
+                if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+                    close(sock);
+                    throw RuntimeError("Interrupted", 0);
+                }
+            }
+
+            close(sock);
+            return Value(result);
+        }));
+
+    // net.pingAll(hosts, timeout?) — concurrent ICMP ping sweep
+    // hosts: array of IP/hostname strings. timeout defaults to 1500ms.
+    // Returns array of {host, alive, rtt?}
+    netMap->entries[Value("pingAll")] = Value(makeNative("net.pingAll", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || args.size() > 2)
+                throw RuntimeError("net.pingAll(hosts, timeout?) takes 1-2 arguments", 0);
+            if (!args[0].isArray())
+                throw RuntimeError("net.pingAll() requires an array of host strings", 0);
+            auto& hosts = args[0].asArray()->elements;
+            int timeoutMs = 1500;
+            if (args.size() == 2) {
+                if (!args[1].isNumber())
+                    throw RuntimeError("net.pingAll() timeout must be a number (ms)", 0);
+                timeoutMs = static_cast<int>(args[1].asNumber());
+                if (timeoutMs < 0)
+                    throw RuntimeError("net.pingAll() timeout must be >= 0", 0);
+            }
+
+            struct PingTarget {
+                std::string host;
+                struct sockaddr_in addr = {};
+                bool resolved = false;
+                bool alive = false;
+                double rtt = 0;
+            };
+
+            std::vector<PingTarget> targets;
+            targets.reserve(hosts.size());
+            for (auto& h : hosts) {
+                if (!h.isString())
+                    throw RuntimeError("net.pingAll() hosts must be strings", 0);
+                PingTarget t;
+                t.host = h.asString();
+                t.addr.sin_family = AF_INET;
+                if (inet_pton(AF_INET, t.host.c_str(), &t.addr.sin_addr) == 1) {
+                    t.resolved = true;
+                } else {
+                    struct addrinfo hints = {};
+                    hints.ai_family = AF_INET;
+                    struct addrinfo* res = nullptr;
+                    if (getaddrinfo(t.host.c_str(), nullptr, &hints, &res) == 0 && res) {
+                        t.addr.sin_addr = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
+                        t.resolved = true;
+                        freeaddrinfo(res);
+                    }
+                }
+                targets.push_back(std::move(t));
+            }
+
+            // Single ICMP socket for all pings
+            int sock = createIcmpSocket("net.pingAll()");
+            uint16_t baseId = static_cast<uint16_t>(getpid() & 0xFFFF);
+
+            // Send all echo requests — use sequence number to identify which host
+            for (size_t i = 0; i < targets.size(); i++) {
+                if (!targets[i].resolved) continue;
+                uint8_t pkt[64] = {};
+                int pktLen = buildEchoRequest(pkt, baseId, static_cast<uint16_t>(i + 1));
+                sendto(sock, pkt, pktLen, 0,
+                       (struct sockaddr*)&targets[i].addr, sizeof(targets[i].addr));
+            }
+
+            // Receive replies
+            struct pollfd pfd = {sock, POLLIN, 0};
+            struct timeval deadline;
+            gettimeofday(&deadline, nullptr);
+            size_t repliesNeeded = 0;
+            for (auto& t : targets) if (t.resolved) repliesNeeded++;
+            size_t repliesGot = 0;
+
+            for (;;) {
+                if (repliesGot >= repliesNeeded) break;
+                int remaining = timeoutMs - msElapsed(deadline);
+                if (remaining <= 0) break;
+                int chunk = (remaining > 100) ? 100 : remaining;
+                int pr = poll(&pfd, 1, chunk);
+                if (pr > 0) {
+                    uint8_t buf[256];
+                    struct sockaddr_in from = {};
+                    socklen_t fromLen = sizeof(from);
+                    int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &fromLen);
+                    if (n <= 0) continue;
+
+                    // Find ICMP header (skip IP header if present)
+                    int offset = 0;
+                    if ((buf[0] >> 4) == 4) offset = (buf[0] & 0x0F) * 4;
+                    if (n < offset + 8) continue;
+                    auto* reply = (const struct icmp*)(buf + offset);
+                    if (reply->icmp_type != ICMP_ECHOREPLY) continue;
+                    if (ntohs(reply->icmp_id) != baseId) continue;
+
+                    uint16_t seq = ntohs(reply->icmp_seq);
+                    if (seq < 1 || seq > targets.size()) continue;
+                    auto& t = targets[seq - 1];
+                    if (t.alive) continue; // duplicate
+
+                    // Compute RTT from timestamp payload
+                    if (n >= offset + 8 + static_cast<int>(sizeof(struct timeval))) {
+                        struct timeval sent;
+                        memcpy(&sent, buf + offset + 8, sizeof(sent));
+                        struct timeval now;
+                        gettimeofday(&now, nullptr);
+                        t.rtt = (now.tv_sec - sent.tv_sec) * 1000.0 +
+                                (now.tv_usec - sent.tv_usec) / 1000.0;
+                    }
+                    t.alive = true;
+                    repliesGot++;
+                    continue; // remaining recalculated from wall clock
+                }
+                if (pr < 0 && errno != EINTR) break;
+                if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+                    close(sock);
+                    throw RuntimeError("Interrupted", 0);
+                }
+            }
+
+            close(sock);
+
+            auto result = gcNew<PraiaArray>();
+            for (auto& t : targets) {
+                auto entry = gcNew<PraiaMap>();
+                entry->entries[Value("host")] = Value(t.host);
+                entry->entries[Value("alive")] = Value(t.alive);
+                if (t.alive)
+                    entry->entries[Value("rtt")] = Value(t.rtt);
+                result->elements.push_back(Value(entry));
+            }
             return Value(result);
         }));
 }
