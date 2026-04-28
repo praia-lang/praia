@@ -185,8 +185,6 @@ void Compiler::compileCallExpr(const CallExpr* expr) {
     compileExpr(expr->callee.get());
 
     if (hasSpread) {
-        // Build a flat args array on the stack, then call with it.
-        // Start with empty array.
         emit(OpCode::OP_BUILD_ARRAY, expr->line, expr->column);
         emitU16(0, expr->line, expr->column);
 
@@ -194,16 +192,14 @@ void Compiler::compileCallExpr(const CallExpr* expr) {
             if (arg->type == ExprType::Spread) {
                 auto* spread = static_cast<const SpreadExpr*>(arg.get());
                 compileExpr(spread->expr.get());
-                emit(OpCode::OP_ADD, expr->line, expr->column); // array + array = concatenated
+                emit(OpCode::OP_ADD, expr->line, expr->column);
             } else {
-                // Wrap single arg in 1-element array, concatenate
                 compileExpr(arg.get());
                 emit(OpCode::OP_BUILD_ARRAY, expr->line, expr->column);
                 emitU16(1, expr->line, expr->column);
                 emit(OpCode::OP_ADD, expr->line, expr->column);
             }
         }
-        // Stack: [callee, argsArray]
         emit(OpCode::OP_CALL_SPREAD, expr->line, expr->column);
         return;
     }

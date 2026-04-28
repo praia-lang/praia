@@ -13,10 +13,14 @@
 #include <regex>
 #endif
 
-Value getStringMethod(const std::string& str,
+Value getStringMethod(const std::string& strRef,
                       const std::string& name, int line) {
+    // Share the string data via shared_ptr — avoids deep-copying the string
+    // into every lambda capture. The shared_ptr copy is O(1).
+    auto str = std::make_shared<std::string>(strRef);
+
     if (name == "upper") {
-        return Value(makeNative("upper", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("upper", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
 #ifdef HAVE_UTF8PROC
             return Value(utf8_upper(str));
 #else
@@ -27,7 +31,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "lower") {
-        return Value(makeNative("lower", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("lower", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
 #ifdef HAVE_UTF8PROC
             return Value(utf8_lower(str));
 #else
@@ -38,7 +42,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "strip") {
-        return Value(makeNative("strip", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("strip", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
             size_t start = str.find_first_not_of(" \t\n\r");
             if (start == std::string::npos) return Value(std::string(""));
             size_t end = str.find_last_not_of(" \t\n\r");
@@ -46,7 +50,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "split") {
-        return Value(makeNative("split", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("split", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString())
                 throw RuntimeError("split() separator must be a string", 0);
             auto& sep = args[0].asString();
@@ -71,14 +75,14 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "contains") {
-        return Value(makeNative("contains", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("contains", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString())
                 throw RuntimeError("contains() argument must be a string", 0);
             return Value(str.find(args[0].asString()) != std::string::npos);
         }));
     }
     if (name == "replace") {
-        return Value(makeNative("replace", 2, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("replace", 2, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString() || !args[1].isString())
                 throw RuntimeError("replace() arguments must be strings", 0);
             auto& from = args[0].asString();
@@ -93,7 +97,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "startsWith") {
-        return Value(makeNative("startsWith", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("startsWith", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString())
                 throw RuntimeError("startsWith() argument must be a string", 0);
             auto& prefix = args[0].asString();
@@ -101,7 +105,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "endsWith") {
-        return Value(makeNative("endsWith", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("endsWith", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString())
                 throw RuntimeError("endsWith() argument must be a string", 0);
             auto& suffix = args[0].asString();
@@ -110,7 +114,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "title") {
-        return Value(makeNative("title", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("title", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
 #ifdef HAVE_UTF8PROC
             return Value(utf8_title(str));
 #else
@@ -126,7 +130,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "capitalize") {
-        return Value(makeNative("capitalize", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("capitalize", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
 #ifdef HAVE_UTF8PROC
             if (str.empty()) return Value(str);
             size_t first_len = utf8_first_grapheme_bytes(str);
@@ -144,7 +148,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "capitalizeFirst") {
-        return Value(makeNative("capitalizeFirst", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("capitalizeFirst", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
 #ifdef HAVE_UTF8PROC
             if (str.empty()) return Value(str);
             size_t first_len = utf8_first_grapheme_bytes(str);
@@ -157,7 +161,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "charCode") {
-        return Value(makeNative("charCode", -1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("charCode", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             int idx = 0;
             if (!args.empty() && args[0].isNumber())
                 idx = static_cast<int>(args[0].asNumber());
@@ -177,7 +181,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "test") {
-        return Value(makeNative("test", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("test", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString())
                 throw RuntimeError("test() pattern must be a string", 0);
 #ifdef HAVE_RE2
@@ -195,7 +199,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "match") {
-        return Value(makeNative("match", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("match", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString())
                 throw RuntimeError("match() pattern must be a string", 0);
 #ifdef HAVE_RE2
@@ -246,7 +250,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "matchAll") {
-        return Value(makeNative("matchAll", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("matchAll", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString())
                 throw RuntimeError("matchAll() pattern must be a string", 0);
 #ifdef HAVE_RE2
@@ -307,7 +311,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "replacePattern") {
-        return Value(makeNative("replacePattern", 2, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("replacePattern", 2, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString() || !args[1].isString())
                 throw RuntimeError("replacePattern() requires string arguments", 0);
 #ifdef HAVE_RE2
@@ -338,7 +342,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "slice") {
-        return Value(makeNative("slice", -1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("slice", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (args.empty() || !args[0].isNumber())
                 throw RuntimeError("slice() requires a start index", 0);
 #ifdef HAVE_UTF8PROC
@@ -376,7 +380,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "indexOf") {
-        return Value(makeNative("indexOf", -1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("indexOf", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (args.empty() || !args[0].isString())
                 throw RuntimeError("indexOf() requires a string argument", 0);
 #ifdef HAVE_UTF8PROC
@@ -402,7 +406,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "lastIndexOf") {
-        return Value(makeNative("lastIndexOf", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("lastIndexOf", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isString())
                 throw RuntimeError("lastIndexOf() requires a string argument", 0);
             auto pos = str.rfind(args[0].asString());
@@ -415,7 +419,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "repeat") {
-        return Value(makeNative("repeat", 1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("repeat", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isNumber())
                 throw RuntimeError("repeat() requires a number", 0);
             int count = static_cast<int>(args[0].asNumber());
@@ -427,7 +431,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "padStart") {
-        return Value(makeNative("padStart", -1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("padStart", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (args.empty() || !args[0].isNumber())
                 throw RuntimeError("padStart() requires a length", 0);
             int target = static_cast<int>(args[0].asNumber());
@@ -450,7 +454,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "padEnd") {
-        return Value(makeNative("padEnd", -1, [str](const std::vector<Value>& args) -> Value {
+        return Value(makeNative("padEnd", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (args.empty() || !args[0].isNumber())
                 throw RuntimeError("padEnd() requires a length", 0);
             int target = static_cast<int>(args[0].asNumber());
@@ -473,21 +477,21 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "trimStart") {
-        return Value(makeNative("trimStart", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("trimStart", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
             size_t start = str.find_first_not_of(" \t\n\r");
             if (start == std::string::npos) return Value(std::string(""));
             return Value(str.substr(start));
         }));
     }
     if (name == "trimEnd") {
-        return Value(makeNative("trimEnd", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("trimEnd", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
             size_t end = str.find_last_not_of(" \t\n\r");
             if (end == std::string::npos) return Value(std::string(""));
             return Value(str.substr(0, end + 1));
         }));
     }
     if (name == "graphemes") {
-        return Value(makeNative("graphemes", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("graphemes", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
             auto arr = gcNew<PraiaArray>();
 #ifdef HAVE_UTF8PROC
             for (auto& g : utf8_graphemes(str))
@@ -500,7 +504,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "codepoints") {
-        return Value(makeNative("codepoints", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("codepoints", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
             auto arr = gcNew<PraiaArray>();
 #ifdef HAVE_UTF8PROC
             for (int32_t cp : utf8_codepoints(str))
@@ -513,7 +517,7 @@ Value getStringMethod(const std::string& str,
         }));
     }
     if (name == "bytes") {
-        return Value(makeNative("bytes", 0, [str](const std::vector<Value>&) -> Value {
+        return Value(makeNative("bytes", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
             auto arr = gcNew<PraiaArray>();
             for (unsigned char c : str)
                 arr->elements.push_back(Value(static_cast<int64_t>(c)));
@@ -522,6 +526,161 @@ Value getStringMethod(const std::string& str,
     }
     throw RuntimeError("String has no method '" + name + "'", line);
 }
+
+// Unused — reserved for future OP_INVOKE optimization.
+#if 0
+bool invokeStringMethod(const std::string& str, const std::string& name,
+                        const std::vector<Value>& args, Value& out, int line) {
+    if (name == "indexOf") {
+        if (args.empty() || !args[0].isString())
+            throw RuntimeError("indexOf() requires a string argument", line);
+#ifdef HAVE_UTF8PROC
+        size_t startByte = 0;
+        if (args.size() > 1 && args[1].isNumber()) {
+            int gi = static_cast<int>(args[1].asNumber());
+            auto gs = utf8_graphemes(str);
+            if (gi < 0) gi += static_cast<int>(gs.size());
+            if (gi < 0 || gi >= static_cast<int>(gs.size())) { out = Value(static_cast<int64_t>(-1)); return true; }
+            for (int i = 0; i < gi; i++) startByte += gs[i].size();
+        }
+        auto pos = str.find(args[0].asString(), startByte);
+        out = (pos == std::string::npos) ? Value(static_cast<int64_t>(-1))
+                                         : Value(static_cast<int64_t>(utf8_byte_to_grapheme_index(str, pos)));
+#else
+        size_t startPos = 0;
+        if (args.size() > 1 && args[1].isNumber())
+            startPos = static_cast<size_t>(args[1].asNumber());
+        auto pos = str.find(args[0].asString(), startPos);
+        out = Value(pos == std::string::npos ? static_cast<int64_t>(-1) : static_cast<int64_t>(pos));
+#endif
+        return true;
+    }
+    if (name == "contains") {
+        if (args.empty() || !args[0].isString())
+            throw RuntimeError("contains() argument must be a string", line);
+        out = Value(str.find(args[0].asString()) != std::string::npos);
+        return true;
+    }
+    if (name == "slice") {
+        if (args.empty() || !args[0].isNumber())
+            throw RuntimeError("slice() requires a start index", line);
+#ifdef HAVE_UTF8PROC
+        auto gs = utf8_graphemes(str);
+        int len = static_cast<int>(gs.size());
+        int start = static_cast<int>(args[0].asNumber());
+        if (start < 0) start += len;
+        if (start < 0) start = 0;
+        if (start >= len) { out = Value(std::string("")); return true; }
+        int end = len;
+        if (args.size() > 1 && args[1].isNumber()) {
+            end = static_cast<int>(args[1].asNumber());
+            if (end < 0) end += len;
+            if (end <= start) { out = Value(std::string("")); return true; }
+            if (end > len) end = len;
+        }
+        std::string result;
+        for (int i = start; i < end; i++) result += gs[i];
+        out = Value(std::move(result));
+#else
+        int len = static_cast<int>(str.size());
+        int start = static_cast<int>(args[0].asNumber());
+        if (start < 0) start += len;
+        if (start < 0) start = 0;
+        if (start >= len) { out = Value(std::string("")); return true; }
+        if (args.size() > 1 && args[1].isNumber()) {
+            int end = static_cast<int>(args[1].asNumber());
+            if (end < 0) end += len;
+            if (end <= start) { out = Value(std::string("")); return true; }
+            if (end > len) end = len;
+            out = Value(str.substr(start, end - start));
+        } else {
+            out = Value(str.substr(start));
+        }
+#endif
+        return true;
+    }
+    if (name == "strip") {
+        size_t s = str.find_first_not_of(" \t\n\r");
+        if (s == std::string::npos) { out = Value(std::string("")); return true; }
+        out = Value(str.substr(s, str.find_last_not_of(" \t\n\r") - s + 1));
+        return true;
+    }
+    if (name == "split") {
+        if (args.empty() || !args[0].isString())
+            throw RuntimeError("split() requires a delimiter string", line);
+        auto& delim = args[0].asString();
+        auto arr = gcNew<PraiaArray>();
+        if (delim.empty()) {
+#ifdef HAVE_UTF8PROC
+            for (auto& g : utf8_graphemes(str)) arr->elements.push_back(Value(g));
+#else
+            for (char c : str) arr->elements.push_back(Value(std::string(1, c)));
+#endif
+        } else {
+            size_t pos = 0, found;
+            while ((found = str.find(delim, pos)) != std::string::npos) {
+                arr->elements.push_back(Value(str.substr(pos, found - pos)));
+                pos = found + delim.size();
+            }
+            arr->elements.push_back(Value(str.substr(pos)));
+        }
+        out = Value(arr);
+        return true;
+    }
+    if (name == "startsWith") {
+        if (args.empty() || !args[0].isString())
+            throw RuntimeError("startsWith() requires a string", line);
+        out = Value(str.starts_with(args[0].asString()));
+        return true;
+    }
+    if (name == "endsWith") {
+        if (args.empty() || !args[0].isString())
+            throw RuntimeError("endsWith() requires a string", line);
+        out = Value(str.ends_with(args[0].asString()));
+        return true;
+    }
+    if (name == "upper") {
+#ifdef HAVE_UTF8PROC
+        out = Value(utf8_upper(str));
+#else
+        std::string r = str;
+        std::transform(r.begin(), r.end(), r.begin(), ::toupper);
+        out = Value(std::move(r));
+#endif
+        return true;
+    }
+    if (name == "lower") {
+#ifdef HAVE_UTF8PROC
+        out = Value(utf8_lower(str));
+#else
+        std::string r = str;
+        std::transform(r.begin(), r.end(), r.begin(), ::tolower);
+        out = Value(std::move(r));
+#endif
+        return true;
+    }
+    if (name == "padEnd") {
+        if (args.empty() || !args[0].isNumber())
+            throw RuntimeError("padEnd() requires a length", line);
+        int target = static_cast<int>(args[0].asNumber());
+        std::string pad = " ";
+        if (args.size() > 1 && args[1].isString()) pad = args[1].asString();
+        std::string result = str;
+#ifdef HAVE_UTF8PROC
+        int currentLen = static_cast<int>(utf8_grapheme_count(result));
+        int padLen = static_cast<int>(utf8_grapheme_count(pad));
+        if (padLen < 1) padLen = 1;
+        while (currentLen < target) { result += pad; currentLen += padLen; }
+#else
+        while (static_cast<int>(result.size()) < target) result += pad;
+#endif
+        out = Value(std::move(result));
+        return true;
+    }
+    // Not a hot-path method — fall through to wrapper-based dispatch
+    return false;
+}
+#endif
 
 Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
                      const std::string& name, int line,

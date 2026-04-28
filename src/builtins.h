@@ -66,3 +66,4 @@ class VM;
 Value getStringMethod(const std::string& str, const std::string& name, int line);
 Value getArrayMethod(std::shared_ptr<PraiaArray> arr, const std::string& name, int line,
                      Interpreter* interp = nullptr, VM* vm = nullptr);
+

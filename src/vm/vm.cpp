@@ -1399,7 +1399,6 @@ VM::Result VM::execute(int baseFrameCount_) {
 
         case OpCode::OP_INVOKE:
         case OpCode::OP_SUPER_INVOKE: {
-            // Not emitted by the compiler (uses GET_PROPERTY + CALL instead)
             // Reserved for future optimization
             RUNTIME_ERR("OP_INVOKE not yet implemented");
         }
