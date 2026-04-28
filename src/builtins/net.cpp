@@ -146,17 +146,16 @@ static int buildEchoRequest(uint8_t* pkt, uint16_t id, uint16_t seq) {
     return pktLen;
 }
 
-// Parse ICMP echo reply. With SOCK_RAW the kernel may rewrite our ID,
-// so we only check type == ECHOREPLY (and optionally ID for SOCK_DGRAM).
-static bool parseEchoReply(const uint8_t* buf, int n, uint16_t expectId,
-                           bool checkId, double& rttMs) {
+// Parse ICMP echo reply. Checks type == ECHOREPLY only.
+// ID checking is skipped: SOCK_DGRAM kernels filter for us,
+// SOCK_RAW matches by sender IP. Linux rewrites ICMP ID on both socket types.
+static bool parseEchoReply(const uint8_t* buf, int n, double& rttMs) {
     int offset = 0;
     if (n > 0 && (buf[0] >> 4) == 4)
         offset = (buf[0] & 0x0F) * 4;
     if (n < offset + 8) return false;
     auto* reply = (const struct icmp*)(buf + offset);
     if (reply->icmp_type != ICMP_ECHOREPLY) return false;
-    if (checkId && ntohs(reply->icmp_id) != expectId) return false;
 
     if (n >= offset + 8 + static_cast<int>(sizeof(struct timeval))) {
         struct timeval sent;
@@ -1309,9 +1308,8 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                     socklen_t fromLen = sizeof(from);
                     int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &fromLen);
                     double rtt = 0;
-                    // SOCK_RAW: kernel rewrites ID, match by sender IP instead
-                    // SOCK_DGRAM: kernel filters by ID, safe to check
-                    if (n > 0 && parseEchoReply(buf, n, id, !isRaw, rtt)) {
+                    if (n > 0 && parseEchoReply(buf, n, rtt)) {
+                        // SOCK_RAW gets all ICMP — verify sender matches target
                         if (!isRaw || from.sin_addr.s_addr == dest.sin_addr.s_addr) {
                             result->entries[Value("alive")] = Value(true);
                             result->entries[Value("rtt")] = Value(rtt);
@@ -1433,13 +1431,12 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                     // Identify which target replied
                     size_t idx;
                     if (isRaw) {
-                        // SOCK_RAW: kernel rewrites ID/seq, match by sender IP
+                        // SOCK_RAW: receives all ICMP, match by sender IP
                         auto it = addrToIdx.find(from.sin_addr.s_addr);
                         if (it == addrToIdx.end()) continue;
                         idx = it->second;
                     } else {
-                        // SOCK_DGRAM: kernel filters by ID, use seq to identify
-                        if (ntohs(reply->icmp_id) != baseId) continue;
+                        // SOCK_DGRAM: kernel filters to our socket, use seq
                         uint16_t seq = ntohs(reply->icmp_seq);
                         if (seq < 1 || seq > targets.size()) continue;
                         idx = seq - 1;
