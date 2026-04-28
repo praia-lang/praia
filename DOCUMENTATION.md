@@ -3828,6 +3828,7 @@ net.setTimeout(sock, 5000)     // 5 second timeout for send/recv
 |----------|-------------|
 | **TCP** | |
 | `net.connect(host, port, timeout?)` | Connect to a TCP server, returns socket. Optional timeout in ms |
+| `net.connectAll(targets, timeout)` | Concurrent TCP connect scan. targets: array of `{host, port}` or `[host, port]`. Returns `[{host, port, open}]` |
 | `net.listen(port)` | Bind and listen on a port, returns server socket |
 | `net.accept(server)` | Wait for and accept a connection, returns client socket |
 | `net.send(sock, data)` | Send a string, returns bytes sent |
@@ -3939,6 +3940,25 @@ for (port in [22, 80, 443, 3306, 5432, 8080]) {
     }
 }
 ```
+
+### Concurrent Connect Scanning
+
+`net.connectAll(targets, timeout)` scans many host/port pairs concurrently using poll-based multiplexing (no threads). Much faster than sequential `net.connect()` calls.
+
+```
+// Scan 100 ports in parallel
+let targets = []
+for (port in 1..1025) {
+    push(targets, {host: "192.168.1.1", port: port})
+}
+
+let results = net.connectAll(targets, 500)
+for (r in results) {
+    if (r.open) { print("port " + str(r.port) + " open") }
+}
+```
+
+Targets can be `{host, port}` maps or `[host, port]` arrays. Results are `{host, port, open}` maps. Internally batches connections to respect file descriptor limits and checks for Ctrl+C between batches.
 
 ### Network Interfaces
 

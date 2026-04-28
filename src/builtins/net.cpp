@@ -11,6 +11,7 @@
 #include <set>
 #include <poll.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <resolv.h>
 #include <arpa/nameser.h>
 #include "../gc_heap.h"
@@ -680,6 +681,169 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 result->elements.push_back(Value(entry));
             }
 
+            return Value(result);
+        }));
+
+    // net.connectAll(targets, timeout) — concurrent TCP connect scan
+    // targets: array of {host, port} or [host, port]
+    // Uses non-blocking connect + poll() multiplexing (no threads).
+    // Returns array of {host, port, open}.
+    netMap->entries[Value("connectAll")] = Value(makeNative("net.connectAll", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("net.connectAll() requires an array of targets", 0);
+            if (!args[1].isNumber())
+                throw RuntimeError("net.connectAll() requires a timeout in ms", 0);
+
+            auto& targets = args[0].asArray()->elements;
+            int timeoutMs = static_cast<int>(args[1].asNumber());
+            if (timeoutMs < 0)
+                throw RuntimeError("net.connectAll() timeout must be >= 0", 0);
+
+            struct ConnAttempt {
+                std::string host;
+                int port;
+                int sock = -1;
+                bool connected = false;
+                bool done = false;
+            };
+
+            std::vector<ConnAttempt> attempts;
+            attempts.reserve(targets.size());
+
+            // Parse targets: accept {host, port} maps or [host, port] arrays
+            for (auto& t : targets) {
+                ConnAttempt a;
+                if (t.isArray()) {
+                    auto& arr = t.asArray()->elements;
+                    if (arr.size() < 2 || !arr[0].isString() || !arr[1].isNumber())
+                        throw RuntimeError("net.connectAll() array target must be [host, port]", 0);
+                    a.host = arr[0].asString();
+                    a.port = static_cast<int>(arr[1].asNumber());
+                } else if (t.isMap()) {
+                    auto& m = t.asMap()->entries;
+                    auto hi = m.find(Value("host"));
+                    auto pi = m.find(Value("port"));
+                    if (hi == m.end() || pi == m.end() || !hi->second.isString() || !pi->second.isNumber())
+                        throw RuntimeError("net.connectAll() map target must have host (string) and port (number)", 0);
+                    a.host = hi->second.asString();
+                    a.port = static_cast<int>(pi->second.asNumber());
+                } else {
+                    throw RuntimeError("net.connectAll() targets must be {host, port} maps or [host, port] arrays", 0);
+                }
+                attempts.push_back(std::move(a));
+            }
+
+            // Determine batch size from FD limit (leave headroom for other FDs)
+            int batchSize = 128;
+            struct rlimit rl;
+            if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur > 256 && rl.rlim_cur < 100000)
+                batchSize = std::min(static_cast<int>(rl.rlim_cur / 2), 512);
+
+            for (size_t batchStart = 0; batchStart < attempts.size(); batchStart += batchSize) {
+                if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+                    for (auto& a : attempts)
+                        if (a.sock >= 0) { close(a.sock); a.sock = -1; }
+                    throw RuntimeError("Interrupted", 0);
+                }
+
+                size_t batchEnd = std::min(batchStart + (size_t)batchSize, attempts.size());
+
+                // Initiate non-blocking connects
+                for (size_t i = batchStart; i < batchEnd; i++) {
+                    auto& a = attempts[i];
+                    struct addrinfo hints = {};
+                    hints.ai_family = AF_UNSPEC;
+                    hints.ai_socktype = SOCK_STREAM;
+                    struct addrinfo* res = nullptr;
+                    if (getaddrinfo(a.host.c_str(), std::to_string(a.port).c_str(), &hints, &res) != 0) {
+                        a.done = true;
+                        continue;
+                    }
+                    // Use first usable address
+                    bool initiated = false;
+                    for (auto* p = res; p && !initiated; p = p->ai_next) {
+                        a.sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+                        if (a.sock < 0) continue;
+                        int flags = fcntl(a.sock, F_GETFL, 0);
+                        fcntl(a.sock, F_SETFL, flags | O_NONBLOCK);
+                        int rc = connect(a.sock, p->ai_addr, p->ai_addrlen);
+                        if (rc == 0) {
+                            a.connected = true;
+                            a.done = true;
+                            close(a.sock);
+                            a.sock = -1;
+                            initiated = true;
+                        } else if (errno == EINPROGRESS) {
+                            initiated = true;
+                        } else {
+                            close(a.sock);
+                            a.sock = -1;
+                        }
+                    }
+                    freeaddrinfo(res);
+                    if (!initiated) a.done = true;
+                }
+
+                // Poll loop — wait for all pending connects or timeout
+                int remaining = timeoutMs;
+                for (;;) {
+                    std::vector<struct pollfd> pfds;
+                    std::vector<size_t> pfdIdx;
+                    for (size_t i = batchStart; i < batchEnd; i++) {
+                        if (!attempts[i].done && attempts[i].sock >= 0) {
+                            pfds.push_back({attempts[i].sock, POLLOUT, 0});
+                            pfdIdx.push_back(i);
+                        }
+                    }
+                    if (pfds.empty()) break;
+
+                    int chunk = (remaining > 100) ? 100 : remaining;
+                    int pr = poll(pfds.data(), (nfds_t)pfds.size(), chunk);
+
+                    if (pr > 0) {
+                        for (size_t j = 0; j < pfds.size(); j++) {
+                            if (pfds[j].revents) {
+                                auto& a = attempts[pfdIdx[j]];
+                                int err = 0;
+                                socklen_t errlen = sizeof(err);
+                                getsockopt(a.sock, SOL_SOCKET, SO_ERROR, &err, &errlen);
+                                a.connected = (err == 0);
+                                a.done = true;
+                                close(a.sock);
+                                a.sock = -1;
+                            }
+                        }
+                    }
+                    if (pr < 0 && errno != EINTR) break;
+                    if (pr == 0) remaining -= chunk;
+                    if (remaining <= 0) break;
+
+                    if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+                        for (auto& a : attempts)
+                            if (a.sock >= 0) { close(a.sock); a.sock = -1; }
+                        throw RuntimeError("Interrupted", 0);
+                    }
+                }
+
+                // Clean up timed-out sockets
+                for (size_t i = batchStart; i < batchEnd; i++) {
+                    if (attempts[i].sock >= 0) {
+                        close(attempts[i].sock);
+                        attempts[i].sock = -1;
+                        attempts[i].done = true;
+                    }
+                }
+            }
+
+            auto result = gcNew<PraiaArray>();
+            for (auto& a : attempts) {
+                auto entry = gcNew<PraiaMap>();
+                entry->entries[Value("host")] = Value(a.host);
+                entry->entries[Value("port")] = Value(static_cast<int64_t>(a.port));
+                entry->entries[Value("open")] = Value(a.connected);
+                result->elements.push_back(Value(entry));
+            }
             return Value(result);
         }));
 
