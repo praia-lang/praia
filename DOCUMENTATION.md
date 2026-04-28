@@ -3827,7 +3827,7 @@ net.setTimeout(sock, 5000)     // 5 second timeout for send/recv
 | Function | Description |
 |----------|-------------|
 | **TCP** | |
-| `net.connect(host, port)` | Connect to a TCP server, returns socket |
+| `net.connect(host, port, timeout?)` | Connect to a TCP server, returns socket. Optional timeout in ms |
 | `net.listen(port)` | Bind and listen on a port, returns server socket |
 | `net.accept(server)` | Wait for and accept a connection, returns client socket |
 | `net.send(sock, data)` | Send a string, returns bytes sent |
@@ -3843,8 +3843,13 @@ net.setTimeout(sock, 5000)     // 5 second timeout for send/recv
 | `net.rawSocket(protocol)` | Create a raw socket. Protocol: `"icmp"`, `"icmp6"`, `"tcp"`, `"udp"`, `"raw"`, or a number |
 | `net.rawSend(sock, host, data)` | Send raw data to a host |
 | `net.rawRecv(sock, maxBytes?)` | Receive raw data, returns `{data, host}` |
-| **General** | |
+| **DNS** | |
 | `net.resolve(host)` | DNS lookup, returns array of IP strings (IPv4 and IPv6) |
+| `net.query(name, type)` | Raw DNS query. Types: `"A"`, `"AAAA"`, `"MX"`, `"TXT"`, `"NS"`, `"CNAME"`, `"SOA"`, `"PTR"`, `"SRV"` |
+| **Interface** | |
+| `net.interfaces()` | List network interfaces, returns array of `{name, addresses}` |
+| `net.bindInterface(sock, name)` | Bind a socket to a network interface (e.g. `"en0"`) |
+| **General** | |
 | `net.setTimeout(sock, ms)` | Set send/recv timeout in milliseconds |
 | `net.close(sock)` | Close a socket |
 
@@ -3876,6 +3881,77 @@ if (!sys.isRoot()) {
     print("This tool requires root. Run with sudo.")
     sys.exit(1)
 }
+```
+
+### DNS Queries
+
+`net.query(name, type)` performs raw DNS record lookups. Returns an array of maps, each with `name`, `type`, and `ttl` plus type-specific fields.
+
+For PTR lookups, pass a plain IP address — it's automatically converted to the reverse `.in-addr.arpa` / `.ip6.arpa` form.
+
+Returns an empty array for non-existent domains (NXDOMAIN) or no records of that type (NODATA). Only throws on network-level failures.
+
+```
+// A records
+let a = net.query("example.com", "A")
+// [{name: "example.com", type: "A", ttl: 300, address: "93.184.216.34"}]
+
+// MX records
+let mx = net.query("google.com", "MX")
+// [{name: "google.com", type: "MX", ttl: 600, priority: 10, exchange: "smtp.google.com"}]
+
+// TXT records (SPF, DKIM, etc.)
+let txt = net.query("google.com", "TXT")
+// [{name: "google.com", type: "TXT", ttl: 300, text: "v=spf1 include:_spf.google.com ~all"}]
+
+// Reverse DNS (PTR) — pass IP directly
+let ptr = net.query("8.8.8.8", "PTR")
+// [{name: "8.8.8.8.in-addr.arpa", type: "PTR", ttl: 3600, hostname: "dns.google"}]
+
+// SOA record
+let soa = net.query("example.com", "SOA")
+// [{..., mname: "ns1.example.com", rname: "admin.example.com",
+//   serial: 2024010100, refresh: 3600, retry: 900, expire: 604800, minimum: 86400}]
+
+// SRV record
+let srv = net.query("_sip._tcp.example.com", "SRV")
+// [{..., priority: 10, weight: 60, port: 5060, target: "sip.example.com"}]
+
+// NS, CNAME, AAAA also supported
+let ns = net.query("example.com", "NS")       // target field
+let cn = net.query("www.github.com", "CNAME")  // target field
+let v6 = net.query("example.com", "AAAA")      // address field
+```
+
+### Connection Timeouts
+
+`net.connect()` accepts an optional third argument for a timeout in milliseconds. Without a timeout, connect blocks until the OS gives up (often 75+ seconds). With a timeout, it returns quickly — essential for port scanning.
+
+```
+// Port scan with 500ms timeout
+for (port in [22, 80, 443, 3306, 5432, 8080]) {
+    try {
+        let sock = net.connect("192.168.1.1", port, 500)
+        net.close(sock)
+        print("port " + str(port) + " open")
+    } catch (e) {
+        // closed or filtered
+    }
+}
+```
+
+### Network Interfaces
+
+```
+// List all interfaces
+let ifaces = net.interfaces()
+for (iface in ifaces) {
+    print(iface.name + ": " + str(iface.addresses))
+}
+
+// Bind a socket to a specific interface
+let sock = net.udp()
+net.bindInterface(sock, "en0")
 ```
 
 ---

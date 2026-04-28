@@ -126,6 +126,7 @@ classes, control flow, error handling, pipes/closures, and JSON.
 * Error handling with try/catch/throw and `ensure` (early-exit guard)
 * String interpolation (`"%{name} is %{age}"`), regex, Unicode-aware strings (grapheme clusters, emoji, `\u{...}` escapes)
 * Arrays, maps, destructuring, spread operator
+* Networking: TCP, UDP, raw sockets, DNS queries (A/AAAA/MX/TXT/NS/CNAME/SOA/PTR/SRV), connect timeouts
 * HTTP client and server
 * JSON and YAML parse/stringify
 * async/await with true parallelism, channels, futures.all/race
@@ -156,7 +157,7 @@ Praia/
 │   ├── unicode.h/cpp            # UTF-8 grapheme/codepoint helpers (utf8proc)
 │   ├── builtins.h               # shared helpers (makeNative, callSafe, etc.)
 │   ├── builtins/                # built-in namespace implementations
-│   │   ├── net.cpp              # TCP, UDP, raw sockets, DNS
+│   │   ├── net.cpp              # TCP, UDP, raw sockets, DNS queries, interfaces
 │   │   ├── bytes.cpp            # struct pack/unpack, hex, binary data
 │   │   ├── crypto.cpp           # MD5, SHA-256
 │   │   ├── concurrency.cpp      # Lock, Channel, futures.all/race

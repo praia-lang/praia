@@ -11,6 +11,8 @@
 #include <set>
 #include <poll.h>
 #include <fcntl.h>
+#include <resolv.h>
+#include <arpa/nameser.h>
 #include "../gc_heap.h"
 #include "../signal_state.h"
 
@@ -30,6 +32,42 @@ static int validatePort(double val, const char* funcName) {
     if (port < 0 || port > 65535)
         throw RuntimeError(std::string(funcName) + " port must be 0–65535, got " + std::to_string(port), 0);
     return port;
+}
+
+static int dnsTypeFromString(const std::string& type) {
+    if (type == "A")     return ns_t_a;
+    if (type == "AAAA")  return ns_t_aaaa;
+    if (type == "MX")    return ns_t_mx;
+    if (type == "TXT")   return ns_t_txt;
+    if (type == "NS")    return ns_t_ns;
+    if (type == "CNAME") return ns_t_cname;
+    if (type == "SOA")   return ns_t_soa;
+    if (type == "PTR")   return ns_t_ptr;
+    if (type == "SRV")   return ns_t_srv;
+    return -1;
+}
+
+static const char* dnsTypeToString(int type) {
+    switch (type) {
+        case ns_t_a:     return "A";
+        case ns_t_aaaa:  return "AAAA";
+        case ns_t_mx:    return "MX";
+        case ns_t_txt:   return "TXT";
+        case ns_t_ns:    return "NS";
+        case ns_t_cname: return "CNAME";
+        case ns_t_soa:   return "SOA";
+        case ns_t_ptr:   return "PTR";
+        case ns_t_srv:   return "SRV";
+        default:         return "UNKNOWN";
+    }
+}
+
+// Expand a compressed DNS name from a response into a dotted string
+static std::string dnsExpandName(const unsigned char* msg, int msgLen, const unsigned char* ptr) {
+    char name[NS_MAXDNAME];
+    if (dn_expand(msg, msg + msgLen, ptr, name, sizeof(name)) < 0)
+        return "";
+    return std::string(name);
 }
 
 void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
@@ -486,6 +524,162 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 }
                 result->elements.push_back(Value(std::string(buf)));
             }
+            return Value(result);
+        }));
+
+    // net.query(name, type) — raw DNS queries
+    // type: "A", "AAAA", "MX", "TXT", "NS", "CNAME", "SOA", "PTR", "SRV"
+    // For PTR, pass an IP address — it's automatically converted to in-addr.arpa form.
+    // Returns an array of maps, each with at least {name, type, ttl} plus type-specific fields.
+    netMap->entries[Value("query")] = Value(makeNative("net.query", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("net.query() requires a name string", 0);
+            if (!args[1].isString())
+                throw RuntimeError("net.query() requires a type string (A, AAAA, MX, TXT, NS, CNAME, SOA, PTR, SRV)", 0);
+            std::string name = args[0].asString();
+            std::string typeStr = args[1].asString();
+            int qtype = dnsTypeFromString(typeStr);
+            if (qtype < 0)
+                throw RuntimeError("net.query() unknown type: " + typeStr + " (expected A, AAAA, MX, TXT, NS, CNAME, SOA, PTR, SRV)", 0);
+
+            // For PTR lookups, convert IP to reverse form
+            std::string queryName = name;
+            if (qtype == ns_t_ptr) {
+                // Try IPv4 first
+                struct in_addr addr4;
+                struct in6_addr addr6;
+                if (inet_pton(AF_INET, name.c_str(), &addr4) == 1) {
+                    unsigned char* b = (unsigned char*)&addr4.s_addr;
+                    queryName = std::to_string(b[3]) + "." + std::to_string(b[2]) + "." +
+                                std::to_string(b[1]) + "." + std::to_string(b[0]) + ".in-addr.arpa";
+                } else if (inet_pton(AF_INET6, name.c_str(), &addr6) == 1) {
+                    // Build nibble-reversed ip6.arpa name
+                    std::string rev;
+                    for (int i = 15; i >= 0; i--) {
+                        unsigned char byte = addr6.s6_addr[i];
+                        char lo[3], hi[3];
+                        snprintf(lo, sizeof(lo), "%x", byte & 0xf);
+                        snprintf(hi, sizeof(hi), "%x", (byte >> 4) & 0xf);
+                        rev += lo; rev += '.';
+                        rev += hi; rev += '.';
+                    }
+                    rev += "ip6.arpa";
+                    queryName = rev;
+                }
+                // If neither, assume user passed a pre-formed arpa name
+            }
+
+            unsigned char buf[4096];
+            int len = res_query(queryName.c_str(), ns_c_in, qtype, buf, sizeof(buf));
+            if (len < 0) {
+                // HOST_NOT_FOUND (NXDOMAIN) and NO_DATA → empty array
+                // TRY_AGAIN, NO_RECOVERY → throw
+                if (h_errno == HOST_NOT_FOUND || h_errno == NO_DATA)
+                    return Value(gcNew<PraiaArray>());
+                throw RuntimeError("DNS query failed for " + name + " type " + typeStr, 0);
+            }
+
+            ns_msg msg;
+            if (ns_initparse(buf, len, &msg) < 0)
+                throw RuntimeError("DNS parse error for " + name, 0);
+
+            int count = ns_msg_count(msg, ns_s_an);
+            auto result = gcNew<PraiaArray>();
+
+            for (int i = 0; i < count; i++) {
+                ns_rr rr;
+                if (ns_parserr(&msg, ns_s_an, i, &rr) < 0) continue;
+
+                auto entry = gcNew<PraiaMap>();
+                std::string rrName(ns_rr_name(rr));
+                if (!rrName.empty() && rrName.back() == '.') rrName.pop_back();
+                entry->entries[Value("name")] = Value(rrName);
+                int rrtype = ns_rr_type(rr);
+                entry->entries[Value("type")] = Value(std::string(dnsTypeToString(rrtype)));
+                entry->entries[Value("ttl")]  = Value(static_cast<int64_t>(ns_rr_ttl(rr)));
+
+                const unsigned char* rdata = ns_rr_rdata(rr);
+                int rdlen = ns_rr_rdlen(rr);
+
+                if (rrtype == ns_t_a && rdlen >= 4) {
+                    char ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, rdata, ip, sizeof(ip));
+                    entry->entries[Value("address")] = Value(std::string(ip));
+
+                } else if (rrtype == ns_t_aaaa && rdlen >= 16) {
+                    char ip[INET6_ADDRSTRLEN];
+                    inet_ntop(AF_INET6, rdata, ip, sizeof(ip));
+                    entry->entries[Value("address")] = Value(std::string(ip));
+
+                } else if (rrtype == ns_t_mx && rdlen >= 3) {
+                    int pref = (rdata[0] << 8) | rdata[1];
+                    std::string exchange = dnsExpandName(buf, len, rdata + 2);
+                    if (!exchange.empty() && exchange.back() == '.') exchange.pop_back();
+                    entry->entries[Value("priority")] = Value(static_cast<int64_t>(pref));
+                    entry->entries[Value("exchange")] = Value(exchange);
+
+                } else if (rrtype == ns_t_txt) {
+                    // TXT records: one or more length-prefixed strings
+                    std::string txt;
+                    int off = 0;
+                    while (off < rdlen) {
+                        int slen = rdata[off++];
+                        if (off + slen > rdlen) break;
+                        if (!txt.empty()) txt += ' ';
+                        txt.append(reinterpret_cast<const char*>(rdata + off), slen);
+                        off += slen;
+                    }
+                    entry->entries[Value("text")] = Value(txt);
+
+                } else if (rrtype == ns_t_ns || rrtype == ns_t_cname || rrtype == ns_t_ptr) {
+                    std::string target = dnsExpandName(buf, len, rdata);
+                    if (!target.empty() && target.back() == '.') target.pop_back();
+                    const char* key = (rrtype == ns_t_ptr) ? "hostname" : "target";
+                    entry->entries[Value(std::string(key))] = Value(target);
+
+                } else if (rrtype == ns_t_soa && rdlen > 0) {
+                    const unsigned char* p = rdata;
+                    const unsigned char* end = buf + len;
+                    std::string mname = dnsExpandName(buf, len, p);
+                    int skip = dn_skipname(p, end);
+                    if (skip < 0) { result->elements.push_back(Value(entry)); continue; }
+                    p += skip;
+                    std::string rname = dnsExpandName(buf, len, p);
+                    skip = dn_skipname(p, end);
+                    if (skip < 0) { result->elements.push_back(Value(entry)); continue; }
+                    p += skip;
+                    if (!mname.empty() && mname.back() == '.') mname.pop_back();
+                    if (!rname.empty() && rname.back() == '.') rname.pop_back();
+                    entry->entries[Value("mname")] = Value(mname);
+                    entry->entries[Value("rname")] = Value(rname);
+                    if (p + 20 <= rdata + rdlen) {
+                        auto readU32 = [](const unsigned char* d) -> uint32_t {
+                            return (uint32_t(d[0]) << 24) | (uint32_t(d[1]) << 16) |
+                                   (uint32_t(d[2]) << 8) | d[3];
+                        };
+                        entry->entries[Value("serial")]  = Value(static_cast<int64_t>(readU32(p)));
+                        entry->entries[Value("refresh")] = Value(static_cast<int64_t>(readU32(p + 4)));
+                        entry->entries[Value("retry")]   = Value(static_cast<int64_t>(readU32(p + 8)));
+                        entry->entries[Value("expire")]  = Value(static_cast<int64_t>(readU32(p + 12)));
+                        entry->entries[Value("minimum")] = Value(static_cast<int64_t>(readU32(p + 16)));
+                    }
+
+                } else if (rrtype == ns_t_srv && rdlen >= 7) {
+                    int priority = (rdata[0] << 8) | rdata[1];
+                    int weight   = (rdata[2] << 8) | rdata[3];
+                    int srvPort  = (rdata[4] << 8) | rdata[5];
+                    std::string target = dnsExpandName(buf, len, rdata + 6);
+                    if (!target.empty() && target.back() == '.') target.pop_back();
+                    entry->entries[Value("priority")] = Value(static_cast<int64_t>(priority));
+                    entry->entries[Value("weight")]   = Value(static_cast<int64_t>(weight));
+                    entry->entries[Value("port")]     = Value(static_cast<int64_t>(srvPort));
+                    entry->entries[Value("target")]   = Value(target);
+                }
+
+                result->elements.push_back(Value(entry));
+            }
+
             return Value(result);
         }));
 
