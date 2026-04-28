@@ -787,9 +787,11 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
 
                 // Poll loop — wait for all pending connects or timeout
                 int remaining = timeoutMs;
+                std::vector<struct pollfd> pfds;
+                std::vector<size_t> pfdIdx;
                 for (;;) {
-                    std::vector<struct pollfd> pfds;
-                    std::vector<size_t> pfdIdx;
+                    pfds.clear();
+                    pfdIdx.clear();
                     for (size_t i = batchStart; i < batchEnd; i++) {
                         if (!attempts[i].done && attempts[i].sock >= 0) {
                             pfds.push_back({attempts[i].sock, POLLOUT, 0});
