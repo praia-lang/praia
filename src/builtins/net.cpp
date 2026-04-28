@@ -9,7 +9,10 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <set>
+#include <poll.h>
+#include <fcntl.h>
 #include "../gc_heap.h"
+#include "../signal_state.h"
 
 struct AddrGuard {
     struct addrinfo* res = nullptr;
@@ -30,29 +33,98 @@ static int validatePort(double val, const char* funcName) {
 }
 
 void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
-    netMap->entries[Value("connect")] = Value(makeNative("net.connect", 2,
+    netMap->entries[Value("connect")] = Value(makeNative("net.connect", -1,
         [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || args.size() > 3)
+                throw RuntimeError("net.connect(host, port, timeout?) takes 2-3 arguments", 0);
             if (!args[0].isString())
                 throw RuntimeError("net.connect() requires a host string", 0);
             if (!args[1].isNumber())
                 throw RuntimeError("net.connect() requires a port number", 0);
             std::string host = args[0].asString();
             int port = validatePort(args[1].asNumber(), "net.connect()");
+            int timeoutMs = -1; // -1 = no timeout (blocking)
+            if (args.size() == 3) {
+                if (!args[2].isNumber())
+                    throw RuntimeError("net.connect() timeout must be a number (ms)", 0);
+                timeoutMs = static_cast<int>(args[2].asNumber());
+                if (timeoutMs < 0)
+                    throw RuntimeError("net.connect() timeout must be >= 0", 0);
+            }
 
             struct addrinfo hints = {};
-            hints.ai_family = AF_UNSPEC; // IPv4 or IPv6
+            hints.ai_family = AF_UNSPEC;
             hints.ai_socktype = SOCK_STREAM;
             AddrGuard ag;
             if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &ag.res) != 0)
                 throw RuntimeError("Cannot resolve host: " + host, 0);
-            // Try each address until one connects
+
             int sock = -1;
             for (auto* p = ag.get(); p; p = p->ai_next) {
                 sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
                 if (sock < 0) continue;
-                if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) break;
+
+                if (timeoutMs < 0) {
+                    // No timeout — blocking connect
+                    if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) break;
+                    close(sock);
+                    sock = -1;
+                    continue;
+                }
+
+                // Non-blocking connect with timeout
+                int flags = fcntl(sock, F_GETFL, 0);
+                fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+                int rc = connect(sock, p->ai_addr, p->ai_addrlen);
+                if (rc == 0) {
+                    // Connected immediately
+                    fcntl(sock, F_SETFL, flags);
+                    break;
+                }
+                if (errno != EINPROGRESS) {
+                    close(sock);
+                    sock = -1;
+                    continue;
+                }
+
+                // Wait for connection with poll, checking for SIGINT
+                struct pollfd pfd = {sock, POLLOUT, 0};
+                int remaining = timeoutMs;
+                int connectErr = ETIMEDOUT; // default if we exhaust remaining
+                bool connected = false;
+                for (;;) {
+                    int chunk = (remaining > 100) ? 100 : remaining;
+                    int pr = poll(&pfd, 1, chunk);
+                    if (pr > 0) {
+                        int err = 0;
+                        socklen_t errlen = sizeof(err);
+                        getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &errlen);
+                        if (err == 0) { connected = true; }
+                        else { connectErr = err; }
+                        break;
+                    }
+                    if (pr < 0 && errno != EINTR) { connectErr = errno; break; }
+                    if (pr == 0) remaining -= chunk;
+                    if (remaining <= 0) break;
+                    if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+                        close(sock);
+                        throw RuntimeError("Interrupted", 0);
+                    }
+                }
+
+                if (connected) {
+                    fcntl(sock, F_SETFL, flags); // restore blocking
+                    break;
+                }
                 close(sock);
                 sock = -1;
+                // If we got a definitive error (not timeout), try next address
+                // If timeout, no point trying other addresses
+                if (connectErr == ETIMEDOUT) {
+                    throw RuntimeError("Connection timed out: " + host + ":" + std::to_string(port), 0);
+                }
+                errno = connectErr; // for sysErr() if this was the last address
             }
             if (sock < 0)
                 throw RuntimeError(sysErr("Cannot connect to " + host + ":" + std::to_string(port)), 0);
