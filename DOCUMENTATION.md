@@ -3827,26 +3827,59 @@ net.setTimeout(sock, 5000)     // 5 second timeout for send/recv
 | Function | Description |
 |----------|-------------|
 | **TCP** | |
-| `net.connect(host, port)` | Connect to a TCP server, returns socket |
+| `net.connect(host, port, timeout?)` | Connect to a TCP server, returns socket. Optional timeout in ms |
+| `net.connectAll(targets, timeout)` | Concurrent TCP connect scan. targets: array of `{host, port}` or `[host, port]`. Returns `[{host, port, open}]` |
 | `net.listen(port)` | Bind and listen on a port, returns server socket |
 | `net.accept(server)` | Wait for and accept a connection, returns client socket |
-| `net.send(sock, data)` | Send a string, returns bytes sent |
-| `net.recv(sock, maxBytes?)` | Receive data (default 4096 bytes max), returns string |
-| `net.recvAll(sock)` | Read until the connection closes, returns string |
+| `net.send(sock, data)` | Send a string, returns bytes sent. Works with TLS handles |
+| `net.recv(sock, maxBytes?)` | Receive data (default 4096 bytes). Returns `""` on timeout or close. Works with TLS handles |
+| `net.recvAll(sock)` | Read until the connection closes, returns string. Works with TLS handles |
+| **TLS** | |
+| `net.tls(sock, hostname?)` | Wrap a TCP socket with TLS, returns TLS handle. Hostname enables SNI + cert verification |
 | **UDP** | |
 | `net.udp()` | Create an IPv4 UDP socket |
 | `net.udp6()` | Create an IPv6 UDP socket |
 | `net.udpBind(port)` | Create and bind a UDP socket to a port |
 | `net.sendTo(sock, host, port, data)` | Send a UDP datagram |
 | `net.recvFrom(sock, maxBytes?)` | Receive a datagram, returns `{data, host, port}` |
+| **ICMP** | |
+| `net.ping(host, timeout?)` | ICMP echo, returns `{alive, rtt}`. Timeout defaults to 1500ms |
+| `net.pingAll(hosts, timeout?)` | Concurrent ping sweep, returns `[{host, alive, rtt?}]` |
 | **Raw sockets** | |
 | `net.rawSocket(protocol)` | Create a raw socket. Protocol: `"icmp"`, `"icmp6"`, `"tcp"`, `"udp"`, `"raw"`, or a number |
 | `net.rawSend(sock, host, data)` | Send raw data to a host |
 | `net.rawRecv(sock, maxBytes?)` | Receive raw data, returns `{data, host}` |
-| **General** | |
+| **DNS** | |
 | `net.resolve(host)` | DNS lookup, returns array of IP strings (IPv4 and IPv6) |
+| `net.query(name, type)` | Raw DNS query. Types: `"A"`, `"AAAA"`, `"MX"`, `"TXT"`, `"NS"`, `"CNAME"`, `"SOA"`, `"PTR"`, `"SRV"` |
+| **Interface** | |
+| `net.interfaces()` | List network interfaces, returns array of `{name, addresses}` |
+| `net.bindInterface(sock, name)` | Bind a socket to a network interface (e.g. `"en0"`) |
+| **General** | |
 | `net.setTimeout(sock, ms)` | Set send/recv timeout in milliseconds |
 | `net.close(sock)` | Close a socket |
+
+### ICMP Ping
+
+`net.ping(host, timeout?)` sends an ICMP echo request and returns `{alive, rtt}`. Works unprivileged on macOS. Requires root or `CAP_NET_RAW` on Linux.
+
+```
+let r = net.ping("8.8.8.8")
+if (r.alive) { print("up, rtt=" + str(r.rtt) + "ms") }
+```
+
+`net.pingAll(hosts, timeout?)` pings multiple hosts concurrently using a single ICMP socket. All echo requests are sent first, then replies are collected via poll(). Much faster than sequential pinging.
+
+```
+// Sweep a /24 subnet
+let hosts = []
+for (i in 1..255) { push(hosts, "192.168.1." + str(i)) }
+
+let results = net.pingAll(hosts, 500)
+for (r in results) {
+    if (r.alive) { print(r.host + " up (" + str(r.rtt) + "ms)") }
+}
+```
 
 ### Raw Sockets
 
@@ -3876,6 +3909,123 @@ if (!sys.isRoot()) {
     print("This tool requires root. Run with sudo.")
     sys.exit(1)
 }
+```
+
+### DNS Queries
+
+`net.query(name, type)` performs raw DNS record lookups. Returns an array of maps, each with `name`, `type`, and `ttl` plus type-specific fields.
+
+For PTR lookups, pass a plain IP address — it's automatically converted to the reverse `.in-addr.arpa` / `.ip6.arpa` form.
+
+Returns an empty array for non-existent domains (NXDOMAIN) or no records of that type (NODATA). Only throws on network-level failures.
+
+```
+// A records
+let a = net.query("example.com", "A")
+// [{name: "example.com", type: "A", ttl: 300, address: "93.184.216.34"}]
+
+// MX records
+let mx = net.query("google.com", "MX")
+// [{name: "google.com", type: "MX", ttl: 600, priority: 10, exchange: "smtp.google.com"}]
+
+// TXT records (SPF, DKIM, etc.)
+let txt = net.query("google.com", "TXT")
+// [{name: "google.com", type: "TXT", ttl: 300, text: "v=spf1 include:_spf.google.com ~all"}]
+
+// Reverse DNS (PTR) — pass IP directly
+let ptr = net.query("8.8.8.8", "PTR")
+// [{name: "8.8.8.8.in-addr.arpa", type: "PTR", ttl: 3600, hostname: "dns.google"}]
+
+// SOA record
+let soa = net.query("example.com", "SOA")
+// [{..., mname: "ns1.example.com", rname: "admin.example.com",
+//   serial: 2024010100, refresh: 3600, retry: 900, expire: 604800, minimum: 86400}]
+
+// SRV record
+let srv = net.query("_sip._tcp.example.com", "SRV")
+// [{..., priority: 10, weight: 60, port: 5060, target: "sip.example.com"}]
+
+// NS, CNAME, AAAA also supported
+let ns = net.query("example.com", "NS")       // target field
+let cn = net.query("www.github.com", "CNAME")  // target field
+let v6 = net.query("example.com", "AAAA")      // address field
+```
+
+### TLS
+
+`net.tls(sock, hostname?)` wraps an existing TCP socket with TLS. Returns a TLS handle that works transparently with `net.send()`, `net.recv()`, `net.recvAll()`, `net.setTimeout()`, and `net.close()`.
+
+When `hostname` is provided, SNI is sent and the server certificate is verified against that hostname. Without it, TLS is established but the certificate is not verified against a specific hostname (useful for pentesting).
+
+```
+// HTTPS banner grab
+let sock = net.connect("example.com", 443, 3000)
+let tls = net.tls(sock, "example.com")
+net.setTimeout(tls, 2000)
+net.send(tls, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+let response = net.recv(tls)
+print(response.split("\r\n")[0])  // "HTTP/1.1 200 OK"
+net.close(tls)
+
+// TLS without hostname verification
+let sock2 = net.connect("192.168.1.1", 443, 1000)
+let tls2 = net.tls(sock2)  // no cert check
+net.setTimeout(tls2, 1000)
+net.send(tls2, "GET / HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n")
+print(net.recv(tls2))
+net.close(tls2)
+```
+
+Requires OpenSSL (optional build dependency). Throws if OpenSSL is not available.
+
+### Connection Timeouts
+
+`net.connect()` accepts an optional third argument for a timeout in milliseconds. Without a timeout, connect blocks until the OS gives up (often 75+ seconds). With a timeout, it returns quickly — essential for port scanning.
+
+```
+// Port scan with 500ms timeout
+for (port in [22, 80, 443, 3306, 5432, 8080]) {
+    try {
+        let sock = net.connect("192.168.1.1", port, 500)
+        net.close(sock)
+        print("port " + str(port) + " open")
+    } catch (e) {
+        // closed or filtered
+    }
+}
+```
+
+### Concurrent Connect Scanning
+
+`net.connectAll(targets, timeout)` scans many host/port pairs concurrently using poll-based multiplexing (no threads). Much faster than sequential `net.connect()` calls.
+
+```
+// Scan 100 ports in parallel
+let targets = []
+for (port in 1..1025) {
+    push(targets, {host: "192.168.1.1", port: port})
+}
+
+let results = net.connectAll(targets, 500)
+for (r in results) {
+    if (r.open) { print("port " + str(r.port) + " open") }
+}
+```
+
+Targets can be `{host, port}` maps or `[host, port]` arrays. Results are `{host, port, open}` maps. Internally batches connections to respect file descriptor limits and checks for Ctrl+C between batches.
+
+### Network Interfaces
+
+```
+// List all interfaces
+let ifaces = net.interfaces()
+for (iface in ifaces) {
+    print(iface.name + ": " + str(iface.addresses))
+}
+
+// Bind a socket to a specific interface
+let sock = net.udp()
+net.bindInterface(sock, "en0")
 ```
 
 ---

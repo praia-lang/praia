@@ -80,6 +80,12 @@ else
   endif
 endif
 
+# libresolv for DNS queries (net.query)
+HAVE_RESOLV := $(shell echo 'int main(){}' | $(CXX) -x c++ - -lresolv -o /dev/null 2>/dev/null && echo 1)
+ifeq ($(HAVE_RESOLV),1)
+  LDLIBS += -lresolv
+endif
+
 # Auto-detect -ldl for dlopen (Linux needs it, macOS has it in libSystem)
 HAVE_DL := $(shell echo 'int main(){}' | $(CXX) -x c++ - -ldl -o /dev/null 2>/dev/null && echo 1)
 ifeq ($(HAVE_DL),1)
