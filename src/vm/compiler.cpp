@@ -347,28 +347,109 @@ void Compiler::compileMatchStmt(const MatchStmt* stmt) {
         }
 
         if (c.isType) {
-            // Type pattern: dup subject, compile type expr, OP_IS
             emit(OpCode::OP_DUP, stmt->line, stmt->column);
             compileExpr(c.isType.get());
             emit(OpCode::OP_IS, stmt->line, stmt->column);
+            int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
+            emit(OpCode::OP_POP, stmt->line, stmt->column);
+            compileStmt(c.body.get());
+            endJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
+            patchJump(skipJump);
         } else if (c.guard) {
-            // Guard: compile condition (doesn't consume subject from stack)
             compileExpr(c.guard.get());
+            int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
+            emit(OpCode::OP_POP, stmt->line, stmt->column);
+            compileStmt(c.body.get());
+            endJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
+            patchJump(skipJump);
+        } else if (c.pattern && c.pattern->type == ExprType::Call) {
+            // Check for tagged pattern: Ok(val), Point(x, y)
+            auto* call = static_cast<const CallExpr*>(c.pattern.get());
+            bool isTagPattern = false;
+            std::string tagName;
+            if (call->callee->type == ExprType::Identifier) {
+                auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
+                if (!id->name.empty() && std::isupper(id->name[0])) {
+                    isTagPattern = true;
+                    tagName = id->name;
+                }
+            }
+            if (isTagPattern) {
+                bool isBindingPattern = true;
+                for (auto& arg : call->args) {
+                    if (arg->type != ExprType::Identifier) { isBindingPattern = false; break; }
+                }
+
+                if (isBindingPattern) {
+                    // Binding: Ok(val), Point(x, y)
+                    // Dup subject, check tag name match
+                    emit(OpCode::OP_DUP, stmt->line, stmt->column);
+                    uint16_t tagFieldIdx = currentChunk().addConstant(Value(std::string("tag")));
+                    emit(OpCode::OP_GET_PROPERTY, stmt->line, stmt->column);
+                    emitU16(tagFieldIdx, stmt->line, stmt->column);
+                    uint16_t tagNameIdx = currentChunk().addConstant(Value(tagName));
+                    emit(OpCode::OP_CONSTANT, stmt->line, stmt->column);
+                    emitU16(tagNameIdx, stmt->line, stmt->column);
+                    emit(OpCode::OP_EQUAL, stmt->line, stmt->column);
+                    int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
+
+                    // Match! Subject is still on stack. Extract values into locals.
+                    // Subject stays as an unnamed local (cleaned up by endScope).
+                    beginScope();
+                    addLocal(""); // subject occupies slot 0 in this scope
+                    int subjectSlot = static_cast<int>(current->locals.size()) - 1;
+                    for (size_t i = 0; i < call->args.size(); i++) {
+                        auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
+                        // Get subject from its local slot (not OP_DUP which gets stack top)
+                        emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
+                        emitU16(static_cast<uint16_t>(subjectSlot), stmt->line, stmt->column);
+                        uint16_t vIdx = currentChunk().addConstant(Value(std::string("values")));
+                        emit(OpCode::OP_GET_PROPERTY, stmt->line, stmt->column);
+                        emitU16(vIdx, stmt->line, stmt->column);
+                        emit(OpCode::OP_CONSTANT, stmt->line, stmt->column);
+                        emitU16(currentChunk().addConstant(Value(static_cast<int64_t>(i))), stmt->line, stmt->column);
+                        emit(OpCode::OP_INDEX_GET, stmt->line, stmt->column);
+                        addLocal(argId->name);
+                    }
+                    compileStmt(c.body.get());
+                    endScope(stmt->line);
+                    endJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
+                    patchJump(skipJump);
+                } else {
+                    // Value pattern: Ok(42) — construct and compare
+                    emit(OpCode::OP_DUP, stmt->line, stmt->column);
+                    compileExpr(c.pattern.get());
+                    emit(OpCode::OP_EQUAL, stmt->line, stmt->column);
+                    int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
+                    emit(OpCode::OP_POP, stmt->line, stmt->column);
+                    compileStmt(c.body.get());
+                    endJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
+                    patchJump(skipJump);
+                }
+            } else {
+                // Normal call expression as equality pattern
+                emit(OpCode::OP_DUP, stmt->line, stmt->column);
+                compileExpr(c.pattern.get());
+                emit(OpCode::OP_EQUAL, stmt->line, stmt->column);
+
+                int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
+                emit(OpCode::OP_POP, stmt->line, stmt->column);
+                compileStmt(c.body.get());
+                endJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
+                patchJump(skipJump);
+            }
         } else {
             // Equality: dup subject, compile pattern, OP_EQUAL
             emit(OpCode::OP_DUP, stmt->line, stmt->column);
             compileExpr(c.pattern.get());
             emit(OpCode::OP_EQUAL, stmt->line, stmt->column);
+
+            int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
+            emit(OpCode::OP_POP, stmt->line, stmt->column);
+            compileStmt(c.body.get());
+            endJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
+            patchJump(skipJump);
         }
-
-        int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
-
-        // Match — pop subject, execute body, jump to end
-        emit(OpCode::OP_POP, stmt->line, stmt->column);
-        compileStmt(c.body.get());
-        endJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
-
-        patchJump(skipJump);
     }
 
     // If no case matched and no default, pop the subject

@@ -19,6 +19,7 @@ struct PraiaMap;
 struct PraiaInstance;
 struct PraiaFuture;
 struct PraiaGenerator;
+struct PraiaTagged;
 class Interpreter;
 class Environment;
 
@@ -49,7 +50,8 @@ struct Value {
         std::shared_ptr<PraiaMap>,
         std::shared_ptr<PraiaInstance>,
         std::shared_ptr<PraiaFuture>,
-        std::shared_ptr<PraiaGenerator>
+        std::shared_ptr<PraiaGenerator>,
+        std::shared_ptr<PraiaTagged>
     >;
 
     Data data;
@@ -69,6 +71,7 @@ struct Value {
     Value(std::shared_ptr<PraiaInstance> i) : data(std::move(i)) {}
     Value(std::shared_ptr<PraiaFuture> f) : data(std::move(f)) {}
     Value(std::shared_ptr<PraiaGenerator> g) : data(std::move(g)) {}
+    Value(std::shared_ptr<PraiaTagged> t) : data(std::move(t)) {}
 
     bool isNil()      const { return std::holds_alternative<std::nullptr_t>(data); }
     bool isBool()     const { return std::holds_alternative<bool>(data); }
@@ -82,6 +85,7 @@ struct Value {
     bool isInstance() const { return std::holds_alternative<std::shared_ptr<PraiaInstance>>(data); }
     bool isFuture()   const { return std::holds_alternative<std::shared_ptr<PraiaFuture>>(data); }
     bool isGenerator() const { return std::holds_alternative<std::shared_ptr<PraiaGenerator>>(data); }
+    bool isTagged()   const { return std::holds_alternative<std::shared_ptr<PraiaTagged>>(data); }
 
     bool                        asBool()     const { return std::get<bool>(data); }
     int64_t                     asInt()      const { return std::get<int64_t>(data); }
@@ -97,6 +101,7 @@ struct Value {
     std::shared_ptr<PraiaInstance> asInstance() const { return std::get<std::shared_ptr<PraiaInstance>>(data); }
     std::shared_ptr<PraiaFuture>   asFuture()   const { return std::get<std::shared_ptr<PraiaFuture>>(data); }
     std::shared_ptr<PraiaGenerator> asGenerator() const { return std::get<std::shared_ptr<PraiaGenerator>>(data); }
+    std::shared_ptr<PraiaTagged>   asTagged()   const { return std::get<std::shared_ptr<PraiaTagged>>(data); }
 
     // Declared here, defined after PraiaArray/PraiaMap (needs complete types)
     bool isTruthy() const;
@@ -122,8 +127,10 @@ struct ValueHash {
         // (which compares int and double via asNumber())
         if (v.isInt() || v.isDouble()) return std::hash<double>{}(v.asNumber());
         if (v.isString()) return std::hash<std::string>{}(v.asString());
+        if (v.isTagged()) return hashTagged(v);
         return 0;
     }
+    static size_t hashTagged(const Value& v);
 };
 
 struct PraiaMap {
@@ -166,6 +173,15 @@ struct PraiaInstance {
     std::shared_ptr<PraiaClass> klass;
     std::unordered_map<std::string, Value> fields;
 };
+
+struct PraiaTagged {
+    std::string tag;
+    std::vector<Value> values;
+};
+
+inline size_t ValueHash::hashTagged(const Value& v) {
+    return std::hash<std::string>{}(v.asTagged()->tag);
+}
 
 // ── Value method definitions (need complete types) ──
 
@@ -213,6 +229,18 @@ inline std::string Value::toString() const {
         o << "}";
         return o.str();
     }
+    if (isTagged()) {
+        const auto& t = asTagged();
+        std::ostringstream o;
+        o << t->tag << "(";
+        for (size_t i = 0; i < t->values.size(); i++) {
+            if (i > 0) o << ", ";
+            if (t->values[i].isString()) o << "\"" << t->values[i].toString() << "\"";
+            else o << t->values[i].toString();
+        }
+        o << ")";
+        return o.str();
+    }
     return "<unknown>";
 }
 
@@ -243,6 +271,14 @@ inline bool Value::operator==(const Value& o) const {
     // Instances: reference equality
     if (isInstance() && o.isInstance())
         return asInstance() == o.asInstance();
+    if (isTagged() && o.isTagged()) {
+        const auto& a = asTagged();
+        const auto& b = o.asTagged();
+        if (a->tag != b->tag || a->values.size() != b->values.size()) return false;
+        for (size_t i = 0; i < a->values.size(); i++)
+            if (a->values[i] != b->values[i]) return false;
+        return true;
+    }
     return false;
 }
 

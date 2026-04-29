@@ -19,6 +19,7 @@ public:
     void track(const std::shared_ptr<PraiaInstance>& p);
     void track(const std::shared_ptr<PraiaClass>& p);
     void track(const std::shared_ptr<PraiaGenerator>& p);
+    void track(const std::shared_ptr<PraiaTagged>& p);
     void track(const std::shared_ptr<Environment>& p);
 
     // Mark API (called during root marking by VM/Interpreter)

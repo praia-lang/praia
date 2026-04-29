@@ -177,6 +177,25 @@ void Compiler::compileBinaryExpr(const BinaryExpr* expr) {
 }
 
 void Compiler::compileCallExpr(const CallExpr* expr) {
+    // Tagged value construction: capitalized identifier that doesn't resolve locally
+    if (expr->callee->type == ExprType::Identifier) {
+        auto* id = static_cast<const IdentifierExpr*>(expr->callee.get());
+        if (!id->name.empty() && std::isupper(id->name[0])) {
+            int slot = resolveLocal(current, id->name);
+            int upIdx = (slot == -1) ? resolveUpvalue(current, id->name) : -1;
+            if (slot == -1 && upIdx == -1) {
+                // Not a local/upvalue — could be a global class or a tagged value.
+                // Compile args first, then OP_TAG_OR_CALL (tries global, falls back to tagged)
+                for (auto& arg : expr->args) compileExpr(arg.get());
+                uint16_t nameIdx = currentChunk().addConstant(Value(id->name));
+                emit(OpCode::OP_TAG_OR_CALL, expr->line, expr->column);
+                emitU16(nameIdx, expr->line, expr->column);
+                emit(static_cast<uint8_t>(expr->args.size()), expr->line, expr->column);
+                return;
+            }
+        }
+    }
+
     // Check for spread args
     bool hasSpread = false;
     for (auto& arg : expr->args) {

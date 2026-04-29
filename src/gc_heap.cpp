@@ -34,6 +34,10 @@ void GcHeap::track(const std::shared_ptr<PraiaGenerator>& p) {
     entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Generator});
     allocsSinceGc_++;
 }
+void GcHeap::track(const std::shared_ptr<PraiaTagged>& p) {
+    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Array}); // tagged values are simple containers like arrays
+    allocsSinceGc_++;
+}
 void GcHeap::track(const std::shared_ptr<Environment>& p) {
     entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Environment});
     allocsSinceGc_++;

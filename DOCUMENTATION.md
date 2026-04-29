@@ -669,6 +669,61 @@ print(Level.High)     // 12
 
 Enums are maps — you can pass them around, iterate their keys, etc.
 
+## Tagged Values
+
+Tagged values are data-carrying variants — like Rust enums with data. Any capitalized function call to an undefined name creates a tagged value:
+
+```
+let result = Ok(42)
+let error = Err("not found")
+let point = Point(1, 2)
+let nothing = None()
+
+print(result)       // Ok(42)
+print(type(result)) // "tagged"
+print(result.tag)   // "Ok"
+print(result.values) // [42]
+```
+
+### Pattern matching
+
+Tagged values work with `match` for destructuring:
+
+```
+match (result) {
+    Ok(val) { print("success: " + str(val)) }
+    Err(msg) { print("error: " + msg) }
+}
+
+match (Point(3, 4)) {
+    Point(x, y) { print("sum: " + str(x + y)) }   // 7
+}
+
+match (RGB(255, 0, 128)) {
+    RGB(r, g, b) { print(r) }   // 255
+}
+```
+
+### Equality
+
+Two tagged values are equal if their tag name and all values match:
+
+```
+Ok(1) == Ok(1)     // true
+Ok(1) == Ok(2)     // false
+Ok(1) == Err(1)    // false
+```
+
+### Coexistence with classes
+
+Class constructors take priority. Tagged values only apply when the name isn't defined:
+
+```
+class Foo {}
+let f = Foo()   // class instance
+let t = Bar(1)  // tagged value (Bar is not a class)
+```
+
 ---
 
 ## Control Flow

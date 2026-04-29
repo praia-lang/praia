@@ -212,6 +212,8 @@ int disassembleInstruction(const Chunk& chunk, int offset) {
         case OpCode::OP_TRY_END:        return simpleInstruction("OP_TRY_END", offset);
         case OpCode::OP_THROW:          return simpleInstruction("OP_THROW", offset);
         case OpCode::OP_DEFER:          return simpleInstruction("OP_DEFER", offset);
+        case OpCode::OP_BUILD_TAGGED:   return invokeInstruction("OP_BUILD_TAGGED", chunk, offset);
+        case OpCode::OP_TAG_OR_CALL:    return invokeInstruction("OP_TAG_OR_CALL", chunk, offset);
         case OpCode::OP_RUN_DEFERS:     return simpleInstruction("OP_RUN_DEFERS", offset);
 
         // Generators

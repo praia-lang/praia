@@ -442,6 +442,42 @@ void Interpreter::execute(const Stmt* stmt) {
             } else if (c.guard) {
                 // Guard clause: when condition
                 matched = evaluate(c.guard.get()).isTruthy();
+            } else if (c.pattern && c.pattern->type == ExprType::Call) {
+                // Check for tagged pattern: Ok(val), Point(x, y)
+                auto* call = static_cast<const CallExpr*>(c.pattern.get());
+                if (call->callee->type == ExprType::Identifier) {
+                    auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
+                    if (!id->name.empty() && std::isupper(id->name[0]) &&
+                        subject.isTagged() && subject.asTagged()->tag == id->name &&
+                        call->args.size() == subject.asTagged()->values.size()) {
+                        matched = true;
+                        if (matched) {
+                            // Bind pattern variables in a new scope
+                            auto matchEnv = gcNew<Environment>(env);
+                            auto prevEnv = env;
+                            env = matchEnv;
+                            for (size_t i = 0; i < call->args.size(); i++) {
+                                if (call->args[i]->type == ExprType::Identifier) {
+                                    auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
+                                    matchEnv->define(argId->name, subject.asTagged()->values[i]);
+                                }
+                            }
+                            execute(c.body.get());
+                            env = prevEnv;
+                            break;
+                        }
+                    } else if (!id->name.empty() && std::isupper(id->name[0])) {
+                        // Tag name doesn't match or arity mismatch
+                        matched = false;
+                    } else {
+                        // Lowercase identifier — normal equality
+                        Value pattern = evaluate(c.pattern.get());
+                        matched = (subject == pattern);
+                    }
+                } else {
+                    Value pattern = evaluate(c.pattern.get());
+                    matched = (subject == pattern);
+                }
             } else {
                 // Equality pattern
                 Value pattern = evaluate(c.pattern.get());
@@ -1043,6 +1079,42 @@ Value Interpreter::evaluate(const Expr* expr) {
 
     case ExprType::Call: {
         auto* e = static_cast<const CallExpr*>(expr);
+
+        // Tagged value construction: capitalized identifier that doesn't resolve to a callable
+        if (e->callee->type == ExprType::Identifier) {
+            auto* id = static_cast<const IdentifierExpr*>(e->callee.get());
+            if (!id->name.empty() && std::isupper(id->name[0])) {
+                Value callee;
+                try { callee = evaluate(e->callee.get()); } catch (...) { callee = Value(); }
+                if (!callee.isCallable()) {
+                    auto tagged = gcNew<PraiaTagged>();
+                    tagged->tag = id->name;
+                    for (const auto& arg : e->args)
+                        tagged->values.push_back(evaluate(arg.get()));
+                    return Value(tagged);
+                }
+                // Callable — fall through to normal call path below
+                std::vector<Value> args;
+                for (const auto& arg : e->args) {
+                    if (arg->type == ExprType::Spread) {
+                        auto* spread = static_cast<const SpreadExpr*>(arg.get());
+                        Value val = evaluate(spread->expr.get());
+                        if (!val.isArray())
+                            throw RuntimeError("Spread argument must be an array", spread->line);
+                        for (auto& item : val.asArray()->elements)
+                            args.push_back(item);
+                    } else {
+                        args.push_back(evaluate(arg.get()));
+                    }
+                }
+                bool hasNamed = false;
+                for (auto& n : e->argNames) { if (!n.empty()) { hasNamed = true; break; } }
+                if (hasNamed)
+                    args = reorderNamedArgs(callee.asCallable(), args, e->argNames, e->line);
+                return callWithContext(*this, callee.asCallable(), args, e->line);
+            }
+        }
+
         Value callee = evaluate(e->callee.get());
         if (!callee.isCallable())
             throw RuntimeError("Can only call functions", e->line, e->column);
@@ -1397,6 +1469,17 @@ Value Interpreter::evaluate(const Expr* expr) {
         auto* e = static_cast<const DotExpr*>(expr);
         Value obj = evaluate(e->object.get());
         if (e->isOptional && obj.isNil()) return Value();
+
+        if (obj.isTagged()) {
+            auto t = obj.asTagged();
+            if (e->field == "tag") return Value(t->tag);
+            if (e->field == "values") {
+                auto arr = gcNew<PraiaArray>();
+                arr->elements = t->values;
+                return Value(arr);
+            }
+            throw RuntimeError("Tagged value has no field '" + e->field + "'", e->line, e->column);
+        }
 
         if (obj.isGenerator()) {
             auto gen = obj.asGenerator();
