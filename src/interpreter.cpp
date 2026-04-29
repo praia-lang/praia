@@ -72,6 +72,7 @@ static bool checkIs(const Value& subject, const Value& typeVal, int line, int co
         if (tn == "map")      return subject.isMap();
         if (tn == "function") return subject.isCallable();
         if (tn == "instance") return subject.isInstance();
+        if (tn == "tagged")  return subject.isTagged();
         throw RuntimeError("Unknown type name '" + tn + "'", line, column);
     }
     if (typeVal.isCallable()) {
@@ -443,41 +444,48 @@ void Interpreter::execute(const Stmt* stmt) {
                 // Guard clause: when condition
                 matched = evaluate(c.guard.get()).isTruthy();
             } else if (c.pattern && c.pattern->type == ExprType::Call) {
-                // Check for tagged pattern: Ok(val), Point(x, y)
                 auto* call = static_cast<const CallExpr*>(c.pattern.get());
+                bool isTagPattern = false;
                 if (call->callee->type == ExprType::Identifier) {
                     auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
-                    if (!id->name.empty() && std::isupper(id->name[0]) &&
-                        subject.isTagged() && subject.asTagged()->tag == id->name &&
-                        call->args.size() == subject.asTagged()->values.size()) {
-                        matched = true;
-                        if (matched) {
-                            // Bind pattern variables in a new scope
+                    if (!id->name.empty() && std::isupper(id->name[0]))
+                        isTagPattern = true;
+                }
+                if (isTagPattern && subject.isTagged()) {
+                    auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
+                    auto tag = subject.asTagged();
+                    if (tag->tag == id->name && call->args.size() == tag->values.size()) {
+                        // Check if all args are identifiers (binding pattern) vs values
+                        bool allIdents = true;
+                        for (auto& arg : call->args)
+                            if (arg->type != ExprType::Identifier) { allIdents = false; break; }
+
+                        if (allIdents) {
+                            // Binding pattern: Ok(val), Point(x, y)
+                            matched = true;
                             auto matchEnv = gcNew<Environment>(env);
                             auto prevEnv = env;
                             env = matchEnv;
                             for (size_t i = 0; i < call->args.size(); i++) {
-                                if (call->args[i]->type == ExprType::Identifier) {
-                                    auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
-                                    matchEnv->define(argId->name, subject.asTagged()->values[i]);
-                                }
+                                auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
+                                matchEnv->define(argId->name, tag->values[i]);
                             }
                             execute(c.body.get());
                             env = prevEnv;
                             break;
+                        } else {
+                            // Value pattern: Ok(42) — construct tagged and compare
+                            Value pattern = evaluate(c.pattern.get());
+                            matched = (subject == pattern);
                         }
-                    } else if (!id->name.empty() && std::isupper(id->name[0])) {
-                        // Tag name doesn't match or arity mismatch
-                        matched = false;
-                    } else {
-                        // Lowercase identifier — normal equality
-                        Value pattern = evaluate(c.pattern.get());
-                        matched = (subject == pattern);
                     }
-                } else {
+                    // else: tag mismatch or arity mismatch → matched stays false
+                } else if (!isTagPattern) {
+                    // Normal function call as pattern — evaluate and compare
                     Value pattern = evaluate(c.pattern.get());
                     matched = (subject == pattern);
                 }
+                // else: isTagPattern but subject isn't tagged → matched stays false
             } else {
                 // Equality pattern
                 Value pattern = evaluate(c.pattern.get());
@@ -1084,34 +1092,24 @@ Value Interpreter::evaluate(const Expr* expr) {
         if (e->callee->type == ExprType::Identifier) {
             auto* id = static_cast<const IdentifierExpr*>(e->callee.get());
             if (!id->name.empty() && std::isupper(id->name[0])) {
+                // Try to resolve — only catch "Undefined variable", not other errors
+                bool resolved = false;
                 Value callee;
-                try { callee = evaluate(e->callee.get()); } catch (...) { callee = Value(); }
-                if (!callee.isCallable()) {
+                try {
+                    callee = evaluate(e->callee.get());
+                    resolved = true;
+                } catch (const RuntimeError& err) {
+                    if (std::string(err.what()).find("Undefined variable") == std::string::npos)
+                        throw; // re-throw non-resolution errors
+                }
+                if (!resolved || !callee.isCallable()) {
                     auto tagged = gcNew<PraiaTagged>();
                     tagged->tag = id->name;
                     for (const auto& arg : e->args)
                         tagged->values.push_back(evaluate(arg.get()));
                     return Value(tagged);
                 }
-                // Callable — fall through to normal call path below
-                std::vector<Value> args;
-                for (const auto& arg : e->args) {
-                    if (arg->type == ExprType::Spread) {
-                        auto* spread = static_cast<const SpreadExpr*>(arg.get());
-                        Value val = evaluate(spread->expr.get());
-                        if (!val.isArray())
-                            throw RuntimeError("Spread argument must be an array", spread->line);
-                        for (auto& item : val.asArray()->elements)
-                            args.push_back(item);
-                    } else {
-                        args.push_back(evaluate(arg.get()));
-                    }
-                }
-                bool hasNamed = false;
-                for (auto& n : e->argNames) { if (!n.empty()) { hasNamed = true; break; } }
-                if (hasNamed)
-                    args = reorderNamedArgs(callee.asCallable(), args, e->argNames, e->line);
-                return callWithContext(*this, callee.asCallable(), args, e->line);
+                // Callable — fall through to normal call path
             }
         }
 

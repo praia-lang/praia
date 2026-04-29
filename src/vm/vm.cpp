@@ -850,6 +850,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 else if (tn == "map")      result = left.isMap();
                 else if (tn == "function") result = left.isCallable();
                 else if (tn == "instance") result = left.isInstance();
+                else if (tn == "tagged")  result = left.isTagged();
                 else { RUNTIME_ERR("Unknown type name '" + tn + "'"); }
                 push(Value(result));
             } else if (right.isCallable()) {
