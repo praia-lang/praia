@@ -1,0 +1,272 @@
+// socket — WebSocket support for Praia HTTP server
+//
+// Usage:
+//   use "socket"
+//
+//   let server = http.createServer(lam{ req in
+//       if (req.path == "/ws") {
+//           return socket.upgrade(req, lam{ ws in
+//               ws.onMessage(lam{ msg in ws.send("echo: " + msg) })
+//               ws.onClose(lam{ in print("disconnected") })
+//               ws.send("Welcome!")
+//           })
+//       }
+//       return {body: "Hello"}
+//   })
+//   server.listen(8080)
+
+let WS_MAGIC_GUID = "258EAFA5-E914-47DA-95CA-5AB5B11F857E"
+let MAX_MESSAGE_SIZE = 16 * 1024 * 1024  // 16 MB max message/frame size
+
+// ── Internal: binary I/O helpers ──
+
+func _readExact(fd, n) {
+    let data = ""
+    let got = 0
+    while (got < n) {
+        let chunk = net.recv(fd, n - got)
+        if (chunk == "") { return nil }
+        data = data + chunk
+        got = got + bytes.len(chunk)
+    }
+    return data
+}
+
+// ── Internal: WebSocket frame protocol ──
+
+func _readFrame(fd) {
+    // Read 2-byte header
+    let hdr = _readExact(fd, 2)
+    if (!hdr) { return nil }
+    let h = bytes.toArray(hdr)
+
+    let fin = (h[0] & 0x80) != 0
+    let opcode = h[0] & 0x0F
+    let masked = (h[1] & 0x80) != 0
+    let payloadLen = h[1] & 0x7F
+
+    // Extended payload length
+    if (payloadLen == 126) {
+        let ext = _readExact(fd, 2)
+        if (!ext) { return nil }
+        let b = bytes.toArray(ext)
+        payloadLen = b[0] * 256 + b[1]
+    } elif (payloadLen == 127) {
+        let ext = _readExact(fd, 8)
+        if (!ext) { return nil }
+        let b = bytes.toArray(ext)
+        payloadLen = 0
+        for (i in 0..8) { payloadLen = payloadLen * 256 + b[i] }
+    }
+
+    if (payloadLen > MAX_MESSAGE_SIZE) { return nil }
+
+    // Masking key (client→server frames are always masked)
+    let mask = nil
+    if (masked) {
+        let maskData = _readExact(fd, 4)
+        if (!maskData) { return nil }
+        mask = bytes.toArray(maskData)
+    }
+
+    // Payload
+    let payload = ""
+    if (payloadLen > 0) {
+        payload = _readExact(fd, payloadLen)
+        if (!payload) { return nil }
+    }
+
+    // Unmask payload
+    if (mask && payloadLen > 0) {
+        payload = bytes.xor(payload, bytes.from(mask))
+    }
+
+    return {fin: fin, opcode: opcode, payload: payload}
+}
+
+func _sendFrame(fd, opcode, payload) {
+    let header = []
+    push(header, 0x80 | opcode)  // FIN + opcode
+
+    let payloadLen = bytes.len(payload)
+    if (payloadLen <= 125) {
+        push(header, payloadLen)
+    } elif (payloadLen <= 65535) {
+        push(header, 126)
+        push(header, (payloadLen >> 8) & 0xFF)
+        push(header, payloadLen & 0xFF)
+    } else {
+        push(header, 127)
+        for (i in 0..8) {
+            push(header, (payloadLen >> ((7 - i) * 8)) & 0xFF)
+        }
+    }
+
+    net.send(fd, bytes.from(header) + payload)
+}
+
+func _sendClose(fd, code) {
+    if (code != nil) {
+        let payload = bytes.from([(code >> 8) & 0xFF, code & 0xFF])
+        _sendFrame(fd, 8, payload)
+    } else {
+        _sendFrame(fd, 8, "")
+    }
+}
+
+// ── Internal: handshake ──
+
+func _handshake(fd, key) {
+    let hash = crypto.sha1(key + WS_MAGIC_GUID)
+    let accept = base64.encode(bytes.fromHex(hash))
+
+    let response = "HTTP/1.1 101 Switching Protocols\r\n" +
+                   "Upgrade: websocket\r\n" +
+                   "Connection: Upgrade\r\n" +
+                   "Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
+    net.send(fd, response)
+}
+
+// ── Internal: connection loop (runs in async task) ──
+
+func _connectionLoop(fd, setupFn) {
+    let closed = false
+    let messageFn = nil
+    let closeFn = nil
+
+    let wsId = "ws-" + str(fd)
+    let sendLock = Lock()
+    let ws = {
+        id: wsId,
+
+        send: lam{ msg in
+            sendLock.withLock(lam{ in
+                if (!closed) { _sendFrame(fd, 1, msg) }
+            })
+        },
+
+        sendBinary: lam{ data in
+            sendLock.withLock(lam{ in
+                if (!closed) { _sendFrame(fd, 2, data) }
+            })
+        },
+
+        close: lam{ in
+            sendLock.withLock(lam{ in
+                if (!closed) {
+                    closed = true
+                    try { _sendClose(fd, 1000) } catch (e) {}
+                }
+            })
+        },
+
+        onMessage: lam{ fn in messageFn = fn },
+        onClose: lam{ fn in closeFn = fn }
+    }
+
+    // Let user set up handlers
+    try {
+        setupFn(ws)
+    } catch (e) {
+        try { net.close(fd) } catch (e2) {}
+        return
+    }
+
+    // Fragment reassembly buffer
+    let fragmentBuffer = ""
+
+    // Frame read loop
+    while (!closed) {
+        let frame = nil
+        try {
+            frame = _readFrame(fd)
+        } catch (e) {
+            break  // read error
+        }
+        if (!frame) { break }  // connection lost
+
+        try {
+            match (frame.opcode) {
+                // Continuation frame (fragmented message)
+                0 {
+                    fragmentBuffer = fragmentBuffer + frame.payload
+                    if (bytes.len(fragmentBuffer) > MAX_MESSAGE_SIZE) { break }
+                    if (frame.fin && messageFn) {
+                        messageFn(fragmentBuffer)
+                        fragmentBuffer = ""
+                    }
+                }
+                // Text frame
+                1 {
+                    if (frame.fin) {
+                        if (messageFn) { messageFn(frame.payload) }
+                    } else {
+                        fragmentBuffer = frame.payload
+                    }
+                }
+                // Binary frame
+                2 {
+                    if (frame.fin) {
+                        if (messageFn) { messageFn(frame.payload) }
+                    } else {
+                        fragmentBuffer = frame.payload
+                    }
+                }
+                // Close frame
+                8 {
+                    if (!closed) {
+                        closed = true
+                        try { _sendClose(fd, 1000) } catch (e) {}
+                    }
+                }
+                // Ping → pong
+                9 {
+                    try { _sendFrame(fd, 10, frame.payload) } catch (e) {}
+                }
+                // Pong — ignore
+                10 {}
+            }
+        } catch (e) {
+            // Handler error — close connection
+            break
+        }
+    }
+
+    // Cleanup
+    if (closeFn) {
+        try { closeFn() } catch (e) {}
+    }
+    try { net.close(fd) } catch (e) {}
+}
+
+// ── Public API ──
+
+// Upgrade an HTTP request to a WebSocket connection.
+// Call inside an http.createServer handler.
+// Returns a marker that tells the HTTP server not to close the connection.
+func upgrade(req, handler) {
+    // Validate request
+    if (!req.has("__clientFd")) {
+        throw "socket.upgrade() must be called inside an HTTP handler"
+    }
+    let fd = req.__clientFd
+    let headers = req.headers
+
+    let upgradeHeader = headers.get("upgrade", "").lower()
+    let key = headers.get("sec-websocket-key", "")
+
+    if (upgradeHeader != "websocket" || key == "") {
+        throw "Not a valid WebSocket upgrade request"
+    }
+
+    // Perform handshake (synchronous, on the server thread)
+    _handshake(fd, key)
+
+    // Spawn connection loop in background thread
+    async _connectionLoop(fd, handler)
+
+    // Tell HTTP server not to close the fd or send a response
+    return {__sse: true}
+}
+
+export { upgrade }

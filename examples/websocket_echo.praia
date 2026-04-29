@@ -1,0 +1,45 @@
+#!/usr/bin/env praia
+use "socket"
+
+let server = http.createServer(lam{ req in
+    if (req.path == "/ws") {
+        return socket.upgrade(req, lam{ ws in
+            print("[%{ws.id}] connected")
+
+            ws.onMessage(lam{ msg in
+                print("[%{ws.id}] received: %{msg}")
+                ws.send("echo: %{msg}")
+            })
+
+            ws.onClose(lam{ in
+                print("[%{ws.id}] disconnected")
+            })
+
+            ws.send("Welcome to the echo server!")
+        })
+    }
+
+    // Serve a simple test page
+    return http.html("<!DOCTYPE html><html><body>
+<h2>WebSocket Echo Test</h2>
+<input id='msg' placeholder='Type a message...' />
+<button onclick='send()'>Send</button>
+<pre id='log'></pre>
+<script>
+const ws = new WebSocket('ws://' + location.host + '/ws');
+const log = document.getElementById('log');
+ws.onopen = () => log.textContent += 'Connected\\n';
+ws.onmessage = e => log.textContent += '< ' + e.data + '\\n';
+ws.onclose = () => log.textContent += 'Disconnected\\n';
+function send() {
+    const msg = document.getElementById('msg').value;
+    ws.send(msg);
+    log.textContent += '> ' + msg + '\\n';
+    document.getElementById('msg').value = '';
+}
+document.getElementById('msg').onkeydown = e => { if (e.key === 'Enter') send(); };
+</script></body></html>")
+})
+
+print("WebSocket echo server on http://localhost:9090")
+server.listen(9090)
