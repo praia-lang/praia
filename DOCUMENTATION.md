@@ -2174,11 +2174,11 @@ The pipe operator `|>` passes the left side as the first argument to the right s
 
 ```
 // Without pipe: nested, reads inside-out
-print(sort(filter(nums, lam{ n in n > 5 })))
+print(sort(filter(nums, lam{ it > 5 })))
 
 // With pipe: linear, reads top-to-bottom
 nums
-    |> filter(lam{ n in n > 5 })
+    |> filter(lam{ it > 5 })
     |> sort
     |> print
 ```
@@ -2189,8 +2189,8 @@ nums
 
 ```
 let result = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    |> filter(lam{ n in n % 2 == 0 })
-    |> map(lam{ n in n * n })
+    |> filter(lam{ it % 2 == 0 })
+    |> map(lam{ it * it })
     |> sort
 print(result)   // [4, 16, 36, 64, 100]
 ```
@@ -2291,10 +2291,10 @@ users |> sort(lam{ a, b in a.age - b.age })
 
 // groupBy
 [{t: "a", v: 1}, {t: "b", v: 2}, {t: "a", v: 3}]
-    |> groupBy(lam{ x in x.t })  // {a: [...], b: [...]}
+    |> groupBy(lam{ it.t })  // {a: [...], b: [...]}
 
 // flatMap
-[[1, 2], [3, 4]] |> flatMap(lam{ x in x })  // [1, 2, 3, 4]
+[[1, 2], [3, 4]] |> flatMap(lam{ it })  // [1, 2, 3, 4]
 
 // enumerate with pipe
 ["x", "y"] |> enumerate |> each(lam{ p in print("%{p[0]}: %{p[1]}") })

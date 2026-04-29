@@ -5,8 +5,11 @@ file_extensions:
   - praia
 scope: source.praia
 
+first_line_match: '^#!.*\bpraia\b'
+
 contexts:
   main:
+    - include: shebang
     - include: comments
     - include: strings
     - include: numbers
@@ -19,6 +22,10 @@ contexts:
     - include: functions
     - include: classes
     - include: punctuation
+
+  shebang:
+    - match: ^#!.*$
+      scope: comment.line.shebang.praia
 
   comments:
     - match: //.*$
@@ -103,7 +110,7 @@ contexts:
       scope: keyword.control.praia
     - match: \b(return|yield)\b
       scope: keyword.control.flow.praia
-    - match: \b(try|catch|throw|finally|ensure)\b
+    - match: \b(try|catch|throw|finally|ensure|defer)\b
       scope: keyword.control.exception.praia
     - match: \b(async|await)\b
       scope: keyword.control.async.praia
@@ -121,7 +128,7 @@ contexts:
       scope: constant.language.null.praia
 
   builtins:
-    - match: \b(print|len|push|pop|type|str|num|fromCharCode|sort|filter|map|each|keys|values|loadNative)\b
+    - match: \b(print|len|push|pop|type|str|num|fromCharCode|sort|filter|map|each|keys|values|reduce|any|all|flatMap|unique|zip|enumerate|groupBy|findIndex|flatten|loadNative)\b
       scope: support.function.praia
 
   namespaces:
@@ -131,6 +138,8 @@ contexts:
       scope: support.class.praia
 
   operators:
+    - match: \|\?>
+      scope: keyword.operator.pipe-try.praia
     - match: \|>
       scope: keyword.operator.pipe.praia
     - match: '&&|\|\|'

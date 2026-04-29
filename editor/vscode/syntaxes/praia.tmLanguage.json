@@ -3,6 +3,7 @@
   "name": "Praia",
   "scopeName": "source.praia",
   "patterns": [
+    { "include": "#shebang" },
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#numbers" },
@@ -17,6 +18,12 @@
     { "include": "#punctuation" }
   ],
   "repository": {
+    "shebang": {
+      "patterns": [{
+        "match": "^#!.*$",
+        "name": "comment.line.shebang.praia"
+      }]
+    },
     "comments": {
       "patterns": [
         {
@@ -139,7 +146,7 @@
         },
         {
           "name": "keyword.control.exception.praia",
-          "match": "\\b(try|catch|throw|finally|ensure)\\b"
+          "match": "\\b(try|catch|throw|finally|ensure|defer)\\b"
         },
         {
           "name": "keyword.control.async.praia",
@@ -175,7 +182,7 @@
       "patterns": [
         {
           "name": "support.function.praia",
-          "match": "\\b(print|len|push|pop|type|str|num|fromCharCode|sort|filter|map|each|keys|values|loadNative)\\b"
+          "match": "\\b(print|len|push|pop|type|str|num|fromCharCode|sort|filter|map|each|keys|values|reduce|any|all|flatMap|unique|zip|enumerate|groupBy|findIndex|flatten|loadNative)\\b"
         }
       ]
     },
@@ -193,6 +200,10 @@
     },
     "operators": {
       "patterns": [
+        {
+          "name": "keyword.operator.pipe-try.praia",
+          "match": "\\|\\?>"
+        },
         {
           "name": "keyword.operator.pipe.praia",
           "match": "\\|>"
