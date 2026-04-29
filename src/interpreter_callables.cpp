@@ -87,104 +87,80 @@ Value PraiaMethod::call(Interpreter& interp, const std::vector<Value>& args) {
 
 // ── PraiaFunction / PraiaLambda ───────────────────────────────
 
-Value PraiaLambda::call(Interpreter& interp, const std::vector<Value>& args) {
-    auto lambdaEnv = gcNew<Environment>(closure);
+Value Interpreter::callBody(std::shared_ptr<Environment> callEnv,
+                            const std::vector<std::string>& params,
+                            const std::string& restParam,
+                            const std::vector<Value>& args,
+                            std::function<const Expr*(size_t)> getDefault,
+                            std::function<void()> runBody) {
+    auto prevEnv = env;
+    env = callEnv;
 
-    auto prevEnv = interp.env;
-    interp.env = lambdaEnv;
     for (size_t i = 0; i < params.size(); i++) {
         if (i < args.size() && !args[i].isNil()) {
-            lambdaEnv->define(params[i], args[i]);
-        } else if (i < expr->defaults.size() && expr->defaults[i]) {
-            lambdaEnv->define(params[i], interp.evaluate(expr->defaults[i].get()));
+            callEnv->define(params[i], args[i]);
+        } else if (auto* def = getDefault(i)) {
+            callEnv->define(params[i], evaluate(def));
         } else if (i < args.size()) {
-            lambdaEnv->define(params[i], args[i]);
+            callEnv->define(params[i], args[i]);
         } else {
-            lambdaEnv->define(params[i], Value());
+            callEnv->define(params[i], Value());
         }
     }
     if (!restParam.empty()) {
         auto rest = gcNew<PraiaArray>();
         for (size_t i = params.size(); i < args.size(); i++)
             rest->elements.push_back(args[i]);
-        lambdaEnv->define(restParam, Value(rest));
+        callEnv->define(restParam, Value(rest));
     }
 
-    interp.deferStacks_.push_back({});
-    auto runDefers = [&interp]() {
-        if (interp.deferStacks_.empty()) return;
-        auto defers = std::move(interp.deferStacks_.back());
-        interp.deferStacks_.pop_back();
+    deferStacks_.push_back({});
+    auto runDefers = [this]() {
+        if (deferStacks_.empty()) return;
+        auto defers = std::move(deferStacks_.back());
+        deferStacks_.pop_back();
         for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
-            try { interp.evaluate(defers[i]); } catch (...) {}
+            try { evaluate(defers[i]); } catch (...) {}
         }
     };
 
     try {
-        for (const auto& stmt : expr->body)
-            interp.execute(stmt.get());
+        runBody();
     } catch (const ReturnSignal& ret) {
         runDefers();
-        interp.env = prevEnv;
+        env = prevEnv;
         return ret.value;
     } catch (...) {
         runDefers();
-        interp.env = prevEnv;
+        env = prevEnv;
         throw;
     }
     runDefers();
-    interp.env = prevEnv;
-    return Value(); // implicit nil
+    env = prevEnv;
+    return Value();
+}
+
+Value PraiaLambda::call(Interpreter& interp, const std::vector<Value>& args) {
+    auto* e = expr;
+    return interp.callBody(gcNew<Environment>(closure), params, restParam, args,
+        [e](size_t i) -> const Expr* {
+            return (i < e->defaults.size() && e->defaults[i]) ? e->defaults[i].get() : nullptr;
+        },
+        [&interp, e]() {
+            for (const auto& stmt : e->body) interp.execute(stmt.get());
+        });
 }
 
 Value PraiaFunction::call(Interpreter& interp, const std::vector<Value>& args) {
-    auto funcEnv = gcNew<Environment>(closure);
-
-    auto prevEnv = interp.env;
-    interp.env = funcEnv;
-    for (size_t i = 0; i < params.size(); i++) {
-        if (i < args.size() && !args[i].isNil()) {
-            funcEnv->define(params[i], args[i]);
-        } else if (defaults && i < defaults->size() && (*defaults)[i]) {
-            funcEnv->define(params[i], interp.evaluate((*defaults)[i].get()));
-        } else if (i < args.size()) {
-            funcEnv->define(params[i], args[i]);
-        } else {
-            funcEnv->define(params[i], Value());
-        }
-    }
-    if (!restParam.empty()) {
-        auto rest = gcNew<PraiaArray>();
-        for (size_t i = params.size(); i < args.size(); i++)
-            rest->elements.push_back(args[i]);
-        funcEnv->define(restParam, Value(rest));
-    }
-
-    interp.deferStacks_.push_back({});
-    auto runDefers = [&interp]() {
-        if (interp.deferStacks_.empty()) return;
-        auto defers = std::move(interp.deferStacks_.back());
-        interp.deferStacks_.pop_back();
-        for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
-            try { interp.evaluate(defers[i]); } catch (...) {}
-        }
-    };
-
-    try {
-        for (const auto& stmt : body->statements)
-            interp.execute(stmt.get());
-    } catch (const ReturnSignal& ret) {
-        runDefers();
-        interp.env = prevEnv;
-        return ret.value;
-    } catch (...) {
-        runDefers();
-        interp.env = prevEnv;
-        throw;
-    }
-    runDefers();
-    interp.env = prevEnv;
-    return Value(); // implicit nil
+    auto* d = defaults;
+    auto* b = body;
+    return interp.callBody(gcNew<Environment>(closure), params, restParam, args,
+        [d](size_t i) -> const Expr* {
+            return (d && i < d->size() && (*d)[i]) ? (*d)[i].get() : nullptr;
+        },
+        [&interp, b]() {
+            for (const auto& stmt : b->statements) interp.execute(stmt.get());
+        });
 }
 
 // ── PraiaGenerator destructor ────────────────────────────────
