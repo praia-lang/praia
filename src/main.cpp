@@ -20,6 +20,10 @@
 #include <readline/history.h>
 #endif
 
+// ── Version ──────────────────────────────────────────────────
+
+static constexpr const char* PRAIA_VERSION = "0.4.6";
+
 // ── AST printer ──────────────────────────────────────────────
 
 static void printIndent(int level) {
@@ -384,8 +388,6 @@ static void printAst(const std::vector<StmtPtr>& program) {
 }
 
 // ── Main ─────────────────────────────────────────────────────
-
-static constexpr const char* PRAIA_VERSION = "0.4.6";
 
 static std::string readFile(const std::string& path) {
     std::ifstream file(path);

@@ -524,6 +524,44 @@ Value getStringMethod(const std::string& strRef,
             return Value(arr);
         }));
     }
+    if (name == "count") {
+        return Value(makeNative("count", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
+            if (!args[0].isString())
+                throw RuntimeError("count() requires a string argument", 0);
+            auto& sub = args[0].asString();
+            if (sub.empty()) return Value(static_cast<int64_t>(0));
+            int64_t count = 0;
+            size_t pos = 0;
+            while ((pos = str.find(sub, pos)) != std::string::npos) {
+                count++;
+                pos += sub.size();
+            }
+            return Value(count);
+        }));
+    }
+    if (name == "center") {
+        return Value(makeNative("center", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
+            if (args.empty() || !args[0].isNumber())
+                throw RuntimeError("center() requires a width", 0);
+            int target = static_cast<int>(args[0].asNumber());
+            std::string pad = " ";
+            if (args.size() > 1 && args[1].isString()) pad = args[1].asString();
+#ifdef HAVE_UTF8PROC
+            int currentLen = static_cast<int>(utf8_grapheme_count(str));
+#else
+            int currentLen = static_cast<int>(str.size());
+#endif
+            if (currentLen >= target) return Value(str);
+            int total = target - currentLen;
+            int left = total / 2;
+            int right = total - left;
+            std::string result;
+            for (int i = 0; i < left; i++) result += pad;
+            result += str;
+            for (int i = 0; i < right; i++) result += pad;
+            return Value(std::move(result));
+        }));
+    }
     throw RuntimeError("String has no method '" + name + "'", line);
 }
 
@@ -625,6 +663,29 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
                 if (result.isTruthy()) return elem;
             }
             return Value();
+        }));
+    }
+    if (name == "sort") {
+        return Value(makeNative("sort", -1, [arr, interp, vm](const std::vector<Value>& args) -> Value {
+            auto sorted = gcNew<PraiaArray>();
+            sorted->elements = arr->elements;
+            auto& elems = sorted->elements;
+            if (!args.empty() && args[0].isCallable()) {
+                auto cmp = args[0].asCallable();
+                std::sort(elems.begin(), elems.end(),
+                    [&cmp, interp, vm](const Value& a, const Value& b) -> bool {
+                        Value result = vm ? callWithVM(*vm, cmp, {a, b})
+                                          : callSafe(*interp, cmp, {a, b});
+                        if (result.isNumber()) return result.asNumber() < 0;
+                        return result.isTruthy();
+                    });
+            } else {
+                std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
+                    if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
+                    return a.toString() < b.toString();
+                });
+            }
+            return Value(sorted);
         }));
     }
     throw RuntimeError("Array has no method '" + name + "'", line);

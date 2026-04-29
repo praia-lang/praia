@@ -1967,6 +1967,11 @@ Interpreter::Interpreter() {
             return Value(geteuid() == 0);
         }));
 
+    sysMap->entries[Value("getpid")] = Value(makeNative("sys.getpid", 0,
+        [](const std::vector<Value>&) -> Value {
+            return Value(static_cast<int64_t>(getpid()));
+        }));
+
     // ── Signal handling ──
 
     // sys.onSignal(name, handler) — register a callback for a signal

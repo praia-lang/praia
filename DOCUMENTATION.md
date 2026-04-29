@@ -1666,6 +1666,8 @@ Methods are called with dot notation on string values.
 | `.repeat(count)` | Repeat string N times |
 | `.padStart(len, char?)` | Left-pad to width (default: space) |
 | `.padEnd(len, char?)` | Right-pad to width (default: space) |
+| `.center(width, char?)` | Center-pad both sides (default: space) |
+| `.count(substr)` | Count non-overlapping occurrences of substring |
 | `.trimStart()` | Remove leading whitespace |
 | `.trimEnd()` | Remove trailing whitespace |
 | `.graphemes()` | Split into array of grapheme clusters |
@@ -1890,6 +1892,7 @@ Methods are called with dot notation on array values.
 | `.slice(start, end?)` | Extract subarray (negative indices supported) |
 | `.indexOf(val)` | Find index of element (-1 if not found) |
 | `.find(fn)` | First element where fn returns truthy (nil if not found) |
+| `.sort(comparator?)` | Return sorted copy. Optional: `lam{ a, b in a - b }` |
 
 ```
 let arr = [1, 2, 3]
@@ -3368,6 +3371,7 @@ In addition to file/directory operations, `sys` provides:
 | `sys.readLines(path)` | Read file as array of lines (no trailing newlines) |
 | `sys.uid()` | Effective user ID (`geteuid()`) |
 | `sys.isRoot()` | `true` if running as root (uid 0) |
+| `sys.getpid()` | Current process ID |
 | `sys.platform` | `"darwin"`, `"linux"`, or `"windows"` |
 | `sys.stdout(str)` | Write to stdout without a trailing newline |
 | `sys.rawMode(bool)` | Enable/disable raw terminal mode (no line buffering) |
