@@ -448,6 +448,29 @@ Interpreter::Interpreter() {
             return Value(result);
         })));
 
+    globals->define("groupBy", Value(makeNative("groupBy", 2,
+        [this](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("groupBy() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("groupBy() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto fn = args[1].asCallable();
+            auto result = gcNew<PraiaMap>();
+            for (auto& elem : src) {
+                Value key = callSafe(*this, fn, {elem});
+                auto it = result->entries.find(key);
+                if (it == result->entries.end()) {
+                    auto group = gcNew<PraiaArray>();
+                    group->elements.push_back(elem);
+                    result->entries[key] = Value(group);
+                } else {
+                    it->second.asArray()->elements.push_back(elem);
+                }
+            }
+            return Value(result);
+        })));
+
     globals->define("keys", Value(makeNative("keys", 1,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isMap())
@@ -1767,6 +1790,45 @@ Interpreter::Interpreter() {
             if (setenv(args[0].asString().c_str(), args[1].asString().c_str(), 1) != 0)
                 throw RuntimeError("sys.setenv() failed for key '" + args[0].asString() + "'", 0);
             return Value();
+        }));
+
+    sysMap->entries[Value("envAll")] = Value(makeNative("sys.envAll", 0,
+        [](const std::vector<Value>&) -> Value {
+            auto result = gcNew<PraiaMap>();
+            extern char** environ;
+            for (char** env = environ; *env; env++) {
+                std::string entry(*env);
+                auto eq = entry.find('=');
+                if (eq != std::string::npos) {
+                    result->entries[Value(entry.substr(0, eq))] = Value(entry.substr(eq + 1));
+                }
+            }
+            return Value(result);
+        }));
+
+    sysMap->entries[Value("chdir")] = Value(makeNative("sys.chdir", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("sys.chdir() requires a string path", 0);
+            std::error_code ec;
+            std::filesystem::current_path(args[0].asString(), ec);
+            if (ec)
+                throw RuntimeError("sys.chdir() failed: " + ec.message(), 0);
+            return Value();
+        }));
+
+    sysMap->entries[Value("readLines")] = Value(makeNative("sys.readLines", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("sys.readLines() requires a string path", 0);
+            std::ifstream f(args[0].asString());
+            if (!f.is_open())
+                throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
+            auto result = gcNew<PraiaArray>();
+            std::string line;
+            while (std::getline(f, line))
+                result->elements.push_back(Value(std::move(line)));
+            return Value(result);
         }));
 
     sysMap->entries[Value("cwd")] = Value(makeNative("sys.cwd", 0,

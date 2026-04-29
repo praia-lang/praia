@@ -63,7 +63,7 @@ void vmRegisterNatives(VM& vm) {
     std::vector<std::string> globalNames = {
         "print", "len", "push", "pop", "type", "str", "num", "fromCharCode",
         "Lock", "Channel", "futures", "sort", "filter", "map", "each", "reduce", "any", "all",
-        "flatMap", "unique", "zip", "enumerate", "keys", "values",
+        "flatMap", "unique", "zip", "enumerate", "groupBy", "keys", "values",
         "sys", "http", "json", "yaml", "base64", "path", "url", "net",
         "bytes", "crypto", "random", "time", "math",
         "loadNative",
@@ -317,6 +317,31 @@ void vmRegisterNatives(VM& vm) {
                         result->elements.push_back(inner);
                 } else {
                     result->elements.push_back(mapped);
+                }
+            }
+            return Value(result);
+        }));
+
+    vm.defineNative("groupBy", makeNat("groupBy", 2,
+        [](const std::vector<Value>& args) -> Value {
+            VM* vm = VM::current();
+            if (!vm) throw RuntimeError("groupBy() requires VM context", 0);
+            if (!args[0].isArray())
+                throw RuntimeError("groupBy() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("groupBy() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto fn = args[1].asCallable();
+            auto result = gcNew<PraiaMap>();
+            for (auto& elem : src) {
+                Value key = callWithVM(*vm, fn, {elem});
+                auto it = result->entries.find(key);
+                if (it == result->entries.end()) {
+                    auto group = gcNew<PraiaArray>();
+                    group->elements.push_back(elem);
+                    result->entries[key] = Value(group);
+                } else {
+                    it->second.asArray()->elements.push_back(elem);
                 }
             }
             return Value(result);

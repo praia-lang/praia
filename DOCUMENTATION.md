@@ -279,11 +279,13 @@ if (len(items) > 0) { print("has items") }
 
 ### Comparison
 
+Works on numbers and strings (lexicographic ordering).
+
 ```
-3 < 5       // true
-3 > 5       // false
-3 <= 3      // true
-3 >= 5      // false
+3 < 5           // true
+3 >= 5          // false
+"apple" < "banana"  // true
+"abc" <= "abc"      // true
 ```
 
 ### Equality
@@ -575,6 +577,25 @@ let b = a
 b.y = 2
 print(a)            // {x: 1, y: 2}
 ```
+
+### Map Methods
+
+| Method | Description |
+|--------|-------------|
+| `.has(key)` | Returns `true` if the key exists |
+| `.get(key, default?)` | Returns the value for key, or default (nil if omitted) |
+| `.delete(key)` | Removes the key, returns `true` if it existed |
+| `.merge(other)` | Returns a new map combining both, with `other`'s values taking priority |
+
+```
+let m = {a: 1, b: 2}
+m.has("a")           // true
+m.get("z", 0)        // 0
+m.delete("b")        // true, m is now {a: 1}
+let m2 = {a: 1}.merge({b: 2, a: 99})  // {a: 99, b: 2}
+```
+
+Note: map entries named `has`, `get`, `delete`, or `merge` shadow the methods.
 
 ---
 
@@ -2160,15 +2181,35 @@ These functions are designed to work with `|>`:
 |----------|-------------|
 | `filter(arr, predicate)` | Keep elements where predicate returns truthy |
 | `map(arr, transform)` | Transform each element |
+| `flatMap(arr, fn)` | Map then flatten — if fn returns an array, its elements are spread into the result |
+| `reduce(arr, fn, initial?)` | Fold array to a single value. fn receives `(accumulator, element)` |
 | `each(arr, fn)` | Call fn on each element (side effects), returns the array |
-| `sort(arr)` | Return sorted copy (numbers ascending, strings alphabetical) |
+| `sort(arr, comparator?)` | Return sorted copy. Optional comparator: `lam{ a, b in a.field - b.field }` |
+| `any(arr, predicate)` | Returns `true` if any element matches |
+| `all(arr, predicate)` | Returns `true` if all elements match |
+| `unique(arr)` | Remove duplicates, preserving order |
+| `zip(a, b)` | Combine two arrays into `[[a0, b0], [a1, b1], ...]` (truncates to shorter) |
+| `enumerate(arr)` | Returns `[[0, elem0], [1, elem1], ...]` |
+| `groupBy(arr, fn)` | Group elements by key function, returns map of key → array |
 | `keys(map)` | Return array of map keys |
 | `values(map)` | Return array of map values |
 
 ```
-let config = {host: "localhost", port: 8080}
-config |> keys |> print          // ["host", "port"]
-config |> values |> print        // ["localhost", 8080]
+// reduce
+[1, 2, 3, 4] |> reduce(lam{ acc, x in acc + x }, 0)  // 10
+
+// sort by field
+users |> sort(lam{ a, b in a.age - b.age })
+
+// groupBy
+[{t: "a", v: 1}, {t: "b", v: 2}, {t: "a", v: 3}]
+    |> groupBy(lam{ x in x.t })  // {a: [...], b: [...]}
+
+// flatMap
+[[1, 2], [3, 4]] |> flatMap(lam{ x in x })  // [1, 2, 3, 4]
+
+// enumerate with pipe
+["x", "y"] |> enumerate |> each(lam{ p in print("%{p[0]}: %{p[1]}") })
 ```
 
 ---
@@ -3217,9 +3258,12 @@ The `math` namespace provides mathematical constants and functions.
 | `math.approx(a, b, epsilon?)` | Approximate equality (default epsilon: 1e-9) |
 | `math.sin(x)`, `cos`, `tan` | Trigonometry (radians) |
 | `math.asin(x)`, `acos`, `atan` | Inverse trig |
+| `math.atan2(y, x)` | Two-argument arctangent |
 | `math.log(x)` | Natural log |
 | `math.log2(x)`, `log10(x)` | Base-2 and base-10 log |
 | `math.exp(x)` | e^x |
+| `math.isNan(x)` | Returns `true` if x is NaN (false for non-numbers) |
+| `math.isInf(x)` | Returns `true` if x is ±Infinity (false for non-numbers) |
 
 ```
 print(math.sqrt(144))              // 12
@@ -3268,6 +3312,7 @@ The `time` namespace provides timestamps, formatting, and sleep.
 | `time.epoch()` | Current time as Unix seconds |
 | `time.sleep(ms)` | Pause execution for ms milliseconds |
 | `time.format(fmt?, timestamp?)` | Format time as string (default: `"%Y-%m-%d %H:%M:%S"`) |
+| `time.parse(str, fmt?)` | Parse date string to millisecond timestamp |
 
 ```
 let start = time.now()
@@ -3277,6 +3322,11 @@ print(time.now() - start)          // ~100
 print(time.format())               // "2026-04-18 13:00:00"
 print(time.format("%H:%M"))        // "13:00"
 print(time.epoch())                // 1776510000
+
+// Parsing — auto-detects "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS"
+let ts = time.parse("2024-06-15")
+let ts2 = time.parse("15/06/2024", "%d/%m/%Y")  // custom format
+print(time.format("%Y-%m-%d", ts))               // "2024-06-15"
 ```
 
 ### Benchmarking
@@ -3298,8 +3348,11 @@ In addition to file/directory operations, `sys` provides:
 | `sys.copy(src, dst)` | Copy a file or directory (recursive) |
 | `sys.move(src, dst)` | Move / rename a file or directory |
 | `sys.env(name)` | Read environment variable (returns nil if not set) |
+| `sys.envAll()` | Returns all environment variables as a map |
 | `sys.setenv(name, value)` | Set an environment variable |
 | `sys.cwd()` | Current working directory |
+| `sys.chdir(path)` | Change working directory |
+| `sys.readLines(path)` | Read file as array of lines (no trailing newlines) |
 | `sys.uid()` | Effective user ID (`geteuid()`) |
 | `sys.isRoot()` | `true` if running as root (uid 0) |
 | `sys.platform` | `"darwin"`, `"linux"`, or `"windows"` |

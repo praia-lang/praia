@@ -647,5 +647,24 @@ Value getMapMethod(std::shared_ptr<PraiaMap> map,
             return Value();
         }));
     }
+    if (name == "delete") {
+        return Value(makeNative("delete", 1, [map](const std::vector<Value>& args) -> Value {
+            auto it = map->entries.find(args[0]);
+            if (it == map->entries.end()) return Value(false);
+            map->entries.erase(it);
+            return Value(true);
+        }));
+    }
+    if (name == "merge") {
+        return Value(makeNative("merge", 1, [map](const std::vector<Value>& args) -> Value {
+            if (!args[0].isMap())
+                throw RuntimeError("merge() requires a map argument", 0);
+            auto result = gcNew<PraiaMap>();
+            result->entries = map->entries;
+            for (auto& [k, v] : args[0].asMap()->entries)
+                result->entries[k] = v;
+            return Value(result);
+        }));
+    }
     throw RuntimeError("Map has no method '" + name + "'", line);
 }
