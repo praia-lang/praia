@@ -18,6 +18,16 @@ Praia throws plain values (strings, maps). There's no `TypeError`, `ValueError`,
 
 Having a built-in `Error` class with subclasses (or maybe just a `type` field convention) would make error handling more structured.
 
+### Class features
+Partially implemented. Single inheritance, super, operator overloading (__add, __sub, __eq, __lt, __str, __len, __index, __indexSet, etc.), static methods, method decorators. 
+Missing: 
+- multiple inheritance
+- metaclasses
+- properties
+- abstract base classes
+- dataclasses
+These are advanced OOP features, need to decide whether to go this direction with the language.
+
 ### Introspection / reflection
 Only `type()` and `is` exist. No `dir()`, `getattr()`, `hasattr()`, `inspect`. Can't enumerate an object's methods or fields at runtime. Would be useful for debugging tools and serialization frameworks.
 
