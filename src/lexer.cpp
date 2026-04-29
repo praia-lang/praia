@@ -114,6 +114,10 @@ void Lexer::scanToken() {
             break;
         case '|':
             if (match('|')) addToken(TokenType::OR);
+            else if (peek() == '?' && peekNext() == '>') {
+                advance(); advance(); // consume ? and >
+                addToken(TokenType::PIPE_TRY);
+            }
             else if (match('>')) addToken(TokenType::PIPE);
             else addToken(TokenType::BIT_OR);
             break;

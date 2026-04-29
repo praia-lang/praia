@@ -17,7 +17,7 @@ enum class ExprType {
     Unary, Binary, Postfix, Assign, Call,
     InterpolatedString, Lambda, Ternary, Spread,
     ArrayLiteral, Index, IndexAssign, MapLiteral,
-    Dot, DotAssign, Pipe, Async, Await, Yield,
+    Dot, DotAssign, Pipe, PipeTry, Async, Await, Yield,
     This, Super
 };
 
@@ -168,6 +168,13 @@ struct PipeExpr : Expr {
     PipeExpr() : Expr(ExprType::Pipe) {}
     ExprPtr left;
     ExprPtr right;  // function or call expression
+};
+
+// a |?> f — if left throws, pass error to f; otherwise pass through
+struct PipeTryExpr : Expr {
+    PipeTryExpr() : Expr(ExprType::PipeTry) {}
+    ExprPtr left;
+    ExprPtr right;
 };
 
 struct AsyncExpr : Expr {

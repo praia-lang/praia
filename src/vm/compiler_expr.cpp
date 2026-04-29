@@ -17,6 +17,7 @@ void Compiler::compileExpr(const Expr* expr) {
     case ExprType::Call:      compileCallExpr(static_cast<const CallExpr*>(expr)); break;
     case ExprType::Ternary:   compileTernaryExpr(static_cast<const TernaryExpr*>(expr)); break;
     case ExprType::Pipe:      compilePipeExpr(static_cast<const PipeExpr*>(expr)); break;
+    case ExprType::PipeTry:   compilePipeTryExpr(static_cast<const PipeTryExpr*>(expr)); break;
     case ExprType::Lambda:    compileLambdaExpr(static_cast<const LambdaExpr*>(expr)); break;
     case ExprType::ArrayLiteral: compileArrayLiteralExpr(static_cast<const ArrayLiteralExpr*>(expr)); break;
     case ExprType::MapLiteral:compileMapLiteralExpr(static_cast<const MapLiteralExpr*>(expr)); break;
@@ -271,6 +272,54 @@ void Compiler::compilePipeExpr(const PipeExpr* expr) {
         emit(OpCode::OP_CALL, expr->line, expr->column);
         emit(1, expr->line, expr->column);
     }
+}
+
+void Compiler::compilePipeTryExpr(const PipeTryExpr* expr) {
+    // Compile: try { left } catch (e) { handler(e) }
+    // TRY_BEGIN [catch_offset]
+    emit(OpCode::OP_TRY_BEGIN, expr->line, expr->column);
+    int catchSlot = static_cast<int>(currentChunk().code.size());
+    emitU16(0, expr->line, expr->column);
+    current->tryDepth++;
+
+    compileExpr(expr->left.get());
+
+    emit(OpCode::OP_TRY_END, expr->line, expr->column);
+    current->tryDepth--;
+
+    // Jump over catch block (left succeeded, result is on stack)
+    emit(OpCode::OP_JUMP, expr->line, expr->column);
+    int jumpOverSlot = static_cast<int>(currentChunk().code.size());
+    emitU16(0, expr->line, expr->column);
+
+    // Patch catch offset
+    int catchTarget = static_cast<int>(currentChunk().code.size());
+    int catchOffset = catchTarget - catchSlot - 2;
+    currentChunk().code[catchSlot] = static_cast<uint8_t>((catchOffset >> 8) & 0xFF);
+    currentChunk().code[catchSlot + 1] = static_cast<uint8_t>(catchOffset & 0xFF);
+
+    // Catch block: error is on stack. Call handler with it.
+    if (expr->right->type == ExprType::Call) {
+        auto* call = static_cast<const CallExpr*>(expr->right.get());
+        compileExpr(call->callee.get());
+        // Swap callee and error so callee is below args
+        emit(OpCode::OP_SWAP, expr->line, expr->column);
+        for (auto& arg : call->args) compileExpr(arg.get());
+        int totalArgs = static_cast<int>(call->args.size()) + 1;
+        emit(OpCode::OP_CALL, expr->line, expr->column);
+        emit(static_cast<uint8_t>(totalArgs), expr->line, expr->column);
+    } else {
+        compileExpr(expr->right.get());
+        emit(OpCode::OP_SWAP, expr->line, expr->column);
+        emit(OpCode::OP_CALL, expr->line, expr->column);
+        emit(1, expr->line, expr->column);
+    }
+
+    // Patch jump-over
+    int afterCatch = static_cast<int>(currentChunk().code.size());
+    int jumpDist = afterCatch - jumpOverSlot - 2;
+    currentChunk().code[jumpOverSlot] = static_cast<uint8_t>((jumpDist >> 8) & 0xFF);
+    currentChunk().code[jumpOverSlot + 1] = static_cast<uint8_t>(jumpDist & 0xFF);
 }
 
 // ── Phase 3+ stubs ──────────────────────────────────────────

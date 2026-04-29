@@ -1,0 +1,55 @@
+use "testing"
+
+testing.test("implicit it in map", lam{ in
+    testing.assertEqual([1, 2, 3] |> map(lam{ it * 2 }), [2, 4, 6], nil)
+})
+
+testing.test("implicit it in filter", lam{ in
+    testing.assertEqual([1, 2, 3, 4] |> filter(lam{ it > 2 }), [3, 4], nil)
+})
+
+testing.test("implicit it in any/all", lam{ in
+    testing.assert([1, 2, 3] |> any(lam{ it > 2 }), nil)
+    testing.assert([1, 2, 3] |> all(lam{ it > 0 }), nil)
+})
+
+testing.test("implicit it standalone", lam{ in
+    let double = lam{ it * 2 }
+    testing.assertEqual(double(5), 10, nil)
+})
+
+testing.test("implicit it with method call", lam{ in
+    testing.assertEqual(["a", "b"] |> map(lam{ it.upper() }), ["A", "B"], nil)
+})
+
+testing.test("explicit params still work", lam{ in
+    testing.assertEqual([1, 2, 3] |> map(lam{ x in x + 10 }), [11, 12, 13], nil)
+})
+
+testing.test("zero-param lambda still works", lam{ in
+    let f = lam{ in 42 }
+    testing.assertEqual(f(), 42, nil)
+})
+
+testing.test("pipe try catches error", lam{ in
+    let r = "bad" |> json.parse |?> lam{ nil }
+    testing.assertEqual(r, nil, nil)
+})
+
+testing.test("pipe try passes through on success", lam{ in
+    let r = "[1]" |> json.parse |?> lam{ nil }
+    testing.assertEqual(r, [1], nil)
+})
+
+testing.test("pipe try with implicit it", lam{ in
+    let r = "bad" |> json.parse |?> lam{ "error: " + it }
+    testing.assert(r.startsWith("error:"), nil)
+})
+
+testing.test("pipe try in chain", lam{ in
+    func fail(x) { throw "nope" }
+    let r = 1 |> fail |?> lam{ "recovered" }
+    testing.assertEqual(r, "recovered", nil)
+})
+
+testing.done()
