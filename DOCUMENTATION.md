@@ -586,6 +586,8 @@ print(a)            // {x: 1, y: 2}
 | `.get(key, default?)` | Returns the value for key, or default (nil if omitted) |
 | `.delete(key)` | Removes the key, returns `true` if it existed |
 | `.merge(other)` | Returns a new map combining both, with `other`'s values taking priority |
+| `.entries()` | Returns `[[key, value], ...]` array of all entries |
+| `.clear()` | Remove all entries from the map |
 
 ```
 let m = {a: 1, b: 2}
@@ -1668,6 +1670,12 @@ Methods are called with dot notation on string values.
 | `.padEnd(len, char?)` | Right-pad to width (default: space) |
 | `.center(width, char?)` | Center-pad both sides (default: space) |
 | `.count(substr)` | Count non-overlapping occurrences of substring |
+| `.isDigit()` | `true` if all characters are digits |
+| `.isAlpha()` | `true` if all characters are alphabetic |
+| `.isAlnum()` | `true` if all characters are alphanumeric |
+| `.isSpace()` | `true` if all characters are whitespace |
+| `.isUpper()` | `true` if all alphabetic characters are uppercase |
+| `.isLower()` | `true` if all alphabetic characters are lowercase |
 | `.trimStart()` | Remove leading whitespace |
 | `.trimEnd()` | Remove trailing whitespace |
 | `.graphemes()` | Split into array of grapheme clusters |
@@ -1892,6 +1900,7 @@ Methods are called with dot notation on array values.
 | `.slice(start, end?)` | Extract subarray (negative indices supported) |
 | `.indexOf(val)` | Find index of element (-1 if not found) |
 | `.find(fn)` | First element where fn returns truthy (nil if not found) |
+| `.lastIndexOf(val)` | Find last index of element (-1 if not found) |
 | `.sort(comparator?)` | Return sorted copy. Optional: `lam{ a, b in a - b }` |
 
 ```
@@ -1938,7 +1947,7 @@ let files = sys.readDir("my/dir")   // returns array of filenames in directory
 
 ### Running Commands
 
-`sys.exec(cmd)` (also available as `sys.run(cmd)`) runs a command and returns a map with `stdout`, `stderr`, and `exitCode`. Pass a string for shell execution, or an array for safe argument passing (no shell injection):
+`sys.exec(cmd, timeout?)` (also available as `sys.run(cmd, timeout?)`) runs a command and returns a map with `stdout`, `stderr`, and `exitCode`. Optional timeout in milliseconds — if the process exceeds the timeout, it's killed and `timedOut: true` is added to the result. Pass a string for shell execution, or an array for safe argument passing (no shell injection):
 
 ```
 // String form — runs through /bin/sh (supports pipes, redirects, etc.)
@@ -3329,6 +3338,7 @@ The `time` namespace provides timestamps, formatting, and sleep.
 | `time.addHours(ts, n)` | Add/subtract hours |
 | `time.addMinutes(ts, n)` | Add/subtract minutes |
 | `time.addSeconds(ts, n)` | Add/subtract seconds |
+| `time.components(ts, utc?)` | Returns `{year, month, day, hour, minute, second, weekday}`. Pass `true` for UTC |
 
 ```
 let start = time.now()

@@ -562,6 +562,48 @@ Value getStringMethod(const std::string& strRef,
             return Value(std::move(result));
         }));
     }
+    if (name == "isDigit") {
+        return Value(makeNative("isDigit", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
+            if (str.empty()) return Value(false);
+            for (unsigned char c : str) if (!std::isdigit(c)) return Value(false);
+            return Value(true);
+        }));
+    }
+    if (name == "isAlpha") {
+        return Value(makeNative("isAlpha", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
+            if (str.empty()) return Value(false);
+            for (unsigned char c : str) if (!std::isalpha(c)) return Value(false);
+            return Value(true);
+        }));
+    }
+    if (name == "isAlnum") {
+        return Value(makeNative("isAlnum", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
+            if (str.empty()) return Value(false);
+            for (unsigned char c : str) if (!std::isalnum(c)) return Value(false);
+            return Value(true);
+        }));
+    }
+    if (name == "isSpace") {
+        return Value(makeNative("isSpace", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
+            if (str.empty()) return Value(false);
+            for (unsigned char c : str) if (!std::isspace(c)) return Value(false);
+            return Value(true);
+        }));
+    }
+    if (name == "isUpper") {
+        return Value(makeNative("isUpper", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
+            if (str.empty()) return Value(false);
+            for (unsigned char c : str) if (std::isalpha(c) && !std::isupper(c)) return Value(false);
+            return Value(true);
+        }));
+    }
+    if (name == "isLower") {
+        return Value(makeNative("isLower", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
+            if (str.empty()) return Value(false);
+            for (unsigned char c : str) if (std::isalpha(c) && !std::islower(c)) return Value(false);
+            return Value(true);
+        }));
+    }
     throw RuntimeError("String has no method '" + name + "'", line);
 }
 
@@ -652,6 +694,13 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
             return Value(static_cast<int64_t>(-1));
         }));
     }
+    if (name == "lastIndexOf") {
+        return Value(makeNative("lastIndexOf", 1, [arr](const std::vector<Value>& args) -> Value {
+            for (int64_t i = static_cast<int64_t>(arr->elements.size()) - 1; i >= 0; i--)
+                if (arr->elements[i] == args[0]) return Value(i);
+            return Value(static_cast<int64_t>(-1));
+        }));
+    }
     if (name == "find") {
         return Value(makeNative("find", 1, [arr, interp, vm](const std::vector<Value>& args) -> Value {
             if (!args[0].isCallable())
@@ -725,6 +774,24 @@ Value getMapMethod(std::shared_ptr<PraiaMap> map,
             for (auto& [k, v] : args[0].asMap()->entries)
                 result->entries[k] = v;
             return Value(result);
+        }));
+    }
+    if (name == "entries") {
+        return Value(makeNative("entries", 0, [map](const std::vector<Value>&) -> Value {
+            auto result = gcNew<PraiaArray>();
+            for (auto& [k, v] : map->entries) {
+                auto pair = gcNew<PraiaArray>();
+                pair->elements.push_back(k);
+                pair->elements.push_back(v);
+                result->elements.push_back(Value(pair));
+            }
+            return Value(result);
+        }));
+    }
+    if (name == "clear") {
+        return Value(makeNative("clear", 0, [map](const std::vector<Value>&) -> Value {
+            map->entries.clear();
+            return Value();
         }));
     }
     throw RuntimeError("Map has no method '" + name + "'", line);

@@ -623,10 +623,14 @@ Interpreter::Interpreter() {
             return Value();
         }));
 
-    auto execImpl = makeNative("sys.exec", 1,
+    auto execImpl = makeNative("sys.exec", -1,
         [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString() && !args[0].isArray())
+            if (args.empty() || (!args[0].isString() && !args[0].isArray()))
                 throw RuntimeError("sys.exec() requires a string or array of strings", 0);
+            int timeoutMs = -1; // no timeout by default
+            if (args.size() > 1 && args[1].isNumber()) {
+                timeoutMs = static_cast<int>(args[1].asNumber());
+            }
 
             // Build argv for the child process
             bool useShell = args[0].isString();
@@ -680,14 +684,28 @@ Interpreter::Interpreter() {
             // when the child fills one pipe while we're blocked reading the other.
             std::string outStr, errStr;
             bool interrupted = false;
+            bool timedOut = false;
             {
                 struct pollfd fds[2];
                 fds[0] = {stdoutPipe[0], POLLIN, 0};
                 fds[1] = {stderrPipe[0], POLLIN, 0};
                 int openCount = 2;
                 char buf[4096];
+                struct timeval deadline;
+                if (timeoutMs >= 0) gettimeofday(&deadline, nullptr);
                 while (openCount > 0) {
-                    int pr = poll(fds, 2, -1);
+                    int pollTimeout = -1;
+                    if (timeoutMs >= 0) {
+                        struct timeval now;
+                        gettimeofday(&now, nullptr);
+                        int elapsed = static_cast<int>((now.tv_sec - deadline.tv_sec) * 1000 +
+                                                       (now.tv_usec - deadline.tv_usec) / 1000);
+                        int remaining = timeoutMs - elapsed;
+                        if (remaining <= 0) { timedOut = true; break; }
+                        pollTimeout = remaining;
+                    }
+                    int pr = poll(fds, 2, pollTimeout);
+                    if (pr == 0 && timeoutMs >= 0) { timedOut = true; break; }
                     if (pr < 0 && errno == EINTR) {
                         if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
                             kill(pid, SIGINT);
@@ -715,11 +733,15 @@ Interpreter::Interpreter() {
                 if (!errStr.empty() && errStr.back() == '\n') errStr.pop_back();
             }
 
+            if (timedOut) {
+                kill(pid, SIGKILL);
+            }
+
             int status = 0;
             waitpid(pid, &status, 0);
             int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            if (timedOut) exitCode = -1;
 
-            // If interrupted, let the interpreter's checkInterrupt handle it
             if (interrupted)
                 throw RuntimeError("Interrupted", 0);
 
@@ -727,6 +749,7 @@ Interpreter::Interpreter() {
             result->entries[Value("stdout")] = Value(std::move(outStr));
             result->entries[Value("stderr")] = Value(std::move(errStr));
             result->entries[Value("exitCode")] = Value(static_cast<int64_t>(exitCode));
+            if (timedOut) result->entries[Value("timedOut")] = Value(true);
             return Value(result);
         });
     sysMap->entries[Value("exec")] = Value(std::static_pointer_cast<Callable>(execImpl));
@@ -1743,6 +1766,25 @@ Interpreter::Interpreter() {
             if (args.size() < 2 || !args[0].isNumber() || !args[1].isNumber())
                 throw RuntimeError("time.addSeconds(timestamp, seconds) requires two numbers", 0);
             return Value(static_cast<int64_t>(args[0].asNumber() + args[1].asNumber() * 1000.0));
+        }));
+
+    // time.components(ts, utc?) — all components at once, optional UTC
+    timeMap->entries[Value("components")] = Value(makeNative("time.components", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isNumber())
+                throw RuntimeError("time.components() requires a millisecond timestamp", 0);
+            std::time_t t = static_cast<std::time_t>(args[0].asNumber() / 1000.0);
+            bool utc = args.size() > 1 && args[1].isTruthy();
+            std::tm tm = utc ? *std::gmtime(&t) : *std::localtime(&t);
+            auto result = gcNew<PraiaMap>();
+            result->entries[Value("year")]    = Value(static_cast<int64_t>(tm.tm_year + 1900));
+            result->entries[Value("month")]   = Value(static_cast<int64_t>(tm.tm_mon + 1));
+            result->entries[Value("day")]     = Value(static_cast<int64_t>(tm.tm_mday));
+            result->entries[Value("hour")]    = Value(static_cast<int64_t>(tm.tm_hour));
+            result->entries[Value("minute")]  = Value(static_cast<int64_t>(tm.tm_min));
+            result->entries[Value("second")]  = Value(static_cast<int64_t>(tm.tm_sec));
+            result->entries[Value("weekday")] = Value(static_cast<int64_t>(tm.tm_wday));
+            return Value(result);
         }));
 
     globals->define("time", Value(timeMap));

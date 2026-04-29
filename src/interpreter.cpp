@@ -1425,7 +1425,8 @@ Value Interpreter::evaluate(const Expr* expr) {
             auto& entries = obj.asMap()->entries;
             auto it = entries.find(Value(e->field));
             if (it != entries.end()) return it->second;
-            if (e->field == "has" || e->field == "get" || e->field == "delete" || e->field == "merge")
+            if (e->field == "has" || e->field == "get" || e->field == "delete" || e->field == "merge" ||
+                e->field == "entries" || e->field == "clear")
                 return getMapMethod(obj.asMap(), e->field, e->line);
             // Fall through to universal methods below
         }
