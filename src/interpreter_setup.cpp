@@ -1660,13 +1660,15 @@ Interpreter::Interpreter() {
             if (args.size() > 1 && args[1].isNumber())
                 timestamp = args[1].asNumber();
 
+            bool utc = args.size() > 2 && args[2].isTruthy();
+
             std::time_t t;
             if (timestamp > 0) {
                 t = static_cast<std::time_t>(timestamp / 1000.0);
             } else {
                 t = std::time(nullptr);
             }
-            std::tm tm = *std::localtime(&t);
+            std::tm tm = utc ? *std::gmtime(&t) : *std::localtime(&t);
             std::ostringstream oss;
             oss << std::put_time(&tm, fmt.c_str());
             return Value(oss.str());
@@ -1682,6 +1684,11 @@ Interpreter::Interpreter() {
             if (args.empty() || !args[0].isString())
                 throw RuntimeError("time.parse() requires a date string", 0);
             const std::string& dateStr = args[0].asString();
+            // args: (str, format?, utc?)
+            bool utc = false;
+            if (args.size() > 2 && args[2].isTruthy()) utc = true;
+            // If second arg is bool (not string), treat as utc flag
+            if (args.size() == 2 && args[1].isBool() && args[1].isTruthy()) utc = true;
 
             auto parseWith = [&](const std::string& format) -> std::pair<bool, int64_t> {
                 std::tm tm = {};
@@ -1689,7 +1696,12 @@ Interpreter::Interpreter() {
                 std::istringstream iss(dateStr);
                 iss >> std::get_time(&tm, format.c_str());
                 if (iss.fail()) return {false, 0};
-                std::time_t t = std::mktime(&tm);
+                std::time_t t;
+                if (utc) {
+                    t = timegm(&tm);
+                } else {
+                    t = std::mktime(&tm);
+                }
                 if (t == -1) return {false, 0};
                 return {true, static_cast<int64_t>(t) * 1000};
             };

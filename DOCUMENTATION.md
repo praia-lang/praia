@@ -3329,8 +3329,8 @@ The `time` namespace provides timestamps, formatting, and sleep.
 | `time.now()` | Current time as Unix milliseconds |
 | `time.epoch()` | Current time as Unix seconds |
 | `time.sleep(ms)` | Pause execution for ms milliseconds |
-| `time.format(fmt?, timestamp?)` | Format time as string (default: `"%Y-%m-%d %H:%M:%S"`) |
-| `time.parse(str, fmt?)` | Parse date string to millisecond timestamp |
+| `time.format(fmt?, timestamp?, utc?)` | Format time as string. Pass `true` for UTC |
+| `time.parse(str, fmt?, utc?)` | Parse date string to ms timestamp. Pass `true` for UTC |
 | `time.year(ts)`, `month`, `day` | Extract date components from ms timestamp |
 | `time.hour(ts)`, `minute`, `second` | Extract time components |
 | `time.weekday(ts)` | Day of week (0=Sunday, 6=Saturday) |
@@ -3602,6 +3602,28 @@ crypto.verifyPassword("wrong", result.hash, result.salt)        // false
 ```
 
 Custom iterations: `crypto.hashPassword("pass", nil, 200000)`
+
+### Digital signatures
+
+Sign and verify data with RSA or EC keys.
+
+| Function | Description |
+|----------|-------------|
+| `crypto.sign(data, privateKeyPEM, algorithm?)` | Sign data, returns base64 signature. Default: `"sha256"` |
+| `crypto.verify(data, signature, publicKeyPEM, algorithm?)` | Verify signature, returns boolean |
+| `crypto.generateKeyPair(type?, bits?)` | Generate key pair. Returns `{privateKey, publicKey}` as PEM. Type: `"rsa"` (default) or `"ec"` |
+
+```
+let keys = crypto.generateKeyPair("rsa", 2048)
+let sig = crypto.sign("hello world", keys.privateKey)
+crypto.verify("hello world", sig, keys.publicKey)  // true
+crypto.verify("tampered", sig, keys.publicKey)      // false
+
+// EC keys (P-256)
+let ecKeys = crypto.generateKeyPair("ec")
+let ecSig = crypto.sign("data", ecKeys.privateKey, "sha256")
+crypto.verify("data", ecSig, ecKeys.publicKey, "sha256")  // true
+```
 
 ---
 

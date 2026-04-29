@@ -10,6 +10,9 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include <openssl/ec.h>
 #endif
 
 // ── Helpers ──
@@ -552,6 +555,161 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             for (size_t i = 0; i < actualHex.size(); i++)
                 diff |= actualHex[i] ^ expectedHex[i];
             return Value(diff == 0);
+        }));
+
+    // ── Asymmetric crypto ──
+
+    // Helper: get EVP_MD from algorithm name
+    auto getDigest = [](const std::string& algo) -> const EVP_MD* {
+        if (algo == "sha256") return EVP_sha256();
+        if (algo == "sha384") return EVP_sha384();
+        if (algo == "sha512") return EVP_sha512();
+        if (algo == "sha1") return EVP_sha1();
+        return nullptr;
+    };
+
+    // Helper: base64 encode/decode for signatures
+    auto b64Encode = [](const std::vector<uint8_t>& data) -> std::string {
+        BIO* b64 = BIO_new(BIO_f_base64());
+        BIO* mem = BIO_new(BIO_s_mem());
+        b64 = BIO_push(b64, mem);
+        BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+        BIO_write(b64, data.data(), static_cast<int>(data.size()));
+        BIO_flush(b64);
+        BUF_MEM* bptr;
+        BIO_get_mem_ptr(b64, &bptr);
+        std::string result(bptr->data, bptr->length);
+        BIO_free_all(b64);
+        return result;
+    };
+
+    auto b64Decode = [](const std::string& encoded) -> std::vector<uint8_t> {
+        BIO* b64 = BIO_new(BIO_f_base64());
+        BIO* mem = BIO_new_mem_buf(encoded.data(), static_cast<int>(encoded.size()));
+        mem = BIO_push(b64, mem);
+        BIO_set_flags(mem, BIO_FLAGS_BASE64_NO_NL);
+        std::vector<uint8_t> result(encoded.size());
+        int len = BIO_read(mem, result.data(), static_cast<int>(result.size()));
+        if (len > 0) result.resize(len);
+        else result.clear();
+        BIO_free_all(mem);
+        return result;
+    };
+
+    // crypto.sign(data, privateKeyPEM, algorithm?)
+    cryptoMap->entries[Value("sign")] = Value(makeNative("crypto.sign", -1,
+        [getDigest, b64Encode](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || !args[0].isString() || !args[1].isString())
+                throw RuntimeError("crypto.sign(data, privateKeyPEM, algorithm?) requires data and key strings", 0);
+            auto& data = args[0].asString();
+            auto& keyPem = args[1].asString();
+            std::string algo = (args.size() > 2 && args[2].isString()) ? args[2].asString() : "sha256";
+
+            const EVP_MD* md = getDigest(algo);
+            if (!md) throw RuntimeError("crypto.sign(): unknown algorithm '" + algo + "'", 0);
+
+            BIO* bio = BIO_new_mem_buf(keyPem.data(), static_cast<int>(keyPem.size()));
+            EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+            BIO_free(bio);
+            if (!pkey) throw RuntimeError("crypto.sign(): invalid private key", 0);
+
+            EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+            size_t sigLen = 0;
+            bool ok = EVP_DigestSignInit(ctx, nullptr, md, nullptr, pkey) == 1 &&
+                      EVP_DigestSignUpdate(ctx, data.data(), data.size()) == 1 &&
+                      EVP_DigestSignFinal(ctx, nullptr, &sigLen) == 1;
+            std::vector<uint8_t> sig(sigLen);
+            ok = ok && EVP_DigestSignFinal(ctx, sig.data(), &sigLen) == 1;
+            sig.resize(sigLen);
+            EVP_MD_CTX_free(ctx);
+            EVP_PKEY_free(pkey);
+
+            if (!ok) throw RuntimeError("crypto.sign(): signing failed", 0);
+            return Value(b64Encode(sig));
+        }));
+
+    // crypto.verify(data, signature, publicKeyPEM, algorithm?)
+    cryptoMap->entries[Value("verify")] = Value(makeNative("crypto.verify", -1,
+        [getDigest, b64Decode](const std::vector<Value>& args) -> Value {
+            if (args.size() < 3 || !args[0].isString() || !args[1].isString() || !args[2].isString())
+                throw RuntimeError("crypto.verify(data, signature, publicKeyPEM, algorithm?) requires three strings", 0);
+            auto& data = args[0].asString();
+            auto& sigB64 = args[1].asString();
+            auto& keyPem = args[2].asString();
+            std::string algo = (args.size() > 3 && args[3].isString()) ? args[3].asString() : "sha256";
+
+            const EVP_MD* md = getDigest(algo);
+            if (!md) throw RuntimeError("crypto.verify(): unknown algorithm '" + algo + "'", 0);
+
+            auto sig = b64Decode(sigB64);
+            if (sig.empty()) return Value(false);
+
+            BIO* bio = BIO_new_mem_buf(keyPem.data(), static_cast<int>(keyPem.size()));
+            EVP_PKEY* pkey = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
+            BIO_free(bio);
+            if (!pkey) throw RuntimeError("crypto.verify(): invalid public key", 0);
+
+            EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+            bool ok = EVP_DigestVerifyInit(ctx, nullptr, md, nullptr, pkey) == 1 &&
+                      EVP_DigestVerifyUpdate(ctx, data.data(), data.size()) == 1 &&
+                      EVP_DigestVerifyFinal(ctx, sig.data(), sig.size()) == 1;
+            EVP_MD_CTX_free(ctx);
+            EVP_PKEY_free(pkey);
+            return Value(ok);
+        }));
+
+    // crypto.generateKeyPair(type?, bits?)
+    cryptoMap->entries[Value("generateKeyPair")] = Value(makeNative("crypto.generateKeyPair", -1,
+        [](const std::vector<Value>& args) -> Value {
+            std::string keyType = (!args.empty() && args[0].isString()) ? args[0].asString() : "rsa";
+            int bits = (args.size() > 1 && args[1].isNumber()) ? static_cast<int>(args[1].asNumber()) : 2048;
+
+            EVP_PKEY* pkey = nullptr;
+            EVP_PKEY_CTX* ctx = nullptr;
+
+            if (keyType == "rsa") {
+                ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+                if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0 ||
+                    EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) <= 0 ||
+                    EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+                    if (ctx) EVP_PKEY_CTX_free(ctx);
+                    throw RuntimeError("crypto.generateKeyPair(): RSA key generation failed", 0);
+                }
+            } else if (keyType == "ec") {
+                ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+                if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0 ||
+                    EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) <= 0 ||
+                    EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+                    if (ctx) EVP_PKEY_CTX_free(ctx);
+                    throw RuntimeError("crypto.generateKeyPair(): EC key generation failed", 0);
+                }
+            } else {
+                throw RuntimeError("crypto.generateKeyPair(): unknown type '" + keyType + "' (expected 'rsa' or 'ec')", 0);
+            }
+            EVP_PKEY_CTX_free(ctx);
+
+            // Export private key as PEM
+            BIO* privBio = BIO_new(BIO_s_mem());
+            PEM_write_bio_PrivateKey(privBio, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+            BUF_MEM* privBuf;
+            BIO_get_mem_ptr(privBio, &privBuf);
+            std::string privPem(privBuf->data, privBuf->length);
+            BIO_free(privBio);
+
+            // Export public key as PEM
+            BIO* pubBio = BIO_new(BIO_s_mem());
+            PEM_write_bio_PUBKEY(pubBio, pkey);
+            BUF_MEM* pubBuf;
+            BIO_get_mem_ptr(pubBio, &pubBuf);
+            std::string pubPem(pubBuf->data, pubBuf->length);
+            BIO_free(pubBio);
+
+            EVP_PKEY_free(pkey);
+
+            auto result = gcNew<PraiaMap>();
+            result->entries[Value("privateKey")] = Value(std::move(privPem));
+            result->entries[Value("publicKey")] = Value(std::move(pubPem));
+            return Value(result);
         }));
 #endif
 }
