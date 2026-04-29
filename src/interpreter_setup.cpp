@@ -34,6 +34,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <sys/wait.h>
+#include <sys/time.h>
 #include <poll.h>
 #include <unistd.h>
 #include <csignal>
