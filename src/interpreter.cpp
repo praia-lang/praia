@@ -480,12 +480,17 @@ void Interpreter::execute(const Stmt* stmt) {
                         }
                     }
                     // else: tag mismatch or arity mismatch → matched stays false
-                } else if (!isTagPattern) {
-                    // Normal function call as pattern — evaluate and compare
+                } else {
+                    // Not a tagged match (either lowercase or subject isn't tagged)
+                    // Evaluate pattern and compare, supporting __eq for instances
                     Value pattern = evaluate(c.pattern.get());
-                    matched = (subject == pattern);
+                    if (subject.isInstance()) {
+                        auto [found, result] = callDunder(*this, subject.asInstance(), "__eq", {pattern});
+                        matched = found ? result.isTruthy() : (subject == pattern);
+                    } else {
+                        matched = (subject == pattern);
+                    }
                 }
-                // else: isTagPattern but subject isn't tagged → matched stays false
             } else {
                 // Equality pattern
                 Value pattern = evaluate(c.pattern.get());
