@@ -9,6 +9,19 @@ These are out of scope for Praia's identity as a scripting/tool-building languag
 - **Data science / ML** - numpy, pandas, pytorch, etc. Requires wrapping large C libraries via native plugins. Although entirely possible, this is not planned as built-in features of Praia.
 - **Type hints / gradual typing** - No type annotation system. Praia is dynamically typed by design, like Ruby and early JavaScript. Though something like Python's mypy could be created in the future.
 
+## Medium priority
+
+### String builders
+Praia's string concatenation in loops is O(n²) because strings are immutable. Hypothetical StringBuilder example:
+
+```praia
+let b = str.builder()
+for (line in lines) { b.append(line + "\n") }
+let result = b.build()  // one allocation
+```
+
+Practical for template engines, code generation, large output assembly.
+
 ## Low priority
 
 Reasonable workarounds exist. Would improve the language but aren't blocking:

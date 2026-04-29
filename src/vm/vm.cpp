@@ -850,6 +850,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 else if (tn == "map")      result = left.isMap();
                 else if (tn == "function") result = left.isCallable();
                 else if (tn == "instance") result = left.isInstance();
+                else if (tn == "tagged")  result = left.isTagged();
                 else { RUNTIME_ERR("Unknown type name '" + tn + "'"); }
                 push(Value(result));
             } else if (right.isCallable()) {
@@ -1179,6 +1180,17 @@ VM::Result VM::execute(int baseFrameCount_) {
             Value obj = pop();
 
             if (_propOpt && obj.isNil()) { push(Value()); break; }
+
+            if (obj.isTagged()) {
+                auto t = obj.asTagged();
+                if (name == "tag") { push(Value(t->tag)); break; }
+                if (name == "values") {
+                    auto arr = gcNew<PraiaArray>();
+                    arr->elements = t->values;
+                    push(Value(arr)); break;
+                }
+                RUNTIME_ERR("Tagged value has no field '" + name + "'");
+            }
 
             if (obj.isGenerator()) {
                 auto gen = obj.asGenerator();
@@ -1588,6 +1600,41 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_RUN_DEFERS:
             // Not emitted by compiler — defers run in OP_RETURN and exception unwinding
             break;
+        case OpCode::OP_BUILD_TAGGED: {
+            std::string tagName = READ_STRING();
+            uint8_t argc = READ_BYTE();
+            auto tagged = gcNew<PraiaTagged>();
+            tagged->tag = tagName;
+            tagged->values.resize(argc);
+            for (int i = argc - 1; i >= 0; i--) tagged->values[i] = pop();
+            push(Value(tagged));
+            break;
+        }
+        case OpCode::OP_TAG_OR_CALL: {
+            // Stack has [arg0, arg1, ...] — NO callee on stack.
+            // Look up tagName as a global. If callable (class), call it.
+            // Otherwise, build a tagged value.
+            std::string tagName = READ_STRING();
+            uint8_t argc = READ_BYTE();
+            auto git = globals.find(tagName);
+            if (git != globals.end() && git->second.isCallable()) {
+                // Global class/function — insert callee below args and call
+                // Shift args up by 1 to make room for callee
+                push(Value()); // make space
+                for (int i = 0; i < argc; i++)
+                    stack[stackTop - 1 - i] = stack[stackTop - 2 - i];
+                stack[stackTop - argc - 1] = git->second;
+                if (!callValue(git->second, argc, CURRENT_LINE()))
+                    return Result::RUNTIME_ERROR;
+            } else {
+                auto tagged = gcNew<PraiaTagged>();
+                tagged->tag = tagName;
+                tagged->values.resize(argc);
+                for (int i = argc - 1; i >= 0; i--) tagged->values[i] = pop();
+                push(Value(tagged));
+            }
+            break;
+        }
         case OpCode::OP_IMPORT: {
             std::string path = READ_STRING();
             std::string alias = READ_STRING();

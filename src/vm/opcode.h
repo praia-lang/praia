@@ -102,6 +102,10 @@ enum class OpCode : uint8_t {
     OP_DEFER,           // push top-of-stack onto current frame's defer list
     OP_RUN_DEFERS,      // execute all defers for current frame in LIFO order
 
+    // ── Tagged values ──
+    OP_BUILD_TAGGED,    // [name_idx:16] [argc:8] — build tagged value from stack args
+    OP_TAG_OR_CALL,     // [name_idx:16] [argc:8] — if callee is callable, call; else build tagged
+
     // ── Advanced ──
     OP_YIELD,           // yield value from generator
     OP_ASYNC,           // [argc:8]

@@ -72,6 +72,7 @@ static bool checkIs(const Value& subject, const Value& typeVal, int line, int co
         if (tn == "map")      return subject.isMap();
         if (tn == "function") return subject.isCallable();
         if (tn == "instance") return subject.isInstance();
+        if (tn == "tagged")  return subject.isTagged();
         throw RuntimeError("Unknown type name '" + tn + "'", line, column);
     }
     if (typeVal.isCallable()) {
@@ -442,6 +443,54 @@ void Interpreter::execute(const Stmt* stmt) {
             } else if (c.guard) {
                 // Guard clause: when condition
                 matched = evaluate(c.guard.get()).isTruthy();
+            } else if (c.pattern && c.pattern->type == ExprType::Call) {
+                auto* call = static_cast<const CallExpr*>(c.pattern.get());
+                bool isTagPattern = false;
+                if (call->callee->type == ExprType::Identifier) {
+                    auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
+                    if (!id->name.empty() && std::isupper(id->name[0]))
+                        isTagPattern = true;
+                }
+                if (isTagPattern && subject.isTagged()) {
+                    auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
+                    auto tag = subject.asTagged();
+                    if (tag->tag == id->name && call->args.size() == tag->values.size()) {
+                        // Check if all args are identifiers (binding pattern) vs values
+                        bool allIdents = true;
+                        for (auto& arg : call->args)
+                            if (arg->type != ExprType::Identifier) { allIdents = false; break; }
+
+                        if (allIdents) {
+                            // Binding pattern: Ok(val), Point(x, y)
+                            matched = true;
+                            auto matchEnv = gcNew<Environment>(env);
+                            auto prevEnv = env;
+                            env = matchEnv;
+                            for (size_t i = 0; i < call->args.size(); i++) {
+                                auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
+                                matchEnv->define(argId->name, tag->values[i]);
+                            }
+                            execute(c.body.get());
+                            env = prevEnv;
+                            break;
+                        } else {
+                            // Value pattern: Ok(42) — construct tagged and compare
+                            Value pattern = evaluate(c.pattern.get());
+                            matched = (subject == pattern);
+                        }
+                    }
+                    // else: tag mismatch or arity mismatch → matched stays false
+                } else {
+                    // Not a tagged match (either lowercase or subject isn't tagged)
+                    // Evaluate pattern and compare, supporting __eq for instances
+                    Value pattern = evaluate(c.pattern.get());
+                    if (subject.isInstance()) {
+                        auto [found, result] = callDunder(*this, subject.asInstance(), "__eq", {pattern});
+                        matched = found ? result.isTruthy() : (subject == pattern);
+                    } else {
+                        matched = (subject == pattern);
+                    }
+                }
             } else {
                 // Equality pattern
                 Value pattern = evaluate(c.pattern.get());
@@ -1043,6 +1092,32 @@ Value Interpreter::evaluate(const Expr* expr) {
 
     case ExprType::Call: {
         auto* e = static_cast<const CallExpr*>(expr);
+
+        // Tagged value construction: capitalized identifier that doesn't resolve to a callable
+        if (e->callee->type == ExprType::Identifier) {
+            auto* id = static_cast<const IdentifierExpr*>(e->callee.get());
+            if (!id->name.empty() && std::isupper(id->name[0])) {
+                // Try to resolve — only catch "Undefined variable", not other errors
+                bool resolved = false;
+                Value callee;
+                try {
+                    callee = evaluate(e->callee.get());
+                    resolved = true;
+                } catch (const RuntimeError& err) {
+                    if (std::string(err.what()).find("Undefined variable") == std::string::npos)
+                        throw; // re-throw non-resolution errors
+                }
+                if (!resolved || !callee.isCallable()) {
+                    auto tagged = gcNew<PraiaTagged>();
+                    tagged->tag = id->name;
+                    for (const auto& arg : e->args)
+                        tagged->values.push_back(evaluate(arg.get()));
+                    return Value(tagged);
+                }
+                // Callable — fall through to normal call path
+            }
+        }
+
         Value callee = evaluate(e->callee.get());
         if (!callee.isCallable())
             throw RuntimeError("Can only call functions", e->line, e->column);
@@ -1397,6 +1472,17 @@ Value Interpreter::evaluate(const Expr* expr) {
         auto* e = static_cast<const DotExpr*>(expr);
         Value obj = evaluate(e->object.get());
         if (e->isOptional && obj.isNil()) return Value();
+
+        if (obj.isTagged()) {
+            auto t = obj.asTagged();
+            if (e->field == "tag") return Value(t->tag);
+            if (e->field == "values") {
+                auto arr = gcNew<PraiaArray>();
+                arr->elements = t->values;
+                return Value(arr);
+            }
+            throw RuntimeError("Tagged value has no field '" + e->field + "'", e->line, e->column);
+        }
 
         if (obj.isGenerator()) {
             auto gen = obj.asGenerator();
