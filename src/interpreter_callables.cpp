@@ -110,16 +110,29 @@ Value PraiaLambda::call(Interpreter& interp, const std::vector<Value>& args) {
         lambdaEnv->define(restParam, Value(rest));
     }
 
+    interp.deferStacks_.push_back({});
+    auto runDefers = [&interp]() {
+        if (interp.deferStacks_.empty()) return;
+        auto defers = std::move(interp.deferStacks_.back());
+        interp.deferStacks_.pop_back();
+        for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
+            try { interp.evaluate(defers[i]); } catch (...) {}
+        }
+    };
+
     try {
         for (const auto& stmt : expr->body)
             interp.execute(stmt.get());
     } catch (const ReturnSignal& ret) {
+        runDefers();
         interp.env = prevEnv;
         return ret.value;
     } catch (...) {
+        runDefers();
         interp.env = prevEnv;
         throw;
     }
+    runDefers();
     interp.env = prevEnv;
     return Value(); // implicit nil
 }
@@ -147,16 +160,29 @@ Value PraiaFunction::call(Interpreter& interp, const std::vector<Value>& args) {
         funcEnv->define(restParam, Value(rest));
     }
 
+    interp.deferStacks_.push_back({});
+    auto runDefers = [&interp]() {
+        if (interp.deferStacks_.empty()) return;
+        auto defers = std::move(interp.deferStacks_.back());
+        interp.deferStacks_.pop_back();
+        for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
+            try { interp.evaluate(defers[i]); } catch (...) {}
+        }
+    };
+
     try {
         for (const auto& stmt : body->statements)
             interp.execute(stmt.get());
     } catch (const ReturnSignal& ret) {
+        runDefers();
         interp.env = prevEnv;
         return ret.value;
     } catch (...) {
+        runDefers();
         interp.env = prevEnv;
         throw;
     }
+    runDefers();
     interp.env = prevEnv;
     return Value(); // implicit nil
 }

@@ -99,6 +99,8 @@ enum class OpCode : uint8_t {
     OP_TRY_BEGIN,       // [catch_offset:16]
     OP_TRY_END,
     OP_THROW,
+    OP_DEFER,           // push top-of-stack onto current frame's defer list
+    OP_RUN_DEFERS,      // execute all defers for current frame in LIFO order
 
     // ── Advanced ──
     OP_YIELD,           // yield value from generator

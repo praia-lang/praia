@@ -149,6 +149,10 @@ private:
     };
     std::vector<ExceptionHandler> exceptionHandlers;
 
+    // Defer stacks — one per call frame
+    std::vector<Value> deferStack[FRAMES_MAX];
+    void runDefers(int frameIdx);
+
     // Closures created during execution (RAII ownership)
     std::vector<std::unique_ptr<ObjClosure>> allClosures;
     std::vector<std::unique_ptr<ObjUpvalue>> allUpvalues;

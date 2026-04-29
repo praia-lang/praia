@@ -143,6 +143,44 @@ void Compiler::compileStmt(const Stmt* stmt) {
     case StmtType::Throw:   compileThrowStmt(static_cast<const ThrowStmt*>(stmt)); break;
     case StmtType::TryCatch:compileTryCatchStmt(static_cast<const TryCatchStmt*>(stmt)); break;
     case StmtType::Ensure:  compileEnsureStmt(static_cast<const EnsureStmt*>(stmt)); break;
+    case StmtType::Defer: {
+        auto* s = static_cast<const DeferStmt*>(stmt);
+        // Wrap the deferred expression in a 0-arg closure and push it
+        // onto the VM's per-frame defer stack via OP_DEFER.
+        auto fn = std::make_shared<CompiledFunction>();
+        fn->name = "<defer>";
+        fn->arity = 0;
+
+        CompilerState deferState;
+        deferState.function = fn;
+        deferState.enclosing = current;
+        deferState.scopeDepth = 1;
+        current = &deferState;
+
+        compileExpr(s->expr.get());
+        emit(OpCode::OP_POP, s->line, s->column);
+        emit(OpCode::OP_NIL, s->line, s->column);
+        emit(OpCode::OP_RETURN, s->line, s->column);
+
+        current = deferState.enclosing;
+        fn->upvalueCount = static_cast<int>(deferState.upvalues.size());
+
+        // Create closure constant (same pattern as compileFuncStmt)
+        auto proto = std::make_shared<ObjClosure>(fn);
+        auto wrapper = std::make_shared<VMClosureCallable>(proto.get());
+        wrapper->ownedPrototype = proto;
+        uint16_t fnIdx = currentChunk().addConstant(
+            Value(std::static_pointer_cast<Callable>(wrapper)));
+
+        emit(OpCode::OP_CLOSURE, s->line, s->column);
+        emitU16(fnIdx, s->line, s->column);
+        for (auto& uv : deferState.upvalues) {
+            emit(uv.isLocal ? 1 : 0, s->line, s->column);
+            emitU16(uv.index, s->line, s->column);
+        }
+        emit(OpCode::OP_DEFER, s->line, s->column);
+        break;
+    }
     case StmtType::Use:     compileUseStmt(static_cast<const UseStmt*>(stmt)); break;
     case StmtType::Export:  compileExportStmt(static_cast<const ExportStmt*>(stmt)); break;
     default: error("Unknown statement type", stmt->line); break;

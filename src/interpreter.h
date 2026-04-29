@@ -225,6 +225,10 @@ private:
     // makes them reachable during mark phase.
     std::vector<std::shared_ptr<Environment>> savedEnvStack_;
 
+    // Defer stacks — one per function call. Each is a list of expressions
+    // to evaluate in reverse order when the function exits.
+    std::vector<std::vector<const Expr*>> deferStacks_;
+
     // (interpMutex removed — async tasks use task-local Interpreters instead)
 
     // Call stack for error traces

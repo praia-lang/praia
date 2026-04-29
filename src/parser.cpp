@@ -81,6 +81,7 @@ StmtPtr Parser::statement() {
     if (match(TokenType::THROW))  return throwStatement();
     if (match(TokenType::TRY))    return tryCatchStatement();
     if (match(TokenType::ENSURE)) return ensureStatement();
+    if (match(TokenType::DEFER))  return deferStatement();
     if (match(TokenType::USE))    return useStatement();
     if (match(TokenType::EXPORT)) return exportStatement();
     return expressionStatement();
@@ -514,6 +515,16 @@ StmtPtr Parser::throwStatement() {
     stmt->line = ln;
     stmt->column = lnCol;
     stmt->value = expression();
+    return stmt;
+}
+
+StmtPtr Parser::deferStatement() {
+    int ln = previous().line;
+    int lnCol = previous().column;
+    auto stmt = std::make_unique<DeferStmt>();
+    stmt->line = ln;
+    stmt->column = lnCol;
+    stmt->expr = expression();
     return stmt;
 }
 
