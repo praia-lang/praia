@@ -2205,13 +2205,57 @@ let val = 5 |> double |> add10 |> double
 print(val)      // 40
 ```
 
+### Implicit `it` parameter
+
+Lambdas without an `in` keyword automatically get a single parameter named `it`:
+
+```
+[1, 2, 3] |> filter(lam{ it > 1 }) |> map(lam{ it * 2 })
+// equivalent to:
+[1, 2, 3] |> filter(lam{ x in x > 1 }) |> map(lam{ x in x * 2 })
+```
+
+This works anywhere, not just in pipes:
+
+```
+let double = lam{ it * 2 }
+print(double(5))    // 10
+```
+
+Use `lam{ in ... }` (explicit empty `in`) for zero-parameter lambdas.
+
+### Error pipeline (`|?>`)
+
+The `|?>` operator catches errors in pipe chains. If the left side throws, the error is passed to the handler on the right. If no error, the value passes through.
+
+```
+// Catch parse errors with a fallback
+let data = inputStr |> json.parse |?> lam{ nil }
+
+// Chain with error recovery
+let result = rawInput
+    |> validate
+    |> transform
+    |> save
+    |?> lam{ err in print("failed: " + err); defaultValue }
+```
+
+`|?>` is equivalent to wrapping the left side in `try/catch`:
+
+```
+// These are equivalent:
+let r1 = expr |?> handler
+let r2 = nil
+try { r2 = expr } catch (e) { r2 = handler(e) }
+```
+
 ### Data processing pipeline
 
 ```
 let adults = sys.read("users.json")
     |> json.parse
-    |> filter(lam{ u in u.age >= 18 })
-    |> map(lam{ u in u.name })
+    |> filter(lam{ it.age >= 18 })
+    |> map(lam{ it.name })
     |> sort
 ```
 

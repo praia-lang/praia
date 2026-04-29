@@ -740,16 +740,26 @@ ExprPtr Parser::assignment() {
 
 ExprPtr Parser::pipe() {
     auto left = ternary();
-    while (match(TokenType::PIPE)) {
+    while (match(TokenType::PIPE) || match(TokenType::PIPE_TRY)) {
+        bool isTry = (previous().type == TokenType::PIPE_TRY);
         int ln = previous().line;
         int lnCol = previous().column;
         auto right = ternary();
-        auto e = std::make_unique<PipeExpr>();
-        e->line = ln;
-        e->column = lnCol;
-        e->left = std::move(left);
-        e->right = std::move(right);
-        left = std::move(e);
+        if (isTry) {
+            auto e = std::make_unique<PipeTryExpr>();
+            e->line = ln;
+            e->column = lnCol;
+            e->left = std::move(left);
+            e->right = std::move(right);
+            left = std::move(e);
+        } else {
+            auto e = std::make_unique<PipeExpr>();
+            e->line = ln;
+            e->column = lnCol;
+            e->left = std::move(left);
+            e->right = std::move(right);
+            left = std::move(e);
+        }
     }
     return left;
 }
@@ -1276,30 +1286,48 @@ ExprPtr Parser::primary() {
         int lnCol = previous().column;
         consume(TokenType::LBRACE, "Expected '{' after 'lam'");
 
-        // Parse optional params before 'in'
+        // Check if this lambda has an 'in' keyword (explicit params) or not (implicit 'it')
+        // Scan ahead to find 'in' before '}' — if absent, inject 'it' as sole parameter.
+        bool hasIn = false;
+        {
+            int depth = 1; // track nested braces
+            for (int look = current; look < static_cast<int>(tokens.size()); look++) {
+                if (tokens[look].type == TokenType::LBRACE) depth++;
+                else if (tokens[look].type == TokenType::RBRACE) { depth--; if (depth == 0) break; }
+                else if (tokens[look].type == TokenType::IN && depth == 1) { hasIn = true; break; }
+            }
+        }
+
         std::vector<std::string> params;
         std::vector<ExprPtr> defaults;
         std::string restParam;
-        bool seenLamDefault = false;
-        if (!check(TokenType::IN)) {
-            do {
-                if (match(TokenType::SPREAD)) {
-                    restParam = consume(TokenType::IDENTIFIER, "Expected parameter name after '...'").lexeme;
-                    break;
-                }
-                params.push_back(
-                    consume(TokenType::IDENTIFIER, "Expected parameter name").lexeme);
-                if (match(TokenType::ASSIGN)) {
-                    defaults.push_back(expression());
-                    seenLamDefault = true;
-                } else {
-                    if (seenLamDefault)
-                        throw error(previous(), "Non-default parameter after default parameter");
-                    defaults.push_back(nullptr);
-                }
-            } while (match(TokenType::COMMA));
+        if (hasIn) {
+            // Parse explicit params before 'in'
+            bool seenLamDefault = false;
+            if (!check(TokenType::IN)) {
+                do {
+                    if (match(TokenType::SPREAD)) {
+                        restParam = consume(TokenType::IDENTIFIER, "Expected parameter name after '...'").lexeme;
+                        break;
+                    }
+                    params.push_back(
+                        consume(TokenType::IDENTIFIER, "Expected parameter name").lexeme);
+                    if (match(TokenType::ASSIGN)) {
+                        defaults.push_back(expression());
+                        seenLamDefault = true;
+                    } else {
+                        if (seenLamDefault)
+                            throw error(previous(), "Non-default parameter after default parameter");
+                        defaults.push_back(nullptr);
+                    }
+                } while (match(TokenType::COMMA));
+            }
+            consume(TokenType::IN, "Expected 'in' in lambda");
+        } else {
+            // Implicit 'it' parameter — no 'in' keyword present
+            params.push_back("it");
+            defaults.push_back(nullptr);
         }
-        consume(TokenType::IN, "Expected 'in' in lambda");
 
         // Parse body statements until '}'
         auto lam = std::make_unique<LambdaExpr>();

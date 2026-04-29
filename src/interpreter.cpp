@@ -1137,6 +1137,40 @@ Value Interpreter::evaluate(const Expr* expr) {
         return callWithContext(*this, callee.asCallable(), {leftVal}, e->line);
     }
 
+    case ExprType::PipeTry: {
+        auto* e = static_cast<const PipeTryExpr*>(expr);
+        Value leftVal;
+        bool caught = false;
+        Value error;
+        try {
+            leftVal = evaluate(e->left.get());
+        } catch (const RuntimeError& err) {
+            caught = true;
+            error = Value(std::string(err.what()));
+        } catch (const ThrowSignal& ts) {
+            caught = true;
+            error = ts.value;
+        }
+        if (!caught) return leftVal;
+
+        // Pass error to handler (same dispatch as |>)
+        if (e->right->type == ExprType::Call) {
+            auto* call = static_cast<const CallExpr*>(e->right.get());
+            Value callee = evaluate(call->callee.get());
+            if (!callee.isCallable())
+                throw RuntimeError("Pipe error handler must be a function", e->line, e->column);
+            std::vector<Value> args;
+            args.push_back(error);
+            for (const auto& arg : call->args)
+                args.push_back(evaluate(arg.get()));
+            return callWithContext(*this, callee.asCallable(), args, e->line);
+        }
+        Value callee = evaluate(e->right.get());
+        if (!callee.isCallable())
+            throw RuntimeError("Pipe error handler must be a function", e->line, e->column);
+        return callWithContext(*this, callee.asCallable(), {error}, e->line);
+    }
+
     // ── Async / Await ──
 
     case ExprType::Async: {

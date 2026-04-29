@@ -92,6 +92,7 @@ private:
     void compileCallExpr(const CallExpr* expr);
     void compileTernaryExpr(const TernaryExpr* expr);
     void compilePipeExpr(const PipeExpr* expr);
+    void compilePipeTryExpr(const PipeTryExpr* expr);
     void compileLambdaExpr(const LambdaExpr* expr);
     void compileArrayLiteralExpr(const ArrayLiteralExpr* expr);
     void compileMapLiteralExpr(const MapLiteralExpr* expr);
