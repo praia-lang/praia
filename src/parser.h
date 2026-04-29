@@ -33,6 +33,7 @@ private:
     StmtPtr throwStatement();
     StmtPtr tryCatchStatement();
     StmtPtr ensureStatement();
+    StmtPtr deferStatement();
     StmtPtr useStatement();
     StmtPtr exportStatement();
     StmtPtr expressionStatement();

@@ -700,6 +700,12 @@ void Interpreter::execute(const Stmt* stmt) {
             execute(s->elseBody.get());
         break;
     }
+    case StmtType::Defer: {
+        auto* s = static_cast<const DeferStmt*>(stmt);
+        if (!deferStacks_.empty())
+            deferStacks_.back().push_back(s->expr.get());
+        break;
+    }
     case StmtType::Use: {
         auto* s = static_cast<const UseStmt*>(stmt);
         Value grain = loadGrain(s->path, s->line);

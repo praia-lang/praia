@@ -25,7 +25,7 @@ enum class StmtType {
     Expr, Let, Block, If, Match, While,
     For, ForIn, Func, Return, Class, Enum,
     Break, Continue, Throw, TryCatch, Ensure,
-    Use, Export
+    Defer, Use, Export
 };
 
 // --- Expressions ---
@@ -353,6 +353,11 @@ struct EnsureStmt : Stmt {
     EnsureStmt() : Stmt(StmtType::Ensure) {}
     ExprPtr condition;
     StmtPtr elseBody;
+};
+
+struct DeferStmt : Stmt {
+    DeferStmt() : Stmt(StmtType::Defer) {}
+    ExprPtr expr;
 };
 
 // use "path"  — imports a grain, binds to variable named after the file

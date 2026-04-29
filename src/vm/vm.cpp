@@ -401,6 +401,27 @@ bool VM::callValue(Value callee, int argCount, int line) {
     return false;
 }
 
+void VM::runDefers(int frameIdx) {
+    auto defers = std::move(deferStack[frameIdx]);
+    deferStack[frameIdx].clear();
+    // Save VM state, run defers on the same VM (re-entrant but safe because
+    // result is popped before we get here), then let OP_RETURN restore.
+    for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
+        int savedTop = stackTop;
+        int savedFrameCount = frameCount;
+        try {
+            if (defers[i].isCallable()) {
+                push(defers[i]);
+                if (callValue(defers[i], 0, 0))
+                    execute(frameCount);
+            }
+        } catch (...) {}
+        // Restore stack — deferred function's return might have changed stackTop
+        stackTop = savedTop;
+        frameCount = savedFrameCount;
+    }
+}
+
 void VM::runtimeError(const std::string& msg, int line, int column) {
     lastError_ = msg;
     // In re-entrant calls (depth > 1), suppress output — the error
@@ -419,6 +440,7 @@ bool VM::tryHandleError(Value error) {
         exceptionHandlers.pop_back();
 
         while (frameCount - 1 > handler.frameIndex) {
+            runDefers(frameCount - 1);
             closeUpvalues(&stack[frames[frameCount - 1].baseSlot]);
             frameCount--;
         }
@@ -982,7 +1004,11 @@ VM::Result VM::execute(int baseFrameCount_) {
 
         case OpCode::OP_RETURN: {
             Value result = pop();
-            int returnBase = FRAME.baseSlot; // save callee's base before popping frame
+
+            // Run deferred calls for this frame (uses tree-walker, no stack issues)
+            runDefers(frameCount - 1);
+
+            int returnBase = FRAME.baseSlot;
             closeUpvalues(&stack[returnBase]);
 
             // Generator return: if we're returning from the generator's base frame,
@@ -1554,6 +1580,14 @@ VM::Result VM::execute(int baseFrameCount_) {
             }
             return Result::RUNTIME_ERROR;
         }
+        case OpCode::OP_DEFER: {
+            Value closure = pop();
+            deferStack[frameCount - 1].push_back(std::move(closure));
+            break;
+        }
+        case OpCode::OP_RUN_DEFERS:
+            // Not emitted by compiler — defers run in OP_RETURN and exception unwinding
+            break;
         case OpCode::OP_IMPORT: {
             std::string path = READ_STRING();
             std::string alias = READ_STRING();

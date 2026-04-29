@@ -23,6 +23,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"throw",  TokenType::THROW},
     {"finally",TokenType::FINALLY},
     {"ensure", TokenType::ENSURE},
+    {"defer",  TokenType::DEFER},
     {"async",   TokenType::ASYNC},
     {"await",   TokenType::AWAIT},
     {"yield",   TokenType::YIELD},

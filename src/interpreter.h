@@ -193,10 +193,18 @@ public:
     void setArgs(const std::vector<std::string>& args);
     void setCurrentFile(const std::string& path);
 
-    // Public so PraiaFunction::call can use it
+    // Public so PraiaFunction::call / PraiaLambda::call can use it
     void executeBlock(const BlockStmt* block, std::shared_ptr<Environment> env);
     void checkInterrupt(int line, int column);
     std::shared_ptr<Environment> getGlobals() { return globals; }
+
+    // Shared function/lambda call implementation
+    Value callBody(std::shared_ptr<Environment> callEnv,
+                   const std::vector<std::string>& params,
+                   const std::string& restParam,
+                   const std::vector<Value>& args,
+                   std::function<const Expr*(size_t)> getDefault,
+                   std::function<void()> runBody);
 
 private:
     Value evaluate(const Expr* expr);
@@ -224,6 +232,10 @@ private:
     // scopes on the C++ call stack, invisible to GC. This explicit stack
     // makes them reachable during mark phase.
     std::vector<std::shared_ptr<Environment>> savedEnvStack_;
+
+    // Defer stacks — one per function call. Each is a list of expressions
+    // to evaluate in reverse order when the function exits.
+    std::vector<std::vector<const Expr*>> deferStacks_;
 
     // (interpMutex removed — async tasks use task-local Interpreters instead)
 

@@ -846,6 +846,36 @@ try {
 }
 ```
 
+### defer
+
+`defer` registers an expression to run when the enclosing function exits — whether by normal return, explicit `return`, or thrown exception. Multiple defers execute in LIFO order (last registered runs first).
+
+```
+func processFile(path) {
+    let db = sqlite.open("app.db")
+    defer db.close()
+
+    let sock = net.connect("host", 80)
+    defer net.close(sock)
+
+    // ... use db and sock ...
+    // On function exit: net.close(sock) runs first, then db.close()
+}
+```
+
+Defers run even if an exception is thrown:
+
+```
+func f() {
+    defer print("cleanup")
+    throw "error"
+}
+try { f() } catch (e) {}
+// prints "cleanup" before the catch
+```
+
+If a defer itself throws, it doesn't prevent other defers from running.
+
 ### ensure
 
 `ensure` is an early-exit guard (like Swift's `guard`). If the condition is falsy, the `else` block runs — which should exit the scope (typically `return` or `throw`).

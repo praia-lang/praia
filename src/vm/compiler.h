@@ -78,7 +78,6 @@ private:
     void compileEnsureStmt(const EnsureStmt* stmt);
     void compileUseStmt(const UseStmt* stmt);
     void compileExportStmt(const ExportStmt* stmt);
-
     // Expressions
     void compileExpr(const Expr* expr);
     void compileNumberExpr(const NumberExpr* expr);

@@ -22,7 +22,7 @@
 
 // ── Version ──────────────────────────────────────────────────
 
-static constexpr const char* PRAIA_VERSION = "0.5.0";
+static constexpr const char* PRAIA_VERSION = "0.5.1";
 
 // ── AST printer ──────────────────────────────────────────────
 
