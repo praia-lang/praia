@@ -3627,6 +3627,76 @@ crypto.verify("data", ecSig, ecKeys.publicKey, "sha256")  // true
 
 ---
 
+## WebSocket (socket grain)
+
+The `socket` grain provides WebSocket server support for Praia's HTTP server. Each WebSocket connection runs in its own background thread.
+
+```
+use "socket"
+
+let server = http.createServer(lam{ req in
+    if (req.path == "/ws") {
+        return socket.upgrade(req, lam{ ws in
+            print("Connected: " + ws.id)
+
+            ws.onMessage(lam{ msg in
+                ws.send("echo: " + msg)
+            })
+
+            ws.onClose(lam{ in
+                print("Disconnected")
+            })
+
+            ws.send("Welcome!")
+        })
+    }
+    return {body: "Hello"}
+})
+server.listen(8080)
+```
+
+### API
+
+| Function | Description |
+|----------|-------------|
+| `socket.upgrade(req, handler)` | Upgrade HTTP request to WebSocket. Call inside an HTTP handler |
+
+The `handler` receives a `ws` object:
+
+| Method | Description |
+|--------|-------------|
+| `ws.send(msg)` | Send a text message |
+| `ws.sendBinary(data)` | Send binary data |
+| `ws.close()` | Close the connection |
+| `ws.onMessage(fn)` | Set message handler — `fn` receives the message string |
+| `ws.onClose(fn)` | Set close handler — called when connection ends |
+| `ws.id` | Unique connection identifier (e.g. `"ws-1"`) |
+
+### With the router grain
+
+```
+use "router"
+use "socket"
+
+let app = router.create()
+
+app.get("/ws", lam{ req in
+    return socket.upgrade(req, lam{ ws in
+        ws.onMessage(lam{ msg in ws.send("echo: " + msg) })
+    })
+})
+
+app.listen(8080)
+```
+
+### Notes
+
+- Each connection runs in its own `async` thread — the server can handle multiple concurrent WebSocket connections alongside normal HTTP requests
+- The grain handles the WebSocket handshake (SHA-1 + base64), frame parsing/writing, masking, ping/pong, close handshake, and message fragmentation
+- Requires OpenSSL for the SHA-1 handshake hash (same dependency as HTTPS)
+
+---
+
 ## hex Grain
 
 The `hex` grain provides hex encoding/decoding utilities for working with binary data, network protocols, and debugging.

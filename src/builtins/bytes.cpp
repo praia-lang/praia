@@ -224,4 +224,19 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             return Value(static_cast<int64_t>(args[0].asString().size()));
         }));
 
+    // bytes.xor(data, mask) — XOR data with a repeating mask. Both are raw byte strings.
+    bytesMap->entries[Value("xor")] = Value(makeNative("bytes.xor", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("bytes.xor() requires two strings", 0);
+            auto& data = args[0].asString();
+            auto& mask = args[1].asString();
+            if (mask.empty()) return Value(data);
+            std::string result(data.size(), '\0');
+            size_t maskLen = mask.size();
+            for (size_t i = 0; i < data.size(); i++)
+                result[i] = data[i] ^ mask[i % maskLen];
+            return Value(std::move(result));
+        }));
+
 }
