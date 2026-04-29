@@ -379,6 +379,75 @@ Interpreter::Interpreter() {
             return Value(true);
         })));
 
+    globals->define("flatMap", Value(makeNative("flatMap", 2,
+        [this](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("flatMap() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("flatMap() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto fn = args[1].asCallable();
+            auto result = gcNew<PraiaArray>();
+            for (auto& elem : src) {
+                Value mapped = callSafe(*this, fn, {elem});
+                if (mapped.isArray()) {
+                    for (auto& inner : mapped.asArray()->elements)
+                        result->elements.push_back(inner);
+                } else {
+                    result->elements.push_back(mapped);
+                }
+            }
+            return Value(result);
+        })));
+
+    globals->define("unique", Value(makeNative("unique", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("unique() requires an array", 0);
+            auto& src = args[0].asArray()->elements;
+            auto result = gcNew<PraiaArray>();
+            // Use a set of string representations for dedup
+            // (Value equality works but unordered_set needs ValueHash)
+            std::unordered_set<Value, ValueHash> seen;
+            for (auto& elem : src) {
+                if (seen.insert(elem).second)
+                    result->elements.push_back(elem);
+            }
+            return Value(result);
+        })));
+
+    globals->define("zip", Value(makeNative("zip", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray() || !args[1].isArray())
+                throw RuntimeError("zip() requires two arrays", 0);
+            auto& a = args[0].asArray()->elements;
+            auto& b = args[1].asArray()->elements;
+            size_t len = std::min(a.size(), b.size());
+            auto result = gcNew<PraiaArray>();
+            for (size_t i = 0; i < len; i++) {
+                auto pair = gcNew<PraiaArray>();
+                pair->elements.push_back(a[i]);
+                pair->elements.push_back(b[i]);
+                result->elements.push_back(Value(pair));
+            }
+            return Value(result);
+        })));
+
+    globals->define("enumerate", Value(makeNative("enumerate", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("enumerate() requires an array", 0);
+            auto& src = args[0].asArray()->elements;
+            auto result = gcNew<PraiaArray>();
+            for (size_t i = 0; i < src.size(); i++) {
+                auto pair = gcNew<PraiaArray>();
+                pair->elements.push_back(Value(static_cast<int64_t>(i)));
+                pair->elements.push_back(src[i]);
+                result->elements.push_back(Value(pair));
+            }
+            return Value(result);
+        })));
+
     globals->define("keys", Value(makeNative("keys", 1,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isMap())
@@ -1638,6 +1707,25 @@ Interpreter::Interpreter() {
                 throw RuntimeError("math.clamp() requires three numbers", 0);
             double x = args[0].asNumber(), lo = args[1].asNumber(), hi = args[2].asNumber();
             return Value(std::fmax(lo, std::fmin(x, hi)));
+        }));
+
+    mathMap->entries[Value("atan2")] = Value(makeNative("math.atan2", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isNumber() || !args[1].isNumber())
+                throw RuntimeError("math.atan2() requires two numbers", 0);
+            return Value(std::atan2(args[0].asNumber(), args[1].asNumber()));
+        }));
+
+    mathMap->entries[Value("isNan")] = Value(makeNative("math.isNan", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isNumber()) return Value(false);
+            return Value(std::isnan(args[0].asNumber()));
+        }));
+
+    mathMap->entries[Value("isInf")] = Value(makeNative("math.isInf", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isNumber()) return Value(false);
+            return Value(std::isinf(args[0].asNumber()));
         }));
 
     mathMap->entries[Value("approx")] = Value(makeNative("math.approx", -1,

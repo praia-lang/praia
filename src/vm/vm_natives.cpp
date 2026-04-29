@@ -62,7 +62,8 @@ void vmRegisterNatives(VM& vm) {
 
     std::vector<std::string> globalNames = {
         "print", "len", "push", "pop", "type", "str", "num", "fromCharCode",
-        "Lock", "Channel", "futures", "sort", "filter", "map", "each", "reduce", "any", "all", "keys", "values",
+        "Lock", "Channel", "futures", "sort", "filter", "map", "each", "reduce", "any", "all",
+        "flatMap", "unique", "zip", "enumerate", "keys", "values",
         "sys", "http", "json", "yaml", "base64", "path", "url", "net",
         "bytes", "crypto", "random", "time", "math",
         "loadNative",
@@ -296,6 +297,29 @@ void vmRegisterNatives(VM& vm) {
             for (auto& elem : src)
                 if (!callWithVM(*vm, pred, {elem}).isTruthy()) return Value(false);
             return Value(true);
+        }));
+
+    vm.defineNative("flatMap", makeNat("flatMap", 2,
+        [](const std::vector<Value>& args) -> Value {
+            VM* vm = VM::current();
+            if (!vm) throw RuntimeError("flatMap() requires VM context", 0);
+            if (!args[0].isArray())
+                throw RuntimeError("flatMap() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("flatMap() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto fn = args[1].asCallable();
+            auto result = gcNew<PraiaArray>();
+            for (auto& elem : src) {
+                Value mapped = callWithVM(*vm, fn, {elem});
+                if (mapped.isArray()) {
+                    for (auto& inner : mapped.asArray()->elements)
+                        result->elements.push_back(inner);
+                } else {
+                    result->elements.push_back(mapped);
+                }
+            }
+            return Value(result);
         }));
 
     // Convert any iterable to an array for for-in loops.
