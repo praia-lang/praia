@@ -135,22 +135,29 @@ func _connectionLoop(fd, setupFn) {
     let closeFn = nil
 
     let wsId = "ws-" + str(fd)
+    let sendLock = Lock()
     let ws = {
         id: wsId,
 
         send: lam{ msg in
-            if (!closed) { _sendFrame(fd, 1, msg) }
+            sendLock.withLock(lam{ in
+                if (!closed) { _sendFrame(fd, 1, msg) }
+            })
         },
 
         sendBinary: lam{ data in
-            if (!closed) { _sendFrame(fd, 2, data) }
+            sendLock.withLock(lam{ in
+                if (!closed) { _sendFrame(fd, 2, data) }
+            })
         },
 
         close: lam{ in
-            if (!closed) {
-                closed = true
-                try { _sendClose(fd, 1000) } catch (e) {}
-            }
+            sendLock.withLock(lam{ in
+                if (!closed) {
+                    closed = true
+                    try { _sendClose(fd, 1000) } catch (e) {}
+                }
+            })
         },
 
         onMessage: lam{ fn in messageFn = fn },
