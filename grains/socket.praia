@@ -16,16 +16,18 @@
 //   server.listen(8080)
 
 let WS_MAGIC_GUID = "258EAFA5-E914-47DA-95CA-5AB5B11F857E"
-let _nextId = 0
+let MAX_MESSAGE_SIZE = 16 * 1024 * 1024  // 16 MB max message/frame size
 
 // ── Internal: binary I/O helpers ──
 
 func _readExact(fd, n) {
     let data = ""
-    while (bytes.len(data) < n) {
-        let chunk = net.recv(fd, n - bytes.len(data))
+    let got = 0
+    while (got < n) {
+        let chunk = net.recv(fd, n - got)
         if (chunk == "") { return nil }
         data = data + chunk
+        got = got + bytes.len(chunk)
     }
     return data
 }
@@ -56,6 +58,8 @@ func _readFrame(fd) {
         payloadLen = 0
         for (i in 0..8) { payloadLen = payloadLen * 256 + b[i] }
     }
+
+    if (payloadLen > MAX_MESSAGE_SIZE) { return nil }
 
     // Masking key (client→server frames are always masked)
     let mask = nil
@@ -102,7 +106,7 @@ func _sendFrame(fd, opcode, payload) {
 }
 
 func _sendClose(fd, code) {
-    if (code) {
+    if (code != nil) {
         let payload = bytes.from([(code >> 8) & 0xFF, code & 0xFF])
         _sendFrame(fd, 8, payload)
     } else {
@@ -130,9 +134,9 @@ func _connectionLoop(fd, setupFn) {
     let messageFn = nil
     let closeFn = nil
 
-    _nextId = _nextId + 1
+    let wsId = "ws-" + str(fd)
     let ws = {
-        id: "ws-" + str(_nextId),
+        id: wsId,
 
         send: lam{ msg in
             if (!closed) { _sendFrame(fd, 1, msg) }
@@ -179,6 +183,7 @@ func _connectionLoop(fd, setupFn) {
                 // Continuation frame (fragmented message)
                 0 {
                     fragmentBuffer = fragmentBuffer + frame.payload
+                    if (bytes.len(fragmentBuffer) > MAX_MESSAGE_SIZE) { break }
                     if (frame.fin && messageFn) {
                         messageFn(fragmentBuffer)
                         fragmentBuffer = ""
