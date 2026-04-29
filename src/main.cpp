@@ -385,7 +385,7 @@ static void printAst(const std::vector<StmtPtr>& program) {
 
 // ── Main ─────────────────────────────────────────────────────
 
-static constexpr const char* PRAIA_VERSION = "0.4.5";
+static constexpr const char* PRAIA_VERSION = "0.4.6";
 
 static std::string readFile(const std::string& path) {
     std::ifstream file(path);
