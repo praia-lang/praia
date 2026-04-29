@@ -63,7 +63,7 @@ void vmRegisterNatives(VM& vm) {
     std::vector<std::string> globalNames = {
         "print", "len", "push", "pop", "type", "str", "num", "fromCharCode",
         "Lock", "Channel", "futures", "sort", "filter", "map", "each", "reduce", "any", "all",
-        "flatMap", "unique", "zip", "enumerate", "groupBy", "keys", "values",
+        "flatMap", "unique", "zip", "enumerate", "groupBy", "findIndex", "flatten", "keys", "values",
         "sys", "http", "json", "yaml", "base64", "path", "url", "net",
         "bytes", "crypto", "random", "time", "math",
         "loadNative",
@@ -345,6 +345,22 @@ void vmRegisterNatives(VM& vm) {
                 }
             }
             return Value(result);
+        }));
+
+    vm.defineNative("findIndex", makeNat("findIndex", 2,
+        [](const std::vector<Value>& args) -> Value {
+            VM* vm = VM::current();
+            if (!vm) throw RuntimeError("findIndex() requires VM context", 0);
+            if (!args[0].isArray())
+                throw RuntimeError("findIndex() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("findIndex() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto pred = args[1].asCallable();
+            for (size_t i = 0; i < src.size(); i++)
+                if (callWithVM(*vm, pred, {src[i]}).isTruthy())
+                    return Value(static_cast<int64_t>(i));
+            return Value(static_cast<int64_t>(-1));
         }));
 
     // Convert any iterable to an array for for-in loops.

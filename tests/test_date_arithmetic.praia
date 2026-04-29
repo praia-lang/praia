@@ -1,0 +1,115 @@
+use "testing"
+
+let ts = time.parse("2024-06-15 14:30:45")
+
+// ── Component extraction ──
+
+testing.test("year", lam{ in
+    testing.assertEqual(time.year(ts), 2024, nil)
+})
+
+testing.test("month", lam{ in
+    testing.assertEqual(time.month(ts), 6, nil)
+})
+
+testing.test("day", lam{ in
+    testing.assertEqual(time.day(ts), 15, nil)
+})
+
+testing.test("hour", lam{ in
+    testing.assertEqual(time.hour(ts), 14, nil)
+})
+
+testing.test("minute", lam{ in
+    testing.assertEqual(time.minute(ts), 30, nil)
+})
+
+testing.test("second", lam{ in
+    testing.assertEqual(time.second(ts), 45, nil)
+})
+
+testing.test("weekday", lam{ in
+    // 2024-06-15 is a Saturday = 6
+    testing.assertEqual(time.weekday(ts), 6, nil)
+})
+
+// ── Arithmetic ──
+
+testing.test("addDays forward", lam{ in
+    let tomorrow = time.addDays(ts, 1)
+    testing.assertEqual(time.day(tomorrow), 16, nil)
+})
+
+testing.test("addDays backward", lam{ in
+    let yesterday = time.addDays(ts, -1)
+    testing.assertEqual(time.day(yesterday), 14, nil)
+})
+
+testing.test("addDays month rollover", lam{ in
+    let endOfJune = time.parse("2024-06-30")
+    let july1 = time.addDays(endOfJune, 1)
+    testing.assertEqual(time.month(july1), 7, nil)
+    testing.assertEqual(time.day(july1), 1, nil)
+})
+
+testing.test("addHours", lam{ in
+    let later = time.addHours(ts, 3)
+    testing.assertEqual(time.hour(later), 17, nil)
+})
+
+testing.test("addMinutes", lam{ in
+    let later = time.addMinutes(ts, 45)
+    testing.assertEqual(time.minute(later), 15, nil)
+    testing.assertEqual(time.hour(later), 15, nil)
+})
+
+testing.test("addSeconds", lam{ in
+    let later = time.addSeconds(ts, 20)
+    testing.assertEqual(time.second(later), 5, nil)
+    testing.assertEqual(time.minute(later), 31, nil)
+})
+
+// ── findIndex ──
+
+testing.test("findIndex match", lam{ in
+    testing.assertEqual([10, 20, 30] |> findIndex(lam{ x in x > 15 }), 1, nil)
+})
+
+testing.test("findIndex first match", lam{ in
+    testing.assertEqual([1, 2, 3, 4] |> findIndex(lam{ x in x > 1 }), 1, nil)
+})
+
+testing.test("findIndex no match", lam{ in
+    testing.assertEqual([1, 2, 3] |> findIndex(lam{ x in x > 10 }), -1, nil)
+})
+
+testing.test("findIndex empty", lam{ in
+    testing.assertEqual([] |> findIndex(lam{ x in true }), -1, nil)
+})
+
+// ── flatten ──
+
+testing.test("flatten nested arrays", lam{ in
+    testing.assertEqual([[1, 2], [3, 4]] |> flatten, [1, 2, 3, 4], nil)
+})
+
+testing.test("flatten mixed", lam{ in
+    testing.assertEqual([[1], 2, [3, 4]] |> flatten, [1, 2, 3, 4], nil)
+})
+
+testing.test("flatten already flat", lam{ in
+    testing.assertEqual([1, 2, 3] |> flatten, [1, 2, 3], nil)
+})
+
+testing.test("flatten one level only", lam{ in
+    let result = [[[1, 2]], [3]] |> flatten
+    // Should flatten one level: [[1,2], 3]
+    testing.assertEqual(len(result), 2, nil)
+    testing.assertEqual(result[1], 3, nil)
+})
+
+testing.test("flatten empty", lam{ in
+    testing.assertEqual([] |> flatten, [], nil)
+})
+
+testing.done()

@@ -2191,6 +2191,8 @@ These functions are designed to work with `|>`:
 | `zip(a, b)` | Combine two arrays into `[[a0, b0], [a1, b1], ...]` (truncates to shorter) |
 | `enumerate(arr)` | Returns `[[0, elem0], [1, elem1], ...]` |
 | `groupBy(arr, fn)` | Group elements by key function, returns map of key → array |
+| `findIndex(arr, fn)` | Index of first matching element, or -1 |
+| `flatten(arr)` | Flatten one level of nested arrays |
 | `keys(map)` | Return array of map keys |
 | `values(map)` | Return array of map values |
 
@@ -2359,6 +2361,10 @@ Path manipulation using `<filesystem>`. All functions work with strings.
 | `path.basename(p)` | Filename component |
 | `path.ext(p)` | File extension (including dot) |
 | `path.resolve(p)` | Absolute path |
+| `path.isFile(p)` | Returns `true` if path is a regular file |
+| `path.isDir(p)` | Returns `true` if path is a directory |
+| `path.size(p)` | File size in bytes |
+| `path.glob(dir, pattern)` | Match files by pattern (e.g. `"*.praia"`) |
 
 ```
 path.join("src", "main.cpp")       // "src/main.cpp"
@@ -3313,6 +3319,13 @@ The `time` namespace provides timestamps, formatting, and sleep.
 | `time.sleep(ms)` | Pause execution for ms milliseconds |
 | `time.format(fmt?, timestamp?)` | Format time as string (default: `"%Y-%m-%d %H:%M:%S"`) |
 | `time.parse(str, fmt?)` | Parse date string to millisecond timestamp |
+| `time.year(ts)`, `month`, `day` | Extract date components from ms timestamp |
+| `time.hour(ts)`, `minute`, `second` | Extract time components |
+| `time.weekday(ts)` | Day of week (0=Sunday, 6=Saturday) |
+| `time.addDays(ts, n)` | Add/subtract days, returns new timestamp |
+| `time.addHours(ts, n)` | Add/subtract hours |
+| `time.addMinutes(ts, n)` | Add/subtract minutes |
+| `time.addSeconds(ts, n)` | Add/subtract seconds |
 
 ```
 let start = time.now()

@@ -471,6 +471,37 @@ Interpreter::Interpreter() {
             return Value(result);
         })));
 
+    globals->define("findIndex", Value(makeNative("findIndex", 2,
+        [this](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("findIndex() requires an array as first argument", 0);
+            if (!args[1].isCallable())
+                throw RuntimeError("findIndex() requires a function as second argument", 0);
+            auto& src = args[0].asArray()->elements;
+            auto pred = args[1].asCallable();
+            for (size_t i = 0; i < src.size(); i++)
+                if (callSafe(*this, pred, {src[i]}).isTruthy())
+                    return Value(static_cast<int64_t>(i));
+            return Value(static_cast<int64_t>(-1));
+        })));
+
+    globals->define("flatten", Value(makeNative("flatten", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isArray())
+                throw RuntimeError("flatten() requires an array", 0);
+            auto& src = args[0].asArray()->elements;
+            auto result = gcNew<PraiaArray>();
+            for (auto& elem : src) {
+                if (elem.isArray()) {
+                    for (auto& inner : elem.asArray()->elements)
+                        result->elements.push_back(inner);
+                } else {
+                    result->elements.push_back(elem);
+                }
+            }
+            return Value(result);
+        })));
+
     globals->define("keys", Value(makeNative("keys", 1,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isMap())
@@ -1649,6 +1680,69 @@ Interpreter::Interpreter() {
             auto [ok2, ms2] = parseWith("%Y-%m-%d");
             if (ok2) return Value(ms2);
             throw RuntimeError("time.parse() could not parse '" + dateStr + "'", 0);
+        }));
+
+    // Helper: convert ms timestamp to std::tm
+    auto msToTm = [](const std::vector<Value>& args, const char* name) -> std::tm {
+        if (args.empty() || !args[0].isNumber())
+            throw RuntimeError(std::string(name) + " requires a millisecond timestamp", 0);
+        std::time_t t = static_cast<std::time_t>(args[0].asNumber() / 1000.0);
+        return *std::localtime(&t);
+    };
+
+    timeMap->entries[Value("year")] = Value(makeNative("time.year", 1,
+        [msToTm](const std::vector<Value>& args) -> Value {
+            return Value(static_cast<int64_t>(msToTm(args, "time.year()").tm_year + 1900));
+        }));
+    timeMap->entries[Value("month")] = Value(makeNative("time.month", 1,
+        [msToTm](const std::vector<Value>& args) -> Value {
+            return Value(static_cast<int64_t>(msToTm(args, "time.month()").tm_mon + 1));
+        }));
+    timeMap->entries[Value("day")] = Value(makeNative("time.day", 1,
+        [msToTm](const std::vector<Value>& args) -> Value {
+            return Value(static_cast<int64_t>(msToTm(args, "time.day()").tm_mday));
+        }));
+    timeMap->entries[Value("hour")] = Value(makeNative("time.hour", 1,
+        [msToTm](const std::vector<Value>& args) -> Value {
+            return Value(static_cast<int64_t>(msToTm(args, "time.hour()").tm_hour));
+        }));
+    timeMap->entries[Value("minute")] = Value(makeNative("time.minute", 1,
+        [msToTm](const std::vector<Value>& args) -> Value {
+            return Value(static_cast<int64_t>(msToTm(args, "time.minute()").tm_min));
+        }));
+    timeMap->entries[Value("second")] = Value(makeNative("time.second", 1,
+        [msToTm](const std::vector<Value>& args) -> Value {
+            return Value(static_cast<int64_t>(msToTm(args, "time.second()").tm_sec));
+        }));
+    timeMap->entries[Value("weekday")] = Value(makeNative("time.weekday", 1,
+        [msToTm](const std::vector<Value>& args) -> Value {
+            return Value(static_cast<int64_t>(msToTm(args, "time.weekday()").tm_wday));
+        }));
+
+    // Date arithmetic — returns new ms timestamp
+    timeMap->entries[Value("addDays")] = Value(makeNative("time.addDays", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || !args[0].isNumber() || !args[1].isNumber())
+                throw RuntimeError("time.addDays(timestamp, days) requires two numbers", 0);
+            return Value(static_cast<int64_t>(args[0].asNumber() + args[1].asNumber() * 86400000.0));
+        }));
+    timeMap->entries[Value("addHours")] = Value(makeNative("time.addHours", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || !args[0].isNumber() || !args[1].isNumber())
+                throw RuntimeError("time.addHours(timestamp, hours) requires two numbers", 0);
+            return Value(static_cast<int64_t>(args[0].asNumber() + args[1].asNumber() * 3600000.0));
+        }));
+    timeMap->entries[Value("addMinutes")] = Value(makeNative("time.addMinutes", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || !args[0].isNumber() || !args[1].isNumber())
+                throw RuntimeError("time.addMinutes(timestamp, minutes) requires two numbers", 0);
+            return Value(static_cast<int64_t>(args[0].asNumber() + args[1].asNumber() * 60000.0));
+        }));
+    timeMap->entries[Value("addSeconds")] = Value(makeNative("time.addSeconds", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || !args[0].isNumber() || !args[1].isNumber())
+                throw RuntimeError("time.addSeconds(timestamp, seconds) requires two numbers", 0);
+            return Value(static_cast<int64_t>(args[0].asNumber() + args[1].asNumber() * 1000.0));
         }));
 
     globals->define("time", Value(timeMap));
