@@ -1,0 +1,49 @@
+use "testing"
+
+testing.test("less than", lam{ in
+    testing.assert("apple" < "banana", nil)
+    testing.assert(!("banana" < "apple"), nil)
+    testing.assert(!("abc" < "abc"), "equal strings not less than")
+})
+
+testing.test("greater than", lam{ in
+    testing.assert("banana" > "apple", nil)
+    testing.assert(!("apple" > "banana"), nil)
+    testing.assert(!("abc" > "abc"), nil)
+})
+
+testing.test("less than or equal", lam{ in
+    testing.assert("abc" <= "abc", "equal")
+    testing.assert("abc" <= "abd", "less")
+    testing.assert(!("abd" <= "abc"), nil)
+})
+
+testing.test("greater than or equal", lam{ in
+    testing.assert("abc" >= "abc", "equal")
+    testing.assert("abd" >= "abc", "greater")
+    testing.assert(!("abc" >= "abd"), nil)
+})
+
+testing.test("prefix ordering", lam{ in
+    testing.assert("hello" > "hell", "longer string is greater")
+    testing.assert("hell" < "hello", nil)
+})
+
+testing.test("case sensitivity", lam{ in
+    testing.assert("A" < "a", "uppercase before lowercase in ASCII")
+    testing.assert("Z" < "a", nil)
+})
+
+testing.test("empty string", lam{ in
+    testing.assert("" < "a", "empty is less than anything")
+    testing.assert("" <= "", nil)
+    testing.assert(!("" > ""), nil)
+})
+
+testing.test("mixed type comparison still throws", lam{ in
+    testing.assertThrows(lam{ in "abc" < 123 }, nil)
+    testing.assertThrows(lam{ in "abc" > true }, nil)
+    testing.assertThrows(lam{ in 1 < "a" }, nil)
+})
+
+testing.done()

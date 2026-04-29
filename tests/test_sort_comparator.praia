@@ -1,0 +1,46 @@
+use "testing"
+
+testing.test("sort with numeric comparator", lam{ in
+    let result = [3, 1, 4, 1, 5] |> sort(lam{ a, b in a - b })
+    testing.assertEqual(result, [1, 1, 3, 4, 5], nil)
+})
+
+testing.test("sort descending", lam{ in
+    let result = [3, 1, 4, 1, 5] |> sort(lam{ a, b in b - a })
+    testing.assertEqual(result, [5, 4, 3, 1, 1], nil)
+})
+
+testing.test("sort by object field", lam{ in
+    let items = [{name: "Charlie", age: 30}, {name: "Alice", age: 25}, {name: "Bob", age: 35}]
+    let byAge = items |> sort(lam{ a, b in a.age - b.age })
+    testing.assertEqual(byAge[0].name, "Alice", nil)
+    testing.assertEqual(byAge[1].name, "Charlie", nil)
+    testing.assertEqual(byAge[2].name, "Bob", nil)
+})
+
+testing.test("sort with boolean comparator", lam{ in
+    let result = [3, 1, 2] |> sort(lam{ a, b in a < b })
+    testing.assertEqual(result, [1, 2, 3], nil)
+})
+
+testing.test("sort strings with comparator", lam{ in
+    let result = ["banana", "apple", "cherry"] |> sort(lam{ a, b in a < b })
+    testing.assertEqual(result, ["apple", "banana", "cherry"], nil)
+})
+
+testing.test("sort does not mutate original", lam{ in
+    let original = [3, 1, 2]
+    let sorted = original |> sort(lam{ a, b in a - b })
+    testing.assertEqual(original, [3, 1, 2], "original unchanged")
+    testing.assertEqual(sorted, [1, 2, 3], nil)
+})
+
+testing.test("sort empty array", lam{ in
+    testing.assertEqual([] |> sort(lam{ a, b in a - b }), [], nil)
+})
+
+testing.test("sort single element", lam{ in
+    testing.assertEqual([42] |> sort(lam{ a, b in a - b }), [42], nil)
+})
+
+testing.done()

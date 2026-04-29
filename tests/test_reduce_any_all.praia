@@ -1,0 +1,75 @@
+use "testing"
+
+// ── reduce ──
+
+testing.test("reduce with initial value", lam{ in
+    testing.assertEqual([1, 2, 3, 4] |> reduce(lam{ a, x in a + x }, 0), 10, nil)
+})
+
+testing.test("reduce without initial value", lam{ in
+    testing.assertEqual([1, 2, 3] |> reduce(lam{ a, x in a + x }), 6, nil)
+})
+
+testing.test("reduce single element no initial", lam{ in
+    testing.assertEqual([42] |> reduce(lam{ a, x in a + x }), 42, nil)
+})
+
+testing.test("reduce string concatenation", lam{ in
+    testing.assertEqual(["a", "b", "c"] |> reduce(lam{ a, x in a + x }, ""), "abc", nil)
+})
+
+testing.test("reduce product", lam{ in
+    testing.assertEqual([1, 2, 3, 4] |> reduce(lam{ a, x in a * x }, 1), 24, nil)
+})
+
+testing.test("reduce empty array with initial", lam{ in
+    testing.assertEqual([] |> reduce(lam{ a, x in a + x }, 99), 99, nil)
+})
+
+testing.test("reduce empty array without initial throws", lam{ in
+    testing.assertThrows(lam{ in [] |> reduce(lam{ a, x in a + x }) }, nil)
+})
+
+// ── any ──
+
+testing.test("any with match", lam{ in
+    testing.assert([1, 2, 3] |> any(lam{ x in x > 2 }), nil)
+})
+
+testing.test("any without match", lam{ in
+    testing.assert(!([1, 2, 3] |> any(lam{ x in x > 5 })), nil)
+})
+
+testing.test("any on empty array", lam{ in
+    testing.assert(!([] |> any(lam{ x in true })), nil)
+})
+
+testing.test("any short-circuits", lam{ in
+    let count = 0
+    func check(x) { count = count + 1; return x == 2 }
+    [1, 2, 3, 4, 5] |> any(check)
+    testing.assertEqual(count, 2, "should stop after finding match")
+})
+
+// ── all ──
+
+testing.test("all true", lam{ in
+    testing.assert([1, 2, 3] |> all(lam{ x in x > 0 }), nil)
+})
+
+testing.test("all false", lam{ in
+    testing.assert(!([1, 2, 3] |> all(lam{ x in x > 1 })), nil)
+})
+
+testing.test("all on empty array", lam{ in
+    testing.assert([] |> all(lam{ x in false }), "all on empty is true")
+})
+
+testing.test("all short-circuits", lam{ in
+    let count = 0
+    func check(x) { count = count + 1; return x < 3 }
+    [1, 2, 3, 4, 5] |> all(check)
+    testing.assertEqual(count, 3, "should stop after first false")
+})
+
+testing.done()

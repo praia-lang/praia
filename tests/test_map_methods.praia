@@ -1,0 +1,76 @@
+use "testing"
+
+// ── .has() ──
+
+testing.test("has returns true for existing key", lam{ in
+    let m = {a: 1, b: 2}
+    testing.assert(m.has("a"), nil)
+    testing.assert(m.has("b"), nil)
+})
+
+testing.test("has returns false for missing key", lam{ in
+    let m = {a: 1}
+    testing.assert(!m.has("z"), nil)
+    testing.assert(!m.has(""), nil)
+})
+
+testing.test("has with non-string keys", lam{ in
+    let m = {[1]: "one", [true]: "yes"}
+    testing.assert(m.has(1), nil)
+    testing.assert(m.has(true), nil)
+    testing.assert(!m.has(2), nil)
+})
+
+testing.test("has on empty map", lam{ in
+    testing.assert(!({}).has("anything"), nil)
+})
+
+testing.test("has with nil value", lam{ in
+    let m = {a: nil}
+    testing.assert(m.has("a"), "key exists even if value is nil")
+})
+
+// ── .get() ──
+
+testing.test("get returns value for existing key", lam{ in
+    let m = {a: 1, b: "hello"}
+    testing.assertEqual(m.get("a"), 1, nil)
+    testing.assertEqual(m.get("b"), "hello", nil)
+})
+
+testing.test("get returns nil for missing key", lam{ in
+    testing.assertEqual({a: 1}.get("z"), nil, nil)
+})
+
+testing.test("get returns default for missing key", lam{ in
+    testing.assertEqual({a: 1}.get("z", 99), 99, nil)
+    testing.assertEqual({a: 1}.get("z", "default"), "default", nil)
+})
+
+testing.test("get returns value not default when key exists", lam{ in
+    testing.assertEqual({a: 1}.get("a", 99), 1, "should return value, not default")
+})
+
+testing.test("get with nil value returns nil not default", lam{ in
+    testing.assertEqual({a: nil}.get("a", 99), nil, "nil value is still a value")
+})
+
+testing.test("get with non-string keys", lam{ in
+    let m = {[42]: "answer"}
+    testing.assertEqual(m.get(42), "answer", nil)
+    testing.assertEqual(m.get(43, "nope"), "nope", nil)
+})
+
+// ── shadowing ──
+
+testing.test("map key named 'has' shadows method", lam{ in
+    let m = {has: 42}
+    testing.assertEqual(m.has, 42, nil)
+})
+
+testing.test("map key named 'get' shadows method", lam{ in
+    let m = {get: "value"}
+    testing.assertEqual(m.get, "value", nil)
+})
+
+testing.done()
