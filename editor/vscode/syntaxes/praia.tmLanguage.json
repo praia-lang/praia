@@ -35,17 +35,32 @@
           "begin": "/\\*",
           "end": "\\*/",
           "patterns": [
-            {
-              "name": "comment.block.praia",
-              "begin": "/\\*",
-              "end": "\\*/"
-            }
+            { "include": "#block-comment" }
           ]
         }
       ]
     },
     "strings": {
       "patterns": [
+        {
+          "name": "string.quoted.triple.praia",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.praia",
+              "match": "\\\\([ntr0\\\\\"'/%]|x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\})"
+            },
+            {
+              "name": "meta.interpolation.praia",
+              "begin": "%\\{",
+              "end": "\\}",
+              "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.praia" } },
+              "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.praia" } },
+              "patterns": [{ "include": "source.praia" }]
+            }
+          ]
+        },
         {
           "name": "string.quoted.double.praia",
           "begin": "\"",
@@ -221,6 +236,10 @@
           "match": "\\?\\."
         },
         {
+          "name": "keyword.operator.optional-index.praia",
+          "match": "\\?\\["
+        },
+        {
           "name": "keyword.operator.bitwise.shift.praia",
           "match": "<<|>>"
         },
@@ -231,6 +250,10 @@
         {
           "name": "keyword.operator.increment.praia",
           "match": "\\+\\+|--"
+        },
+        {
+          "name": "keyword.operator.assignment.compound.praia",
+          "match": "[+\\-*/%]="
         },
         {
           "name": "keyword.operator.arithmetic.praia",
@@ -249,12 +272,12 @@
           "match": "="
         },
         {
-          "name": "keyword.operator.range.praia",
-          "match": "\\.\\."
-        },
-        {
           "name": "keyword.operator.spread.praia",
           "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.range.praia",
+          "match": "\\.\\."
         }
       ]
     },
@@ -308,6 +331,14 @@
             "1": { "name": "variable.function.praia" }
           }
         }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.praia",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [
+        { "include": "#block-comment" }
       ]
     },
     "punctuation": {
