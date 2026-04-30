@@ -32,18 +32,36 @@ contexts:
       scope: comment.line.double-slash.praia
     - match: /\*
       scope: punctuation.definition.comment.begin.praia
-      push:
-        - meta_scope: comment.block.praia
-        - match: \*/
-          scope: punctuation.definition.comment.end.praia
-          pop: true
-        - match: /\*
-          push:
-            - meta_scope: comment.block.praia
-            - match: \*/
-              pop: true
+      push: block-comment
+
+  block-comment:
+    - meta_scope: comment.block.praia
+    - match: \*/
+      scope: punctuation.definition.comment.end.praia
+      pop: true
+    - match: /\*
+      scope: punctuation.definition.comment.begin.praia
+      push: block-comment
 
   strings:
+    - match: '"""'
+      scope: punctuation.definition.string.begin.praia
+      push:
+        - meta_scope: string.quoted.triple.praia
+        - match: '"""'
+          scope: punctuation.definition.string.end.praia
+          pop: true
+        - match: \\([ntr0\\\"'/%]|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\})
+          scope: constant.character.escape.praia
+        - match: '%\{'
+          scope: punctuation.section.interpolation.begin.praia
+          push:
+            - clear_scopes: 1
+            - meta_scope: meta.interpolation.praia
+            - match: '\}'
+              scope: punctuation.section.interpolation.end.praia
+              pop: true
+            - include: main
     - match: '"'
       scope: punctuation.definition.string.begin.praia
       push:
@@ -148,12 +166,16 @@ contexts:
       scope: keyword.operator.nil-coalesce.praia
     - match: '\?\.'
       scope: keyword.operator.optional-chain.praia
+    - match: '\?\['
+      scope: keyword.operator.optional-index.praia
     - match: '<<|>>'
       scope: keyword.operator.bitwise.shift.praia
     - match: '==|!=|<=|>=|<|>'
       scope: keyword.operator.comparison.praia
     - match: '\+\+|--'
       scope: keyword.operator.increment.praia
+    - match: '[+\-*/%]='
+      scope: keyword.operator.assignment.compound.praia
     - match: '[-+*/%]'
       scope: keyword.operator.arithmetic.praia
     - match: '[&|^~]'
@@ -162,10 +184,10 @@ contexts:
       scope: keyword.operator.logical.not.praia
     - match: '='
       scope: keyword.operator.assignment.praia
-    - match: '\.\.'
-      scope: keyword.operator.range.praia
     - match: '\.\.\.'
       scope: keyword.operator.spread.praia
+    - match: '\.\.'
+      scope: keyword.operator.range.praia
 
   decorators:
     - match: '@'
