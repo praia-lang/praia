@@ -419,19 +419,45 @@ void VM::runDefers(int frameIdx) {
     deferStack[frameIdx].clear();
     // Save VM state, run defers on the same VM (re-entrant but safe because
     // result is popped before we get here), then let OP_RETURN restore.
+    // Errors in one defer must not stop the rest from running, but we surface
+    // each error to stderr so failures aren't silent.
     for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
         int savedTop = stackTop;
         int savedFrameCount = frameCount;
+        std::string errMsg;
+        bool errored = false;
         try {
             if (defers[i].isCallable()) {
                 push(defers[i]);
-                if (callValue(defers[i], 0, 0))
-                    execute(frameCount);
+                if (callValue(defers[i], 0, 0)) {
+                    if (execute(frameCount) == Result::RUNTIME_ERROR) {
+                        errored = true;
+                        errMsg = lastError_;
+                    }
+                } else {
+                    errored = true;
+                    errMsg = lastError_;
+                }
             }
-        } catch (...) {}
+        } catch (const ExitSignal&) {
+            // sys.exit() must propagate even from a defer.
+            stackTop = savedTop;
+            frameCount = savedFrameCount;
+            throw;
+        } catch (const std::exception& e) {
+            errored = true;
+            errMsg = e.what();
+        } catch (...) {
+            errored = true;
+            errMsg = "unknown exception";
+        }
         // Restore stack — deferred function's return might have changed stackTop
         stackTop = savedTop;
         frameCount = savedFrameCount;
+        if (errored && !suppressErrors_) {
+            std::cerr << "Error in deferred call: "
+                      << (errMsg.empty() ? "(no message)" : errMsg) << std::endl;
+        }
     }
 }
 

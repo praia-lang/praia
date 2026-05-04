@@ -1,4 +1,5 @@
 #include "parser.h"
+#include <array>
 #include <iostream>
 
 Parser::Parser(const std::vector<Token>& tokens) : tokens(tokens) {}
@@ -11,7 +12,7 @@ std::vector<StmtPtr> Parser::parse() {
             // Drain pending statements (emitted by decorator desugaring)
             while (!pending_.empty()) {
                 statements.push_back(std::move(pending_.front()));
-                pending_.erase(pending_.begin());
+                pending_.pop_front();
             }
         } catch (const ParseError&) {
             synchronize();
@@ -638,7 +639,7 @@ StmtPtr Parser::block() {
             blk->statements.push_back(statement());
             while (!pending_.empty()) {
                 blk->statements.push_back(std::move(pending_.front()));
-                pending_.erase(pending_.begin());
+                pending_.pop_front();
             }
         } catch (const ParseError&) {
             synchronize();
@@ -1343,7 +1344,7 @@ ExprPtr Parser::primary() {
             lam->body.push_back(statement());
             while (!pending_.empty()) {
                 lam->body.push_back(std::move(pending_.front()));
-                pending_.erase(pending_.begin());
+                pending_.pop_front();
             }
         }
         functionDepth--;
@@ -1512,16 +1513,26 @@ Parser::ParseError Parser::error(const Token& token, const std::string& message)
 }
 
 bool Parser::isNameToken(TokenType t) const {
-    return t == TokenType::IDENTIFIER ||
-           t == TokenType::LET || t == TokenType::FUNC || t == TokenType::CLASS || t == TokenType::ENUM ||
-           t == TokenType::IF || t == TokenType::ELSE || t == TokenType::ELIF || t == TokenType::MATCH || t == TokenType::STATIC ||
-           t == TokenType::WHILE || t == TokenType::FOR || t == TokenType::IN || t == TokenType::IS ||
-           t == TokenType::RETURN || t == TokenType::BREAK || t == TokenType::CONTINUE ||
-           t == TokenType::TRY || t == TokenType::CATCH || t == TokenType::THROW || t == TokenType::FINALLY ||
-           t == TokenType::ENSURE || t == TokenType::USE || t == TokenType::EXPORT ||
-           t == TokenType::EXTENDS || t == TokenType::THIS || t == TokenType::SUPER ||
-           t == TokenType::LAM || t == TokenType::ASYNC || t == TokenType::AWAIT || t == TokenType::YIELD ||
-           t == TokenType::TRUE || t == TokenType::FALSE || t == TokenType::NIL;
+    static constexpr auto kTable = []() {
+        std::array<bool, static_cast<size_t>(TokenType::EOF_TOKEN) + 1> a{};
+        for (auto tt : {
+            TokenType::IDENTIFIER,
+            TokenType::LET, TokenType::FUNC, TokenType::CLASS, TokenType::ENUM,
+            TokenType::IF, TokenType::ELSE, TokenType::ELIF, TokenType::MATCH, TokenType::STATIC,
+            TokenType::WHILE, TokenType::FOR, TokenType::IN, TokenType::IS,
+            TokenType::RETURN, TokenType::BREAK, TokenType::CONTINUE,
+            TokenType::TRY, TokenType::CATCH, TokenType::THROW, TokenType::FINALLY,
+            TokenType::ENSURE, TokenType::USE, TokenType::EXPORT,
+            TokenType::EXTENDS, TokenType::THIS, TokenType::SUPER,
+            TokenType::LAM, TokenType::ASYNC, TokenType::AWAIT, TokenType::YIELD,
+            TokenType::TRUE, TokenType::FALSE, TokenType::NIL,
+        }) {
+            a[static_cast<size_t>(tt)] = true;
+        }
+        return a;
+    }();
+    auto idx = static_cast<size_t>(t);
+    return idx < kTable.size() && kTable[idx];
 }
 
 void Parser::synchronize() {

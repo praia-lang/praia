@@ -2,6 +2,7 @@
 
 #include "ast.h"
 #include "token.h"
+#include <deque>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -79,5 +80,5 @@ private:
     int loopDepth = 0;
     int functionDepth = 0;
     int yieldCount = 0; // tracks yield expressions in current function body
-    std::vector<StmtPtr> pending_; // for decorator desugaring (extra stmts to emit)
+    std::deque<StmtPtr> pending_; // for decorator desugaring (extra stmts to emit)
 };

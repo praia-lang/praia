@@ -1,8 +1,10 @@
 #include "../builtins.h"
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <vector>
 #include "../gc_heap.h"
 
 void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment> globals) {
@@ -134,19 +136,53 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
             auto& futures = args[0].asArray()->elements;
             if (futures.empty())
                 throw RuntimeError("async.race() requires at least one future", 0);
-            // Poll futures until one is ready
-            // Note: shared_future doesn't have a ready() check, so we
-            // use wait_for with zero timeout
-            while (true) {
-                for (auto& f : futures) {
-                    if (!f.isFuture()) continue;
-                    auto& sf = f.asFuture()->future;
-                    if (sf.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-                        return sf.get();
-                    }
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            for (auto& f : futures) {
+                if (!f.isFuture())
+                    throw RuntimeError("async.race() array must contain only futures", 0);
             }
+
+            // Quick check for any future already satisfied — avoids spawning
+            // waiter threads when the race is already decided.
+            for (size_t i = 0; i < futures.size(); i++) {
+                auto& sf = futures[i].asFuture()->future;
+                if (sf.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                    return sf.get();
+            }
+
+            // Spawn one waiter thread per future; each blocks on f.wait()
+            // (using the future's internal notification — no polling) and
+            // races to claim the win via compare_exchange. The first to
+            // succeed signals the condition variable. Loser threads finish
+            // when their own future eventually completes; we detach them.
+            auto cv = std::make_shared<std::condition_variable>();
+            auto mtx = std::make_shared<std::mutex>();
+            auto winner = std::make_shared<std::atomic<int>>(-1);
+
+            std::vector<std::thread> waiters;
+            waiters.reserve(futures.size());
+            for (size_t i = 0; i < futures.size(); i++) {
+                auto sf = futures[i].asFuture()->future;
+                int idx = static_cast<int>(i);
+                waiters.emplace_back([sf, cv, mtx, winner, idx]() {
+                    sf.wait();
+                    int expected = -1;
+                    if (winner->compare_exchange_strong(expected, idx)) {
+                        std::lock_guard<std::mutex> lk(*mtx);
+                        cv->notify_one();
+                    }
+                });
+            }
+
+            {
+                std::unique_lock<std::mutex> lk(*mtx);
+                cv->wait(lk, [&] { return winner->load() != -1; });
+            }
+
+            // Detach losers — they'll exit naturally when their future
+            // completes (and their compare_exchange will harmlessly fail).
+            for (auto& t : waiters) t.detach();
+
+            return futures[winner->load()].asFuture()->future.get();
         }));
 
     globals->define("futures", Value(asyncMap));
