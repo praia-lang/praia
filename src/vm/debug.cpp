@@ -141,6 +141,9 @@ int disassembleInstruction(const Chunk& chunk, int offset) {
         case OpCode::OP_GET_LOCAL:      return u16Instruction("OP_GET_LOCAL", chunk, offset);
         case OpCode::OP_SET_LOCAL:      return u16Instruction("OP_SET_LOCAL", chunk, offset);
 
+        // Function prologue
+        case OpCode::OP_IS_MISSING_ARG:   return u16Instruction("OP_IS_MISSING_ARG", chunk, offset);
+
         // Postfix
         case OpCode::OP_POST_INC_LOCAL:   return u16Instruction("OP_POST_INC_LOCAL", chunk, offset);
         case OpCode::OP_POST_DEC_LOCAL:   return u16Instruction("OP_POST_DEC_LOCAL", chunk, offset);

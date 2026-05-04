@@ -237,6 +237,12 @@ private:
     // to evaluate in reverse order when the function exits.
     std::vector<std::vector<const Expr*>> deferStacks_;
 
+    // Pending "filled" mask for the next call. Bits set = positions actually
+    // provided by the caller. Default (UINT64_MAX) means "all provided"
+    // (positional call). Named-arg call sites set this before invoking, and
+    // the receiving call path consumes-and-resets it on entry.
+    uint64_t pendingArgsFilled_ = ~0ULL;
+
     // (interpMutex removed — async tasks use task-local Interpreters instead)
 
     // Call stack for error traces

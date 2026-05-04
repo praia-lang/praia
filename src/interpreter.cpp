@@ -92,12 +92,16 @@ static bool checkIs(const Value& subject, const Value& typeVal, int line, int co
 }
 
 // Reorder named arguments to match parameter positions.
-// Returns a vector in parameter order with Value() for unfilled positions.
+// Returns a vector in parameter order with Value() for unfilled positions
+// AND sets *outMask: bit i is 1 iff position i was actually provided. The
+// caller is responsible for installing outMask into Interpreter::pendingArgsFilled_
+// before invoking the callable so the receiver knows which positions to default.
 static std::vector<Value> reorderNamedArgs(
     const std::shared_ptr<Callable>& callable,
     const std::vector<Value>& args,
     const std::vector<std::string>& names,
-    int line) {
+    int line,
+    uint64_t* outMask) {
     const auto* params = callable->paramNames();
     if (!params)
         throw RuntimeError("Named arguments not supported for '" + callable->name() + "'", line);
@@ -126,6 +130,12 @@ static std::vector<Value> reorderNamedArgs(
             result[found] = args[i];
             filled[found] = true;
         }
+    }
+    if (outMask) {
+        uint64_t m = 0;
+        int n = std::min(paramCount, 64);
+        for (int p = 0; p < n; p++) if (filled[p]) m |= (uint64_t)1 << p;
+        *outMask = m;
     }
     return result;
 }
@@ -1159,8 +1169,11 @@ Value Interpreter::evaluate(const Expr* expr) {
         // Reorder named arguments if present
         bool hasNamed = false;
         for (auto& n : e->argNames) { if (!n.empty()) { hasNamed = true; break; } }
-        if (hasNamed)
-            args = reorderNamedArgs(callee.asCallable(), args, e->argNames, e->line);
+        if (hasNamed) {
+            uint64_t mask = 0;
+            args = reorderNamedArgs(callee.asCallable(), args, e->argNames, e->line, &mask);
+            pendingArgsFilled_ = mask;
+        }
 
         return callWithContext(*this, callee.asCallable(), args, e->line);
     }
@@ -1218,7 +1231,9 @@ Value Interpreter::evaluate(const Expr* expr) {
                 std::vector<std::string> names;
                 names.push_back("");
                 for (auto& n : call->argNames) names.push_back(n);
-                args = reorderNamedArgs(callee.asCallable(), args, names, e->line);
+                uint64_t mask = 0;
+                args = reorderNamedArgs(callee.asCallable(), args, names, e->line, &mask);
+                pendingArgsFilled_ = mask;
             }
 
             return callWithContext(*this, callee.asCallable(), args, e->line);
@@ -1287,8 +1302,11 @@ Value Interpreter::evaluate(const Expr* expr) {
         // Reorder named arguments if present
         bool hasNamed = false;
         for (auto& n : call->argNames) { if (!n.empty()) { hasNamed = true; break; } }
-        if (hasNamed)
-            args = reorderNamedArgs(callee.asCallable(), args, call->argNames, e->line);
+        if (hasNamed) {
+            uint64_t mask = 0;
+            args = reorderNamedArgs(callee.asCallable(), args, call->argNames, e->line, &mask);
+            pendingArgsFilled_ = mask;
+        }
 
         auto callable = callee.asCallable();
         int arity = callable->arity();

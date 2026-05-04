@@ -48,6 +48,9 @@ enum class OpCode : uint8_t {
     OP_GET_LOCAL,       // [slot:16]
     OP_SET_LOCAL,       // [slot:16]
 
+    // ── Function prologue ──
+    OP_IS_MISSING_ARG,    // [slot:16] — pushes true if param at slot was not provided by caller
+
     // ── Postfix ──
     OP_POST_INC_LOCAL,    // [slot:16]
     OP_POST_DEC_LOCAL,    // [slot:16]

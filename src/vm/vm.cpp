@@ -159,6 +159,9 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
     frame.function = closure->function;
     frame.ip = gen->savedIp;
     frame.baseSlot = restoreBase;
+    // Generators are past their prologue when restored, so OP_IS_MISSING_ARG
+    // never runs in a resumed frame. Zero mask means "everything provided".
+    frame.missingArgsMask = 0;
     frame.definingClass = nullptr;
 
     // Push sendValue as result of yield expression (skip on first call)
@@ -243,6 +246,7 @@ void VM::closeUpvalues(Value* last) {
 bool VM::callClosure(ObjClosure* closure, int argCount, int line) {
     auto& fn = closure->function;
     bool hasRest = !fn->restParam.empty();
+    int origArgCount = argCount;
 
     // Allow fewer args (defaults to nil) but not more (unless rest param).
     if (!hasRest && argCount > fn->arity) {
@@ -250,11 +254,19 @@ bool VM::callClosure(ObjClosure* closure, int argCount, int line) {
             " " + argStr(fn->arity) + " but got " + std::to_string(argCount), line);
     }
 
+    if (fn->arity > 64) {
+        throw RuntimeError(fn->name + "() has more than 64 parameters (max supported)", line);
+    }
+
     // Pad missing args with nil
     while (argCount < fn->arity) {
         push(Value());
         argCount++;
     }
+
+    // Build missing-args mask: bits [origArgCount, arity) are set.
+    uint64_t missingMask = 0;
+    for (int i = origArgCount; i < fn->arity; i++) missingMask |= (uint64_t)1 << i;
 
     // Collect extra args into rest array
     if (hasRest) {
@@ -280,6 +292,7 @@ bool VM::callClosure(ObjClosure* closure, int argCount, int line) {
     frame.function = nullptr;
     frame.ip = fn->chunk.code.data();
     frame.baseSlot = stackTop - argCount - 1; // -1 for the closure itself on stack
+    frame.missingArgsMask = missingMask;
     frame.definingClass = nullptr;
     return true;
 }
@@ -531,6 +544,7 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     grainVm.frames[0].function = script;
     grainVm.frames[0].ip = script->chunk.code.data();
     grainVm.frames[0].baseSlot = 0;
+    grainVm.frames[0].missingArgsMask = 0;
     grainVm.frameCount = 1;
 
     auto result = grainVm.execute();
@@ -603,6 +617,7 @@ VM::Result VM::run(std::shared_ptr<CompiledFunction> script) {
     frames[0].function = script;
     frames[0].ip = script->chunk.code.data();
     frames[0].baseSlot = 0;
+    frames[0].missingArgsMask = 0;
     frameCount = 1;
 
     return execute();
@@ -627,6 +642,7 @@ VM::Result VM::runRepl(std::shared_ptr<CompiledFunction> script) {
     frames[0].function = script;
     frames[0].ip = script->chunk.code.data();
     frames[0].baseSlot = 0;
+    frames[0].missingArgsMask = 0;
     frames[0].definingClass = nullptr;
     frameCount = 1;
 
@@ -915,6 +931,18 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_GET_LOCAL: { uint16_t slot = READ_U16(); push(stack[FRAME.baseSlot + slot]); break; }
         case OpCode::OP_SET_LOCAL: { uint16_t slot = READ_U16(); stack[FRAME.baseSlot + slot] = peek(); break; }
 
+        // ── Function prologue ──
+        case OpCode::OP_IS_MISSING_ARG: {
+            uint16_t slot = READ_U16();
+            // slot is 1-indexed (slot 0 = closure itself). Param index = slot - 1.
+            // Bit i in missingArgsMask is set iff param i was not provided.
+            int paramIdx = static_cast<int>(slot) - 1;
+            bool missing = (paramIdx < 64) &&
+                ((FRAME.missingArgsMask >> paramIdx) & 1ULL) != 0;
+            push(Value(missing));
+            break;
+        }
+
         // ── Postfix ──
         case OpCode::OP_POST_INC_LOCAL: {
             uint16_t slot = READ_U16();
@@ -1038,7 +1066,19 @@ VM::Result VM::execute(int baseFrameCount_) {
             // Push callee back + reordered args
             push(callee);
             for (auto& a : reordered) push(a);
+            int prevFrameCount = frameCount;
             if (!callValue(callee, paramCount, CURRENT_LINE())) return Result::RUNTIME_ERROR;
+            // If a Praia frame was pushed, override its missing mask so that
+            // omitted named-arg positions (which we filled with nil placeholders)
+            // are treated as missing for default evaluation.
+            if (frameCount > prevFrameCount) {
+                uint64_t mask = 0;
+                int n = std::min(paramCount, 64);
+                for (int p = 0; p < n; p++) {
+                    if (!filled[p]) mask |= (uint64_t)1 << p;
+                }
+                frames[frameCount - 1].missingArgsMask = mask;
+            }
             break;
         }
 

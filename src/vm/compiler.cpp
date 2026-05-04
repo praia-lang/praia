@@ -670,14 +670,13 @@ void Compiler::compileFuncStmt(const FuncStmt* stmt) {
         addLocal(stmt->restParam);
     }
 
-    // Emit default parameter evaluation: if param is nil and default exists, replace it
+    // Emit default parameter evaluation: only when the caller did NOT provide
+    // an argument for this parameter. Explicit nil from the caller is preserved.
     for (size_t i = 0; i < stmt->defaults.size(); i++) {
         if (stmt->defaults[i]) {
             int slot = static_cast<int>(i) + 1; // +1 for slot 0 (function itself)
-            emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
+            emit(OpCode::OP_IS_MISSING_ARG, stmt->line, stmt->column);
             emitU16(static_cast<uint16_t>(slot), stmt->line, stmt->column);
-            emit(OpCode::OP_NIL, stmt->line, stmt->column);
-            emit(OpCode::OP_EQUAL, stmt->line, stmt->column);
             int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
             // Replace with default value
             compileExpr(stmt->defaults[i].get());

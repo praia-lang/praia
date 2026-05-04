@@ -73,6 +73,10 @@ struct VMCallFrame {
     std::shared_ptr<CompiledFunction> function; // fallback for script frame
     const uint8_t* ip;
     int baseSlot;
+    // Bit i is set iff parameter i was NOT provided by the caller.
+    // Used by OP_IS_MISSING_ARG to decide whether to apply defaults.
+    // (Limit of 64 params is enforced at function-definition time.)
+    uint64_t missingArgsMask;
     std::shared_ptr<PraiaClass> definingClass; // for super resolution in methods
 
     Chunk& chunk() const {

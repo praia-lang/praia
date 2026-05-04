@@ -54,13 +54,16 @@ Value PraiaMethod::call(Interpreter& interp, const std::vector<Value>& args) {
 
     auto prevEnv = interp.env;
     interp.env = methodEnv;
+    uint64_t filled = interp.pendingArgsFilled_;
+    interp.pendingArgsFilled_ = ~0ULL;
+    auto isFilled = [&](size_t i) {
+        return i < args.size() && (i >= 64 || ((filled >> i) & 1ULL));
+    };
     for (size_t i = 0; i < params.size(); i++) {
-        if (i < args.size() && !args[i].isNil()) {
+        if (isFilled(i)) {
             methodEnv->define(params[i], args[i]);
         } else if (decl && i < decl->defaults.size() && decl->defaults[i]) {
             methodEnv->define(params[i], interp.evaluate(decl->defaults[i].get()));
-        } else if (i < args.size()) {
-            methodEnv->define(params[i], args[i]);
         } else {
             methodEnv->define(params[i], Value());
         }
@@ -96,13 +99,17 @@ Value Interpreter::callBody(std::shared_ptr<Environment> callEnv,
     auto prevEnv = env;
     env = callEnv;
 
+    uint64_t filled = pendingArgsFilled_;
+    pendingArgsFilled_ = ~0ULL;
+    auto isFilled = [&](size_t i) {
+        return i < args.size() && (i >= 64 || ((filled >> i) & 1ULL));
+    };
     for (size_t i = 0; i < params.size(); i++) {
-        if (i < args.size() && !args[i].isNil()) {
+        if (isFilled(i)) {
+            // Caller passed something — keep it (even if nil).
             callEnv->define(params[i], args[i]);
         } else if (auto* def = getDefault(i)) {
             callEnv->define(params[i], evaluate(def));
-        } else if (i < args.size()) {
-            callEnv->define(params[i], args[i]);
         } else {
             callEnv->define(params[i], Value());
         }
@@ -245,13 +252,14 @@ Value PraiaGeneratorFunction::call(Interpreter& interp, const std::vector<Value>
 
     auto prevEnv = interp.env;
     interp.env = funcEnv;
+    uint64_t filledG1 = interp.pendingArgsFilled_;
+    interp.pendingArgsFilled_ = ~0ULL;
     for (size_t i = 0; i < params.size(); i++) {
-        if (i < args.size() && !args[i].isNil()) {
+        bool filled = i < args.size() && (i >= 64 || ((filledG1 >> i) & 1ULL));
+        if (filled) {
             funcEnv->define(params[i], args[i]);
         } else if (defaults && i < defaults->size() && (*defaults)[i]) {
             funcEnv->define(params[i], interp.evaluate((*defaults)[i].get()));
-        } else if (i < args.size()) {
-            funcEnv->define(params[i], args[i]);
         } else {
             funcEnv->define(params[i], Value());
         }
@@ -274,13 +282,14 @@ Value PraiaGeneratorLambda::call(Interpreter& interp, const std::vector<Value>& 
 
     auto prevEnv = interp.env;
     interp.env = funcEnv;
+    uint64_t filledG2 = interp.pendingArgsFilled_;
+    interp.pendingArgsFilled_ = ~0ULL;
     for (size_t i = 0; i < params.size(); i++) {
-        if (i < args.size() && !args[i].isNil()) {
+        bool filled = i < args.size() && (i >= 64 || ((filledG2 >> i) & 1ULL));
+        if (filled) {
             funcEnv->define(params[i], args[i]);
         } else if (i < expr->defaults.size() && expr->defaults[i]) {
             funcEnv->define(params[i], interp.evaluate(expr->defaults[i].get()));
-        } else if (i < args.size()) {
-            funcEnv->define(params[i], args[i]);
         } else {
             funcEnv->define(params[i], Value());
         }
