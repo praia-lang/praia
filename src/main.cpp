@@ -24,6 +24,17 @@
 
 static constexpr const char* PRAIA_VERSION = "0.5.1";
 
+// ── Exit codes ───────────────────────────────────────────────
+// Documented in --help. `sys.exit(N)` from user code passes through
+// unchanged via ExitSignal, so any value other than these is a user
+// choice — don't repurpose 0–3.
+namespace ExitCode {
+    constexpr int Success      = 0;
+    constexpr int UsageError   = 1; // bad CLI args, file not found, no test files
+    constexpr int CompileError = 2; // lex / parse / bytecode codegen failure
+    constexpr int RuntimeError = 3; // uncaught exception, VM/interpreter failed
+}
+
 // ── AST printer ──────────────────────────────────────────────
 
 static void printIndent(int level) {
@@ -393,7 +404,7 @@ static std::string readFile(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file '" << path << "'" << std::endl;
-        exit(1);
+        exit(ExitCode::UsageError);
     }
     std::stringstream ss;
     ss << file.rdbuf();
@@ -649,7 +660,7 @@ static int runTestsCommand(const std::string& dir, bool useVm) {
     namespace fs = std::filesystem;
     if (!fs::exists(dir)) {
         std::cerr << "praia test: directory not found: " << dir << std::endl;
-        return 2;
+        return ExitCode::UsageError;
     }
 
     std::vector<std::string> files;
@@ -665,7 +676,7 @@ static int runTestsCommand(const std::string& dir, bool useVm) {
 
     if (files.empty()) {
         std::cerr << "praia test: no test_*.praia files in " << dir << std::endl;
-        return 1;
+        return ExitCode::UsageError;
     }
 
     int passed = 0, failed = 0;
@@ -751,7 +762,7 @@ int main(int argc, char* argv[]) {
     // `praia -v` / `praia --version`
     if (argc >= 2 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "-v")) {
         std::cout << "Praia Version " << PRAIA_VERSION << std::endl;
-        return 0;
+        return ExitCode::Success;
     }
 
     // `praia --include-path` — print the header directory for native plugins
@@ -762,7 +773,7 @@ int main(int argc, char* argv[]) {
         // Development mode: headers are in src/ relative to the binary
         std::cout << fs::canonical(fs::path(argv[0]).parent_path() / "src").string() << std::endl;
 #endif
-        return 0;
+        return ExitCode::Success;
     }
 
     // `praia -h` / `praia --help`
@@ -782,8 +793,15 @@ int main(int argc, char* argv[]) {
                   << "  --tree           Use tree-walker interpreter instead of VM\n"
                   << "  --tokens         Print lexer tokens and exit\n"
                   << "  --ast            Print parse tree and exit\n"
-                  << "  --include-path   Print the header path for native plugins\n";
-        return 0;
+                  << "  --include-path   Print the header path for native plugins\n"
+                  << "\n"
+                  << "Exit codes:\n"
+                  << "  0  success\n"
+                  << "  1  usage error (bad args, file not found)\n"
+                  << "  2  compile error (syntax / parse)\n"
+                  << "  3  runtime error\n"
+                  << "  N  sys.exit(N) — user-defined\n";
+        return ExitCode::Success;
     }
 
     // `praia test [dir]` subcommand — scan past flags to find it
@@ -819,7 +837,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "-c") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: -c requires an argument\n";
-                return 1;
+                return ExitCode::UsageError;
             }
             hasCFlag = true;
             cCode = argv[++i];
@@ -833,12 +851,12 @@ int main(int argc, char* argv[]) {
     if (hasCFlag) {
         bool hadError = false;
         auto program = compile(cCode, showTokens, showAst, hadError);
-        if (hadError) return 1;
+        if (hadError) return ExitCode::CompileError;
         if (!program.empty()) {
             if (useVm) {
                 Compiler compiler;
                 auto script = compiler.compile(program);
-                if (!script) return 1;
+                if (!script) return ExitCode::CompileError;
                 extern void vmRegisterNatives(VM& vm);
                 VM vm;
                 vmRegisterNatives(vm);
@@ -846,7 +864,10 @@ int main(int argc, char* argv[]) {
                 for (int i = cArgStart; i < argc; i++)
                     scriptArgs.push_back(argv[i]);
                 vm.setArgs(scriptArgs);
-                try { return vm.run(script) == VM::Result::OK ? 0 : 1; }
+                try {
+                    return vm.run(script) == VM::Result::OK
+                        ? ExitCode::Success : ExitCode::RuntimeError;
+                }
                 catch (const ExitSignal& e) { return e.code; }
             } else {
                 Interpreter interpreter;
@@ -855,12 +876,12 @@ int main(int argc, char* argv[]) {
                     scriptArgs.push_back(argv[i]);
                 interpreter.setArgs(scriptArgs);
                 try {
-                    if (!interpreter.interpret(program)) return 1;
+                    if (!interpreter.interpret(program)) return ExitCode::RuntimeError;
                 }
                 catch (const ExitSignal& e) { return e.code; }
             }
         }
-        return 0;
+        return ExitCode::Success;
     }
 
     if (filename.empty()) {
@@ -869,7 +890,7 @@ int main(int argc, char* argv[]) {
             else repl(showTokens, showAst);
         }
         catch (const ExitSignal& e) { return e.code; }
-        return 0;
+        return ExitCode::Success;
     }
 
     // Collect script arguments (everything after the filename)
@@ -880,13 +901,13 @@ int main(int argc, char* argv[]) {
     std::string source = readFile(filename);
     bool hadError = false;
     auto program = compile(source, showTokens, showAst, hadError);
-    if (hadError) return 1;
+    if (hadError) return ExitCode::CompileError;
     if (!program.empty()) {
         if (useVm) {
             // Bytecode VM path
             Compiler compiler;
             auto script = compiler.compile(program);
-            if (!script) return 1;
+            if (!script) return ExitCode::CompileError;
 
             extern void vmRegisterNatives(VM& vm);
             VM vm;
@@ -895,7 +916,8 @@ int main(int argc, char* argv[]) {
             vm.setCurrentFile(filename);
             try {
                 auto result = vm.run(script);
-                return result == VM::Result::OK ? 0 : 1;
+                return result == VM::Result::OK
+                    ? ExitCode::Success : ExitCode::RuntimeError;
             } catch (const ExitSignal& e) { return e.code; }
         } else {
             // Tree-walker path
@@ -903,10 +925,10 @@ int main(int argc, char* argv[]) {
             interpreter.setArgs(scriptArgs);
             interpreter.setCurrentFile(filename);
             try {
-                if (!interpreter.interpret(program)) return 1;
+                if (!interpreter.interpret(program)) return ExitCode::RuntimeError;
             }
             catch (const ExitSignal& e) { return e.code; }
         }
     }
-    return 0;
+    return ExitCode::Success;
 }
