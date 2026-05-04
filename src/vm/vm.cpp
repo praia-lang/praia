@@ -1511,12 +1511,18 @@ VM::Result VM::execute(int baseFrameCount_) {
             Value idx = pop();
             Value obj = pop();
             if (_idxOpt && obj.isNil()) { push(Value()); break; }
+            // Optional access (`?[`) suppresses "missing value" failures
+            // (out-of-bounds, missing map key) but still throws on type
+            // errors — those indicate a programming bug, not an absent element.
             if (obj.isArray()) {
                 if (!idx.isNumber()) { RUNTIME_ERR("Array index must be a number"); }
                 auto& elems = obj.asArray()->elements;
                 int i = static_cast<int>(idx.asNumber());
                 if (i < 0) i += static_cast<int>(elems.size());
-                if (i < 0 || i >= static_cast<int>(elems.size())) { RUNTIME_ERR("Array index out of bounds"); }
+                if (i < 0 || i >= static_cast<int>(elems.size())) {
+                    if (_idxOpt) { push(Value()); break; }
+                    RUNTIME_ERR("Array index out of bounds");
+                }
                 push(elems[i]);
             } else if (obj.isString()) {
                 if (!idx.isNumber()) { RUNTIME_ERR("String index must be a number"); }
@@ -1526,17 +1532,26 @@ VM::Result VM::execute(int baseFrameCount_) {
                 auto gs = utf8_graphemes(str);
                 int slen = static_cast<int>(gs.size());
                 if (i < 0) i += slen;
-                if (i < 0 || i >= slen) { RUNTIME_ERR("String index out of bounds"); }
+                if (i < 0 || i >= slen) {
+                    if (_idxOpt) { push(Value()); break; }
+                    RUNTIME_ERR("String index out of bounds");
+                }
                 push(Value(gs[i]));
 #else
                 if (i < 0) i += static_cast<int>(str.size());
-                if (i < 0 || i >= static_cast<int>(str.size())) { RUNTIME_ERR("String index out of bounds"); }
+                if (i < 0 || i >= static_cast<int>(str.size())) {
+                    if (_idxOpt) { push(Value()); break; }
+                    RUNTIME_ERR("String index out of bounds");
+                }
                 push(Value(std::string(1, str[i])));
 #endif
             } else if (obj.isMap()) {
                 auto& entries = obj.asMap()->entries;
                 auto it = entries.find(idx);
-                if (it == entries.end()) { RUNTIME_ERR("Map has no key '" + idx.toString() + "'"); }
+                if (it == entries.end()) {
+                    if (_idxOpt) { push(Value()); break; }
+                    RUNTIME_ERR("Map has no key '" + idx.toString() + "'");
+                }
                 push(it->second);
             } else if (obj.isInstance()) {
                 auto [ok, r] = vmCallDunder(*this, obj, "__index", {idx});

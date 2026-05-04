@@ -1401,14 +1401,20 @@ Value Interpreter::evaluate(const Expr* expr) {
         Value obj = evaluate(e->object.get());
         if (e->isOptional && obj.isNil()) return Value();
         Value idx = evaluate(e->index.get());
+        // Optional access (`?[`) suppresses "missing value" failures (out-of-
+        // bounds, missing map key) but still throws on type errors (e.g.
+        // string index on an array) — those indicate a programming bug, not
+        // an absent element.
         if (obj.isArray()) {
             if (!idx.isNumber())
                 throw RuntimeError("Array index must be a number", e->line, e->column);
             auto& elems = obj.asArray()->elements;
             int i = static_cast<int>(idx.asNumber());
             if (i < 0) i += static_cast<int>(elems.size());
-            if (i < 0 || i >= static_cast<int>(elems.size()))
+            if (i < 0 || i >= static_cast<int>(elems.size())) {
+                if (e->isOptional) return Value();
                 throw RuntimeError("Array index out of bounds", e->line, e->column);
+            }
             return elems[i];
         }
         if (obj.isString()) {
@@ -1420,21 +1426,27 @@ Value Interpreter::evaluate(const Expr* expr) {
             auto gs = utf8_graphemes(str);
             int len = static_cast<int>(gs.size());
             if (i < 0) i += len;
-            if (i < 0 || i >= len)
+            if (i < 0 || i >= len) {
+                if (e->isOptional) return Value();
                 throw RuntimeError("String index out of bounds", e->line, e->column);
+            }
             return Value(gs[i]);
 #else
             if (i < 0) i += static_cast<int>(str.size());
-            if (i < 0 || i >= static_cast<int>(str.size()))
+            if (i < 0 || i >= static_cast<int>(str.size())) {
+                if (e->isOptional) return Value();
                 throw RuntimeError("String index out of bounds", e->line, e->column);
+            }
             return Value(std::string(1, str[i]));
 #endif
         }
         if (obj.isMap()) {
             auto& entries = obj.asMap()->entries;
             auto it = entries.find(idx);
-            if (it == entries.end())
+            if (it == entries.end()) {
+                if (e->isOptional) return Value();
                 throw RuntimeError("Map has no key '" + idx.toString() + "'", e->line);
+            }
             return it->second;
         }
         if (obj.isInstance()) {
