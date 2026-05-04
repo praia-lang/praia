@@ -67,20 +67,63 @@ class JsonParser {
                     case 'b': result += '\b'; break;
                     case 'f': result += '\f'; break;
                     case 'u': {
-                        pos++;
-                        if (pos + 4 > src.size())
-                            fail("Truncated unicode escape in JSON string");
-                        std::string hex = src.substr(pos, 4);
-                        pos += 3; // +1 from the loop increment below
+                        // Helper: parse exactly 4 hex digits at pos+1..pos+4.
+                        // On entry, pos points at the 'u'. On success, pos
+                        // advances to the last hex digit (loop's pos++ then
+                        // moves past it).
+                        auto parseHex4 = [&](int& cp) {
+                            if (pos + 4 >= src.size())
+                                fail("Truncated unicode escape in JSON string");
+                            cp = 0;
+                            for (int i = 1; i <= 4; i++) {
+                                char ch = src[pos + i];
+                                int d;
+                                if (ch >= '0' && ch <= '9') d = ch - '0';
+                                else if (ch >= 'a' && ch <= 'f') d = 10 + (ch - 'a');
+                                else if (ch >= 'A' && ch <= 'F') d = 10 + (ch - 'A');
+                                else fail(std::string("Invalid hex digit '") + ch + "' in unicode escape");
+                                cp = (cp << 4) | d;
+                            }
+                            pos += 4; // +1 from the loop increment below = 5 total past 'u'
+                        };
+
                         int cp;
-                        try { cp = std::stoi(hex, nullptr, 16); }
-                        catch (...) { fail("Invalid unicode escape: \\u" + hex); }
-                        if (cp < 0x80) result += static_cast<char>(cp);
-                        else if (cp < 0x800) {
+                        parseHex4(cp);
+
+                        // Surrogate-pair handling: high surrogate must be
+                        // followed by `\uXXXX` low surrogate; combine to a
+                        // supplementary-plane codepoint.
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            // Need to peek past the current loop position. The
+                            // loop will pos++ before exiting this iteration, so
+                            // the next char is at pos+1. Require "\u".
+                            if (pos + 2 >= src.size() ||
+                                src[pos + 1] != '\\' || src[pos + 2] != 'u') {
+                                fail("Lone high surrogate in JSON string");
+                            }
+                            pos += 2; // skip "\u" (loop pos++ will then sit at last hex)
+                            int low;
+                            parseHex4(low);
+                            if (low < 0xDC00 || low > 0xDFFF)
+                                fail("Invalid low surrogate after high surrogate");
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                            fail("Lone low surrogate in JSON string");
+                        }
+
+                        // Encode codepoint as UTF-8.
+                        if (cp < 0x80) {
+                            result += static_cast<char>(cp);
+                        } else if (cp < 0x800) {
                             result += static_cast<char>(0xC0 | (cp >> 6));
                             result += static_cast<char>(0x80 | (cp & 0x3F));
-                        } else {
+                        } else if (cp < 0x10000) {
                             result += static_cast<char>(0xE0 | (cp >> 12));
+                            result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                            result += static_cast<char>(0x80 | (cp & 0x3F));
+                        } else {
+                            result += static_cast<char>(0xF0 | (cp >> 18));
+                            result += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
                             result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
                             result += static_cast<char>(0x80 | (cp & 0x3F));
                         }
