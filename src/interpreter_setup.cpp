@@ -577,6 +577,31 @@ Interpreter::Interpreter() {
             return Value();
         }));
 
+    // sys.tempDir(prefix?) — create a unique temp directory under the system
+    // temp dir and return its absolute path. Uses mkdtemp(3) for atomic
+    // creation with mode 0700. Caller is responsible for removing it.
+    sysMap->entries[Value("tempDir")] = Value(makeNative("sys.tempDir", -1,
+        [](const std::vector<Value>& args) -> Value {
+            std::string prefix = "praia";
+            if (!args.empty()) {
+                if (!args[0].isString())
+                    throw RuntimeError("sys.tempDir() prefix must be a string", 0);
+                prefix = args[0].asString();
+            }
+            std::string base;
+            std::error_code ec;
+            auto tmpPath = fs::temp_directory_path(ec);
+            if (ec)
+                throw RuntimeError("sys.tempDir(): " + ec.message(), 0);
+            base = tmpPath.string();
+            std::string tmpl = base + "/" + prefix + ".XXXXXX";
+            std::vector<char> buf(tmpl.begin(), tmpl.end());
+            buf.push_back('\0');
+            if (!mkdtemp(buf.data()))
+                throw RuntimeError("sys.tempDir(): " + std::string(std::strerror(errno)), 0);
+            return Value(std::string(buf.data()));
+        }));
+
     sysMap->entries[Value("remove")] = Value(makeNative("sys.remove", 1,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isString())
