@@ -165,6 +165,14 @@ struct PraiaGenerator {
     std::vector<std::shared_ptr<void>> ownedResources;
 
     ~PraiaGenerator();  // defined in interpreter_callables.cpp (needs Fiber complete type)
+
+    // Eagerly release the fiber stack and captured environment once the
+    // generator has run to completion. The shared_ptr<PraiaGenerator> may
+    // outlive the actual generation (held by the GC, by user code that
+    // forgot to drop the reference, etc.) — without this, each abandoned
+    // generator would hold its 256KB fiber stack until the next GC cycle.
+    // Safe to call only when state == COMPLETED. No-op if already released.
+    void releaseAfterCompletion();  // defined in interpreter_callables.cpp
 };
 
 struct PraiaClass;  // defined in interpreter.h (it's a Callable)

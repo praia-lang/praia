@@ -186,6 +186,16 @@ PraiaGenerator::~PraiaGenerator() {
     }
 }
 
+void PraiaGenerator::releaseAfterCompletion() {
+    // Drop the fiber (releases its 256KB mmap'd stack via Fiber::~Fiber).
+    // Drop fiberEnv so the captured environment becomes GC-collectible
+    // immediately rather than waiting for this PraiaGenerator's own collection.
+    // ownedResources is dropped for the same reason.
+    fiber.reset();
+    fiberEnv.reset();
+    ownedResources.clear();
+}
+
 // ── Generator callables ──────────────────────────────────────
 // Calling a generator function returns a PraiaGenerator object.
 // The body runs on a fiber (lightweight coroutine), suspended/resumed

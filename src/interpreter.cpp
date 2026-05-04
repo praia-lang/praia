@@ -632,8 +632,14 @@ void Interpreter::execute(const Stmt* stmt) {
                     gen->sendValue = Value();
                     gen->fiber->resume();
 
-                    if (!gen->errorMessage.empty())
-                        throw RuntimeError(gen->errorMessage, s->line, s->column);
+                    if (!gen->errorMessage.empty()) {
+                        std::string msg = gen->errorMessage;
+                        gen->releaseAfterCompletion();
+                        throw RuntimeError(msg, s->line, s->column);
+                    }
+                    if (gen->state == PraiaGenerator::State::COMPLETED) {
+                        gen->releaseAfterCompletion();
+                    }
                     if (gen->done) break;
 
                     auto iterEnv = gcNew<Environment>(env);
@@ -1548,12 +1554,21 @@ Value Interpreter::evaluate(const Expr* expr) {
                         gen->sendValue = args.empty() ? Value() : args[0];
                         gen->fiber->resume();
 
-                        if (!gen->errorMessage.empty())
-                            throw RuntimeError(gen->errorMessage, 0);
+                        if (!gen->errorMessage.empty()) {
+                            std::string msg = gen->errorMessage;
+                            gen->releaseAfterCompletion();
+                            throw RuntimeError(msg, 0);
+                        }
 
                         auto result = gcNew<PraiaMap>();
                         result->entries[Value("value")] = gen->lastYielded;
                         result->entries[Value("done")] = Value(gen->done);
+                        // If the generator just completed, drop the 256KB fiber
+                        // stack and captured env immediately rather than waiting
+                        // for GC.
+                        if (gen->state == PraiaGenerator::State::COMPLETED) {
+                            gen->releaseAfterCompletion();
+                        }
                         return Value(result);
                     }));
             }
