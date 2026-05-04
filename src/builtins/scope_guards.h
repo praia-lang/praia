@@ -9,6 +9,8 @@
 
 #ifdef HAVE_OPENSSL
 #include <openssl/ssl.h>
+#include <openssl/evp.h>
+#include <openssl/bio.h>
 #endif
 
 namespace praia {
@@ -92,6 +94,37 @@ public:
     SSL* release() { auto t = p_; p_ = nullptr; return t; }
     explicit operator bool() const { return p_ != nullptr; }
 };
+
+// Generic move-only guard for an OpenSSL pointer with a free function.
+// Specializations below cover EVP_CIPHER_CTX, EVP_MD_CTX, EVP_PKEY,
+// EVP_PKEY_CTX, and BIO. Use the typedefs at the bottom rather than
+// instantiating directly.
+template <typename T, void (*Free)(T*)>
+class OsslPtrGuard {
+    T* p_;
+public:
+    explicit OsslPtrGuard(T* p = nullptr) : p_(p) {}
+    OsslPtrGuard(const OsslPtrGuard&) = delete;
+    OsslPtrGuard& operator=(const OsslPtrGuard&) = delete;
+    OsslPtrGuard(OsslPtrGuard&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
+    OsslPtrGuard& operator=(OsslPtrGuard&& o) noexcept {
+        if (this != &o) { if (p_) Free(p_); p_ = o.p_; o.p_ = nullptr; }
+        return *this;
+    }
+    ~OsslPtrGuard() { if (p_) Free(p_); }
+    T* get() const { return p_; }
+    T* release() { auto t = p_; p_ = nullptr; return t; }
+    explicit operator bool() const { return p_ != nullptr; }
+};
+
+// BIO_free returns int; wrap it so it matches the void(*)(T*) signature.
+inline void osslBioFree(BIO* b) { BIO_free(b); }
+
+using EvpCipherCtxGuard = OsslPtrGuard<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
+using EvpMdCtxGuard     = OsslPtrGuard<EVP_MD_CTX,     EVP_MD_CTX_free>;
+using EvpPkeyGuard      = OsslPtrGuard<EVP_PKEY,       EVP_PKEY_free>;
+using EvpPkeyCtxGuard   = OsslPtrGuard<EVP_PKEY_CTX,   EVP_PKEY_CTX_free>;
+using BioGuard          = OsslPtrGuard<BIO,            osslBioFree>;
 
 #endif // HAVE_OPENSSL
 

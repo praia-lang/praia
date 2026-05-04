@@ -1,5 +1,6 @@
 #include "../builtins.h"
 #include "../gc_heap.h"
+#include "scope_guards.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -400,32 +401,25 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (iv.size() != 16)
                 throw RuntimeError("crypto.encrypt() iv must be 16 bytes", 0);
 
-            EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+            praia::EvpCipherCtxGuard ctx(EVP_CIPHER_CTX_new());
             if (!ctx) throw RuntimeError("crypto.encrypt() failed to create context", 0);
 
-            if (EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr,
+            if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_cbc(), nullptr,
                     reinterpret_cast<const unsigned char*>(key.data()),
-                    reinterpret_cast<const unsigned char*>(iv.data())) != 1) {
-                EVP_CIPHER_CTX_free(ctx);
+                    reinterpret_cast<const unsigned char*>(iv.data())) != 1)
                 throw RuntimeError("crypto.encrypt() init failed", 0);
-            }
 
             std::string ciphertext(plaintext.size() + 16, '\0');
             int len = 0, totalLen = 0;
-            if (EVP_EncryptUpdate(ctx, reinterpret_cast<unsigned char*>(&ciphertext[0]),
+            if (EVP_EncryptUpdate(ctx.get(), reinterpret_cast<unsigned char*>(&ciphertext[0]),
                     &len, reinterpret_cast<const unsigned char*>(plaintext.data()),
-                    static_cast<int>(plaintext.size())) != 1) {
-                EVP_CIPHER_CTX_free(ctx);
+                    static_cast<int>(plaintext.size())) != 1)
                 throw RuntimeError("crypto.encrypt() update failed", 0);
-            }
             totalLen = len;
-            if (EVP_EncryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(&ciphertext[totalLen]),
-                    &len) != 1) {
-                EVP_CIPHER_CTX_free(ctx);
+            if (EVP_EncryptFinal_ex(ctx.get(), reinterpret_cast<unsigned char*>(&ciphertext[totalLen]),
+                    &len) != 1)
                 throw RuntimeError("crypto.encrypt() final failed", 0);
-            }
             totalLen += len;
-            EVP_CIPHER_CTX_free(ctx);
             ciphertext.resize(totalLen);
             return Value(std::move(ciphertext));
         }));
@@ -443,32 +437,25 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (iv.size() != 16)
                 throw RuntimeError("crypto.decrypt() iv must be 16 bytes", 0);
 
-            EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+            praia::EvpCipherCtxGuard ctx(EVP_CIPHER_CTX_new());
             if (!ctx) throw RuntimeError("crypto.decrypt() failed to create context", 0);
 
-            if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr,
+            if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_cbc(), nullptr,
                     reinterpret_cast<const unsigned char*>(key.data()),
-                    reinterpret_cast<const unsigned char*>(iv.data())) != 1) {
-                EVP_CIPHER_CTX_free(ctx);
+                    reinterpret_cast<const unsigned char*>(iv.data())) != 1)
                 throw RuntimeError("crypto.decrypt() init failed", 0);
-            }
 
             std::string plaintext(ciphertext.size(), '\0');
             int len = 0, totalLen = 0;
-            if (EVP_DecryptUpdate(ctx, reinterpret_cast<unsigned char*>(&plaintext[0]),
+            if (EVP_DecryptUpdate(ctx.get(), reinterpret_cast<unsigned char*>(&plaintext[0]),
                     &len, reinterpret_cast<const unsigned char*>(ciphertext.data()),
-                    static_cast<int>(ciphertext.size())) != 1) {
-                EVP_CIPHER_CTX_free(ctx);
+                    static_cast<int>(ciphertext.size())) != 1)
                 throw RuntimeError("crypto.decrypt() failed (wrong key/iv or corrupted data)", 0);
-            }
             totalLen = len;
-            if (EVP_DecryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(&plaintext[totalLen]),
-                    &len) != 1) {
-                EVP_CIPHER_CTX_free(ctx);
+            if (EVP_DecryptFinal_ex(ctx.get(), reinterpret_cast<unsigned char*>(&plaintext[totalLen]),
+                    &len) != 1)
                 throw RuntimeError("crypto.decrypt() failed (wrong key/iv or corrupted data)", 0);
-            }
             totalLen += len;
-            EVP_CIPHER_CTX_free(ctx);
             plaintext.resize(totalLen);
             return Value(std::move(plaintext));
         }));
@@ -608,21 +595,20 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             const EVP_MD* md = getDigest(algo);
             if (!md) throw RuntimeError("crypto.sign(): unknown algorithm '" + algo + "'", 0);
 
-            BIO* bio = BIO_new_mem_buf(keyPem.data(), static_cast<int>(keyPem.size()));
-            EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-            BIO_free(bio);
+            praia::BioGuard bio(BIO_new_mem_buf(keyPem.data(), static_cast<int>(keyPem.size())));
+            praia::EvpPkeyGuard pkey(PEM_read_bio_PrivateKey(bio.get(), nullptr, nullptr, nullptr));
             if (!pkey) throw RuntimeError("crypto.sign(): invalid private key", 0);
 
-            EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+            praia::EvpMdCtxGuard ctx(EVP_MD_CTX_new());
+            if (!ctx) throw RuntimeError("crypto.sign(): failed to create digest context", 0);
+
             size_t sigLen = 0;
-            bool ok = EVP_DigestSignInit(ctx, nullptr, md, nullptr, pkey) == 1 &&
-                      EVP_DigestSignUpdate(ctx, data.data(), data.size()) == 1 &&
-                      EVP_DigestSignFinal(ctx, nullptr, &sigLen) == 1;
+            bool ok = EVP_DigestSignInit(ctx.get(), nullptr, md, nullptr, pkey.get()) == 1 &&
+                      EVP_DigestSignUpdate(ctx.get(), data.data(), data.size()) == 1 &&
+                      EVP_DigestSignFinal(ctx.get(), nullptr, &sigLen) == 1;
             std::vector<uint8_t> sig(sigLen);
-            ok = ok && EVP_DigestSignFinal(ctx, sig.data(), &sigLen) == 1;
+            ok = ok && EVP_DigestSignFinal(ctx.get(), sig.data(), &sigLen) == 1;
             sig.resize(sigLen);
-            EVP_MD_CTX_free(ctx);
-            EVP_PKEY_free(pkey);
 
             if (!ok) throw RuntimeError("crypto.sign(): signing failed", 0);
             return Value(b64Encode(sig));
@@ -644,17 +630,16 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             auto sig = b64Decode(sigB64);
             if (sig.empty()) return Value(false);
 
-            BIO* bio = BIO_new_mem_buf(keyPem.data(), static_cast<int>(keyPem.size()));
-            EVP_PKEY* pkey = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
-            BIO_free(bio);
+            praia::BioGuard bio(BIO_new_mem_buf(keyPem.data(), static_cast<int>(keyPem.size())));
+            praia::EvpPkeyGuard pkey(PEM_read_bio_PUBKEY(bio.get(), nullptr, nullptr, nullptr));
             if (!pkey) throw RuntimeError("crypto.verify(): invalid public key", 0);
 
-            EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-            bool ok = EVP_DigestVerifyInit(ctx, nullptr, md, nullptr, pkey) == 1 &&
-                      EVP_DigestVerifyUpdate(ctx, data.data(), data.size()) == 1 &&
-                      EVP_DigestVerifyFinal(ctx, sig.data(), sig.size()) == 1;
-            EVP_MD_CTX_free(ctx);
-            EVP_PKEY_free(pkey);
+            praia::EvpMdCtxGuard ctx(EVP_MD_CTX_new());
+            if (!ctx) throw RuntimeError("crypto.verify(): failed to create digest context", 0);
+
+            bool ok = EVP_DigestVerifyInit(ctx.get(), nullptr, md, nullptr, pkey.get()) == 1 &&
+                      EVP_DigestVerifyUpdate(ctx.get(), data.data(), data.size()) == 1 &&
+                      EVP_DigestVerifyFinal(ctx.get(), sig.data(), sig.size()) == 1;
             return Value(ok);
         }));
 
@@ -664,47 +649,48 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             std::string keyType = (!args.empty() && args[0].isString()) ? args[0].asString() : "rsa";
             int bits = (args.size() > 1 && args[1].isNumber()) ? static_cast<int>(args[1].asNumber()) : 2048;
 
-            EVP_PKEY* pkey = nullptr;
-            EVP_PKEY_CTX* ctx = nullptr;
+            praia::EvpPkeyGuard pkey;
+            praia::EvpPkeyCtxGuard ctx;
 
             if (keyType == "rsa") {
-                ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
-                if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0 ||
-                    EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) <= 0 ||
-                    EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-                    if (ctx) EVP_PKEY_CTX_free(ctx);
+                ctx = praia::EvpPkeyCtxGuard(EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr));
+                EVP_PKEY* raw = nullptr;
+                if (!ctx || EVP_PKEY_keygen_init(ctx.get()) <= 0 ||
+                    EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), bits) <= 0 ||
+                    EVP_PKEY_keygen(ctx.get(), &raw) <= 0)
                     throw RuntimeError("crypto.generateKeyPair(): RSA key generation failed", 0);
-                }
+                pkey = praia::EvpPkeyGuard(raw);
             } else if (keyType == "ec") {
-                ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
-                if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0 ||
-                    EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) <= 0 ||
-                    EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-                    if (ctx) EVP_PKEY_CTX_free(ctx);
+                ctx = praia::EvpPkeyCtxGuard(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr));
+                EVP_PKEY* raw = nullptr;
+                if (!ctx || EVP_PKEY_keygen_init(ctx.get()) <= 0 ||
+                    EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx.get(), NID_X9_62_prime256v1) <= 0 ||
+                    EVP_PKEY_keygen(ctx.get(), &raw) <= 0)
                     throw RuntimeError("crypto.generateKeyPair(): EC key generation failed", 0);
-                }
+                pkey = praia::EvpPkeyGuard(raw);
             } else {
                 throw RuntimeError("crypto.generateKeyPair(): unknown type '" + keyType + "' (expected 'rsa' or 'ec')", 0);
             }
-            EVP_PKEY_CTX_free(ctx);
 
             // Export private key as PEM
-            BIO* privBio = BIO_new(BIO_s_mem());
-            PEM_write_bio_PrivateKey(privBio, pkey, nullptr, nullptr, 0, nullptr, nullptr);
-            BUF_MEM* privBuf;
-            BIO_get_mem_ptr(privBio, &privBuf);
-            std::string privPem(privBuf->data, privBuf->length);
-            BIO_free(privBio);
+            std::string privPem;
+            {
+                praia::BioGuard privBio(BIO_new(BIO_s_mem()));
+                PEM_write_bio_PrivateKey(privBio.get(), pkey.get(), nullptr, nullptr, 0, nullptr, nullptr);
+                BUF_MEM* privBuf;
+                BIO_get_mem_ptr(privBio.get(), &privBuf);
+                privPem.assign(privBuf->data, privBuf->length);
+            }
 
             // Export public key as PEM
-            BIO* pubBio = BIO_new(BIO_s_mem());
-            PEM_write_bio_PUBKEY(pubBio, pkey);
-            BUF_MEM* pubBuf;
-            BIO_get_mem_ptr(pubBio, &pubBuf);
-            std::string pubPem(pubBuf->data, pubBuf->length);
-            BIO_free(pubBio);
-
-            EVP_PKEY_free(pkey);
+            std::string pubPem;
+            {
+                praia::BioGuard pubBio(BIO_new(BIO_s_mem()));
+                PEM_write_bio_PUBKEY(pubBio.get(), pkey.get());
+                BUF_MEM* pubBuf;
+                BIO_get_mem_ptr(pubBio.get(), &pubBuf);
+                pubPem.assign(pubBuf->data, pubBuf->length);
+            }
 
             auto result = gcNew<PraiaMap>();
             result->entries[Value("privateKey")] = Value(std::move(privPem));
