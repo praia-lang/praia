@@ -23,14 +23,19 @@ inline const char* g_praiaLibDir = nullptr;
 
 // Verify that a resolved path stays within an expected base directory.
 // Prevents symlink escapes (e.g. ext_grains/evil -> /etc/passwd).
+// Returns "" on rejection (containment escaped) OR on filesystem error
+// (missing file, permission denied) — both treated as "not a valid grain".
 inline std::string containedCanonical(const fs::path& file, const fs::path& base) {
-    auto resolved = fs::canonical(file).string();
-    auto baseStr = fs::canonical(base).string();
+    std::error_code ec;
+    auto resolved = fs::canonical(file, ec).string();
+    if (ec) return "";
+    auto baseCanonical = fs::canonical(base, ec).string();
+    if (ec) return "";
     // Ensure resolved path starts with base + separator (or equals base)
-    if (resolved.rfind(baseStr, 0) != 0)
+    if (resolved.rfind(baseCanonical, 0) != 0)
         return ""; // escaped containment
     // Must be exactly base or base/...
-    if (resolved.size() > baseStr.size() && resolved[baseStr.size()] != '/')
+    if (resolved.size() > baseCanonical.size() && resolved[baseCanonical.size()] != '/')
         return ""; // e.g. base="/foo/bar", resolved="/foo/barBaz"
     return resolved;
 }
@@ -92,11 +97,25 @@ inline std::string resolveGrainPath(const std::string& importPath,
                                      const std::string& currentFile) {
     // 1. Relative path (starts with ./ or ../)
     if (importPath.starts_with("./") || importPath.starts_with("../")) {
-        std::string base = currentFile.empty() ? fs::current_path().string()
-                                                : fs::path(currentFile).parent_path().string();
-        std::string resolved = (fs::path(base) / (importPath + ".praia")).string();
-        if (fs::exists(resolved)) return fs::canonical(resolved).string();
-        throw std::runtime_error("Grain not found: " + importPath + " (looked in " + resolved + ")");
+        fs::path baseDir = currentFile.empty() ? fs::current_path()
+                                                : fs::path(currentFile).parent_path();
+        fs::path resolved = baseDir / (importPath + ".praia");
+        if (!fs::exists(resolved))
+            throw std::runtime_error("Grain not found: " + importPath +
+                                      " (looked in " + resolved.string() + ")");
+        // Reject if the file at the resolved path is itself a symlink — the
+        // user wrote a literal relative path, but the file redirects through
+        // a symlink to somewhere else. Defense-in-depth for hosts that load
+        // untrusted grains. (Symlinks in parent directories are still allowed.)
+        std::error_code ec;
+        if (fs::is_symlink(resolved, ec))
+            throw std::runtime_error("Grain '" + importPath +
+                                      "' resolves to a symlink (refusing to load)");
+        auto canon = fs::canonical(resolved, ec);
+        if (ec)
+            throw std::runtime_error("Grain not found: " + importPath +
+                                      " (" + ec.message() + ")");
+        return canon.string();
     }
 
     // 2. ext_grains/ (local dependencies installed by sand)

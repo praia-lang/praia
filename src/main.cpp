@@ -22,7 +22,7 @@
 
 // ── Version ──────────────────────────────────────────────────
 
-static constexpr const char* PRAIA_VERSION = "0.5.0";
+static constexpr const char* PRAIA_VERSION = "0.5.1";
 
 // ── AST printer ──────────────────────────────────────────────
 
@@ -816,7 +816,11 @@ int main(int argc, char* argv[]) {
         else if (arg == "--ast")      showAst = true;
         else if (arg == "--vm")       useVm = true;
         else if (arg == "--tree")     useVm = false;
-        else if (arg == "-c" && i + 1 < argc) {
+        else if (arg == "-c") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: -c requires an argument\n";
+                return 1;
+            }
             hasCFlag = true;
             cCode = argv[++i];
             cArgStart = i + 1;

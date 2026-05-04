@@ -473,29 +473,52 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
     // net.tls(sock, hostname?) — wrap a TCP socket with TLS.
     // Returns a TLS handle (negative integer) that works with send/recv/close.
     // hostname enables SNI and certificate verification.
+    // net.tls(sock, hostname, options?) -> TLS handle
+    //
+    // Default secure: requires a hostname (used for both SNI and certificate
+    // verification). To intentionally skip verification (e.g. for banner
+    // grabbing or other pentesting stuff), pass {verify: false} explicitly. An empty
+    // hostname is only allowed alongside {verify: false}.
     netMap->entries[Value("tls")] = Value(makeNative("net.tls", -1,
         [](const std::vector<Value>& args) -> Value {
-            if (args.empty() || args.size() > 2)
-                throw RuntimeError("net.tls(sock, hostname?) takes 1-2 arguments", 0);
+            if (args.empty() || args.size() > 3)
+                throw RuntimeError("net.tls(sock, hostname, options?) takes 2-3 arguments", 0);
             if (!args[0].isNumber())
                 throw RuntimeError("net.tls() requires a socket", 0);
             int fd = static_cast<int>(args[0].asNumber());
             if (fd < 0)
                 throw RuntimeError("net.tls() requires a plain TCP socket, not a TLS handle", 0);
-            std::string hostname;
-            if (args.size() == 2) {
-                if (!args[1].isString())
-                    throw RuntimeError("net.tls() hostname must be a string", 0);
-                hostname = args[1].asString();
+
+            if (args.size() < 2)
+                throw RuntimeError("net.tls(): hostname required for verification "
+                                   "(or pass an empty hostname with {verify: false} to opt out)", 0);
+            if (!args[1].isString())
+                throw RuntimeError("net.tls() hostname must be a string", 0);
+            std::string hostname = args[1].asString();
+
+            bool verify = true;
+            if (args.size() == 3) {
+                if (!args[2].isMap())
+                    throw RuntimeError("net.tls() options must be a map", 0);
+                auto& opts = args[2].asMap()->entries;
+                auto it = opts.find(Value(std::string("verify")));
+                if (it != opts.end()) {
+                    if (!it->second.isBool())
+                        throw RuntimeError("net.tls() options.verify must be a bool", 0);
+                    verify = it->second.asBool();
+                }
             }
+
+            if (hostname.empty() && verify)
+                throw RuntimeError("net.tls(): hostname required for verification "
+                                   "(or pass {verify: false} to opt out)", 0);
 #ifdef HAVE_OPENSSL
             ensureSSLInit();
             SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
             if (!ctx)
                 throw RuntimeError("net.tls(): failed to create SSL context", 0);
             SSL_CTX_set_default_verify_paths(ctx);
-            if (!hostname.empty())
-                SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+            SSL_CTX_set_verify(ctx, verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, nullptr);
 
             SSL* ssl = SSL_new(ctx);
             if (!ssl) {
@@ -503,9 +526,11 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 throw RuntimeError("net.tls(): failed to create SSL object", 0);
             }
             SSL_set_fd(ssl, fd);
+            // SNI uses hostname even when verify=false (most servers require it).
             if (!hostname.empty()) {
                 SSL_set_tlsext_host_name(ssl, hostname.c_str()); // SNI
-                SSL_set1_host(ssl, hostname.c_str());            // hostname verification
+                if (verify)
+                    SSL_set1_host(ssl, hostname.c_str());        // hostname verification
             }
 
             if (SSL_connect(ssl) <= 0) {
@@ -517,7 +542,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 throw RuntimeError("TLS handshake failed: " + std::string(errBuf), 0);
             }
 
-            if (!hostname.empty()) {
+            if (verify) {
                 long vr = SSL_get_verify_result(ssl);
                 if (vr != X509_V_OK) {
                     std::string reason = X509_verify_cert_error_string(vr);
@@ -544,7 +569,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             conn.fd = fd;
             return Value(static_cast<int64_t>(registerTls(conn)));
 #else
-            (void)fd; (void)hostname;
+            (void)fd; (void)hostname; (void)verify;
             throw RuntimeError("net.tls() requires OpenSSL (build with HAVE_OPENSSL)", 0);
 #endif
         }));
