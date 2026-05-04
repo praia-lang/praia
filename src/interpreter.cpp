@@ -472,7 +472,16 @@ void Interpreter::execute(const Stmt* stmt) {
                                 auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
                                 matchEnv->define(argId->name, tag->values[i]);
                             }
-                            execute(c.body.get());
+                            // Restore env on throw so the outer scope isn't
+                            // left pointing at matchEnv. (Outer executeBlock
+                            // calls also restore via savedEnvStack_, but
+                            // relying on that coupling is fragile.)
+                            try {
+                                execute(c.body.get());
+                            } catch (...) {
+                                env = prevEnv;
+                                throw;
+                            }
                             env = prevEnv;
                             break;
                         } else {

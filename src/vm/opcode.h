@@ -49,10 +49,12 @@ enum class OpCode : uint8_t {
     OP_SET_LOCAL,       // [slot:16]
 
     // ── Postfix ──
-    OP_POST_INC_LOCAL,  // [slot:16]
-    OP_POST_DEC_LOCAL,  // [slot:16]
-    OP_POST_INC_GLOBAL, // [name_idx:16]
-    OP_POST_DEC_GLOBAL, // [name_idx:16]
+    OP_POST_INC_LOCAL,    // [slot:16]
+    OP_POST_DEC_LOCAL,    // [slot:16]
+    OP_POST_INC_GLOBAL,   // [name_idx:16]
+    OP_POST_DEC_GLOBAL,   // [name_idx:16]
+    OP_POST_INC_UPVALUE,  // [slot:16]
+    OP_POST_DEC_UPVALUE,  // [slot:16]
 
     // ── Control flow ──
     OP_JUMP,            // [offset:16]

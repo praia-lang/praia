@@ -142,10 +142,12 @@ int disassembleInstruction(const Chunk& chunk, int offset) {
         case OpCode::OP_SET_LOCAL:      return u16Instruction("OP_SET_LOCAL", chunk, offset);
 
         // Postfix
-        case OpCode::OP_POST_INC_LOCAL: return u16Instruction("OP_POST_INC_LOCAL", chunk, offset);
-        case OpCode::OP_POST_DEC_LOCAL: return u16Instruction("OP_POST_DEC_LOCAL", chunk, offset);
-        case OpCode::OP_POST_INC_GLOBAL:return constantInstruction("OP_POST_INC_GLOBAL", chunk, offset);
-        case OpCode::OP_POST_DEC_GLOBAL:return constantInstruction("OP_POST_DEC_GLOBAL", chunk, offset);
+        case OpCode::OP_POST_INC_LOCAL:   return u16Instruction("OP_POST_INC_LOCAL", chunk, offset);
+        case OpCode::OP_POST_DEC_LOCAL:   return u16Instruction("OP_POST_DEC_LOCAL", chunk, offset);
+        case OpCode::OP_POST_INC_GLOBAL:  return constantInstruction("OP_POST_INC_GLOBAL", chunk, offset);
+        case OpCode::OP_POST_DEC_GLOBAL:  return constantInstruction("OP_POST_DEC_GLOBAL", chunk, offset);
+        case OpCode::OP_POST_INC_UPVALUE: return u16Instruction("OP_POST_INC_UPVALUE", chunk, offset);
+        case OpCode::OP_POST_DEC_UPVALUE: return u16Instruction("OP_POST_DEC_UPVALUE", chunk, offset);
 
         // Control flow
         case OpCode::OP_JUMP:           return jumpInstruction("OP_JUMP", 1, chunk, offset);

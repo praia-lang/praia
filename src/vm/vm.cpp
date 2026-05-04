@@ -950,6 +950,21 @@ VM::Result VM::execute(int baseFrameCount_) {
             } else it->second = Value(it->second.asNumber() + (inc ? 1 : -1));
             break;
         }
+        case OpCode::OP_POST_INC_UPVALUE:
+        case OpCode::OP_POST_DEC_UPVALUE: {
+            uint16_t slot = READ_U16();
+            Value& val = *FRAME.closure->upvalues[slot]->location;
+            if (!val.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
+            push(val);
+            bool inc = static_cast<OpCode>(instruction) == OpCode::OP_POST_INC_UPVALUE;
+            if (val.isInt()) {
+                int64_t r; int64_t delta = inc ? 1 : -1;
+                bool ov = inc ? __builtin_add_overflow(val.asInt(), (int64_t)1, &r)
+                              : __builtin_sub_overflow(val.asInt(), (int64_t)1, &r);
+                if (!ov) val = Value(r); else val = Value(val.asNumber() + delta);
+            } else val = Value(val.asNumber() + (inc ? 1 : -1));
+            break;
+        }
 
         // ── Control flow ──
         case OpCode::OP_JUMP: { uint16_t off = READ_U16(); FRAME.ip += off; break; }

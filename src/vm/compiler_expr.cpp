@@ -112,16 +112,25 @@ void Compiler::compileUnaryExpr(const UnaryExpr* expr) {
 void Compiler::compilePostfixExpr(const PostfixExpr* expr) {
     if (expr->operand->type != ExprType::Identifier) { error("Postfix operator requires a variable", expr->line); return; }
     auto* ident = static_cast<const IdentifierExpr*>(expr->operand.get());
+    bool inc = expr->op == TokenType::INCREMENT;
 
     int slot = resolveLocal(current, ident->name);
     if (slot != -1) {
-        emit(expr->op == TokenType::INCREMENT ? OpCode::OP_POST_INC_LOCAL : OpCode::OP_POST_DEC_LOCAL, expr->line, expr->column);
+        emit(inc ? OpCode::OP_POST_INC_LOCAL : OpCode::OP_POST_DEC_LOCAL, expr->line, expr->column);
         emitU16(static_cast<uint16_t>(slot), expr->line, expr->column);
-    } else {
-        uint16_t nameIdx = identifierConstant(ident->name);
-        emit(expr->op == TokenType::INCREMENT ? OpCode::OP_POST_INC_GLOBAL : OpCode::OP_POST_DEC_GLOBAL, expr->line, expr->column);
-        emitU16(nameIdx, expr->line, expr->column);
+        return;
     }
+
+    int upvalue = resolveUpvalue(current, ident->name);
+    if (upvalue != -1) {
+        emit(inc ? OpCode::OP_POST_INC_UPVALUE : OpCode::OP_POST_DEC_UPVALUE, expr->line, expr->column);
+        emitU16(static_cast<uint16_t>(upvalue), expr->line, expr->column);
+        return;
+    }
+
+    uint16_t nameIdx = identifierConstant(ident->name);
+    emit(inc ? OpCode::OP_POST_INC_GLOBAL : OpCode::OP_POST_DEC_GLOBAL, expr->line, expr->column);
+    emitU16(nameIdx, expr->line, expr->column);
 }
 
 void Compiler::compileBinaryExpr(const BinaryExpr* expr) {
