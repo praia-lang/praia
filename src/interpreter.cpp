@@ -41,7 +41,9 @@ static std::pair<bool, Value> callDunder(Interpreter& interp,
     return {true, bound->call(interp, args)};
 }
 
-// Map binary operator token to dunder method name
+// Map binary operator token to dunder method name.
+// LTE/GTE prefer dedicated __le/__ge; the dispatch falls back to negated
+// __gt/__lt when those aren't defined (see Binary handling below).
 static std::string binaryDunder(TokenType op) {
     switch (op) {
         case TokenType::PLUS:    return "__add";
@@ -53,8 +55,8 @@ static std::string binaryDunder(TokenType op) {
         case TokenType::NEQ:     return "__eq";
         case TokenType::LT:      return "__lt";
         case TokenType::GT:      return "__gt";
-        case TokenType::LTE:     return "__gt"; // !(a > b) → !(a.__gt(b))
-        case TokenType::GTE:     return "__lt"; // !(a < b) → !(a.__lt(b))
+        case TokenType::LTE:     return "__le";
+        case TokenType::GTE:     return "__ge";
         default: return "";
     }
 }
@@ -941,10 +943,19 @@ Value Interpreter::evaluate(const Expr* expr) {
             if (!dunder.empty()) {
                 auto [found, result] = callDunder(*this, left.asInstance(), dunder, {right});
                 if (found) {
-                    // NEQ, LTE, GTE negate the result of __eq, __gt, __lt
-                    if (e->op == TokenType::NEQ || e->op == TokenType::LTE || e->op == TokenType::GTE)
+                    // NEQ negates the result of __eq
+                    if (e->op == TokenType::NEQ)
                         return Value(!result.isTruthy());
                     return result;
+                }
+                // Fallback: __le/__ge default to !__gt / !__lt when the
+                // dedicated dunder isn't defined.
+                if (e->op == TokenType::LTE) {
+                    auto [ok2, r2] = callDunder(*this, left.asInstance(), "__gt", {right});
+                    if (ok2) return Value(!r2.isTruthy());
+                } else if (e->op == TokenType::GTE) {
+                    auto [ok2, r2] = callDunder(*this, left.asInstance(), "__lt", {right});
+                    if (ok2) return Value(!r2.isTruthy());
                 }
             }
         }
