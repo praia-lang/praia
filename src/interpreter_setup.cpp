@@ -2390,31 +2390,42 @@ Interpreter::Interpreter() {
                 throw RuntimeError("loadNative(): failed to load '" + path + "': " + err, 0);
             }
 
-            // Keep handle alive — never dlclose (function pointers live in lambdas)
-            g_pluginHandles.push_back(handle);
-
-            // dlsym for the entry point
+            // dlsym for the entry point. If this fails or returns null, no
+            // plugin code has run yet — safe to dlclose so the handle doesn't
+            // leak. Once we call registerFn we MUST keep the handle alive
+            // forever: the plugin's callables (and even the plugin-built
+            // std::function deleters in their destructors) hold pointers
+            // into plugin code that would dangle if unloaded.
             using RegisterFn = void (*)(PraiaMap*);
             dlerror(); // clear any old error
             auto registerFn = reinterpret_cast<RegisterFn>(dlsym(handle, "praia_register"));
             const char* dlErr = dlerror();
-            if (dlErr) {
+            if (dlErr || !registerFn) {
+                std::string sym_err = dlErr ? std::string(dlErr) : "praia_register is null";
+                dlclose(handle);
                 throw RuntimeError(
                     "loadNative(): plugin '" + path +
-                    "' missing 'praia_register' symbol: " + std::string(dlErr), 0);
+                    "' missing 'praia_register' symbol: " + sym_err, 0);
             }
 
-            // Create the module map and call the plugin's register function
+            // Past the point of no return: track the handle BEFORE calling
+            // registerFn so a partial/throwing register still records the
+            // handle (never dlclose'd, but at least visible for diagnostics).
+            g_pluginHandles.push_back(handle);
+
             auto moduleMap = gcNew<PraiaMap>();
             try {
                 registerFn(moduleMap.get());
             } catch (const std::exception& e) {
+                // Don't dlclose here — plugin code may still be referenced
+                // by std::function deleters in the partially-populated
+                // moduleMap. Just wrap and re-throw with context.
                 throw RuntimeError(
                     "loadNative(): plugin '" + path +
                     "' threw during registration: " + std::string(e.what()), 0);
             }
 
-            // Cache
+            // Success — cache the module
             g_pluginCache[absPath] = moduleMap;
 
             return Value(moduleMap);
