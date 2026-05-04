@@ -19,6 +19,7 @@
 #include <arpa/nameser.h>
 #include "../gc_heap.h"
 #include "../signal_state.h"
+#include "scope_guards.h"
 #include <mutex>
 #include <map>
 
@@ -77,13 +78,6 @@ static void closeTls(int id) {
     g_tlsConns.erase(it);
 }
 #endif
-
-struct AddrGuard {
-    struct addrinfo* res = nullptr;
-    ~AddrGuard() { if (res) freeaddrinfo(res); }
-    struct addrinfo* operator->() { return res; }
-    struct addrinfo* get() { return res; }
-};
 
 static std::string sysErr(const std::string& msg) {
     return msg + ": " + std::strerror(errno);
@@ -229,7 +223,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             struct addrinfo hints = {};
             hints.ai_family = AF_UNSPEC;
             hints.ai_socktype = SOCK_STREAM;
-            AddrGuard ag;
+            praia::AddrGuard ag;
             if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &ag.res) != 0)
                 throw RuntimeError("Cannot resolve host: " + host, 0);
 
@@ -312,45 +306,43 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             int port = validatePort(args[0].asNumber(), "net.listen()");
 
             // Try IPv6 dual-stack first (accepts both v4 and v6), fall back to IPv4
-            int fd = socket(AF_INET6, SOCK_STREAM, 0);
-            if (fd >= 0) {
-                int opt = 1;
-                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-                int v6only = 0; // dual-stack: accept IPv4-mapped addresses
-                setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+            {
+                praia::FdGuard fd(socket(AF_INET6, SOCK_STREAM, 0));
+                if (fd) {
+                    int opt = 1;
+                    setsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+                    int v6only = 0; // dual-stack: accept IPv4-mapped addresses
+                    setsockopt(fd.get(), IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
 
-                struct sockaddr_in6 addr = {};
-                addr.sin6_family = AF_INET6;
-                addr.sin6_addr = in6addr_any;
-                addr.sin6_port = htons(port);
+                    struct sockaddr_in6 addr = {};
+                    addr.sin6_family = AF_INET6;
+                    addr.sin6_addr = in6addr_any;
+                    addr.sin6_port = htons(port);
 
-                if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0 &&
-                    ::listen(fd, 64) == 0) {
-                    return Value(static_cast<int64_t>(fd));
+                    if (bind(fd.get(), (struct sockaddr*)&addr, sizeof(addr)) == 0 &&
+                        ::listen(fd.get(), 64) == 0) {
+                        return Value(static_cast<int64_t>(fd.release()));
+                    }
+                    // FdGuard closes on scope exit
                 }
-                close(fd);
             }
             // Fallback: IPv4 only
-            fd = socket(AF_INET, SOCK_STREAM, 0);
-            if (fd < 0)
+            praia::FdGuard fd(socket(AF_INET, SOCK_STREAM, 0));
+            if (!fd)
                 throw RuntimeError(sysErr("Cannot create socket"), 0);
             int opt = 1;
-            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            setsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
             struct sockaddr_in addr = {};
             addr.sin_family = AF_INET;
             addr.sin_addr.s_addr = INADDR_ANY;
             addr.sin_port = htons(port);
 
-            if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-                close(fd);
+            if (bind(fd.get(), (struct sockaddr*)&addr, sizeof(addr)) < 0)
                 throw RuntimeError(sysErr("Cannot bind to port " + std::to_string(port)), 0);
-            }
-            if (::listen(fd, 64) < 0) {
-                close(fd);
+            if (::listen(fd.get(), 64) < 0)
                 throw RuntimeError(sysErr("Cannot listen on port " + std::to_string(port)), 0);
-            }
-            return Value(static_cast<int64_t>(fd));
+            return Value(static_cast<int64_t>(fd.release()));
         }));
 
     netMap->entries[Value("accept")] = Value(makeNative("net.accept", 1,
@@ -514,58 +506,54 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                                    "(or pass {verify: false} to opt out)", 0);
 #ifdef HAVE_OPENSSL
             ensureSSLInit();
-            SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+            praia::SslCtxGuard ctx(SSL_CTX_new(TLS_client_method()));
             if (!ctx)
                 throw RuntimeError("net.tls(): failed to create SSL context", 0);
-            SSL_CTX_set_default_verify_paths(ctx);
-            SSL_CTX_set_verify(ctx, verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, nullptr);
+            SSL_CTX_set_default_verify_paths(ctx.get());
+            SSL_CTX_set_verify(ctx.get(), verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, nullptr);
 
-            SSL* ssl = SSL_new(ctx);
-            if (!ssl) {
-                SSL_CTX_free(ctx);
+            praia::SslGuard ssl(SSL_new(ctx.get()));
+            if (!ssl)
                 throw RuntimeError("net.tls(): failed to create SSL object", 0);
-            }
-            SSL_set_fd(ssl, fd);
+            SSL_set_fd(ssl.get(), fd);
             // SNI uses hostname even when verify=false (most servers require it).
             if (!hostname.empty()) {
-                SSL_set_tlsext_host_name(ssl, hostname.c_str()); // SNI
+                SSL_set_tlsext_host_name(ssl.get(), hostname.c_str()); // SNI
                 if (verify)
-                    SSL_set1_host(ssl, hostname.c_str());        // hostname verification
+                    SSL_set1_host(ssl.get(), hostname.c_str());        // hostname verification
             }
 
-            if (SSL_connect(ssl) <= 0) {
+            if (SSL_connect(ssl.get()) <= 0) {
                 unsigned long err = ERR_get_error();
                 char errBuf[256];
                 ERR_error_string_n(err, errBuf, sizeof(errBuf));
-                SSL_free(ssl);
-                SSL_CTX_free(ctx);
                 throw RuntimeError("TLS handshake failed: " + std::string(errBuf), 0);
             }
 
             if (verify) {
-                long vr = SSL_get_verify_result(ssl);
+                long vr = SSL_get_verify_result(ssl.get());
                 if (vr != X509_V_OK) {
                     std::string reason = X509_verify_cert_error_string(vr);
-                    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx);
+                    SSL_shutdown(ssl.get());
                     throw RuntimeError("TLS certificate verification failed: " + reason, 0);
                 }
                 // Verify hostname matches certificate CN/SAN
-                X509* cert = SSL_get_peer_certificate(ssl);
+                X509* cert = SSL_get_peer_certificate(ssl.get());
                 if (!cert) {
-                    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx);
+                    SSL_shutdown(ssl.get());
                     throw RuntimeError("TLS: server presented no certificate", 0);
                 }
                 int match = X509_check_host(cert, hostname.c_str(), hostname.size(), 0, nullptr);
                 X509_free(cert);
                 if (match != 1) {
-                    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx);
+                    SSL_shutdown(ssl.get());
                     throw RuntimeError("TLS hostname mismatch: certificate does not match '" + hostname + "'", 0);
                 }
             }
 
             TlsConn conn;
-            conn.ssl = ssl;
-            conn.ctx = ctx;
+            conn.ssl = ssl.release();
+            conn.ctx = ctx.release();
             conn.fd = fd;
             return Value(static_cast<int64_t>(registerTls(conn)));
 #else
@@ -603,35 +591,35 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             int port = validatePort(args[0].asNumber(), "net.udpBind()");
 
             // Try IPv6 dual-stack first
-            int sock = socket(AF_INET6, SOCK_DGRAM, 0);
-            if (sock >= 0) {
-                int opt = 1;
-                setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-                int v6only = 0;
-                setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
-                struct sockaddr_in6 addr = {};
-                addr.sin6_family = AF_INET6;
-                addr.sin6_addr = in6addr_any;
-                addr.sin6_port = htons(port);
-                if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0)
-                    return Value(static_cast<int64_t>(sock));
-                close(sock);
+            {
+                praia::FdGuard sock(socket(AF_INET6, SOCK_DGRAM, 0));
+                if (sock) {
+                    int opt = 1;
+                    setsockopt(sock.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+                    int v6only = 0;
+                    setsockopt(sock.get(), IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+                    struct sockaddr_in6 addr = {};
+                    addr.sin6_family = AF_INET6;
+                    addr.sin6_addr = in6addr_any;
+                    addr.sin6_port = htons(port);
+                    if (bind(sock.get(), (struct sockaddr*)&addr, sizeof(addr)) == 0)
+                        return Value(static_cast<int64_t>(sock.release()));
+                    // FdGuard closes on scope exit
+                }
             }
             // Fallback to IPv4
-            sock = socket(AF_INET, SOCK_DGRAM, 0);
-            if (sock < 0)
+            praia::FdGuard sock(socket(AF_INET, SOCK_DGRAM, 0));
+            if (!sock)
                 throw RuntimeError(sysErr("Cannot create UDP socket"), 0);
             int opt = 1;
-            setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            setsockopt(sock.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
             struct sockaddr_in addr = {};
             addr.sin_family = AF_INET;
             addr.sin_addr.s_addr = INADDR_ANY;
             addr.sin_port = htons(port);
-            if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-                close(sock);
+            if (bind(sock.get(), (struct sockaddr*)&addr, sizeof(addr)) < 0)
                 throw RuntimeError(sysErr("Cannot bind UDP to port " + std::to_string(port)), 0);
-            }
-            return Value(static_cast<int64_t>(sock));
+            return Value(static_cast<int64_t>(sock.release()));
         }));
 
     // net.bindInterface(sock, ifname) — bind a socket to a specific network interface.
@@ -730,7 +718,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             struct addrinfo hints = {};
             hints.ai_family = family;
             hints.ai_socktype = SOCK_DGRAM;
-            AddrGuard ag;
+            praia::AddrGuard ag;
             if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &ag.res) != 0) {
                 // Socket family didn't match host (e.g. IPv6 socket, IPv4 host) — retry unspec
                 if (family != AF_UNSPEC) {
@@ -800,7 +788,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             std::string host = args[0].asString();
             struct addrinfo hints = {};
             hints.ai_family = AF_UNSPEC; // return both IPv4 and IPv6
-            AddrGuard ag;
+            praia::AddrGuard ag;
             if (getaddrinfo(host.c_str(), nullptr, &hints, &ag.res) != 0)
                 throw RuntimeError("Cannot resolve: " + host, 0);
             auto result = gcNew<PraiaArray>();
@@ -1227,7 +1215,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
 
             struct addrinfo hints = {};
             hints.ai_family = family;
-            AddrGuard ag;
+            praia::AddrGuard ag;
             if (getaddrinfo(host.c_str(), nullptr, &hints, &ag.res) != 0)
                 throw RuntimeError("net.rawSend(): cannot resolve host: " + host, 0);
             ssize_t sent = sendto(sock, data.data(), data.size(), 0, ag->ai_addr, ag->ai_addrlen);
@@ -1297,7 +1285,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             if (inet_pton(AF_INET, host.c_str(), &dest.sin_addr) != 1) {
                 struct addrinfo hints = {};
                 hints.ai_family = AF_INET;
-                AddrGuard ag;
+                praia::AddrGuard ag;
                 if (getaddrinfo(host.c_str(), nullptr, &hints, &ag.res) != 0 || !ag.get())
                     throw RuntimeError("net.ping(): cannot resolve host: " + host, 0);
                 auto* addr = (struct sockaddr_in*)ag.get()->ai_addr;

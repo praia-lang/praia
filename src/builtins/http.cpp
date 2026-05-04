@@ -13,6 +13,7 @@
 #include <netdb.h>
 #include <unistd.h>
 #include "../gc_heap.h"
+#include "scope_guards.h"
 #ifdef HAVE_OPENSSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -157,25 +158,17 @@ ParsedUrl parseUrl(const std::string& url) {
     return r;
 }
 
-struct AddrGuard {
-    struct addrinfo* res = nullptr;
-    ~AddrGuard() { if (res) freeaddrinfo(res); }
-    struct addrinfo* operator->() { return res; }
-};
-
 int connectToHost(const std::string& host, int port) {
     struct addrinfo hints = {};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    AddrGuard ag;
+    praia::AddrGuard ag;
     if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &ag.res) != 0)
         throw RuntimeError("Cannot resolve host: " + host, 0);
-    int sock = socket(ag->ai_family, ag->ai_socktype, ag->ai_protocol);
-    if (sock < 0 || connect(sock, ag->ai_addr, ag->ai_addrlen) < 0) {
-        if (sock >= 0) close(sock);
+    praia::FdGuard sock(socket(ag->ai_family, ag->ai_socktype, ag->ai_protocol));
+    if (!sock || connect(sock.get(), ag->ai_addr, ag->ai_addrlen) < 0)
         throw RuntimeError("Cannot connect to " + host + ":" + std::to_string(port), 0);
-    }
-    return sock;
+    return sock.release();
 }
 
 std::string readAll(SocketConn& conn) {
