@@ -1466,8 +1466,12 @@ VM::Result VM::execute(int baseFrameCount_) {
 
         case OpCode::OP_INVOKE:
         case OpCode::OP_SUPER_INVOKE: {
-            // Reserved for future optimization
-            RUNTIME_ERR("OP_INVOKE not yet implemented");
+            // Reserved opcodes for a future method-call optimization
+            // (combine OP_GET_PROPERTY + OP_CALL into one). The compiler
+            // currently emits the two-opcode form instead, so these are
+            // unreachable. If you see this error, the compiler started
+            // emitting them without a corresponding VM handler.
+            RUNTIME_ERR("internal: OP_INVOKE/OP_SUPER_INVOKE are reserved and not implemented");
         }
 
         case OpCode::OP_BUILD_ARRAY: {
@@ -1572,8 +1576,12 @@ VM::Result VM::execute(int baseFrameCount_) {
         }
 
         case OpCode::OP_UNPACK_SPREAD: {
-            // Not yet fully implemented for VM
-            RUNTIME_ERR("Spread in VM not yet supported");
+            // Reserved opcode. Spread (`...arr`) is currently handled at
+            // build time by the compiler emitting the appropriate fixed-count
+            // OP_BUILD_ARRAY/OP_BUILD_MAP sequences, so this is unreachable.
+            // If you see this error, the compiler started emitting it without
+            // a corresponding VM handler.
+            RUNTIME_ERR("internal: OP_UNPACK_SPREAD is reserved and not implemented");
         }
 
         case OpCode::OP_BUILD_STRING: {
