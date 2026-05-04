@@ -3,6 +3,7 @@
 // Fiber must be included before system headers (it defines _XOPEN_SOURCE)
 #include "fiber.h"
 
+#include <cmath>
 #include <future>
 #include <memory>
 #include <sstream>
@@ -124,8 +125,16 @@ struct ValueHash {
         if (v.isNil()) return 0;
         if (v.isBool()) return std::hash<bool>{}(v.asBool());
         // Hash all numbers as double to be consistent with operator==
-        // (which compares int and double via asNumber())
-        if (v.isInt() || v.isDouble()) return std::hash<double>{}(v.asNumber());
+        // (which compares int and double via asNumber()).
+        // Canonicalize NaN (all bit patterns hash the same) and -0.0 (which
+        // is == to +0.0 but has a distinct bit pattern) so map lookups stay
+        // consistent with PraiaMap's NaN-aware key equality below.
+        if (v.isInt() || v.isDouble()) {
+            double d = v.asNumber();
+            if (std::isnan(d)) return 0;
+            if (d == 0.0) return std::hash<double>{}(0.0);
+            return std::hash<double>{}(d);
+        }
         if (v.isString()) return std::hash<std::string>{}(v.asString());
         if (v.isTagged()) return hashTagged(v);
         return 0;
@@ -133,8 +142,24 @@ struct ValueHash {
     static size_t hashTagged(const Value& v);
 };
 
+// Key-equality predicate for hash tables. Differs from Value::operator== on
+// one point: NaN compares equal to NaN here. This matches the convention used
+// by JavaScript Map / Java HashMap / Swift Dictionary — keys round-trip even
+// when the key is NaN. The user-visible `==` operator on Praia values still
+// follows IEEE 754 (NaN != NaN); only PraiaMap lookups use this predicate.
+struct ValueKeyEqual {
+    bool operator()(const Value& a, const Value& b) const {
+        if (a.isNumber() && b.isNumber()) {
+            double da = a.asNumber(), db = b.asNumber();
+            if (std::isnan(da) && std::isnan(db)) return true;
+            return da == db;
+        }
+        return a == b;
+    }
+};
+
 struct PraiaMap {
-    std::unordered_map<Value, Value, ValueHash> entries;
+    std::unordered_map<Value, Value, ValueHash, ValueKeyEqual> entries;
 };
 
 struct PraiaFuture {
