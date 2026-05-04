@@ -31,13 +31,13 @@ jobs:
 
       - name: Install dependencies (macOS)
         if: startsWith(matrix.os, 'macos')
-        run: brew install openssl@3 readline sqlite utf8proc re2
+        run: brew install openssl@3 readline sqlite utf8proc re2 dylibbundler
 
       - name: Install dependencies (Linux)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev
+          sudo apt-get install -y libssl-dev libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev patchelf
 
       - name: Build
         run: make clean && make
@@ -45,7 +45,13 @@ jobs:
       - name: Run tests
         run: make test
 
-      - name: Package
+      - name: Stage files
+        # Lay out dist/ to mirror the install layout: top-level praia binary
+        # (gets installed to bin/praia), and lib/praia/{grains,sand,...} for
+        # everything else. Bundling steps below add lib/praia/dylibs (macOS)
+        # or lib/praia/lib (Linux). The binary's RPATH/load-paths assume the
+        # post-install relative position, where binary is at bin/praia and
+        # libs live at ../lib/praia/{dylibs,lib}/.
         run: |
           mkdir -p dist/lib/praia
           cp praia dist/
@@ -55,6 +61,69 @@ jobs:
           cp sand/grain.yaml dist/lib/praia/sand/
           cp -R sand/grains dist/lib/praia/sand/grains
           cp README.md LICENSE dist/ 2>/dev/null || true
+
+      - name: Bundle dylibs (macOS)
+        if: startsWith(matrix.os, 'macos')
+        # The binary links against homebrew dylibs (openssl, re2, utf8proc, abseil
+        # via re2). Without bundling, users hit "Library not loaded" unless they
+        # have the same homebrew packages installed at the same paths. dylibbundler
+        # copies every non-system dylib (recursively) into dist/lib/praia/dylibs/
+        # and rewrites the binary + each bundled dylib's load paths to use
+        # @executable_path/../lib/praia/dylibs/, so the install layout becomes
+        # self-contained: bin/praia + lib/praia/dylibs/*.dylib.
+        run: |
+          mkdir -p dist/lib/praia/dylibs
+          dylibbundler -od -b -x dist/praia \
+            -d dist/lib/praia/dylibs/ \
+            -p '@executable_path/../lib/praia/dylibs/'
+          echo "--- post-bundle otool -L ---"
+          otool -L dist/praia
+          if otool -L dist/praia | grep -q '/opt/homebrew\|/usr/local/Cellar'; then
+            echo "ERROR: binary still references homebrew paths after bundling" >&2
+            exit 1
+          fi
+
+      - name: Bundle shared libs (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        # Linux equivalent of the macOS bundling. Copy every non-system shared
+        # library the binary links against into dist/lib/praia/lib/, then patchelf
+        # the binary's RPATH so it looks there first. Skip glibc/libstdc++/libgcc
+        # — those must match the system kernel and aren't safe to ship.
+        # RPATH is "$ORIGIN/../lib/praia/lib" so it resolves correctly *after*
+        # install (binary at /usr/local/bin/praia, libs at /usr/local/lib/praia/lib).
+        # In the CI staged layout (dist/praia + dist/lib/...) ldd will report
+        # "not found" — that's expected; we verify via patchelf --print-rpath.
+        run: |
+          mkdir -p dist/lib/praia/lib
+          ldd dist/praia | awk '/=>/ && $3 ~ /^\// { print $3 }' | while read lib; do
+            case "$(basename "$lib")" in
+              libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|\
+              libstdc++.so.*|libgcc_s.so.*|ld-linux-*.so.*|libnsl.so.*|\
+              libresolv.so.*|libutil.so.*|libcrypt.so.*)
+                ;; # system — leave alone
+              *)
+                cp -L "$lib" dist/lib/praia/lib/
+                ;;
+            esac
+          done
+          patchelf --set-rpath '$ORIGIN/../lib/praia/lib' dist/praia
+          # Bundled .so files set RPATH to $ORIGIN so transitive deps resolve
+          # to the same bundle dir (e.g. libssl finds libcrypto next to it).
+          for so in dist/lib/praia/lib/*.so*; do
+            [ -f "$so" ] || continue
+            patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true
+          done
+          echo "--- bundled libs ---"
+          ls -la dist/lib/praia/lib/
+          echo "--- binary RPATH ---"
+          patchelf --print-rpath dist/praia
+          if [ "$(patchelf --print-rpath dist/praia)" != '$ORIGIN/../lib/praia/lib' ]; then
+            echo "ERROR: RPATH was not set correctly on the binary" >&2
+            exit 1
+          fi
+
+      - name: Package tarball
+        run: |
           cd dist && tar czf ../praia-${{ matrix.target }}.tar.gz *
 
       - name: Upload artifact
