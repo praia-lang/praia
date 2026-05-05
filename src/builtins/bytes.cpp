@@ -224,6 +224,49 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             return Value(static_cast<int64_t>(args[0].asString().size()));
         }));
 
+    // bytes.slice(s, start, end?) — byte-indexed substring (string is treated as raw bytes)
+    // Negative indices count from the end. Useful when a string holds binary data
+    // (e.g. multipart bodies) and grapheme-based slice() would corrupt it.
+    bytesMap->entries[Value("slice")] = Value(makeNative("bytes.slice", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("bytes.slice(s, start, end?) requires a string", 0);
+            if (args.size() < 2 || !args[1].isNumber())
+                throw RuntimeError("bytes.slice() requires a start index", 0);
+            auto& s = args[0].asString();
+            int slen = static_cast<int>(s.size());
+            int start = static_cast<int>(args[1].asNumber());
+            if (start < 0) start += slen;
+            if (start < 0) start = 0;
+            if (start >= slen) return Value(std::string(""));
+            int end = slen;
+            if (args.size() > 2 && args[2].isNumber()) {
+                end = static_cast<int>(args[2].asNumber());
+                if (end < 0) end += slen;
+                if (end <= start) return Value(std::string(""));
+                if (end > slen) end = slen;
+            }
+            return Value(s.substr(start, end - start));
+        }));
+
+    // bytes.indexOf(s, sub, startByte?) — byte-indexed find. Returns byte offset or -1.
+    bytesMap->entries[Value("indexOf")] = Value(makeNative("bytes.indexOf", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || !args[0].isString() || !args[1].isString())
+                throw RuntimeError("bytes.indexOf(s, sub, start?) requires strings", 0);
+            auto& s = args[0].asString();
+            auto& sub = args[1].asString();
+            size_t startByte = 0;
+            if (args.size() > 2 && args[2].isNumber()) {
+                int sb = static_cast<int>(args[2].asNumber());
+                if (sb < 0) sb = 0;
+                startByte = static_cast<size_t>(sb);
+            }
+            auto pos = s.find(sub, startByte);
+            if (pos == std::string::npos) return Value(static_cast<int64_t>(-1));
+            return Value(static_cast<int64_t>(pos));
+        }));
+
     // bytes.xor(data, mask) — XOR data with a repeating mask. Both are raw byte strings.
     bytesMap->entries[Value("xor")] = Value(makeNative("bytes.xor", 2,
         [](const std::vector<Value>& args) -> Value {
