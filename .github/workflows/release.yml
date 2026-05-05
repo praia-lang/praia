@@ -40,18 +40,25 @@ jobs:
           sudo apt-get install -y libssl-dev libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev patchelf
 
       - name: Build
-        run: make clean && make
+        # Bake PRAIA_LIBDIR=/usr/local/lib/praia into the binary so that
+        # `praia --include-path` resolves to the headers we ship below,
+        # which lets users build native plugins without a Praia source checkout.
+        run: |
+          make clean
+          make EXTRA_CXXFLAGS='-DPRAIA_LIBDIR="\"/usr/local/lib/praia\""'
 
       - name: Run tests
         run: make test
 
       - name: Stage files
         # Lay out dist/ to mirror the install layout: top-level praia binary
-        # (gets installed to bin/praia), and lib/praia/{grains,sand,...} for
-        # everything else. Bundling steps below add lib/praia/dylibs (macOS)
+        # (gets installed to bin/praia), and lib/praia/{grains,sand,include}
+        # for everything else. Bundling steps below add lib/praia/dylibs (macOS)
         # or lib/praia/lib (Linux). The binary's RPATH/load-paths assume the
         # post-install relative position, where binary is at bin/praia and
         # libs live at ../lib/praia/{dylibs,lib}/.
+        # Headers shipped match the list in `make install` so plugin authors
+        # can build against /usr/local/lib/praia/include/ without a source checkout.
         run: |
           mkdir -p dist/lib/praia
           cp praia dist/
@@ -60,6 +67,18 @@ jobs:
           cp sand/main.praia dist/lib/praia/sand/
           cp sand/grain.yaml dist/lib/praia/sand/
           cp -R sand/grains dist/lib/praia/sand/grains
+          mkdir -p dist/lib/praia/include
+          cp src/praia_plugin.h \
+             src/value.h \
+             src/builtins.h \
+             src/interpreter.h \
+             src/gc_heap.h \
+             src/environment.h \
+             src/ast.h \
+             src/token.h \
+             src/fiber.h \
+             src/signal_state.h \
+             dist/lib/praia/include/
           cp README.md LICENSE dist/ 2>/dev/null || true
 
       - name: Bundle dylibs (macOS)

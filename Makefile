@@ -98,6 +98,12 @@ ifeq ($(UNAME_S),Linux)
   LDFLAGS += -rdynamic
 endif
 
+# Allow callers (release pipeline, packagers) to append extra flags without
+# clobbering the auto-detected CXXFLAGS above. Common use: bake in PRAIA_LIBDIR
+# for a release build via:
+#   make EXTRA_CXXFLAGS='-DPRAIA_LIBDIR="\"/usr/local/lib/praia\""'
+CXXFLAGS += $(EXTRA_CXXFLAGS)
+
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
