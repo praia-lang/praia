@@ -1,20 +1,52 @@
-// Timers — setTimeout and scheduling utilities
+// Timers — setTimeout/setInterval and scheduling utilities
 //
 // Usage:
 //   use "timers"
 //
 //   timers.setTimeout(lam{ in print("fired!") }, 1000)
+//   let h = timers.setInterval(lam{ in print("tick") }, 1000)
+//   // ... later ...
+//   h.clear()
 //   timers.repeat(5, 200, lam{ i in print("tick", i) })
+//
+// Note: callbacks run in a fresh VM with a deep copy of globals — see
+// `advanced/async` for the cross-VM semantics. Use Channel/files/sqlite to
+// share state with the caller.
 
-// Run fn after ms milliseconds. Returns the async future.
+// Run fn after ms milliseconds. Returns a handle with a .clear() method that
+// suppresses the callback if not yet fired (the timer thread still runs out
+// the sleep, but fn won't be invoked).
 func setTimeout(fn, ms) {
-    return async _runTimeout(fn, ms)
+    let stop = Channel()
+    async _runTimeout(fn, ms, stop)
+    return { clear: lam{ in stop.close() } }
 }
 
-func _runTimeout(fn, ms) {
+func _runTimeout(fn, ms, stop) {
     time.sleep(ms)
-    fn()
+    if (!stop.closed()) { fn() }
 }
+
+// Run fn every ms milliseconds. Returns a handle with a .clear() method that
+// stops the interval after the current tick. fn does not fire immediately —
+// the first call happens after ms.
+func setInterval(fn, ms) {
+    let stop = Channel()
+    async _runInterval(fn, ms, stop)
+    return { clear: lam{ in stop.close() } }
+}
+
+func _runInterval(fn, ms, stop) {
+    while (!stop.closed()) {
+        time.sleep(ms)
+        if (stop.closed()) { break }
+        fn()
+    }
+}
+
+// Aliases for users coming from JavaScript.
+func clearTimeout(handle)  { handle.clear() }
+func clearInterval(handle) { handle.clear() }
 
 // Run fn n times with ms delay between each. Synchronous (blocks).
 func repeat(n, ms, fn) {
@@ -58,4 +90,5 @@ func throttle(fn, ms) {
     }
 }
 
-export { setTimeout, repeat, every, debounce, throttle }
+export { setTimeout, setInterval, clearTimeout, clearInterval,
+         repeat, every, debounce, throttle }
