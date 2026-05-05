@@ -74,6 +74,41 @@ func jsonBody() {
     }
 }
 
+// Form body parser — parses application/x-www-form-urlencoded bodies into
+// req.form (a map). Handles standard +-for-space and %HH percent-decoding.
+func formBody() {
+    return lam{ req, next in
+        if (hasKey(req, "body") && bytes.len(req.body) > 0) {
+            let ct = ""
+            if (hasKey(req, "headers") && hasKey(req.headers, "content-type")) {
+                ct = req.headers["content-type"]
+            }
+            if (ct.contains("application/x-www-form-urlencoded")) {
+                let form = {}
+                let pairs = bytes.split(req.body, "&")
+                for (pair in pairs) {
+                    if (bytes.len(pair) == 0) { continue }
+                    let eq = bytes.indexOf(pair, "=")
+                    let k = ""
+                    let v = ""
+                    if (eq < 0) {
+                        k = pair
+                    } else {
+                        k = bytes.slice(pair, 0, eq)
+                        v = bytes.slice(pair, eq + 1)
+                    }
+                    // x-www-form-urlencoded uses '+' for spaces in addition to %20
+                    k = http.decodeURI(k.replace("+", " "))
+                    v = http.decodeURI(v.replace("+", " "))
+                    form[k] = v
+                }
+                req.form = form
+            }
+        }
+        return next(req)
+    }
+}
+
 // Request ID — adds a unique ID to each request as req.id
 func requestId() {
     return lam{ req, next in
@@ -170,4 +205,4 @@ func bodyLimit(maxBytes) {
     }
 }
 
-export { cors, jsonBody, requestId, auth, headers, bodyLimit }
+export { cors, jsonBody, formBody, requestId, auth, headers, bodyLimit }

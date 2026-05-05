@@ -725,6 +725,13 @@ static int runTestsCommand(const std::string& dir, bool useVm) {
 }
 
 int main(int argc, char* argv[]) {
+    // Force line buffering on stdout/stderr. By default C++ block-buffers
+    // stdout when it isn't a TTY (e.g. piped to a file or grep), which
+    // delays log output until the script exits. Servers and long-running
+    // scripts want their `print` and logger output to appear in real time.
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+
     installDefaultSignalHandlers();
 
     // Resolve the directory where the praia binary lives.

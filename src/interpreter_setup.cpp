@@ -1243,15 +1243,21 @@ Interpreter::Interpreter() {
             return Value(res);
         }));
 
-    // http.file(path, status?) → {status, body, headers} with MIME detection
-    httpMap->entries[Value("file")] = Value(makeNative("http.file", -1,
-        [](const std::vector<Value>& args) -> Value {
+    // http.file(path, status?, options?) → {status, body, headers} with MIME detection.
+    // options: {download: bool|string} — adds Content-Disposition: attachment.
+    //   true     → use the path's basename as the suggested filename
+    //   "name"   → use the given filename (e.g. for renaming on download)
+    auto httpFileImpl = [](const std::vector<Value>& args) -> Value {
             if (args.empty() || !args[0].isString())
                 throw RuntimeError("http.file() requires a file path", 0);
             auto& path = args[0].asString();
             int status = 200;
-            if (args.size() > 1 && args[1].isNumber())
-                status = static_cast<int>(args[1].asNumber());
+            std::shared_ptr<PraiaMap> opts;
+            // Accept either (path, status), (path, options), or (path, status, options).
+            for (size_t i = 1; i < args.size(); i++) {
+                if (args[i].isNumber()) status = static_cast<int>(args[i].asNumber());
+                else if (args[i].isMap()) opts = args[i].asMap();
+            }
 
             std::ifstream f(path, std::ios::binary);
             if (!f.is_open())
@@ -1292,6 +1298,127 @@ Interpreter::Interpreter() {
             res->entries[Value("body")] = Value(ss.str());
             auto hdrs = gcNew<PraiaMap>();
             hdrs->entries[Value("Content-Type")] = Value(mime);
+
+            // Build Content-Disposition if download requested.
+            if (opts) {
+                auto it = opts->entries.find(Value("download"));
+                if (it != opts->entries.end()) {
+                    std::string filename;
+                    if (it->second.isString()) {
+                        filename = it->second.asString();
+                    } else if (it->second.isTruthy()) {
+                        // Default filename = basename of the served path.
+                        auto slash = path.find_last_of("/\\");
+                        filename = (slash == std::string::npos) ? path : path.substr(slash + 1);
+                    }
+                    if (!filename.empty()) {
+                        // Quote the filename and escape any embedded quotes/backslashes.
+                        std::string quoted;
+                        quoted.reserve(filename.size() + 2);
+                        for (char c : filename) {
+                            if (c == '"' || c == '\\') quoted.push_back('\\');
+                            quoted.push_back(c);
+                        }
+                        hdrs->entries[Value("Content-Disposition")] =
+                            Value(std::string("attachment; filename=\"") + quoted + "\"");
+                    } else {
+                        hdrs->entries[Value("Content-Disposition")] =
+                            Value(std::string("attachment"));
+                    }
+                }
+            }
+
+            res->entries[Value("headers")] = Value(hdrs);
+            return Value(res);
+    };
+    httpMap->entries[Value("file")] = Value(makeNative("http.file", -1, httpFileImpl));
+
+    // http.download(path, filename?) — convenience that always sets
+    // Content-Disposition: attachment. If filename is omitted, uses basename(path).
+    httpMap->entries[Value("download")] = Value(makeNative("http.download", -1,
+        [httpFileImpl](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("http.download() requires a file path", 0);
+            auto opts = gcNew<PraiaMap>();
+            if (args.size() > 1 && args[1].isString()) {
+                opts->entries[Value("download")] = args[1];
+            } else {
+                opts->entries[Value("download")] = Value(true);
+            }
+            return httpFileImpl({args[0], Value(opts)});
+        }));
+
+    // http.fileStream(path, status?, options?) — same shape as http.file but
+    // the body is streamed by the server in 64 KB chunks rather than buffered
+    // into memory. Use this for large file responses (videos, archives, etc.).
+    // Options accepted: same as http.file (currently {download: bool|string}).
+    httpMap->entries[Value("fileStream")] = Value(makeNative("http.fileStream", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("http.fileStream() requires a file path", 0);
+            auto& path = args[0].asString();
+            int status = 200;
+            std::shared_ptr<PraiaMap> opts;
+            for (size_t i = 1; i < args.size(); i++) {
+                if (args[i].isNumber()) status = static_cast<int>(args[i].asNumber());
+                else if (args[i].isMap()) opts = args[i].asMap();
+            }
+
+            // MIME type detection from extension (mirrors http.file).
+            std::string mime = "application/octet-stream";
+            auto dot = path.rfind('.');
+            if (dot != std::string::npos) {
+                std::string ext = path.substr(dot);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".html" || ext == ".htm") mime = "text/html; charset=utf-8";
+                else if (ext == ".css")  mime = "text/css";
+                else if (ext == ".js")   mime = "application/javascript";
+                else if (ext == ".json") mime = "application/json";
+                else if (ext == ".xml")  mime = "application/xml";
+                else if (ext == ".txt")  mime = "text/plain";
+                else if (ext == ".csv")  mime = "text/csv";
+                else if (ext == ".svg")  mime = "image/svg+xml";
+                else if (ext == ".png")  mime = "image/png";
+                else if (ext == ".jpg" || ext == ".jpeg") mime = "image/jpeg";
+                else if (ext == ".gif")  mime = "image/gif";
+                else if (ext == ".webp") mime = "image/webp";
+                else if (ext == ".pdf")  mime = "application/pdf";
+                else if (ext == ".zip")  mime = "application/zip";
+                else if (ext == ".mp3")  mime = "audio/mpeg";
+                else if (ext == ".mp4")  mime = "video/mp4";
+                else if (ext == ".webm") mime = "video/webm";
+                else if (ext == ".mov")  mime = "video/quicktime";
+                else if (ext == ".wav")  mime = "audio/wav";
+            }
+
+            auto res = gcNew<PraiaMap>();
+            res->entries[Value("status")] = Value(static_cast<double>(status));
+            res->entries[Value("__streamFile")] = Value(path);
+            auto hdrs = gcNew<PraiaMap>();
+            hdrs->entries[Value("Content-Type")] = Value(mime);
+            if (opts) {
+                auto it = opts->entries.find(Value("download"));
+                if (it != opts->entries.end()) {
+                    std::string filename;
+                    if (it->second.isString()) filename = it->second.asString();
+                    else if (it->second.isTruthy()) {
+                        auto slash = path.find_last_of("/\\");
+                        filename = (slash == std::string::npos) ? path : path.substr(slash + 1);
+                    }
+                    if (!filename.empty()) {
+                        std::string quoted;
+                        quoted.reserve(filename.size() + 2);
+                        for (char c : filename) {
+                            if (c == '"' || c == '\\') quoted.push_back('\\');
+                            quoted.push_back(c);
+                        }
+                        hdrs->entries[Value("Content-Disposition")] =
+                            Value(std::string("attachment; filename=\"") + quoted + "\"");
+                    } else {
+                        hdrs->entries[Value("Content-Disposition")] = Value(std::string("attachment"));
+                    }
+                }
+            }
             res->entries[Value("headers")] = Value(hdrs);
             return Value(res);
         }));

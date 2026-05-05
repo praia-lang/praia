@@ -1486,10 +1486,11 @@ Value Interpreter::evaluate(const Expr* expr) {
         if (obj.isMap()) {
             auto& entries = obj.asMap()->entries;
             auto it = entries.find(idx);
-            if (it == entries.end()) {
-                if (e->isOptional) return Value();
-                throw RuntimeError("Map has no key '" + idx.toString() + "'", e->line);
-            }
+            // Maps are dynamic key-value collections; missing keys return nil
+            // rather than throwing, matching Python's defaultdict, JS objects,
+            // and Lua tables. Use `m.has(k)` to distinguish "absent" from
+            // "present with value nil" if it matters.
+            if (it == entries.end()) return Value();
             return it->second;
         }
         if (obj.isInstance()) {
@@ -1673,8 +1674,9 @@ Value Interpreter::evaluate(const Expr* expr) {
             throw RuntimeError("Instance has no property '" + e->field + "'", e->line, e->column);
         }
         if (obj.isMap()) {
-            if (e->isOptional) return Value();
-            throw RuntimeError("Map has no field '" + e->field + "'", e->line, e->column);
+            // Maps return nil for missing fields; see the matching IndexGet
+            // path above for rationale.
+            return Value();
         }
         // Static methods on classes
         if (obj.isCallable()) {

@@ -8,7 +8,9 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -377,6 +379,41 @@ void sendHttpResponse(int client, int status, const std::string& body,
     send(client, resp.c_str(), resp.size(), 0);
 }
 
+// Stream a file to the client without loading the whole thing into memory.
+// Sends headers (with Content-Length from stat) followed by 64 KB chunks.
+// Returns false if the file couldn't be opened (caller should send 404/500).
+bool sendHttpFileResponse(int client, int status, const std::string& path,
+                           const std::unordered_map<std::string, std::string>& extraHeaders) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0) return false;
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+
+    // Headers first.
+    std::string head = "HTTP/1.1 " + std::to_string(status) + " " +
+                       reasonPhrase(status) + "\r\n";
+    auto hdrs = extraHeaders;
+    hdrs["Content-Length"] = std::to_string(static_cast<long long>(st.st_size));
+    hdrs["Connection"] = "close";
+    for (auto& [k, v] : hdrs) head += k + ": " + v + "\r\n";
+    head += "\r\n";
+    if (::send(client, head.c_str(), head.size(), 0) < 0) { ::close(fd); return true; }
+
+    // Body in 64 KB chunks. Stop on read error or client disconnect.
+    char buf[64 * 1024];
+    ssize_t n;
+    while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t sent = ::send(client, buf + off, n - off, 0);
+            if (sent < 0) { ::close(fd); return true; }
+            off += sent;
+        }
+    }
+    ::close(fd);
+    return true;
+}
+
 } // anonymous namespace
 
 // ── Public API ───────────────────────────────────────────────
@@ -478,8 +515,13 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
         std::string respBody = "Internal Server Error";
         int respStatus = 500;
         std::unordered_map<std::string, std::string> respHeaders;
+        std::string streamFilePath;  // non-empty → stream this file as the body
 
         bool sseHandled = false;
+        // Collected before sendHttpResponse, fired after — the response map
+        // can attach `afterResponse: fn` or `afterResponses: [fn, ...]` for
+        // post-send work (typically temp-file cleanup).
+        std::vector<std::shared_ptr<Callable>> afterCallbacks;
         try {
             // Attach the raw client fd to the request so http.sse can use it
             req->entries[Value("__clientFd")] = Value(static_cast<double>(client));
@@ -498,10 +540,16 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
                     respStatus = static_cast<int>(e["status"].asNumber());
                 else
                     respStatus = 200;
-                if (e.count("body"))
+                // __streamFile takes precedence over body — the listen loop
+                // streams this file directly without buffering it in memory.
+                auto sf = e.find(Value("__streamFile"));
+                if (sf != e.end() && sf->second.isString()) {
+                    streamFilePath = sf->second.asString();
+                } else if (e.count("body")) {
                     respBody = e["body"].toString();
-                else
+                } else {
                     respBody = "";
+                }
                 if (e.count("headers") && e["headers"].isMap()) {
                     for (auto& [k, v] : e["headers"].asMap()->entries)
                         respHeaders[k.toString()] = v.toString();
@@ -509,6 +557,17 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
                 if (respHeaders.find("Content-Type") == respHeaders.end() &&
                     respHeaders.find("content-type") == respHeaders.end())
                     respHeaders["Content-Type"] = "text/plain";
+
+                // After-response callbacks: a single callable or an array of them.
+                auto collect = [&afterCallbacks](const Value& v) {
+                    if (v.isCallable()) afterCallbacks.push_back(v.asCallable());
+                    else if (v.isArray()) {
+                        for (auto& el : v.asArray()->elements)
+                            if (el.isCallable()) afterCallbacks.push_back(el.asCallable());
+                    }
+                };
+                if (e.count(Value("afterResponse")))  collect(e[Value("afterResponse")]);
+                if (e.count(Value("afterResponses"))) collect(e[Value("afterResponses")]);
             } else if (result.isString()) {
                 respStatus = 200;
                 respBody = result.asString();
@@ -526,10 +585,35 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
             // SSE handler should have closed the socket; close again
             // as a safety net (harmless if already closed).
             close(client);
+            // afterResponse runs after socket close for SSE too
+            for (auto& cb : afterCallbacks) {
+                try { cb->call(interp, {}); }
+                catch (...) { /* swallow — request already finished */ }
+            }
             continue;
         }
-        sendHttpResponse(client, respStatus, respBody, respHeaders);
+        if (!streamFilePath.empty()) {
+            if (!sendHttpFileResponse(client, respStatus, streamFilePath, respHeaders)) {
+                // File couldn't be opened — fall back to a 500.
+                sendHttpResponse(client, 500,
+                    "Error: cannot open file: " + streamFilePath,
+                    {{"Content-Type", "text/plain"}});
+            }
+        } else {
+            sendHttpResponse(client, respStatus, respBody, respHeaders);
+        }
         close(client);
+
+        // After-response callbacks run on the server thread, after the
+        // bytes have been handed to the kernel and the socket is closed.
+        // The handler thus gets the OS's "best effort" guarantee that
+        // the client received the response before cleanup runs. Errors
+        // in callbacks are swallowed so a buggy cleanup can't break
+        // the server.
+        for (auto& cb : afterCallbacks) {
+            try { cb->call(interp, {}); }
+            catch (...) { /* swallow */ }
+        }
     }
 
     // Graceful shutdown complete

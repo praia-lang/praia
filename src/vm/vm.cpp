@@ -1451,8 +1451,10 @@ VM::Result VM::execute(int baseFrameCount_) {
                 RUNTIME_ERR("Instance has no property '" + name + "'");
             }
             if (obj.isMap()) {
-                if (_propOpt) { push(Value()); break; }
-                RUNTIME_ERR("Map has no field '" + name + "'");
+                // Maps return nil for missing fields; see Interpreter::IndexGet
+                // for the design rationale (matches Python/JS/Lua semantics).
+                push(Value());
+                break;
             }
 
             // String/array methods
@@ -1653,11 +1655,9 @@ VM::Result VM::execute(int baseFrameCount_) {
             } else if (obj.isMap()) {
                 auto& entries = obj.asMap()->entries;
                 auto it = entries.find(idx);
-                if (it == entries.end()) {
-                    if (_idxOpt) { push(Value()); break; }
-                    RUNTIME_ERR("Map has no key '" + idx.toString() + "'");
-                }
-                push(it->second);
+                // Missing keys return nil — see Interpreter::IndexGet rationale.
+                if (it == entries.end()) push(Value());
+                else push(it->second);
             } else if (obj.isInstance()) {
                 auto [ok, r] = vmCallDunder(*this, obj, "__index", {idx});
                 if (ok) { push(r); }

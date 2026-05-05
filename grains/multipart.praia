@@ -1,0 +1,152 @@
+// Multipart/form-data parser.
+//
+// HTTP request bodies are handed in as strings, but multipart bodies often
+// carry binary file uploads. We use bytes.* helpers (byte-indexed slice and
+// indexOf) so file content survives unscathed -- the grapheme-based
+// .slice()/.indexOf() corrupt arbitrary binary data.
+//
+// Two ways to use:
+//
+//   // 1. Direct call from a handler:
+//   use "multipart"
+//   let parsed = multipart.parse(req)
+//   if (parsed) { let f = parsed.files.get("file"); ... }
+//
+//   // 2. As router middleware (populates req.form and req.files):
+//   use "multipart"
+//   app.use(multipart.middleware())
+//   app.post("/upload", lam{ req, params in
+//       let f = req.files.get("file")
+//       if (f) { sys.write("uploads/" + f.filename, f.content) }
+//   })
+//
+// parse(req) returns:
+//   nil                                                       (not multipart)
+//   { fields: {name: string, ...},
+//     files:  {name: {filename, contentType, content}, ...} } (parsed)
+
+func _extractBoundary(contentType) {
+    let idx = contentType.indexOf("boundary=")
+    if (idx < 0) { return nil }
+    let rest = contentType.slice(idx + len("boundary="))
+    if (rest.startsWith("\"")) {
+        let end = rest.indexOf("\"", 1)
+        if (end < 0) { return nil }
+        return rest.slice(1, end)
+    }
+    let semi = rest.indexOf(";")
+    if (semi >= 0) { rest = rest.slice(0, semi) }
+    return rest.strip()
+}
+
+func _parseHeaders(headerBlock) {
+    let result = {}
+    let lines = headerBlock.split("\r\n")
+    for (line in lines) {
+        if (line == "") { continue }
+        let colon = line.indexOf(":")
+        if (colon < 0) { continue }
+        let name = line.slice(0, colon).strip().lower()
+        let value = line.slice(colon + 1).strip()
+        result[name] = value
+    }
+    return result
+}
+
+// Parse `form-data; name="x"; filename="y"` into a {name, filename, ...} map.
+func _parseDisposition(value) {
+    let params = {}
+    let parts = value.split(";")
+    for (p in parts) {
+        let s = p.strip()
+        let eq = s.indexOf("=")
+        if (eq < 0) { continue }
+        let k = s.slice(0, eq).strip().lower()
+        let v = s.slice(eq + 1).strip()
+        if (v.startsWith("\"") && v.endsWith("\"") && len(v) >= 2) {
+            v = v.slice(1, len(v) - 1)
+        }
+        params[k] = v
+    }
+    return params
+}
+
+func parse(req) {
+    let ct = ""
+    if (req.headers && req.headers.has("content-type")) {
+        ct = req.headers["content-type"]
+    }
+    if (!ct.contains("multipart/form-data")) { return nil }
+    let boundary = _extractBoundary(ct)
+    if (!boundary) { return nil }
+
+    let delim = "--" + boundary
+    let body = req.body
+    let fields = {}
+    let files = {}
+
+    let bodyLen = bytes.len(body)
+    let pos = bytes.indexOf(body, delim)
+    if (pos < 0) { return {fields: fields, files: files} }
+    pos = pos + bytes.len(delim)
+
+    while (pos < bodyLen) {
+        if (pos + 2 <= bodyLen) {
+            let two = bytes.slice(body, pos, pos + 2)
+            if (two == "--") { break }
+            if (two == "\r\n") { pos = pos + 2 }
+        }
+
+        let nextDelim = bytes.indexOf(body, "\r\n" + delim, pos)
+        if (nextDelim < 0) { break }
+
+        let headerEnd = bytes.indexOf(body, "\r\n\r\n", pos)
+        if (headerEnd < 0 || headerEnd >= nextDelim) {
+            pos = nextDelim + bytes.len("\r\n" + delim)
+            continue
+        }
+
+        let headerBlock = bytes.slice(body, pos, headerEnd)
+        let content = bytes.slice(body, headerEnd + 4, nextDelim)
+
+        let headers = _parseHeaders(headerBlock)
+        let dispRaw = headers.get("content-disposition")
+        if (dispRaw) {
+            let disp = _parseDisposition(dispRaw)
+            let name = disp.get("name")
+            if (name) {
+                let filename = disp.get("filename")
+                if (filename != nil) {
+                    files[name] = {
+                        filename: filename,
+                        contentType: headers.get("content-type"),
+                        content: content
+                    }
+                } else {
+                    fields[name] = content
+                }
+            }
+        }
+
+        pos = nextDelim + bytes.len("\r\n" + delim)
+    }
+
+    return {fields: fields, files: files}
+}
+
+// Router middleware. Populates req.form (text fields) and req.files (uploads)
+// when the body is multipart/form-data. Non-multipart requests pass through
+// unchanged. Useful for request handlers that don't want to call parse()
+// themselves.
+func middleware() {
+    return lam{ req, next in
+        let parsed = parse(req)
+        if (parsed) {
+            req.form = parsed.fields
+            req.files = parsed.files
+        }
+        return next(req)
+    }
+}
+
+export { parse, middleware }
