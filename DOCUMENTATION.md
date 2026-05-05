@@ -2664,9 +2664,36 @@ print(m)              // {} — the task mutated its own copy
 
 To communicate, use:
 
+- **`SharedMap`** — cross-task key-value store. Use this when async tasks need shared state by key (progress trackers, job state, caches).
 - **`Channel`** — built for cross-task messaging; the channel itself isn't deep-copied.
 - **External resources** — files, SQLite, sockets, native plugin state. These live outside the Praia heap, so all tasks see the same underlying resource. Use `Lock()` to coordinate concurrent access.
 - **`await`** — collect results back from the task. The future's return value is moved across the boundary.
+
+### SharedMap
+
+`SharedMap()` is a thread-safe key-value store that survives the `async` deep-copy. Unlike a regular `{}` map, mutations from inside an async task are visible to the caller.
+
+```
+let jobs = SharedMap()
+jobs.set("abc", {progress: 0})
+let f = async lam{ in
+    jobs.update("abc", lam{ s in s.progress = 50; return s })
+}()
+await f
+print(jobs.get("abc"))     // {progress: 50}
+```
+
+| Method | Description |
+|--------|-------------|
+| `m.set(k, v)` | Insert or replace. |
+| `m.get(k)` / `m.get(k, default)` | Read with optional default. |
+| `m.has(k)` | Presence check. |
+| `m.delete(k)` | Remove; returns true if was present. |
+| `m.update(k, fn)` | Atomic read-modify-write. `fn(current)` returns the new value. Lock held during `fn`. |
+| `m.keys()` / `m.values()` | Snapshot arrays. |
+| `m.size()` / `m.clear()` | Count / empty. |
+
+Use `update` for compound mutations (increments, conditional writes); the lock guarantees no other task observes a half-update. Don't do I/O inside `update`. The lock is recursive — `fn` can call other `SharedMap` methods on the same map without deadlocking.
 
 ### Channels
 
