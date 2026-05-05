@@ -2133,6 +2133,31 @@ Interpreter::Interpreter() {
             return Value();
         }));
 
+    // sys.kill(pid, signal?) — send a signal to another process. The signal
+    // is "TERM" / "INT" / "KILL" / etc. (or any name `sys.onSignal` accepts);
+    // it defaults to "TERM" if omitted. Returns true if the signal was sent.
+    sysMap->entries[Value("kill")] = Value(makeNative("sys.kill", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isNumber())
+                throw RuntimeError("sys.kill(pid, signal?) requires a pid", 0);
+            int pid = static_cast<int>(args[0].asNumber());
+            int sig = SIGTERM;
+            if (args.size() > 1) {
+                if (args[1].isNumber()) {
+                    sig = static_cast<int>(args[1].asNumber());
+                } else if (args[1].isString()) {
+                    sig = signalNameToNum(args[1].asString());
+                    if (sig < 0)
+                        throw RuntimeError("sys.kill(): unknown signal '" +
+                                           args[1].asString() + "'", 0);
+                } else {
+                    throw RuntimeError("sys.kill(): signal must be a name or number", 0);
+                }
+            }
+            int rc = ::kill(static_cast<pid_t>(pid), sig);
+            return Value(rc == 0);
+        }));
+
     // sys.signal(name) — send a signal to the current process (for testing)
     sysMap->entries[Value("signal")] = Value(makeNative("sys.signal", 1,
         [](const std::vector<Value>& args) -> Value {
