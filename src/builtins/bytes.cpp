@@ -249,6 +249,47 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             return Value(s.substr(start, end - start));
         }));
 
+    // bytes.split(s, sep) — byte-indexed split. The string method works on bytes
+    // already, but mirroring it here keeps "treat as bytes" intent explicit.
+    bytesMap->entries[Value("split")] = Value(makeNative("bytes.split", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("bytes.split(s, sep) requires strings", 0);
+            auto& s = args[0].asString();
+            auto& sep = args[1].asString();
+            auto arr = gcNew<PraiaArray>();
+            if (sep.empty()) {
+                for (char c : s) arr->elements.push_back(Value(std::string(1, c)));
+                return Value(arr);
+            }
+            size_t pos = 0, found;
+            while ((found = s.find(sep, pos)) != std::string::npos) {
+                arr->elements.push_back(Value(s.substr(pos, found - pos)));
+                pos = found + sep.size();
+            }
+            arr->elements.push_back(Value(s.substr(pos)));
+            return Value(arr);
+        }));
+
+    // bytes.startsWith / bytes.endsWith — byte-prefix/suffix tests.
+    bytesMap->entries[Value("startsWith")] = Value(makeNative("bytes.startsWith", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("bytes.startsWith(s, prefix) requires strings", 0);
+            auto& s = args[0].asString();
+            auto& p = args[1].asString();
+            return Value(s.size() >= p.size() && s.compare(0, p.size(), p) == 0);
+        }));
+    bytesMap->entries[Value("endsWith")] = Value(makeNative("bytes.endsWith", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("bytes.endsWith(s, suffix) requires strings", 0);
+            auto& s = args[0].asString();
+            auto& p = args[1].asString();
+            return Value(s.size() >= p.size() &&
+                         s.compare(s.size() - p.size(), p.size(), p) == 0);
+        }));
+
     // bytes.indexOf(s, sub, startByte?) — byte-indexed find. Returns byte offset or -1.
     bytesMap->entries[Value("indexOf")] = Value(makeNative("bytes.indexOf", -1,
         [](const std::vector<Value>& args) -> Value {
