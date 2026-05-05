@@ -2053,15 +2053,19 @@ if (r3.exitCode != 0) {
 
 ### Process Spawning
 
-`sys.spawn(cmd)` launches a child process with piped stdin/stdout/stderr, returning a process handle for interactive communication.
+`sys.spawn(cmd)` launches a child process with piped stdin/stdout/stderr, returning a process handle for interactive communication. Pass a string for shell execution or an array for safe argument passing (no shell, no injection):
 
 ```
+// String form — runs via /bin/sh -c
 let proc = sys.spawn("cat -n")
 proc.write("hello\n")
 proc.write("world\n")
 proc.closeStdin()         // signal EOF to child
 print(proc.read())        // read all stdout
 print("exit:", proc.wait())
+
+// Array form — runs via execvp; each element is an exact argv entry
+let proc2 = sys.spawn(["ffmpeg", "-i", userPath, "-f", "mp3", "out.mp3"])
 ```
 
 #### Process handle methods
@@ -2505,6 +2509,7 @@ Path manipulation using `<filesystem>`. All functions work with strings.
 | `path.isFile(p)` | Returns `true` if path is a regular file |
 | `path.isDir(p)` | Returns `true` if path is a directory |
 | `path.size(p)` | File size in bytes |
+| `path.mtime(p)` | Last modification time (seconds since the Unix epoch) |
 | `path.glob(dir, pattern)` | Match files by pattern (e.g. `"*.praia"`) |
 
 ```
@@ -2850,6 +2855,15 @@ server.listen(3000)
 
 If the handler throws an error, the server returns a 500 response and continues running.
 
+#### Request body size
+
+The server has no built-in cap on request body size — it reads up to `Content-Length` bytes into `req.body`. This matches the philosophy of `net/http`, Flask, and Express: the stdlib stays out of policy. If you need a limit, opt in:
+
+- **Application-level** — use `middleware.bodyLimit(n)` from the middleware grain to reject requests with `Content-Length` over `n` bytes (returns 413).
+- **DoS-grade** — put a reverse proxy (nginx, caddy) in front. A determined attacker can lie about `Content-Length` or stream forever; only the proxy can short-circuit before the body is buffered.
+
+Headers are capped at 64 KB regardless.
+
 #### Graceful shutdown
 
 The server handles `SIGINT` (Ctrl-C) and `SIGTERM` (container stop) gracefully — it finishes the current request, closes the socket, and returns from `listen()`. Code after `listen()` runs normally:
@@ -3086,6 +3100,7 @@ server.use(lam{ req, next in
 | `middleware.requestId()` | Adds unique `req.id` and `X-Request-Id` response header |
 | `middleware.auth(verifier)` | Bearer token auth — calls `verifier(token)`, sets `req.user` |
 | `middleware.headers(map)` | Adds fixed headers to every response |
+| `middleware.bodyLimit(maxBytes)` | Rejects requests with `Content-Length` above `maxBytes` with 413 (app-level only — see HTTP server notes) |
 
 ### CORS
 
@@ -3647,6 +3662,24 @@ bytes.fromHex("414243")         // "ABC"
 
 // Byte length
 bytes.len(data)                 // same as len() but clear intent for binary
+```
+
+### Byte-indexed search and slice
+
+The string method versions of `slice`/`indexOf` are grapheme-indexed and corrupt arbitrary binary data. The `bytes.*` versions operate on raw bytes — use these when a string holds non-text content (file uploads, network frames, etc.):
+
+```
+bytes.slice(s, start, end?)            // byte-indexed substring
+bytes.indexOf(s, sub, startByte?)      // byte offset of first match (-1 if none)
+```
+
+Negative indices count from the end. `bytes.slice` clamps out-of-range indices to the string boundary.
+
+```
+let body = req.body                    // raw HTTP body, may be binary
+let pos = bytes.indexOf(body, "\r\n\r\n")
+let headers = bytes.slice(body, 0, pos)
+let payload = bytes.slice(body, pos + 4)
 ```
 
 ### Character codes
