@@ -111,6 +111,105 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
             return Value(ch);
         })));
 
+    // ── SharedMap() — cross-VM key-value store ──
+    //
+    // The deep-copy that `async` does on globals/args copies the PraiaMap
+    // wrapper but each method's std::shared_ptr<SharedMapState> capture is
+    // preserved through callable cloning, so all copies of the wrapper
+    // address the same C++ state. Same trick as Channel.
+    struct SharedMapState {
+        std::recursive_mutex mtx;
+        std::unordered_map<Value, Value, ValueHash, ValueKeyEqual> entries;
+    };
+
+    globals->define("SharedMap", Value(makeNative("SharedMap", 0,
+        [self](const std::vector<Value>&) -> Value {
+            auto state = std::make_shared<SharedMapState>();
+            auto m = gcNew<PraiaMap>();
+
+            m->entries[Value("set")] = Value(makeNative("set", 2,
+                [state](const std::vector<Value>& args) -> Value {
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    state->entries[args[0]] = args[1];
+                    return Value();
+                }));
+
+            m->entries[Value("get")] = Value(makeNative("get", -1,
+                [state](const std::vector<Value>& args) -> Value {
+                    if (args.empty())
+                        throw RuntimeError("SharedMap.get() requires a key", 0);
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    auto it = state->entries.find(args[0]);
+                    if (it != state->entries.end()) return it->second;
+                    if (args.size() > 1) return args[1];
+                    return Value();
+                }));
+
+            m->entries[Value("has")] = Value(makeNative("has", 1,
+                [state](const std::vector<Value>& args) -> Value {
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    return Value(state->entries.find(args[0]) != state->entries.end());
+                }));
+
+            m->entries[Value("delete")] = Value(makeNative("delete", 1,
+                [state](const std::vector<Value>& args) -> Value {
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    auto it = state->entries.find(args[0]);
+                    if (it == state->entries.end()) return Value(false);
+                    state->entries.erase(it);
+                    return Value(true);
+                }));
+
+            // update(k, fn) — atomic read-modify-write. fn receives the
+            // current value (or nil) and returns the new value to store.
+            // The lock is held across fn, so don't do I/O inside it.
+            m->entries[Value("update")] = Value(makeNative("update", 2,
+                [state, self](const std::vector<Value>& args) -> Value {
+                    if (!args[1].isCallable())
+                        throw RuntimeError("SharedMap.update() requires a function", 0);
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    Value current;
+                    auto it = state->entries.find(args[0]);
+                    if (it != state->entries.end()) current = it->second;
+                    Value next = callSafe(*self, args[1].asCallable(), {current});
+                    state->entries[args[0]] = next;
+                    return next;
+                }));
+
+            m->entries[Value("keys")] = Value(makeNative("keys", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    auto arr = gcNew<PraiaArray>();
+                    arr->elements.reserve(state->entries.size());
+                    for (auto& [k, _] : state->entries) arr->elements.push_back(k);
+                    return Value(arr);
+                }));
+
+            m->entries[Value("values")] = Value(makeNative("values", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    auto arr = gcNew<PraiaArray>();
+                    arr->elements.reserve(state->entries.size());
+                    for (auto& [_, v] : state->entries) arr->elements.push_back(v);
+                    return Value(arr);
+                }));
+
+            m->entries[Value("size")] = Value(makeNative("size", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    return Value(static_cast<int64_t>(state->entries.size()));
+                }));
+
+            m->entries[Value("clear")] = Value(makeNative("clear", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    state->entries.clear();
+                    return Value();
+                }));
+
+            return Value(m);
+        })));
+
     // ── futures namespace ──
 
     auto asyncMap = gcNew<PraiaMap>();

@@ -22,7 +22,7 @@
 
 // ── Version ──────────────────────────────────────────────────
 
-static constexpr const char* PRAIA_VERSION = "0.5.3";
+static constexpr const char* PRAIA_VERSION = "0.5.4";
 
 // ── Exit codes ───────────────────────────────────────────────
 // Documented in --help. `sys.exit(N)` from user code passes through

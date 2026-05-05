@@ -96,4 +96,41 @@ testing.test("bare async returns immediately (no binding)", lam{ in
         "bare async blocked for " + elapsed.toString() + "ms (expected <200ms)")
 })
 
+// SharedMap is the cross-VM key-value primitive. Like Channel and Lock,
+// it survives the deep-copy that `async` performs on globals/args because
+// the C++ state is captured in shared_ptr closures inside each method.
+testing.test("SharedMap basic ops", lam{ in
+    let m = SharedMap()
+    m.set("a", 1)
+    testing.assertEqual(m.get("a"), 1, nil)
+    testing.assertEqual(m.get("missing"), nil, nil)
+    testing.assertEqual(m.get("missing", 99), 99, nil)
+    testing.assert(m.has("a"), "has a")
+    testing.assert(!m.has("missing"), "no missing")
+    testing.assertEqual(m.size(), 1, nil)
+    testing.assert(m.delete("a"), "delete found")
+    testing.assert(!m.delete("a"), "delete second time false")
+})
+
+testing.test("SharedMap.update is atomic read-modify-write", lam{ in
+    let m = SharedMap()
+    m.set("c", 0)
+    let result = m.update("c", lam{ v in v + 5 })
+    testing.assertEqual(result, 5, "update returns new value")
+    testing.assertEqual(m.get("c"), 5, "stored")
+    // update on missing key receives nil
+    let r2 = m.update("new", lam{ v in v == nil ? 1 : v + 1 })
+    testing.assertEqual(r2, 1, nil)
+    testing.assertEqual(m.get("new"), 1, nil)
+})
+
+testing.test("SharedMap survives async deep-copy", lam{ in
+    let m = SharedMap()
+    m.set("k", 0)
+    let f = async lam{ in m.update("k", lam{ v in v + 100 }) }()
+    await f
+    testing.assertEqual(m.get("k"), 100,
+        "mutation in async task visible to caller")
+})
+
 testing.done()

@@ -58,21 +58,33 @@ static std::unordered_map<std::string, std::shared_ptr<PraiaMap>> g_pluginCache;
 static std::vector<void*> g_pluginHandles; // never dlclose'd — function pointers must stay valid
 
 static int signalNameToNum(const std::string& name) {
-    if (name == "SIGINT" || name == "INT") return SIGINT;
+    if (name == "SIGINT"  || name == "INT")  return SIGINT;
     if (name == "SIGTERM" || name == "TERM") return SIGTERM;
-    if (name == "SIGHUP" || name == "HUP") return SIGHUP;
+    if (name == "SIGKILL" || name == "KILL") return SIGKILL;
+    if (name == "SIGHUP"  || name == "HUP")  return SIGHUP;
+    if (name == "SIGQUIT" || name == "QUIT") return SIGQUIT;
     if (name == "SIGUSR1" || name == "USR1") return SIGUSR1;
     if (name == "SIGUSR2" || name == "USR2") return SIGUSR2;
+    if (name == "SIGSTOP" || name == "STOP") return SIGSTOP;
+    if (name == "SIGCONT" || name == "CONT") return SIGCONT;
+    if (name == "SIGPIPE" || name == "PIPE") return SIGPIPE;
+    if (name == "SIGCHLD" || name == "CHLD") return SIGCHLD;
     return -1;
 }
 
 static std::string signalNumToName(int sig) {
     switch (sig) {
-        case SIGINT: return "SIGINT";
+        case SIGINT:  return "SIGINT";
         case SIGTERM: return "SIGTERM";
-        case SIGHUP: return "SIGHUP";
+        case SIGKILL: return "SIGKILL";
+        case SIGHUP:  return "SIGHUP";
+        case SIGQUIT: return "SIGQUIT";
         case SIGUSR1: return "SIGUSR1";
         case SIGUSR2: return "SIGUSR2";
+        case SIGSTOP: return "SIGSTOP";
+        case SIGCONT: return "SIGCONT";
+        case SIGPIPE: return "SIGPIPE";
+        case SIGCHLD: return "SIGCHLD";
         default: return "SIG" + std::to_string(sig);
     }
 }

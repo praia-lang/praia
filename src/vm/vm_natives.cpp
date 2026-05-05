@@ -62,7 +62,7 @@ void vmRegisterNatives(VM& vm) {
 
     std::vector<std::string> globalNames = {
         "print", "len", "push", "pop", "type", "str", "num", "fromCharCode",
-        "Lock", "Channel", "futures", "sort", "filter", "map", "each", "reduce", "any", "all",
+        "Lock", "Channel", "SharedMap", "futures", "sort", "filter", "map", "each", "reduce", "any", "all",
         "flatMap", "unique", "zip", "enumerate", "groupBy", "findIndex", "flatten", "keys", "values",
         "sys", "http", "json", "yaml", "base64", "path", "url", "net",
         "bytes", "crypto", "random", "time", "math",
