@@ -13,11 +13,17 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <set>
 #include <sstream>
 
 namespace fs = std::filesystem;
+
+// Defined in src/vm/vm.cpp. Holds an extra reference to a shared_future so a
+// discarded future doesn't block the caller in its destructor — see the
+// comment at the definition for the C++ standard wart this works around.
+extern void retainInflightFuture(const std::shared_future<Value>& f);
 
 // ── Operator overloading helpers ──
 // Call a dunder method on an instance if it exists. Returns {true, result} if found.
@@ -1341,6 +1347,10 @@ Value Interpreter::evaluate(const Expr* expr) {
 
         auto fut = std::make_shared<PraiaFuture>();
         fut->future = sharedFuture;
+        // Keep an extra reference so a discarded future (`async fn()` with no
+        // binding) doesn't block on its destructor — see the matching call
+        // in vm.cpp's OP_ASYNC for the C++ standard wart this works around.
+        retainInflightFuture(sharedFuture);
         return Value(fut);
     }
     case ExprType::Await: {

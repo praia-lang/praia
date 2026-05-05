@@ -13,10 +13,34 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <unordered_set>
 
 namespace fs = std::filesystem;
+
+// In-flight async task tracker. The C++ standard makes the destructor of the
+// last reference to a std::async(launch::async) shared state block until the
+// task completes. For Praia's fire-and-forget pattern (`async fn()` as a
+// statement), the shared_future inside the discarded PraiaFuture would be
+// that last reference and block the caller. We keep an extra reference here
+// so the call site is never the last one. Each new async call reaps
+// already-completed entries, bounding the tracker to currently in-flight tasks.
+static std::mutex g_inflightMutex;
+static std::vector<std::shared_future<Value>> g_inflightFutures;
+
+void retainInflightFuture(const std::shared_future<Value>& f) {
+    std::lock_guard<std::mutex> lock(g_inflightMutex);
+    // Reap completed entries first so we don't leak.
+    g_inflightFutures.erase(
+        std::remove_if(g_inflightFutures.begin(), g_inflightFutures.end(),
+            [](const std::shared_future<Value>& sf) {
+                return !sf.valid() ||
+                       sf.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+            }),
+        g_inflightFutures.end());
+    g_inflightFutures.push_back(f);
+}
 
 // ── Operator overloading helper ──
 // Try to call a dunder method on a VM instance. Returns {true, result} if found.
@@ -2176,6 +2200,15 @@ VM::Result VM::execute(int baseFrameCount_) {
 
             auto fut = std::make_shared<PraiaFuture>();
             fut->future = sharedFuture;
+            // Keep an extra reference to the shared_future in a global tracker.
+            // Without this, the shared_future inside `fut` is the LAST reference
+            // when the user discards the future (e.g. `async fn()` as a bare
+            // statement). The C++ standard makes the destructor of the last
+            // reference to a std::async-launched shared state block until the
+            // task completes — turning fire-and-forget calls into synchronous
+            // ones. retainInflightFuture() reaps completed entries on each call,
+            // so the tracker only ever holds in-flight tasks.
+            retainInflightFuture(sharedFuture);
             push(Value(fut));
             break;
         }

@@ -84,4 +84,16 @@ testing.test("async native too many args throws", lam{ in
     }, nil)
 })
 
+// Regression: bare `async fn()` (without binding the future) used to block
+// the calling thread for the full duration of the task because the only
+// reference to the std::async-launched shared state was destroyed on
+// statement completion, and the C++ standard makes that destructor wait.
+testing.test("bare async returns immediately (no binding)", lam{ in
+    let start = time.now()
+    async sys.exec(["sleep", "1"])
+    let elapsed = time.now() - start
+    testing.assert(elapsed < 200,
+        "bare async blocked for " + elapsed.toString() + "ms (expected <200ms)")
+})
+
 testing.done()

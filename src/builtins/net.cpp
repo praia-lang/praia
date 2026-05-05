@@ -309,6 +309,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             {
                 praia::FdGuard fd(socket(AF_INET6, SOCK_STREAM, 0));
                 if (fd) {
+                    praia::setCloexec(fd.get());
                     int opt = 1;
                     setsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
                     int v6only = 0; // dual-stack: accept IPv4-mapped addresses
@@ -330,6 +331,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             praia::FdGuard fd(socket(AF_INET, SOCK_STREAM, 0));
             if (!fd)
                 throw RuntimeError(sysErr("Cannot create socket"), 0);
+            praia::setCloexec(fd.get());
             int opt = 1;
             setsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -355,6 +357,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             int client = accept(fd, (struct sockaddr*)&ca, &cl);
             if (client < 0)
                 throw RuntimeError(sysErr("Accept failed"), 0);
+            praia::setCloexec(client);
             return Value(static_cast<int64_t>(client));
         }));
 

@@ -1,0 +1,46 @@
+// ── Async: how to share state across tasks ──
+//
+// Globals/upvalues/args are deep-copied into each async task, so direct map
+// mutation isn't visible to the caller. Use Channels for messages, or
+// external resources (sqlite, files) for key-lookup state.
+
+print("--- 1. Map mutation does NOT cross the boundary ---")
+let counts = {}
+func bumpDirectly(key) { counts[key] = (counts.has(key) ? counts[key] : 0) + 1 }
+let f1 = async bumpDirectly("a")
+await f1
+print("counts after async bump:", counts)        // {} -- the task mutated its own copy
+
+
+print("--- 2. Use a Channel to send results back ---")
+let results = Channel()
+func worker(id, results) {
+    let r = sys.exec(["echo", "worker " + id.toString() + " done"])
+    results.send(r.stdout)
+}
+let _ws = []
+for (i in 0..3) { _ws.push(async worker(i, results)) }
+for (i in 0..3) { print(results.recv()) }
+
+
+print("--- 3. Use an external resource (a file) for key-lookup state ---")
+sys.mkdir("_share_demo")
+func bumpFile(key) {
+    let path = "_share_demo/" + key + ".n"
+    let n = 0
+    if (sys.exists(path)) { n = sys.read(path).strip().toNum() }
+    sys.write(path, (n + 1).toString())
+}
+let fA = async bumpFile("a")
+let fB = async bumpFile("a")
+await fA
+await fB
+print("file says:", sys.read("_share_demo/a.n").strip())   // 2 (both tasks saw the file)
+sys.remove("_share_demo")
+
+
+print("--- 4. Lock coordinates concurrent access to an external resource ---")
+// (sqlite/db example would go here; left as a comment for portability)
+// let lock = Lock()
+// let db = sqlite.open("counts.db")
+// lock.withLock(lam{ in db.run("UPDATE c SET n = n + 1 WHERE id = 1") })

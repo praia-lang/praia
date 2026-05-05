@@ -433,6 +433,7 @@ Value doHttpRequest(const std::string& method, const std::string& url,
 void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) throw RuntimeError("Cannot create server socket", 0);
+    praia::setCloexec(fd);
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -468,6 +469,7 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
             if (g_shutdownRequested.load()) break;
             continue;
         }
+        praia::setCloexec(client);
 
         auto req = readAndParseRequest(client);
         if (!req) { close(client); continue; }

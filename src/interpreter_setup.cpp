@@ -1,4 +1,5 @@
 #include "builtins.h"
+#include "builtins/scope_guards.h"
 #include "gc_heap.h"
 #include "grain_resolve.h"
 #include "interpreter.h"
@@ -678,6 +679,13 @@ Interpreter::Interpreter() {
             int stdoutPipe[2], stderrPipe[2];
             if (pipe(stdoutPipe) != 0 || pipe(stderrPipe) != 0)
                 throw RuntimeError("sys.exec(): failed to create pipes", 0);
+            // CLOEXEC so any *other* fork+exec we do (or that the child does
+            // before it exec()s) doesn't inherit these pipes. The dup2()
+            // calls in the child strip CLOEXEC from the duplicates that
+            // become the child's stdin/stdout/stderr, so the child still
+            // gets its redirected streams across execvp().
+            for (int p : {stdoutPipe[0], stdoutPipe[1], stderrPipe[0], stderrPipe[1]})
+                praia::setCloexec(p);
 
             pid_t pid = fork();
             if (pid < 0) {
@@ -809,6 +817,9 @@ Interpreter::Interpreter() {
             int stdinPipe[2], stdoutPipe[2], stderrPipe[2];
             if (pipe(stdinPipe) < 0 || pipe(stdoutPipe) < 0 || pipe(stderrPipe) < 0)
                 throw RuntimeError("sys.spawn(): pipe creation failed", 0);
+            for (int p : {stdinPipe[0], stdinPipe[1], stdoutPipe[0], stdoutPipe[1],
+                          stderrPipe[0], stderrPipe[1]})
+                praia::setCloexec(p);
 
             pid_t pid = fork();
             if (pid < 0) {

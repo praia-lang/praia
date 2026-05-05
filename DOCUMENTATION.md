@@ -2545,25 +2545,28 @@ print(u.query)     // "key=val"
 
 The HTTP server is **single-threaded** — handlers run one at a time, serially. The next request is not accepted until the current handler returns. This means there are no race conditions by default.
 
-However, if you use `async` inside a handler (e.g., parallel database calls), multiple async tasks may access shared state concurrently. Use `Lock()` to protect shared data.
+You can still use `async` inside a handler for fire-and-forget background work or to parallelise I/O — just remember the cross-task isolation rules: each async task gets a deep copy of globals/upvalues/args, so Praia maps are NOT shared. To communicate, use `Channel`, `await`, or external resources (sqlite, files).
 
 ### Lock
 
-`Lock()` creates a mutex for thread-safe access to shared state.
+`Lock()` is a mutex for serializing concurrent access to **external resources** — files, sqlite handles, sockets, native plugin state. It does not, and cannot, make a Praia value shared across tasks; for that, use a Channel.
 
 ```
 let lock = Lock()
-let counter = 0
+let db = sqlite.open("counts.db")
 
-// Manual acquire/release
-lock.acquire()
-counter = counter + 1
-lock.release()
+func increment() {
+    lock.withLock(lam{ in
+        let row = db.query("SELECT n FROM c WHERE id = 1")
+        db.run("UPDATE c SET n = ? WHERE id = 1", [row[0].n + 1])
+    })
+}
 
-// withLock — auto-releases when the function returns (or throws)
-lock.withLock(lam{ in
-    counter = counter + 1
-})
+let f1 = async increment()
+let f2 = async increment()
+await f1
+await f2
+// db is shared; the lock prevents the two reads/writes from racing
 ```
 
 | Method | Description |
@@ -2573,23 +2576,6 @@ lock.withLock(lam{ in
 | `lock.withLock(fn)` | Acquire, call fn, release — even if fn throws. Returns fn's return value. |
 
 **Always prefer `withLock`** — it's impossible to forget to release, and it handles errors correctly.
-
-### Example: safe shared state
-
-```
-let lock = Lock()
-let db = sqlite.open("app.db")
-
-server.post("/increment", lam{ req, params in
-    let result = lock.withLock(lam{ in
-        let row = db.query("SELECT count FROM counters WHERE id = 1")
-        let newCount = row[0].count + 1
-        db.run("UPDATE counters SET count = ? WHERE id = 1", [newCount])
-        return newCount
-    })
-    return http.json({count: result})
-})
-```
 
 The lock is re-entrant (recursive) — the same thread can acquire it multiple times without deadlocking.
 
@@ -2660,8 +2646,27 @@ try {
 - `async funcCall(args)` evaluates the function and arguments on the current thread, then spawns the actual call in a new OS thread
 - Returns a **future** value immediately
 - `await future` blocks until the background thread finishes
-- Each async Praia function gets its own VM with a snapshot of globals. Tasks are fully isolated — no shared mutable state, no data races
+- Each async Praia function gets its own VM with a **deep copy** of globals, captured upvalues, and arguments. Tasks are fully isolated — no shared mutable state, no data races
 - Native functions (http.get, sys.exec, etc.) also run in true parallel
+- A bare `async fn()` (no `let f =`) is fire-and-forget — it returns immediately and the task runs to completion in the background
+
+### Sharing state across async tasks
+
+Because globals/upvalues/arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. This is the price of "no data races" in user code.
+
+```
+let m = {}
+func writer(k, v) { m[k] = v }
+let f = async writer("a", 1)
+await f
+print(m)              // {} — the task mutated its own copy
+```
+
+To communicate, use:
+
+- **`Channel`** — built for cross-task messaging; the channel itself isn't deep-copied.
+- **External resources** — files, SQLite, sockets, native plugin state. These live outside the Praia heap, so all tasks see the same underlying resource. Use `Lock()` to coordinate concurrent access.
+- **`await`** — collect results back from the task. The future's return value is moved across the boundary.
 
 ### Channels
 

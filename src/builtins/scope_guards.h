@@ -4,6 +4,7 @@
 // owns its resource and releases it on destruction unless `release()` was
 // called first to hand ownership to a caller.
 
+#include <fcntl.h>
 #include <netdb.h>
 #include <unistd.h>
 
@@ -14,6 +15,17 @@
 #endif
 
 namespace praia {
+
+// Mark a file descriptor as close-on-exec. Anything that fork()+exec()s
+// (sys.exec, sys.spawn, native plugins) must not inherit unrelated
+// long-lived fds — listen sockets, accepted clients, parent-side pipe ends.
+// Linux's SOCK_CLOEXEC / O_CLOEXEC / pipe2() can do this atomically; macOS
+// can't, so we use fcntl() universally for portability.
+inline void setCloexec(int fd) {
+    if (fd < 0) return;
+    int flags = fcntl(fd, F_GETFD, 0);
+    if (flags >= 0) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
 
 // Owns a file descriptor; close()s on destruction unless released.
 class FdGuard {
