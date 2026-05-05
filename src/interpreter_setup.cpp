@@ -34,6 +34,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <poll.h>
 #include <unistd.h>
@@ -783,12 +784,27 @@ Interpreter::Interpreter() {
     sysMap->entries[Value("run")] = Value(std::static_pointer_cast<Callable>(execImpl));
 
     // sys.spawn(cmd) — launch a child process with stdin/stdout/stderr pipes.
+    // cmd is either a string (run via /bin/sh -c) or an array of [argv0, ...args]
+    // (run via execvp — no shell, no injection risk; mirrors sys.exec).
     // Returns a process handle map with write/read/readErr/readLine/closeStdin/wait methods.
     sysMap->entries[Value("spawn")] = Value(makeNative("sys.spawn", 1,
         [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.spawn() requires a command string", 0);
-            auto cmd = args[0].asString();
+            if (args.empty() || (!args[0].isString() && !args[0].isArray()))
+                throw RuntimeError("sys.spawn() requires a string or array of strings", 0);
+
+            bool useShell = args[0].isString();
+            std::string cmd;
+            std::vector<std::string> argv;
+            if (useShell) {
+                cmd = args[0].asString();
+            } else {
+                auto& elems = args[0].asArray()->elements;
+                if (elems.empty()) throw RuntimeError("sys.spawn() array must not be empty", 0);
+                for (auto& e : elems) {
+                    if (!e.isString()) throw RuntimeError("sys.spawn() array elements must be strings", 0);
+                    argv.push_back(e.asString());
+                }
+            }
 
             int stdinPipe[2], stdoutPipe[2], stderrPipe[2];
             if (pipe(stdinPipe) < 0 || pipe(stdoutPipe) < 0 || pipe(stderrPipe) < 0)
@@ -813,7 +829,14 @@ Interpreter::Interpreter() {
                 close(stdinPipe[0]);
                 close(stdoutPipe[1]);
                 close(stderrPipe[1]);
-                execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
+                if (useShell) {
+                    execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
+                } else {
+                    std::vector<const char*> cargv;
+                    for (auto& s : argv) cargv.push_back(s.c_str());
+                    cargv.push_back(nullptr);
+                    execvp(cargv[0], const_cast<char* const*>(cargv.data()));
+                }
                 _exit(127);
             }
 
@@ -1531,6 +1554,20 @@ Interpreter::Interpreter() {
             if (!fs::exists(p))
                 throw RuntimeError("path.size(): file not found: " + p, 0);
             return Value(static_cast<int64_t>(fs::file_size(p)));
+        }));
+
+    // path.mtime(path) — last modification time in seconds since the Unix epoch.
+    pathMap->entries[Value("mtime")] = Value(makeNative("path.mtime", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString()) throw RuntimeError("path.mtime() requires a string", 0);
+            auto& p = args[0].asString();
+            if (!fs::exists(p))
+                throw RuntimeError("path.mtime(): file not found: " + p, 0);
+            // fs::file_time_type uses an unspecified clock pre-C++20, so go through stat(2).
+            struct stat st;
+            if (::stat(p.c_str(), &st) != 0)
+                throw RuntimeError("path.mtime(): stat failed: " + p, 0);
+            return Value(static_cast<int64_t>(st.st_mtime));
         }));
 
     globals->define("path", Value(pathMap));

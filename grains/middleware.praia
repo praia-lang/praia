@@ -149,7 +149,7 @@ func bodyLimit(maxBytes) {
             cl = req.headers["content-length"]
         }
         if (len(cl) > 0) {
-            let n = int(cl)
+            let n = cl.toNum()
             if (n > maxBytes) {
                 return {
                     status: 413,
