@@ -217,8 +217,9 @@ Value parseHttpResponse(const std::string& raw) {
 }
 
 // Limits for incoming requests
+// No body-size cap — handlers/middleware (e.g. middleware.bodyLimit) decide policy.
+// A reverse proxy is the right place for DoS-grade limits.
 static constexpr size_t MAX_HEADER_SIZE = 64 * 1024;   // 64 KB headers
-static constexpr size_t MAX_BODY_SIZE   = 8 * 1024 * 1024; // 8 MB body
 static constexpr int    RECV_TIMEOUT_SECS = 30;
 
 // Case-insensitive search for a header name in raw header text.
@@ -284,13 +285,11 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
         if (!clVal.empty()) {
             size_t clen = 0;
             try { clen = std::stoul(clVal); } catch (...) {}
-            if (clen > MAX_BODY_SIZE) return nullptr; // body too large
             size_t bodyStart = hend + 4;
             while (data.size() - bodyStart < clen) {
                 n = recv(client, buf, sizeof(buf), 0);
                 if (n <= 0) break;
                 data.append(buf, n);
-                if (data.size() - bodyStart > MAX_BODY_SIZE) return nullptr;
             }
         }
         break;

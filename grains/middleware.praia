@@ -135,4 +135,39 @@ func headers(headerMap) {
     }
 }
 
-export { cors, jsonBody, requestId, auth, headers }
+// Body size limit - rejects requests with Content-Length above maxBytes.
+//
+// This is application-level policy: by the time middleware runs, the body
+// is already buffered in memory. A malicious client could lie about
+// Content-Length or stream forever on a chunked connection, so this is NOT
+// DoS protection - for that, put a reverse proxy (nginx, caddy) in front.
+// Use this to enforce per-app upload caps and return a clean 413 response.
+func bodyLimit(maxBytes) {
+    return lam{ req, next in
+        let cl = ""
+        if (hasKey(req, "headers") && hasKey(req.headers, "content-length")) {
+            cl = req.headers["content-length"]
+        }
+        if (len(cl) > 0) {
+            let n = int(cl)
+            if (n > maxBytes) {
+                return {
+                    status: 413,
+                    body: json.stringify({error: "Payload too large", limit: maxBytes}),
+                    headers: {"Content-Type": "application/json"}
+                }
+            }
+        }
+        // Fallback for chunked / missing Content-Length: check the buffered body
+        if (hasKey(req, "body") && len(req.body) > maxBytes) {
+            return {
+                status: 413,
+                body: json.stringify({error: "Payload too large", limit: maxBytes}),
+                headers: {"Content-Type": "application/json"}
+            }
+        }
+        return next(req)
+    }
+}
+
+export { cors, jsonBody, requestId, auth, headers, bodyLimit }
