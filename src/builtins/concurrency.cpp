@@ -111,6 +111,45 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
             return Value(ch);
         })));
 
+    // ── CancellationToken() — cross-VM cooperative cancel signal ──
+    //
+    // A token is a flag that any task can flip to "cancelled". Pass it to
+    // long-running async tasks and have them poll `cancelled()` in their
+    // loop to bail out cleanly. Same shared-state-via-native-closures trick
+    // as Channel/SharedMap, so the token survives async deep-copy.
+    struct CancellationState {
+        std::atomic<bool> cancelled{false};
+    };
+
+    globals->define("CancellationToken", Value(makeNative("CancellationToken", 0,
+        [](const std::vector<Value>&) -> Value {
+            auto state = std::make_shared<CancellationState>();
+            auto tok = gcNew<PraiaMap>();
+
+            tok->entries[Value("cancel")] = Value(makeNative("cancel", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    state->cancelled.store(true, std::memory_order_release);
+                    return Value();
+                }));
+
+            tok->entries[Value("cancelled")] = Value(makeNative("cancelled", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    return Value(state->cancelled.load(std::memory_order_acquire));
+                }));
+
+            // throwIfCancelled() — convenience for "fail fast" loops.
+            // Tasks doing `while (...) { token.throwIfCancelled(); ... }`
+            // can let the surrounding try/catch handle the bail-out.
+            tok->entries[Value("throwIfCancelled")] = Value(makeNative("throwIfCancelled", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    if (state->cancelled.load(std::memory_order_acquire))
+                        throw RuntimeError("cancelled", 0);
+                    return Value();
+                }));
+
+            return Value(tok);
+        })));
+
     // ── SharedMap() — cross-VM key-value store ──
     //
     // The deep-copy that `async` does on globals/args copies the PraiaMap

@@ -133,4 +133,37 @@ testing.test("SharedMap survives async deep-copy", lam{ in
         "mutation in async task visible to caller")
 })
 
+// CancellationToken — cooperative cancel signal that survives async
+// deep-copy (same trick as Channel/SharedMap).
+testing.test("CancellationToken basic", lam{ in
+    let t = CancellationToken()
+    testing.assertEqual(t.cancelled(), false, nil)
+    t.cancel()
+    testing.assertEqual(t.cancelled(), true, nil)
+})
+
+testing.test("CancellationToken throwIfCancelled", lam{ in
+    let t = CancellationToken()
+    t.throwIfCancelled()  // shouldn't throw
+    t.cancel()
+    testing.assertThrows(lam{ in t.throwIfCancelled() }, "cancelled")
+})
+
+testing.test("CancellationToken signals across async VMs", lam{ in
+    let token = CancellationToken()
+    let f = async lam{ in
+        let i = 0
+        while (!token.cancelled() && i < 100) {
+            i = i + 1
+            time.sleep(20)
+        }
+        return i
+    }()
+    time.sleep(120)
+    token.cancel()
+    let iters = await f
+    testing.assert(iters < 100, "task should have bailed before 100 iterations")
+    testing.assert(iters >= 5, "task should have run at least a few iterations")
+})
+
 testing.done()

@@ -2666,6 +2666,7 @@ To communicate, use:
 
 - **`SharedMap`** — cross-task key-value store. Use this when async tasks need shared state by key (progress trackers, job state, caches).
 - **`Channel`** — built for cross-task messaging; the channel itself isn't deep-copied.
+- **`CancellationToken`** — cooperative cancel signal. The caller flips the flag; long-running tasks poll and bail.
 - **External resources** — files, SQLite, sockets, native plugin state. These live outside the Praia heap, so all tasks see the same underlying resource. Use `Lock()` to coordinate concurrent access.
 - **`await`** — collect results back from the task. The future's return value is moved across the boundary.
 
@@ -2694,6 +2695,38 @@ print(jobs.get("abc"))     // {progress: 50}
 | `m.size()` / `m.clear()` | Count / empty. |
 
 Use `update` for compound mutations (increments, conditional writes); the lock guarantees no other task observes a half-update. Don't do I/O inside `update`. The lock is recursive — `fn` can call other `SharedMap` methods on the same map without deadlocking.
+
+### CancellationToken
+
+`CancellationToken()` is a flag that any task can flip to "cancelled". Pass it to long-running async tasks and have them poll `cancelled()` to bail out cleanly. This is the cooperative alternative to killing a task by signal — the task gets to clean up its own subprocess.
+
+```
+let token = CancellationToken()
+
+func work(tok) {
+    let proc = sys.spawn(["ffmpeg", "-i", "in.mp4", "out.webm"])
+    while (true) {
+        if (tok.cancelled()) { proc.kill(); return "cancelled" }
+        let line = proc.readLine()
+        if (line == nil) { break }
+    }
+    proc.wait()
+    return "done"
+}
+
+let f = async work(token)
+// ... later, from any thread:
+token.cancel()
+print(await f)        // "cancelled"
+```
+
+| Method | Description |
+|--------|-------------|
+| `token.cancel()` | Set the cancelled flag. Idempotent. |
+| `token.cancelled()` | Returns `true` if `cancel()` has been called. |
+| `token.throwIfCancelled()` | Throws `"cancelled"` if cancelled, otherwise returns nil. |
+
+The flag is `std::atomic<bool>` — both methods are lock-free. Cancellation is a one-way transition. Make a fresh `CancellationToken()` per logical operation.
 
 ### Channels
 
