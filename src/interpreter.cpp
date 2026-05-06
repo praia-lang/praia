@@ -1335,14 +1335,142 @@ Value Interpreter::evaluate(const Expr* expr) {
                     " " + argStr(arity) + " but got " + std::to_string(args.size()), e->line);
         }
 
-        // Spawn the call in a background thread with a task-local
-        // Interpreter so no interpreter state is shared with the caller.
-        auto sharedGlobals = globals;
+        // Deep-copy heap values so the async task can't observe or corrupt
+        // the caller's mutable state. Mirrors the VM's OP_ASYNC isolation
+        // (vm.cpp:1860+); without it `async` in tree-walker mode would
+        // silently violate the documented "no shared mutable state" contract.
+        //
+        // Tree-walker callables use captured `closure` Environment chains for
+        // free-variable lookup. To get true isolation we must deep-copy those
+        // too — otherwise `func writer(){m[k]=v}` resolves `m` through
+        // writer.closure (the caller's globals) and mutates the caller's map
+        // directly. We pre-register the caller globals → fresh task globals
+        // mapping so any closure chain encountered during the copy gets
+        // rerooted at the task globals.
+        //
+        // NativeFunction values are shared as-is — their state is
+        // intentionally cross-VM via their own captured shared_ptrs (this is
+        // how Channel/SharedMap/CancellationToken survive isolation).
+        // Cycles handled via visited maps keyed on raw pointer identity.
+        std::unordered_map<void*, Value> valueVisited;
+        std::unordered_map<void*, std::shared_ptr<Environment>> envVisited;
+        auto taskGlobals = gcNew<Environment>();
+        envVisited[static_cast<void*>(globals.get())] = taskGlobals;
+
+        std::function<Value(const Value&)> deepCopy;
+        std::function<std::shared_ptr<Environment>(const std::shared_ptr<Environment>&)> copyEnv;
+
+        copyEnv = [&](const std::shared_ptr<Environment>& src) -> std::shared_ptr<Environment> {
+            if (!src) return nullptr;
+            void* key = static_cast<void*>(src.get());
+            auto it = envVisited.find(key);
+            if (it != envVisited.end()) return it->second;
+            auto fresh = gcNew<Environment>();
+            envVisited[key] = fresh; // register before recursing
+            fresh->parent = copyEnv(src->parent);
+            for (auto& [name, val] : src->variables)
+                fresh->variables[name] = deepCopy(val);
+            return fresh;
+        };
+
+        // Helper: clone a Praia callable with a deep-copied closure chain.
+        // NativeFunctions return as-is (NativeFunction has no closure to copy).
+        // Class / Method instances clone their closure but keep class identity
+        // (classes are treated as immutable).
+        auto cloneCallable = [&](const std::shared_ptr<Callable>& c) -> Value {
+            if (!c) return Value();
+            if (auto fn = std::dynamic_pointer_cast<PraiaFunction>(c)) {
+                auto clone = std::make_shared<PraiaFunction>(*fn);
+                clone->closure = copyEnv(fn->closure);
+                return Value(std::static_pointer_cast<Callable>(clone));
+            }
+            if (auto lam = std::dynamic_pointer_cast<PraiaLambda>(c)) {
+                auto clone = std::make_shared<PraiaLambda>(*lam);
+                clone->closure = copyEnv(lam->closure);
+                return Value(std::static_pointer_cast<Callable>(clone));
+            }
+            if (auto gf = std::dynamic_pointer_cast<PraiaGeneratorFunction>(c)) {
+                auto clone = std::make_shared<PraiaGeneratorFunction>(*gf);
+                clone->closure = copyEnv(gf->closure);
+                return Value(std::static_pointer_cast<Callable>(clone));
+            }
+            if (auto gl = std::dynamic_pointer_cast<PraiaGeneratorLambda>(c)) {
+                auto clone = std::make_shared<PraiaGeneratorLambda>(*gl);
+                clone->closure = copyEnv(gl->closure);
+                return Value(std::static_pointer_cast<Callable>(clone));
+            }
+            // PraiaMethod, PraiaClass, NativeFunction: share. Methods are
+            // bound at call time; classes are effectively immutable; natives
+            // intentionally share (their state crosses VMs by design).
+            return Value(c);
+        };
+
+        deepCopy = [&](const Value& v) -> Value {
+            if (v.isMap()) {
+                void* key = static_cast<void*>(v.asMap().get());
+                auto it = valueVisited.find(key);
+                if (it != valueVisited.end()) return it->second;
+                auto copy = gcNew<PraiaMap>();
+                Value result(copy);
+                valueVisited[key] = result;
+                for (auto& [k, val] : v.asMap()->entries)
+                    copy->entries[k] = deepCopy(val);
+                return result;
+            }
+            if (v.isArray()) {
+                void* key = static_cast<void*>(v.asArray().get());
+                auto it = valueVisited.find(key);
+                if (it != valueVisited.end()) return it->second;
+                auto copy = gcNew<PraiaArray>();
+                Value result(copy);
+                valueVisited[key] = result;
+                for (auto& el : v.asArray()->elements)
+                    copy->elements.push_back(deepCopy(el));
+                return result;
+            }
+            if (v.isInstance()) {
+                void* key = static_cast<void*>(v.asInstance().get());
+                auto it = valueVisited.find(key);
+                if (it != valueVisited.end()) return it->second;
+                auto copy = gcNew<PraiaInstance>();
+                copy->klass = v.asInstance()->klass; // class is immutable
+                Value result(copy);
+                valueVisited[key] = result;
+                for (auto& [k, fv] : v.asInstance()->fields)
+                    copy->fields[k] = deepCopy(fv);
+                return result;
+            }
+            if (v.isCallable()) {
+                void* key = static_cast<void*>(v.asCallable().get());
+                auto it = valueVisited.find(key);
+                if (it != valueVisited.end()) return it->second;
+                Value result = cloneCallable(v.asCallable());
+                valueVisited[key] = result;
+                return result;
+            }
+            // Primitives, strings, futures share by value/ref.
+            return v;
+        };
+
+        // Populate the fresh task globals from the caller's globals.
+        for (auto& [name, val] : globals->variables)
+            taskGlobals->variables[name] = deepCopy(val);
+
+        // Deep-copy the callable so its closure chain is rooted at task globals.
+        Value calleeCopy = deepCopy(Value(callable));
+        callable = calleeCopy.asCallable();
+
+        // Deep-copy arg values so the task can't mutate the caller's objects.
+        std::vector<Value> argsCopy;
+        argsCopy.reserve(args.size());
+        for (auto& a : args) argsCopy.push_back(deepCopy(a));
+
+        // Spawn the call in a background thread with a task-local Interpreter.
         auto sharedFuture = std::async(std::launch::async,
-            [callable, args, sharedGlobals]() -> Value {
-                Interpreter taskInterp(sharedGlobals);
+            [callable, argsCopy = std::move(argsCopy), taskGlobals]() -> Value {
+                Interpreter taskInterp(taskGlobals);
                 GcHeap::current().disable(); // task interpreters are short-lived
-                return callable->call(taskInterp, args);
+                return callable->call(taskInterp, argsCopy);
             }).share();
 
         auto fut = std::make_shared<PraiaFuture>();
