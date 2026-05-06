@@ -732,6 +732,12 @@ int main(int argc, char* argv[]) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
 
+    // Ignore SIGPIPE process-wide. Without this, an HTTP client that
+    // disconnects mid-response makes the next send() raise SIGPIPE, which
+    // by default kills the server. With SIG_IGN, send() returns -1 with
+    // EPIPE instead and the calling code can handle it gracefully.
+    signal(SIGPIPE, SIG_IGN);
+
     installDefaultSignalHandlers();
 
     // Resolve the directory where the praia binary lives.

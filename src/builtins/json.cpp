@@ -12,6 +12,27 @@ namespace {
 class JsonParser {
     const std::string& src;
     size_t pos = 0;
+    int depth = 0;
+
+    // Cap on object/array nesting to prevent stack overflow on hostile input
+    // (e.g. `[[[[[[...` with thousands of brackets blows the C++ stack and
+    // crashes the process). Matches conservative defaults used elsewhere
+    // (Python json: ~1000, JSON Schema: 200). 200 is plenty for any
+    // human-written or sensible machine-generated JSON.
+    static constexpr int MAX_DEPTH = 200;
+
+    // RAII helper: bumps depth on construction, decrements on destruction
+    // (so exceptions still restore depth correctly). Throws if we'd exceed
+    // MAX_DEPTH.
+    struct DepthGuard {
+        JsonParser& p;
+        DepthGuard(JsonParser& parser) : p(parser) {
+            if (p.depth >= MAX_DEPTH)
+                p.fail("JSON nesting too deep (max " + std::to_string(MAX_DEPTH) + ")");
+            p.depth++;
+        }
+        ~DepthGuard() { p.depth--; }
+    };
 
     void skipWhitespace() { while (pos < src.size() && std::isspace(src[pos])) pos++; }
     char peek() { return pos < src.size() ? src[pos] : '\0'; }
@@ -190,6 +211,7 @@ class JsonParser {
     }
 
     Value parseObject() {
+        DepthGuard g(*this);
         advance(); // {
         auto map = gcNew<PraiaMap>();
         skipWhitespace();
@@ -211,6 +233,7 @@ class JsonParser {
     }
 
     Value parseArray() {
+        DepthGuard g(*this);
         advance(); // [
         auto arr = gcNew<PraiaArray>();
         skipWhitespace();

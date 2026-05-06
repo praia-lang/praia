@@ -376,7 +376,16 @@ void sendHttpResponse(int client, int status, const std::string& body,
     hdrs["Connection"] = "close";
     for (auto& [k, v] : hdrs) resp += k + ": " + v + "\r\n";
     resp += "\r\n" + body;
-    send(client, resp.c_str(), resp.size(), 0);
+    // Loop until the whole response is written. send() can return short on
+    // congested sockets; a bare send() without the loop silently truncates.
+    // SIGPIPE is ignored process-wide, so a closed peer just returns -1
+    // here instead of killing the server.
+    size_t off = 0;
+    while (off < resp.size()) {
+        ssize_t sent = ::send(client, resp.c_str() + off, resp.size() - off, 0);
+        if (sent < 0) break;
+        off += static_cast<size_t>(sent);
+    }
 }
 
 // Stream a file to the client without loading the whole thing into memory.
@@ -397,18 +406,27 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
     hdrs["Connection"] = "close";
     for (auto& [k, v] : hdrs) head += k + ": " + v + "\r\n";
     head += "\r\n";
-    if (::send(client, head.c_str(), head.size(), 0) < 0) { ::close(fd); return true; }
+
+    // sendAll: loop until the whole buffer is written or the peer disconnects.
+    // send() can return less than asked on slow/congested sockets; without
+    // this loop a long Content-Disposition filename would be truncated.
+    auto sendAll = [&](const char* data, size_t len) -> bool {
+        size_t off = 0;
+        while (off < len) {
+            ssize_t sent = ::send(client, data + off, len - off, 0);
+            if (sent < 0) return false;
+            off += static_cast<size_t>(sent);
+        }
+        return true;
+    };
+
+    if (!sendAll(head.c_str(), head.size())) { ::close(fd); return true; }
 
     // Body in 64 KB chunks. Stop on read error or client disconnect.
     char buf[64 * 1024];
     ssize_t n;
     while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
-        ssize_t off = 0;
-        while (off < n) {
-            ssize_t sent = ::send(client, buf + off, n - off, 0);
-            if (sent < 0) { ::close(fd); return true; }
-            off += sent;
-        }
+        if (!sendAll(buf, static_cast<size_t>(n))) { ::close(fd); return true; }
     }
     ::close(fd);
     return true;
