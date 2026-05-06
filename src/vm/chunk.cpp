@@ -27,6 +27,7 @@ uint16_t Chunk::addConstant(Value value) {
     if (constants.size() >= 65535)
         throw RuntimeError("Too many constants in one chunk (max 65535)", 0);
     constants.push_back(std::move(value));
+    globalSlotCache.push_back(-1); // parallel slot cache stays in sync with constants
     return static_cast<uint16_t>(constants.size() - 1);
 }
 

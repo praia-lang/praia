@@ -34,41 +34,57 @@ namespace fs = std::filesystem;
 // CV-driven schedule. Each retain notifies, so steady-state reap latency is
 // bounded by ~one task duration, not a fixed interval. A periodic 5-second
 // timer ensures burst-then-idle workloads (which would otherwise pin
-// completed task results forever) eventually release their memory. The
-// thread is detached and exits when the process does.
-static std::mutex g_inflightMutex;
-static std::condition_variable g_inflightCv;
-static std::vector<std::shared_future<Value>> g_inflightFutures;
-static std::once_flag g_inflightReaperOnce;
+// completed task results forever) eventually release their memory.
+//
+// Lifetime: the state is intentionally leaked (allocated once, never freed).
+// At process exit the OS reclaims the memory and kills the detached reaper
+// thread. We can't use static-storage objects because destroying the mutex
+// or condition_variable while the reaper is blocked in wait_for() is
+// undefined behavior — on Linux it deadlocks the process during the
+// global-destructor pass; on macOS the runtime forces threads down first
+// and gets away with it. The leak is one fixed-size struct per process.
+struct InflightState {
+    std::mutex mtx;
+    std::condition_variable cv;
+    std::vector<std::shared_future<Value>> futures;
+};
 
-static void inflightReaperLoop() {
+static InflightState* getInflight() {
+    static InflightState* state = new InflightState();
+    return state;
+}
+
+static void inflightReaperLoop(InflightState* st) {
     using namespace std::chrono_literals;
-    std::unique_lock<std::mutex> lock(g_inflightMutex);
+    std::unique_lock<std::mutex> lock(st->mtx);
     while (true) {
         // Wait for either a notify (new retain) or the periodic timer.
         // No predicate — every wakeup performs a sweep regardless.
-        g_inflightCv.wait_for(lock, 5s);
-        g_inflightFutures.erase(
-            std::remove_if(g_inflightFutures.begin(), g_inflightFutures.end(),
+        st->cv.wait_for(lock, 5s);
+        st->futures.erase(
+            std::remove_if(st->futures.begin(), st->futures.end(),
                 [](const std::shared_future<Value>& sf) {
                     return !sf.valid() ||
                            sf.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
                 }),
-            g_inflightFutures.end());
+            st->futures.end());
     }
 }
 
+static std::once_flag g_inflightReaperOnce;
+
 void retainInflightFuture(const std::shared_future<Value>& f) {
-    std::call_once(g_inflightReaperOnce, [] {
-        std::thread(inflightReaperLoop).detach();
+    InflightState* st = getInflight();
+    std::call_once(g_inflightReaperOnce, [st] {
+        std::thread(inflightReaperLoop, st).detach();
     });
     {
-        std::lock_guard<std::mutex> lock(g_inflightMutex);
-        g_inflightFutures.push_back(f);
+        std::lock_guard<std::mutex> lock(st->mtx);
+        st->futures.push_back(f);
     }
     // Wake the reaper to consider this entry once it's ready; cheap no-op if
     // the reaper is already mid-sweep.
-    g_inflightCv.notify_one();
+    st->cv.notify_one();
 }
 
 // ── Operator overloading helper ──
@@ -161,7 +177,8 @@ VM::VM() : stack(std::make_unique<Value[]>(STACK_MAX)) {}
 VM::~VM() = default;
 
 void VM::defineNative(const std::string& name, Value value) {
-    globals[name] = std::move(value);
+    int slot = ensureGlobalSlot(name);
+    globals[slot] = std::move(value);
     builtinNames_.insert(name);
 }
 
@@ -169,8 +186,9 @@ void VM::setArgs(const std::vector<std::string>& args) {
     auto arr = gcNew<PraiaArray>();
     for (auto& a : args)
         arr->elements.push_back(Value(a));
-    if (globals.count("sys") && globals["sys"].isMap())
-        globals["sys"].asMap()->entries[Value("args")] = Value(arr);
+    int slot = findGlobalSlot("sys");
+    if (slot >= 0 && globals[slot].isMap())
+        globals[slot].asMap()->entries[Value("args")] = Value(arr);
 }
 
 void VM::push(Value value) {
@@ -612,9 +630,11 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     // Execute in a fresh VM with only builtins (not user globals)
     VM grainVm;
     for (auto& name : builtinNames_) {
-        auto it = globals.find(name);
-        if (it != globals.end())
-            grainVm.globals[name] = it->second;
+        int parentSlot = findGlobalSlot(name);
+        if (parentSlot >= 0) {
+            int childSlot = grainVm.ensureGlobalSlot(name);
+            grainVm.globals[childSlot] = globals[parentSlot];
+        }
     }
     grainVm.builtinNames_ = builtinNames_;
     grainVm.currentFile = resolved;
@@ -654,10 +674,11 @@ Value VM::loadGrain(const std::string& importPath, int line) {
 
     // Copy grain's globals to parent VM so exported closures can access
     // their module-level variables (which were compiled as globals)
-    for (auto& [k, v] : grainVm.globals) {
+    for (auto& [k, grainSlot] : grainVm.globalIndices) {
         // Don't overwrite existing builtins or user globals
-        if (globals.find(k) == globals.end()) {
-            globals[k] = v;
+        if (findGlobalSlot(k) < 0) {
+            int parentSlot = ensureGlobalSlot(k);
+            globals[parentSlot] = grainVm.globals[grainSlot];
         }
     }
 
@@ -680,7 +701,7 @@ Value VM::loadGrain(const std::string& importPath, int line) {
             for (auto& [k, fv] : v.asInstance()->fields) fixupValue(fv);
         }
     };
-    for (auto& [k, v] : globals) fixupValue(v);
+    for (auto& v : globals) fixupValue(v);
     fixupValue(exports);
 
     grainCache[resolved] = exports;
@@ -1000,18 +1021,47 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_NOT: { push(Value(!pop().isTruthy())); break; }
 
         // ── Variables ──
-        case OpCode::OP_DEFINE_GLOBAL: { std::string n = READ_STRING(); globals[n] = pop(); break; }
+        // OP_*_GLOBAL operands are constant pool indices (the global's name
+        // stored as a string). The chunk's `globalSlotCache[constIdx]` is
+        // a per-call-site inline cache: -1 on first hit, the resolved slot
+        // thereafter, so subsequent accesses skip the string hash and go
+        // straight to `globals[slot]`.
+        case OpCode::OP_DEFINE_GLOBAL: {
+            uint16_t constIdx = READ_U16();
+            auto& chunk = FRAME.chunk();
+            int slot = chunk.globalSlotCache[constIdx];
+            if (slot < 0) {
+                slot = ensureGlobalSlot(chunk.constants[constIdx].asString());
+                chunk.globalSlotCache[constIdx] = slot;
+            }
+            globals[slot] = pop();
+            break;
+        }
         case OpCode::OP_GET_GLOBAL: {
-            std::string n = READ_STRING();
-            auto it = globals.find(n);
-            if (it == globals.end()) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
-            push(it->second); break;
+            uint16_t constIdx = READ_U16();
+            auto& chunk = FRAME.chunk();
+            int slot = chunk.globalSlotCache[constIdx];
+            if (slot < 0) {
+                const std::string& n = chunk.constants[constIdx].asString();
+                slot = findGlobalSlot(n);
+                if (slot < 0) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
+                chunk.globalSlotCache[constIdx] = slot;
+            }
+            push(globals[slot]);
+            break;
         }
         case OpCode::OP_SET_GLOBAL: {
-            std::string n = READ_STRING();
-            auto it = globals.find(n);
-            if (it == globals.end()) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
-            it->second = peek(); break;
+            uint16_t constIdx = READ_U16();
+            auto& chunk = FRAME.chunk();
+            int slot = chunk.globalSlotCache[constIdx];
+            if (slot < 0) {
+                const std::string& n = chunk.constants[constIdx].asString();
+                slot = findGlobalSlot(n);
+                if (slot < 0) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
+                chunk.globalSlotCache[constIdx] = slot;
+            }
+            globals[slot] = peek();
+            break;
         }
         case OpCode::OP_GET_LOCAL: { uint16_t slot = READ_U16(); push(stack[FRAME.baseSlot + slot]); break; }
         case OpCode::OP_SET_LOCAL: { uint16_t slot = READ_U16(); stack[FRAME.baseSlot + slot] = peek(); break; }
@@ -1049,18 +1099,25 @@ VM::Result VM::execute(int baseFrameCount_) {
         }
         case OpCode::OP_POST_INC_GLOBAL:
         case OpCode::OP_POST_DEC_GLOBAL: {
-            std::string n = READ_STRING();
-            auto it = globals.find(n);
-            if (it == globals.end()) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
-            if (!it->second.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
-            push(it->second);
+            uint16_t constIdx = READ_U16();
+            auto& chunk = FRAME.chunk();
+            int slot = chunk.globalSlotCache[constIdx];
+            if (slot < 0) {
+                const std::string& n = chunk.constants[constIdx].asString();
+                slot = findGlobalSlot(n);
+                if (slot < 0) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
+                chunk.globalSlotCache[constIdx] = slot;
+            }
+            Value& val = globals[slot];
+            if (!val.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
+            push(val);
             bool inc = static_cast<OpCode>(instruction) == OpCode::OP_POST_INC_GLOBAL;
-            if (it->second.isInt()) {
+            if (val.isInt()) {
                 int64_t r; int64_t delta = inc ? 1 : -1;
-                bool ov = inc ? __builtin_add_overflow(it->second.asInt(), (int64_t)1, &r)
-                              : __builtin_sub_overflow(it->second.asInt(), (int64_t)1, &r);
-                if (!ov) it->second = Value(r); else it->second = Value(it->second.asNumber() + delta);
-            } else it->second = Value(it->second.asNumber() + (inc ? 1 : -1));
+                bool ov = inc ? __builtin_add_overflow(val.asInt(), (int64_t)1, &r)
+                              : __builtin_sub_overflow(val.asInt(), (int64_t)1, &r);
+                if (!ov) val = Value(r); else val = Value(val.asNumber() + delta);
+            } else val = Value(val.asNumber() + (inc ? 1 : -1));
             break;
         }
         case OpCode::OP_POST_INC_UPVALUE:
@@ -1813,15 +1870,15 @@ VM::Result VM::execute(int baseFrameCount_) {
             // Otherwise, build a tagged value.
             std::string tagName = READ_STRING();
             uint8_t argc = READ_BYTE();
-            auto git = globals.find(tagName);
-            if (git != globals.end() && git->second.isCallable()) {
+            int gslot = findGlobalSlot(tagName);
+            if (gslot >= 0 && globals[gslot].isCallable()) {
                 // Global class/function — insert callee below args and call
                 // Shift args up by 1 to make room for callee
                 push(Value()); // make space
                 for (int i = 0; i < argc; i++)
                     stack[stackTop - 1 - i] = stack[stackTop - 2 - i];
-                stack[stackTop - argc - 1] = git->second;
-                if (!callValue(git->second, argc, CURRENT_LINE()))
+                stack[stackTop - argc - 1] = globals[gslot];
+                if (!callValue(globals[gslot], argc, CURRENT_LINE()))
                     return Result::RUNTIME_ERROR;
             } else {
                 auto tagged = gcNew<PraiaTagged>();
@@ -2040,8 +2097,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                 }
 
                 std::unordered_map<std::string, Value> globalsCopy;
-                for (auto& [k, v] : globals)
-                    globalsCopy[k] = deepCopy(v);
+                for (auto& [name, slot] : globalIndices)
+                    globalsCopy[name] = deepCopy(globals[slot]);
 
                 // Snapshot upvalues and deep-copy so captured arrays/maps/instances
                 // are isolated from the caller
@@ -2067,7 +2124,12 @@ VM::Result VM::execute(int baseFrameCount_) {
                      isConstructor, klass]() mutable -> Value {
                         VM taskVm;
                         GcHeap::current().disable(); // task VMs are short-lived
-                        taskVm.globals = std::move(globalsCopy);
+                        // Populate the task VM's slot-indexed globals from
+                        // the deep-copied name→Value snapshot.
+                        for (auto& [name, value] : globalsCopy) {
+                            int slot = taskVm.ensureGlobalSlot(name);
+                            taskVm.globals[slot] = std::move(value);
+                        }
                         taskVm.builtinNames_ = std::move(builtinNames);
                         taskVm.suppressErrors_ = true; // errors propagate to await, not stderr
 
@@ -2096,7 +2158,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                                     for (auto& [k, fv] : v.asInstance()->fields) rewire(fv);
                             }
                         };
-                        for (auto& [k, v] : taskVm.globals) rewire(v);
+                        for (auto& v : taskVm.globals) rewire(v);
 
                         // Pad args to match arity
                         std::vector<Value> paddedArgs = args;
@@ -2327,7 +2389,7 @@ void VM::gcMarkRoots(GcHeap& heap) {
         heap.markValue(stack[i]);
 
     // Globals
-    for (auto& [k, v] : globals)
+    for (auto& v : globals)
         heap.markValue(v);
 
     // Call frame classes (for super resolution)

@@ -136,9 +136,30 @@ public:
     int frameCount = 0;
 private:
 
-    // Globals
-    std::unordered_map<std::string, Value> globals;
+    // Globals — slot-indexed for fast access. The compiler emits names as
+    // constant-pool strings; the first OP_GET_GLOBAL / OP_SET_GLOBAL hit
+    // resolves the name to a slot via globalIndices and writes it to the
+    // chunk's parallel inline cache (Chunk::globalSlotCache), so subsequent
+    // accesses bypass the string hash. Slots are append-only — once
+    // assigned, never freed or moved — so cached slot indices remain valid
+    // for the lifetime of the VM.
+    std::vector<Value> globals;
+    std::unordered_map<std::string, int> globalIndices;
     std::set<std::string> builtinNames_; // names registered via defineNative (for grain isolation)
+
+    // Helpers. Inline because they're on the global-access hot path.
+    int ensureGlobalSlot(const std::string& name) {
+        auto it = globalIndices.find(name);
+        if (it != globalIndices.end()) return it->second;
+        int slot = static_cast<int>(globals.size());
+        globalIndices.emplace(name, slot);
+        globals.emplace_back(); // default Value (nil)
+        return slot;
+    }
+    int findGlobalSlot(const std::string& name) const {
+        auto it = globalIndices.find(name);
+        return (it != globalIndices.end()) ? it->second : -1;
+    }
 
     // Open upvalues (linked list, ordered by stack slot desc)
     ObjUpvalue* openUpvalues = nullptr;
