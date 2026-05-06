@@ -27,10 +27,15 @@ extern void retainInflightFuture(const std::shared_future<Value>& f);
 
 // ── Operator overloading helpers ──
 // Call a dunder method on an instance if it exists. Returns {true, result} if found.
+//
+// Fast path: precomputed `hasOperatorOverloads` flag on the class lets us
+// skip the chain walk for the common case (no overloads). See PraiaClass
+// in interpreter.h for the flag's contract.
 static std::pair<bool, Value> callDunder(Interpreter& interp,
                                           const std::shared_ptr<PraiaInstance>& inst,
                                           const std::string& methodName,
                                           const std::vector<Value>& args) {
+    if (!inst->klass || !inst->klass->hasOperatorOverloads) return {false, Value()};
     auto* decl = inst->klass->findMethod(methodName);
     if (!decl) return {false, Value()};
     auto bound = std::make_shared<PraiaMethod>();
@@ -718,11 +723,19 @@ void Interpreter::execute(const Stmt* stmt) {
         klass->superclass = superclass;
         klass->closure = env;
         klass->astOwner = currentAstOwner_;
+        // Inherit the dunder flag from the superclass — if any ancestor
+        // declared overloads, the dispatch must walk the chain.
+        if (superclass && superclass->hasOperatorOverloads)
+            klass->hasOperatorOverloads = true;
         for (auto& m : s->methods) {
-            if (m.isStatic)
+            if (m.isStatic) {
                 klass->staticMethods[m.name] = &m;
-            else
+            } else {
                 klass->methods[m.name] = &m;
+                // Track dunder presence for the operator-dispatch fast path.
+                if (m.name.size() >= 2 && m.name[0] == '_' && m.name[1] == '_')
+                    klass->hasOperatorOverloads = true;
+            }
         }
         env->define(s->name, Value(std::static_pointer_cast<Callable>(klass)));
         break;

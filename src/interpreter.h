@@ -130,6 +130,13 @@ struct PraiaClass : Callable, std::enable_shared_from_this<PraiaClass> {
     std::shared_ptr<Environment> closure;
     std::shared_ptr<void> astOwner;
 
+    // True if this class (or any ancestor) declares any dunder method
+    // (__add, __eq, __index, etc.). Lets the operator dispatch hot path
+    // skip the chain walk + dynamic_cast when no overloads exist — which
+    // is the overwhelming majority of classes. Set in OP_METHOD/OP_INHERIT
+    // (VM) and in StmtType::Class (tree-walker).
+    bool hasOperatorOverloads = false;
+
     Value call(Interpreter& interp, const std::vector<Value>& args) override;
     int arity() const override;
     std::string name() const override { return className; }

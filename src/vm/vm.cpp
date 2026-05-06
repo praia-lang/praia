@@ -73,11 +73,17 @@ void retainInflightFuture(const std::shared_future<Value>& f) {
 
 // ── Operator overloading helper ──
 // Try to call a dunder method on a VM instance. Returns {true, result} if found.
+//
+// Hot path: most instances have no operator overloads, so we short-circuit on
+// the precomputed `hasOperatorOverloads` flag (set during class definition,
+// inherited on extends). This avoids the chain walk + dynamic_cast on every
+// `+`, `==`, `<`, etc. for ordinary instances.
 static std::pair<bool, Value> vmCallDunder(VM& vm, const Value& instance,
                                             const std::string& methodName,
                                             const std::vector<Value>& args) {
     if (!instance.isInstance()) return {false, Value()};
     auto inst = instance.asInstance();
+    if (!inst->klass || !inst->klass->hasOperatorOverloads) return {false, Value()};
     auto walk = inst->klass;
     while (walk) {
         auto it = walk->vmMethods.find(methodName);
@@ -1290,6 +1296,9 @@ VM::Result VM::execute(int baseFrameCount_) {
 
             // Store the closure as a method — the VM will bind it when accessed
             klassPtr->vmMethods[name] = method;
+            // Track dunder presence for the operator-dispatch fast path.
+            if (name.size() >= 2 && name[0] == '_' && name[1] == '_')
+                klassPtr->hasOperatorOverloads = true;
             break;
         }
 
@@ -1326,6 +1335,13 @@ VM::Result VM::execute(int baseFrameCount_) {
             if (!subPtr) { RUNTIME_ERR("Subclass must be a class"); }
 
             subPtr->superclass = superPtr;
+            // Inherit the dunder flag — if any ancestor has overloads, we
+            // need to dispatch through the chain. OP_INHERIT runs before
+            // OP_METHOD in class declaration codegen, so this captures the
+            // ancestor state; OP_METHOD then OR-s in any locally declared
+            // dunders.
+            if (superPtr->hasOperatorOverloads)
+                subPtr->hasOperatorOverloads = true;
 
             pop(); // pop superclass
             break;
