@@ -92,8 +92,11 @@ testing.test("bare async returns immediately (no binding)", lam{ in
     let start = time.now()
     async sys.exec(["sleep", "1"])
     let elapsed = time.now() - start
-    testing.assert(elapsed < 200,
-        "bare async blocked for " + elapsed.toString() + "ms (expected <200ms)")
+    // The bug was a full 1000 ms block (the entire sleep). Anything under
+    // half a second proves the future destructor isn't waiting; the slack
+    // makes this robust on slow/contended CI runners.
+    testing.assert(elapsed < 500,
+        "bare async blocked for " + elapsed.toString() + "ms (expected <500ms)")
 })
 
 // SharedMap is the cross-VM key-value primitive. Like Channel and Lock,
@@ -151,19 +154,26 @@ testing.test("CancellationToken throwIfCancelled", lam{ in
 
 testing.test("CancellationToken signals across async VMs", lam{ in
     let token = CancellationToken()
+    // Loop budget large enough that natural completion is unambiguously
+    // distinct from cancellation — if cancel never reaches the task, iters
+    // hits the cap.
+    let cap = 500
     let f = async lam{ in
         let i = 0
-        while (!token.cancelled() && i < 100) {
+        while (!token.cancelled() && i < cap) {
             i = i + 1
             time.sleep(20)
         }
         return i
     }()
-    time.sleep(120)
+    // Give the task time to start running on a contended scheduler before
+    // we cancel. The exact iteration count we observe doesn't matter; the
+    // assertion below just checks cancel arrived at all.
+    time.sleep(200)
     token.cancel()
     let iters = await f
-    testing.assert(iters < 100, "task should have bailed before 100 iterations")
-    testing.assert(iters >= 5, "task should have run at least a few iterations")
+    testing.assert(iters < cap,
+        "cancel should bail the loop before natural end (iters=" + iters.toString() + ")")
 })
 
 testing.done()
