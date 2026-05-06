@@ -8,13 +8,17 @@
 #include "../parser.h"
 #include "../unicode.h"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iostream>
 #include <mutex>
 #include <sstream>
+#include <thread>
 #include <unordered_set>
 
 namespace fs = std::filesystem;
@@ -24,22 +28,47 @@ namespace fs = std::filesystem;
 // task completes. For Praia's fire-and-forget pattern (`async fn()` as a
 // statement), the shared_future inside the discarded PraiaFuture would be
 // that last reference and block the caller. We keep an extra reference here
-// so the call site is never the last one. Each new async call reaps
-// already-completed entries, bounding the tracker to currently in-flight tasks.
+// so the call site is never the last one.
+//
+// Reaping: a lazy-spawned coordinator thread sweeps completed entries on a
+// CV-driven schedule. Each retain notifies, so steady-state reap latency is
+// bounded by ~one task duration, not a fixed interval. A periodic 5-second
+// timer ensures burst-then-idle workloads (which would otherwise pin
+// completed task results forever) eventually release their memory. The
+// thread is detached and exits when the process does.
 static std::mutex g_inflightMutex;
+static std::condition_variable g_inflightCv;
 static std::vector<std::shared_future<Value>> g_inflightFutures;
+static std::once_flag g_inflightReaperOnce;
+
+static void inflightReaperLoop() {
+    using namespace std::chrono_literals;
+    std::unique_lock<std::mutex> lock(g_inflightMutex);
+    while (true) {
+        // Wait for either a notify (new retain) or the periodic timer.
+        // No predicate — every wakeup performs a sweep regardless.
+        g_inflightCv.wait_for(lock, 5s);
+        g_inflightFutures.erase(
+            std::remove_if(g_inflightFutures.begin(), g_inflightFutures.end(),
+                [](const std::shared_future<Value>& sf) {
+                    return !sf.valid() ||
+                           sf.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                }),
+            g_inflightFutures.end());
+    }
+}
 
 void retainInflightFuture(const std::shared_future<Value>& f) {
-    std::lock_guard<std::mutex> lock(g_inflightMutex);
-    // Reap completed entries first so we don't leak.
-    g_inflightFutures.erase(
-        std::remove_if(g_inflightFutures.begin(), g_inflightFutures.end(),
-            [](const std::shared_future<Value>& sf) {
-                return !sf.valid() ||
-                       sf.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-            }),
-        g_inflightFutures.end());
-    g_inflightFutures.push_back(f);
+    std::call_once(g_inflightReaperOnce, [] {
+        std::thread(inflightReaperLoop).detach();
+    });
+    {
+        std::lock_guard<std::mutex> lock(g_inflightMutex);
+        g_inflightFutures.push_back(f);
+    }
+    // Wake the reaper to consider this entry once it's ready; cheap no-op if
+    // the reaper is already mid-sweep.
+    g_inflightCv.notify_one();
 }
 
 // ── Operator overloading helper ──
