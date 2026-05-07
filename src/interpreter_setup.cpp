@@ -1441,11 +1441,43 @@ Interpreter::Interpreter() {
 
     auto jsonMap = gcNew<PraiaMap>();
 
-    jsonMap->entries[Value("parse")] = Value(makeNative("json.parse", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
+    // Optional second arg: either a number (max input length in bytes) or
+    // an options map (currently only {maxLength: N}). With no second arg
+    // the parser accepts any size — same behavior as before. Use the cap
+    // for hardening against hostile input on untrusted endpoints (the
+    // recursion-depth guard inside the parser already covers stack-blowing
+    // bracket bombs; this guards against straight-line allocation bombs
+    // like a 100 MB array literal).
+    auto extractMaxLength = [](const std::vector<Value>& args) -> std::pair<size_t, bool> {
+        if (args.size() < 2) return {0, false};
+        if (args[1].isNumber()) {
+            double n = args[1].asNumber();
+            if (n < 0) return {0, false};
+            return {static_cast<size_t>(n), true};
+        }
+        if (args[1].isMap()) {
+            auto it = args[1].asMap()->entries.find(Value("maxLength"));
+            if (it != args[1].asMap()->entries.end() && it->second.isNumber()) {
+                double n = it->second.asNumber();
+                if (n < 0) return {0, false};
+                return {static_cast<size_t>(n), true};
+            }
+        }
+        return {0, false};
+    };
+
+    jsonMap->entries[Value("parse")] = Value(makeNative("json.parse", -1,
+        [extractMaxLength](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
                 throw RuntimeError("json.parse() requires a string", 0);
-            return jsonParse(args[0].asString());
+            auto& src = args[0].asString();
+            auto [limit, hasLimit] = extractMaxLength(args);
+            if (hasLimit && src.size() > limit) {
+                throw RuntimeError("json.parse(): input exceeds maxLength of " +
+                    std::to_string(limit) + " bytes (got " +
+                    std::to_string(src.size()) + ")", 0);
+            }
+            return jsonParse(src);
         }));
 
     jsonMap->entries[Value("stringify")] = Value(makeNative("json.stringify", -1,
@@ -1464,11 +1496,19 @@ Interpreter::Interpreter() {
 
     auto yamlMap = gcNew<PraiaMap>();
 
-    yamlMap->entries[Value("parse")] = Value(makeNative("yaml.parse", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
+    // Optional second arg mirrors json.parse — number or {maxLength: N}.
+    yamlMap->entries[Value("parse")] = Value(makeNative("yaml.parse", -1,
+        [extractMaxLength](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
                 throw RuntimeError("yaml.parse() requires a string", 0);
-            return yamlParse(args[0].asString());
+            auto& src = args[0].asString();
+            auto [limit, hasLimit] = extractMaxLength(args);
+            if (hasLimit && src.size() > limit) {
+                throw RuntimeError("yaml.parse(): input exceeds maxLength of " +
+                    std::to_string(limit) + " bytes (got " +
+                    std::to_string(src.size()) + ")", 0);
+            }
+            return yamlParse(src);
         }));
 
     yamlMap->entries[Value("stringify")] = Value(makeNative("yaml.stringify", 1,
