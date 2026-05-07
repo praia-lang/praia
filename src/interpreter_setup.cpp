@@ -713,6 +713,9 @@ Interpreter::Interpreter() {
                 dup2(stderrPipe[1], STDERR_FILENO);
                 close(stdoutPipe[1]);
                 close(stderrPipe[1]);
+                // Become a process-group leader so kill(-pid, ...) reaches
+                // any grandchildren (e.g. shells that fork their own kids).
+                setpgid(0, 0);
                 if (useShell) {
                     execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
                 } else {
@@ -724,6 +727,9 @@ Interpreter::Interpreter() {
                 }
                 _exit(127);
             }
+            // Parent: also setpgid to close the race where we signal before
+            // the child's setpgid runs. Either side winning is fine.
+            setpgid(pid, pid);
 
             close(stdoutPipe[1]);
             close(stderrPipe[1]);
@@ -756,7 +762,7 @@ Interpreter::Interpreter() {
                     if (pr == 0 && timeoutMs >= 0) { timedOut = true; break; }
                     if (pr < 0 && errno == EINTR) {
                         if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
-                            kill(pid, SIGINT);
+                            kill(-pid, SIGINT);
                             interrupted = true;
                             break;
                         }
@@ -782,7 +788,9 @@ Interpreter::Interpreter() {
             }
 
             if (timedOut) {
-                kill(pid, SIGKILL);
+                // Signal the whole process group so a shell child's
+                // grandchildren (e.g. backgrounded sleeps) get reaped too.
+                kill(-pid, SIGKILL);
             }
 
             int status = 0;
@@ -852,6 +860,9 @@ Interpreter::Interpreter() {
                 close(stdinPipe[0]);
                 close(stdoutPipe[1]);
                 close(stderrPipe[1]);
+                // Become a process-group leader so proc.kill(-pid, ...) can
+                // signal any grandchildren the child spawns.
+                setpgid(0, 0);
                 if (useShell) {
                     execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
                 } else {
@@ -862,6 +873,8 @@ Interpreter::Interpreter() {
                 }
                 _exit(127);
             }
+            // Parent: race-proof the setpgid by setting it from here too.
+            setpgid(pid, pid);
 
             // Parent
             close(stdinPipe[0]);   // close read end of stdin
@@ -973,7 +986,9 @@ Interpreter::Interpreter() {
                     return Value(static_cast<int64_t>(state->exitCode));
                 }));
 
-            // proc.kill(signal?) — send a signal to the child (default SIGTERM)
+            // proc.kill(signal?) — send a signal to the child (default SIGTERM).
+            // Sent to the whole process group so any grandchildren the child
+            // forked (e.g. shell pipelines) are signalled too.
             proc->entries[Value("kill")] = Value(makeNative("proc.kill", -1,
                 [state](const std::vector<Value>& args) -> Value {
                     int sig = SIGTERM;
@@ -984,7 +999,7 @@ Interpreter::Interpreter() {
                     } else if (!args.empty() && args[0].isNumber()) {
                         sig = static_cast<int>(args[0].asNumber());
                     }
-                    ::kill(state->pid, sig);
+                    ::kill(-state->pid, sig);
                     return Value();
                 }));
 
