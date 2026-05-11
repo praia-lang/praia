@@ -73,6 +73,7 @@ private:
     bool isNameToken(TokenType type) const;
     ParseError error(const Token& token, const std::string& message);
     void synchronize();
+    void consumeStatementSeparator();
 
     std::vector<Token> tokens;
     int current = 0;

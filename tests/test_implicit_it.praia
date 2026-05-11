@@ -52,4 +52,44 @@ testing.test("pipe try in chain", lam{ in
     testing.assertEqual(r, "recovered", nil)
 })
 
+// Regression: the implicit-it detection scanned ahead for an `in`
+// token but only tracked brace depth — so a nested `for (x in arr)`
+// at the body level made the parser think the lambda had explicit
+// params named "x", then failed when no `}` followed. Now the
+// lookahead also tracks paren + bracket depth.
+testing.test("implicit-it lambda with for-in body", lam{ in
+    let out = []
+    let f = lam{ for (x in [1, 2, 3]) { push(out, x) } }
+    f(nil)
+    testing.assertEqual(out, [1, 2, 3], "for-in body parsed correctly")
+})
+
+testing.test("implicit-it lambda with nested array literal", lam{ in
+    // [1, 2] inside the body — the `]` is at bracketDepth 0, but the
+    // lookahead must not confuse the array literal's contents with
+    // params.
+    let f = lam{ return [10, 20, 30] }
+    testing.assertEqual(f(nil), [10, 20, 30], nil)
+})
+
+// Regression: BIT_NOT was missing from the "can start expression"
+// allowlist in returnStatement and yield, so `return ~x` / `yield ~x`
+// silently produced nil instead of the bitwise complement.
+testing.test("return ~int gives bitwise complement", lam{ in
+    func r() { return ~1 }
+    testing.assertEqual(r(), -2, nil)
+    func r2() { return ~0xFF }
+    testing.assertEqual(r2(), -256, nil)
+})
+
+testing.test("yield ~int gives bitwise complement", lam{ in
+    func g() {
+        yield ~1
+        yield ~0
+    }
+    let it = g()
+    testing.assertEqual(it.next().value, -2, nil)
+    testing.assertEqual(it.next().value, -1, nil)
+})
+
 testing.done()
