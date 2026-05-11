@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -302,6 +303,16 @@ inline size_t ValueHash::hashTagged(const Value& v) {
 
 // ── Value method definitions (need complete types) ──
 
+// Cycle-aware recursive helper for Value::toString. Tracks the raw
+// pointers of containers on the active recursion path; if a container
+// re-enters itself, emits a placeholder marker instead of recursing
+// forever. Pointers are erased on the way out so shared-but-non-cyclic
+// sub-structures still serialize fully on each occurrence.
+//
+// (Free function rather than a private method to avoid changing the
+// Value declaration; called only from Value::toString.)
+inline std::string valueToStringRec(const Value& v, std::unordered_set<const void*>& visited);
+
 inline bool Value::isTruthy() const {
     if (isNil()) return false;
     if (isBool()) return asBool();
@@ -309,53 +320,67 @@ inline bool Value::isTruthy() const {
 }
 
 inline std::string Value::toString() const {
-    if (isNil())    return "nil";
-    if (isBool())   return asBool() ? "true" : "false";
-    if (isInt())    return std::to_string(asInt());
-    if (isDouble()) { std::ostringstream o; o << asNumber(); return o.str(); }
-    if (isString()) return asString();
-    if (isCallable()) return "<function>";
-    if (isInstance()) return "<instance>";
-    if (isFuture()) return "<future>";
-    if (isGenerator()) return "<generator>";
-    if (isArray()) {
+    std::unordered_set<const void*> visited;
+    return valueToStringRec(*this, visited);
+}
+
+inline std::string valueToStringRec(const Value& v, std::unordered_set<const void*>& visited) {
+    if (v.isNil())    return "nil";
+    if (v.isBool())   return v.asBool() ? "true" : "false";
+    if (v.isInt())    return std::to_string(v.asInt());
+    if (v.isDouble()) { std::ostringstream o; o << v.asNumber(); return o.str(); }
+    if (v.isString()) return v.asString();
+    if (v.isCallable()) return "<function>";
+    if (v.isInstance()) return "<instance>";
+    if (v.isFuture()) return "<future>";
+    if (v.isGenerator()) return "<generator>";
+    if (v.isArray()) {
+        const void* key = static_cast<const void*>(v.asArray().get());
+        if (!visited.insert(key).second) return "[...]";
         std::ostringstream o;
         o << "[";
-        auto& elems = asArray()->elements;
+        auto& elems = v.asArray()->elements;
         for (size_t i = 0; i < elems.size(); i++) {
             if (i > 0) o << ", ";
-            if (elems[i].isString()) o << "\"" << elems[i].toString() << "\"";
-            else o << elems[i].toString();
+            if (elems[i].isString()) o << "\"" << valueToStringRec(elems[i], visited) << "\"";
+            else o << valueToStringRec(elems[i], visited);
         }
         o << "]";
+        visited.erase(key);
         return o.str();
     }
-    if (isMap()) {
+    if (v.isMap()) {
+        const void* key = static_cast<const void*>(v.asMap().get());
+        if (!visited.insert(key).second) return "{...}";
         std::ostringstream o;
         o << "{";
         bool first = true;
-        for (auto& [k, v] : asMap()->entries) {
+        for (auto& [k, val] : v.asMap()->entries) {
             if (!first) o << ", ";
             first = false;
             if (k.isString()) o << k.asString();
-            else o << k.toString();
+            else o << valueToStringRec(k, visited);
             o << ": ";
-            if (v.isString()) o << "\"" << v.toString() << "\"";
-            else o << v.toString();
+            if (val.isString()) o << "\"" << valueToStringRec(val, visited) << "\"";
+            else o << valueToStringRec(val, visited);
         }
         o << "}";
+        visited.erase(key);
         return o.str();
     }
-    if (isTagged()) {
-        const auto& t = asTagged();
+    if (v.isTagged()) {
+        const auto& t = v.asTagged();
+        const void* key = static_cast<const void*>(t.get());
+        if (!visited.insert(key).second) return t->tag + "(...)";
         std::ostringstream o;
         o << t->tag << "(";
         for (size_t i = 0; i < t->values.size(); i++) {
             if (i > 0) o << ", ";
-            if (t->values[i].isString()) o << "\"" << t->values[i].toString() << "\"";
-            else o << t->values[i].toString();
+            if (t->values[i].isString()) o << "\"" << valueToStringRec(t->values[i], visited) << "\"";
+            else o << valueToStringRec(t->values[i], visited);
         }
         o << ")";
+        visited.erase(key);
         return o.str();
     }
     return "<unknown>";
@@ -368,6 +393,11 @@ inline bool Value::operator==(const Value& o) const {
     if (isNumber() && o.isNumber()) return numbersEqual(*this, o);
     if (isString() && o.isString()) return asString()  == o.asString();
     if (isArray()  && o.isArray()) {
+        // Identity short-circuit — covers `a == a` for cyclic `a`. Two
+        // distinct cyclic structures that happen to share shape still
+        // recurse and may stack-overflow; for the practical case
+        // (comparing a value with itself) this terminates.
+        if (asArray().get() == o.asArray().get()) return true;
         auto& a = asArray()->elements;
         auto& b = o.asArray()->elements;
         if (a.size() != b.size()) return false;
@@ -376,6 +406,7 @@ inline bool Value::operator==(const Value& o) const {
         return true;
     }
     if (isMap() && o.isMap()) {
+        if (asMap().get() == o.asMap().get()) return true;
         auto& a = asMap()->entries;
         auto& b = o.asMap()->entries;
         if (a.size() != b.size()) return false;
@@ -391,6 +422,7 @@ inline bool Value::operator==(const Value& o) const {
     if (isTagged() && o.isTagged()) {
         const auto& a = asTagged();
         const auto& b = o.asTagged();
+        if (a.get() == b.get()) return true;
         if (a->tag != b->tag || a->values.size() != b->values.size()) return false;
         for (size_t i = 0; i < a->values.size(); i++)
             if (a->values[i] != b->values[i]) return false;

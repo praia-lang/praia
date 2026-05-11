@@ -591,7 +591,19 @@ bool VM::callValue(Value callee, int argCount, int line) {
             std::vector<Value> args(argCount);
             for (int i = argCount - 1; i >= 0; i--) args[i] = pop();
             pop(); // the callable
-            Value result = native->fn(args);
+            // Defense-in-depth: any stdlib exception that escapes the
+            // native (std::invalid_argument from stoi, std::bad_alloc,
+            // std::regex_error, etc.) becomes a RuntimeError. Without
+            // this, those abort the process. RuntimeError passes through
+            // unchanged so line/column survive.
+            Value result;
+            try {
+                result = native->fn(args);
+            } catch (const RuntimeError&) {
+                throw;
+            } catch (const std::exception& e) {
+                throw RuntimeError(native->name() + "(): " + e.what(), line);
+            }
             push(std::move(result));
             return true;
         }

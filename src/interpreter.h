@@ -95,7 +95,22 @@ struct NativeFunction : Callable {
     int numArgs;  // -1 = variadic
     std::function<Value(const std::vector<Value>&)> fn;
 
-    Value call(Interpreter&, const std::vector<Value>& args) override { return fn(args); }
+    Value call(Interpreter&, const std::vector<Value>& args) override {
+        // Defense-in-depth: any C++ stdlib exception that escapes the
+        // native (e.g. std::invalid_argument from std::stoi on bad input,
+        // std::bad_alloc, std::regex_error, fs::filesystem_error) becomes
+        // a Praia RuntimeError tagged with the function name. Without
+        // this, those exceptions propagate to main() and terminate the
+        // process. RuntimeError is rethrown unchanged so its line/column
+        // info is preserved.
+        try {
+            return fn(args);
+        } catch (const RuntimeError&) {
+            throw;
+        } catch (const std::exception& e) {
+            throw RuntimeError(funcName + "(): " + e.what(), 0);
+        }
+    }
     int arity() const override { return numArgs; }
     std::string name() const override { return funcName; }
 };

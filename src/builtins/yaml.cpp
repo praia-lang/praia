@@ -4,6 +4,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include "../gc_heap.h"
 
 namespace {
@@ -263,7 +264,12 @@ Value yamlParse(const std::string& src) {
     return parser.parse();
 }
 
-std::string yamlStringify(const Value& val, int depth) {
+// Recursive helper. `visited` holds container pointers on the active
+// path; cycles throw rather than emit a placeholder (YAML's `&anchor`
+// syntax could in principle represent cycles, but our stringifier
+// doesn't emit anchors, so the only safe answer is to refuse).
+static std::string yamlStringifyRec(const Value& val, int depth,
+                                    std::unordered_set<const void*>& visited) {
     std::string pad(depth * 2, ' ');
 
     if (val.isNil()) return "null";
@@ -287,29 +293,36 @@ std::string yamlStringify(const Value& val, int depth) {
         return s;
     }
     if (val.isArray()) {
+        const void* key = static_cast<const void*>(val.asArray().get());
+        if (!visited.insert(key).second)
+            throw RuntimeError("yaml.stringify: cyclic reference", 0);
         auto& elems = val.asArray()->elements;
-        if (elems.empty()) return "[]";
+        if (elems.empty()) { visited.erase(key); return "[]"; }
         std::string r;
         for (size_t i = 0; i < elems.size(); i++) {
             if (i > 0 || depth > 0) r += pad;
             r += "- ";
             if (elems[i].isMap() || elems[i].isArray()) {
-                r += "\n" + yamlStringify(elems[i], depth + 1);
+                r += "\n" + yamlStringifyRec(elems[i], depth + 1, visited);
             } else {
-                r += yamlStringify(elems[i], depth + 1) + "\n";
+                r += yamlStringifyRec(elems[i], depth + 1, visited) + "\n";
             }
         }
+        visited.erase(key);
         return r;
     }
     if (val.isMap()) {
+        const void* key = static_cast<const void*>(val.asMap().get());
+        if (!visited.insert(key).second)
+            throw RuntimeError("yaml.stringify: cyclic reference", 0);
         auto& entries = val.asMap()->entries;
-        if (entries.empty()) return "{}";
+        if (entries.empty()) { visited.erase(key); return "{}"; }
 
         // Quote YAML keys that contain special characters
-        auto yamlQuoteKey = [](const std::string& key) -> std::string {
-            if (key.empty()) return "\"\"";
+        auto yamlQuoteKey = [](const std::string& k) -> std::string {
+            if (k.empty()) return "\"\"";
             bool needsQuote = false;
-            for (char c : key) {
+            for (char c : k) {
                 if (c == ':' || c == '#' || c == '{' || c == '}' ||
                     c == '[' || c == ']' || c == ',' || c == '&' ||
                     c == '*' || c == '?' || c == '|' || c == '>' ||
@@ -319,13 +332,13 @@ std::string yamlStringify(const Value& val, int depth) {
                     break;
                 }
             }
-            if (!needsQuote && (key.front() == ' ' || key.back() == ' ' ||
-                                key.front() == '-' || key.front() == '!'))
+            if (!needsQuote && (k.front() == ' ' || k.back() == ' ' ||
+                                k.front() == '-' || k.front() == '!'))
                 needsQuote = true;
-            if (!needsQuote) return key;
+            if (!needsQuote) return k;
             // Double-quote with escapes
             std::string r = "\"";
-            for (char c : key) {
+            for (char c : k) {
                 if (c == '"') r += "\\\"";
                 else if (c == '\\') r += "\\\\";
                 else if (c == '\n') r += "\\n";
@@ -343,12 +356,18 @@ std::string yamlStringify(const Value& val, int depth) {
             if (depth > 0) r += pad;
             r += yamlQuoteKey(k.asString()) + ":";
             if (v.isMap() || v.isArray()) {
-                r += "\n" + yamlStringify(v, depth + 1);
+                r += "\n" + yamlStringifyRec(v, depth + 1, visited);
             } else {
-                r += " " + yamlStringify(v, depth + 1) + "\n";
+                r += " " + yamlStringifyRec(v, depth + 1, visited) + "\n";
             }
         }
+        visited.erase(key);
         return r;
     }
     return "null";
+}
+
+std::string yamlStringify(const Value& val, int depth) {
+    std::unordered_set<const void*> visited;
+    return yamlStringifyRec(val, depth, visited);
 }

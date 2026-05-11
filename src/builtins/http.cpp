@@ -154,7 +154,18 @@ ParsedUrl parseUrl(const std::string& url) {
     auto colon = hostPort.find(':');
     if (colon != std::string::npos) {
         r.host = hostPort.substr(0, colon);
-        r.port = std::stoi(hostPort.substr(colon + 1));
+        const std::string portStr = hostPort.substr(colon + 1);
+        if (portStr.empty())
+            throw RuntimeError("Invalid URL: empty port in \"" + url + "\"", 0);
+        size_t pos = 0;
+        int port;
+        try { port = std::stoi(portStr, &pos); }
+        catch (...) {
+            throw RuntimeError("Invalid URL: bad port \"" + portStr + "\" in \"" + url + "\"", 0);
+        }
+        if (pos != portStr.size() || port < 0 || port > 65535)
+            throw RuntimeError("Invalid URL: bad port \"" + portStr + "\" in \"" + url + "\"", 0);
+        r.port = port;
     } else {
         r.host = hostPort;
     }
