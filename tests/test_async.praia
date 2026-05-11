@@ -196,4 +196,39 @@ testing.test("async deep-copy survives parent GC pressure", lam{ in
     testing.assertEqual(m.get("n"), 1, "task ran each iteration without corruption")
 })
 
+// Lazy-globals regression: with the per-task globals map rebuilt via
+// unordered_map iteration (pre-fix), the task's slot for a given name
+// could disagree with the parent's, and the shared chunk slot cache
+// would read the wrong global. With lazy globals + verbatim indices
+// copy, slot numbering matches by construction. These three tests
+// exercise the relevant shapes.
+testing.test("async reads parent-defined global", lam{ in
+    let counter_value = 4711
+    func read_counter() { return counter_value }
+    let f = async read_counter()
+    testing.assertEqual(await f, 4711, nil)
+})
+
+testing.test("async reads selected global among many", lam{ in
+    let g0 = "g0"; let g1 = "g1"; let g2 = "g2"; let g3 = "g3"
+    let g4 = "g4"; let g5 = "g5"; let g6 = "g6"; let g7 = "g7"
+    let target = "found_it"
+    let g8 = "g8"; let g9 = "g9"
+    func read_target() { return target }
+    let f = async read_target()
+    testing.assertEqual(await f, "found_it", nil)
+})
+
+testing.test("nested async sees parent globals through chain", lam{ in
+    let outer_unused = 1
+    let needed_by_inner = 7
+    func inner() { return needed_by_inner }
+    func outer() {
+        let f = async inner()
+        return await f
+    }
+    let g = async outer()
+    testing.assertEqual(await g, 7, nil)
+})
+
 testing.done()

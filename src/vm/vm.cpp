@@ -117,6 +117,128 @@ static std::pair<bool, Value> vmCallDunder(VM& vm, const Value& instance,
     return {false, Value()};
 }
 
+// ── Async deep-copy helpers ──
+//
+// Used by OP_ASYNC to clone heap-allocated values across the task boundary
+// so the task VM doesn't share mutable state with the caller. Handles
+// PraiaMap, PraiaArray, PraiaInstance (clone-fields), VMClosureCallable
+// (clone wrapper with vm=nullptr; rewireForTaskVm fixes it up later), and
+// VMBoundMethod (clone with deep-copied receiver). NativeFunction,
+// PraiaClass, primitives, strings, futures are shared as-is.
+//
+// Cycle handling: `visited` maps original heap pointer → freshly-created
+// copy. Caller scopes the visited map: a per-batch map (args + upvalues +
+// receiver of one OP_ASYNC) gives shared identity across that batch; a
+// per-call map (one global lazy-load) keeps identity inside one subtree
+// but lets different subtrees clone shared sub-objects independently.
+static Value deepCopyForTask(const Value& v,
+                             std::unordered_map<void*, Value>& visited) {
+    if (v.isCallable()) {
+        auto* vmcc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
+        if (vmcc) {
+            auto clone = std::make_shared<VMClosureCallable>(vmcc->closure);
+            clone->ownedPrototype = vmcc->ownedPrototype;
+            clone->vm = nullptr; // rewireForTaskVm sets this to &taskVm
+            return Value(std::static_pointer_cast<Callable>(clone));
+        }
+        auto* bm = dynamic_cast<VMBoundMethod*>(v.asCallable().get());
+        if (bm) {
+            Value recvCopy = deepCopyForTask(bm->receiver, visited);
+            auto clone = std::make_shared<VMBoundMethod>(
+                std::move(recvCopy), bm->method, bm->definingClass);
+            return Value(std::static_pointer_cast<Callable>(clone));
+        }
+        return v; // NativeFunction etc — safe to share
+    }
+    if (v.isMap()) {
+        void* key = static_cast<void*>(v.asMap().get());
+        auto it = visited.find(key);
+        if (it != visited.end()) return it->second;
+        auto copy = gcNew<PraiaMap>();
+        Value result(copy);
+        visited[key] = result; // register before recursing
+        for (auto& [k, val] : v.asMap()->entries)
+            copy->entries[k] = deepCopyForTask(val, visited);
+        return result;
+    }
+    if (v.isArray()) {
+        void* key = static_cast<void*>(v.asArray().get());
+        auto it = visited.find(key);
+        if (it != visited.end()) return it->second;
+        auto copy = gcNew<PraiaArray>();
+        Value result(copy);
+        visited[key] = result;
+        for (auto& el : v.asArray()->elements)
+            copy->elements.push_back(deepCopyForTask(el, visited));
+        return result;
+    }
+    if (v.isInstance()) {
+        void* key = static_cast<void*>(v.asInstance().get());
+        auto it = visited.find(key);
+        if (it != visited.end()) return it->second;
+        auto copy = gcNew<PraiaInstance>();
+        copy->klass = v.asInstance()->klass; // share class (immutable)
+        Value result(copy);
+        visited[key] = result;
+        for (auto& [k, fv] : v.asInstance()->fields)
+            copy->fields[k] = deepCopyForTask(fv, visited);
+        return result;
+    }
+    return v; // primitives, strings, futures
+}
+
+// Walk a freshly cloned Value subtree and rewire every VMClosureCallable's
+// `vm` pointer to the given task VM. Called per-subtree after a
+// deepCopyForTask. Necessary so closures *returned* from the task that get
+// invoked on the parent thread post-await can fall back to the right VM
+// (VM::current() is null on a non-executing thread).
+static void rewireForTaskVm(Value& v, VM* taskVm,
+                            std::unordered_set<void*>& visited) {
+    if (v.isCallable()) {
+        auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
+        if (vc) vc->vm = taskVm;
+    }
+    if (v.isMap()) {
+        void* p = static_cast<void*>(v.asMap().get());
+        if (visited.insert(p).second)
+            for (auto& [k, mv] : v.asMap()->entries)
+                rewireForTaskVm(mv, taskVm, visited);
+    }
+    if (v.isArray()) {
+        void* p = static_cast<void*>(v.asArray().get());
+        if (visited.insert(p).second)
+            for (auto& el : v.asArray()->elements)
+                rewireForTaskVm(el, taskVm, visited);
+    }
+    if (v.isInstance()) {
+        void* p = static_cast<void*>(v.asInstance().get());
+        if (visited.insert(p).second)
+            for (auto& [k, fv] : v.asInstance()->fields)
+                rewireForTaskVm(fv, taskVm, visited);
+    }
+}
+
+// Slow path for OP_GET_GLOBAL / POST_INC/DEC_GLOBAL in a task VM whose
+// snapshot entry hasn't been materialized yet. Deep-copies one slot's
+// value from the parent's snapshot, rewires VMClosureCallable vm pointers
+// in the cloned subtree, and marks the slot loaded.
+//
+// Per-slot visited map: identity within one global subtree is preserved,
+// but two globals that share a parent sub-object clone it independently
+// here — accepted minor behavior change from the eager design's one
+// shared visited map. Cross-global identity divergence is only visible if
+// user code asserts `id(A.x) == id(B.x)` after the boundary, which is
+// extremely rare.
+void VM::lazyLoadGlobal(int slot) {
+    std::unordered_map<void*, Value> visited;
+    Value cloned = deepCopyForTask(globalsSnapshot_[slot], visited);
+    std::unordered_set<void*> rewireVisited;
+    rewireForTaskVm(cloned, this, rewireVisited);
+    globals[slot] = std::move(cloned);
+    loadedMask_[slot] = 1;
+    globalsSnapshot_[slot] = Value(); // release stale shared_ptr
+}
+
 // Thread-local pointer to the currently executing VM
 thread_local VM* VM::currentVM_ = nullptr;
 
@@ -1035,6 +1157,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                 chunk.globalSlotCache[constIdx] = slot;
             }
             globals[slot] = pop();
+            // Overwrite wins over any pending lazy snapshot — mark loaded.
+            if (isTaskVm_) loadedMask_[slot] = 1;
             break;
         }
         case OpCode::OP_GET_GLOBAL: {
@@ -1047,6 +1171,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 if (slot < 0) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
                 chunk.globalSlotCache[constIdx] = slot;
             }
+            if (isTaskVm_ && !loadedMask_[slot]) lazyLoadGlobal(slot);
             push(globals[slot]);
             break;
         }
@@ -1061,6 +1186,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 chunk.globalSlotCache[constIdx] = slot;
             }
             globals[slot] = peek();
+            if (isTaskVm_) loadedMask_[slot] = 1;
             break;
         }
         case OpCode::OP_GET_LOCAL: { uint16_t slot = READ_U16(); push(stack[FRAME.baseSlot + slot]); break; }
@@ -1108,6 +1234,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 if (slot < 0) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
                 chunk.globalSlotCache[constIdx] = slot;
             }
+            if (isTaskVm_ && !loadedMask_[slot]) lazyLoadGlobal(slot);
             Value& val = globals[slot];
             if (!val.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
             push(val);
@@ -1871,6 +1998,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             std::string tagName = READ_STRING();
             uint8_t argc = READ_BYTE();
             int gslot = findGlobalSlot(tagName);
+            if (gslot >= 0 && isTaskVm_ && !loadedMask_[gslot]) lazyLoadGlobal(gslot);
             if (gslot >= 0 && globals[gslot].isCallable()) {
                 // Global class/function — insert callee below args and call
                 // Shift args up by 1 to make room for callee
@@ -1983,74 +2111,16 @@ VM::Result VM::execute(int baseFrameCount_) {
                 args = std::move(reordered);
             }
 
-            /* Deep-copy heap-allocated values so the async task doesn't share
-            the caller's mutable state. Handles PraiaMap, PraiaArray,
-            PraiaInstance (clones fields), and VMClosureCallable (clones
-            wrapper to prevent dangling vm pointers). NativeFunction and
-            PraiaFuture are safe to share. Primitives/strings copy by value.
-            Track visited heap objects to handle cycles (e.g. a = []; a.push(a)).
-            Key: raw pointer of the original object. Value: its already-created copy. */
+            /* Deep-copy heap-allocated values so the async task doesn't
+            share the caller's mutable state. The actual logic is in
+            deepCopyForTask (free helper above). `visited` is shared across
+            args / upvalues / receiver below so a single heap object passed
+            via multiple paths is cloned once. */
             std::unordered_map<void*, Value> visited;
-
-            std::function<Value(const Value&)> deepCopy;
-            deepCopy = [&deepCopy, &visited](const Value& v) -> Value {
-                if (v.isCallable()) {
-                    auto* vmcc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
-                    if (vmcc) {
-                        auto clone = std::make_shared<VMClosureCallable>(vmcc->closure);
-                        clone->ownedPrototype = vmcc->ownedPrototype;
-                        clone->vm = nullptr; // rewire sets this to &taskVm
-                        return Value(std::static_pointer_cast<Callable>(clone));
-                    }
-                    auto* bm = dynamic_cast<VMBoundMethod*>(v.asCallable().get());
-                    if (bm) {
-                        Value recvCopy = deepCopy(bm->receiver);
-                        auto clone = std::make_shared<VMBoundMethod>(
-                            std::move(recvCopy), bm->method, bm->definingClass);
-                        return Value(std::static_pointer_cast<Callable>(clone));
-                    }
-                    return v; // NativeFunction etc — safe to share
-                }
-                if (v.isMap()) {
-                    void* key = static_cast<void*>(v.asMap().get());
-                    auto it = visited.find(key);
-                    if (it != visited.end()) return it->second;
-                    auto copy = gcNew<PraiaMap>();
-                    Value result(copy);
-                    visited[key] = result; // register before recursing
-                    for (auto& [k, val] : v.asMap()->entries)
-                        copy->entries[k] = deepCopy(val);
-                    return result;
-                }
-                if (v.isArray()) {
-                    void* key = static_cast<void*>(v.asArray().get());
-                    auto it = visited.find(key);
-                    if (it != visited.end()) return it->second;
-                    auto copy = gcNew<PraiaArray>();
-                    Value result(copy);
-                    visited[key] = result; // register before recursing
-                    for (auto& el : v.asArray()->elements)
-                        copy->elements.push_back(deepCopy(el));
-                    return result;
-                }
-                if (v.isInstance()) {
-                    void* key = static_cast<void*>(v.asInstance().get());
-                    auto it = visited.find(key);
-                    if (it != visited.end()) return it->second;
-                    auto copy = gcNew<PraiaInstance>();
-                    copy->klass = v.asInstance()->klass; // share class (immutable)
-                    Value result(copy);
-                    visited[key] = result; // register before recursing
-                    for (auto& [k, fv] : v.asInstance()->fields)
-                        copy->fields[k] = deepCopy(fv);
-                    return result;
-                }
-                return v; // primitives, strings, futures
-            };
 
             // Deep-copy args so async task can't mutate caller's objects
             for (auto& arg : args)
-                arg = deepCopy(arg);
+                arg = deepCopyForTask(arg, visited);
 
             auto* native = dynamic_cast<NativeFunction*>(callable.get());
             auto* vmcc = dynamic_cast<VMClosureCallable*>(callable.get());
@@ -2096,33 +2166,55 @@ VM::Result VM::execute(int baseFrameCount_) {
                         " " + argStr(arity) + " but got " + std::to_string(args.size()));
                 }
 
-                std::unordered_map<std::string, Value> globalsCopy;
-                for (auto& [name, slot] : globalIndices)
-                    globalsCopy[name] = deepCopy(globals[slot]);
+                // Lazy/COW globals: build a shallow snapshot of the parent's
+                // globals (just shared_ptr increments — no deep-copy). The
+                // task VM will deep-copy a slot only the first time it
+                // reads or writes it (see VM::lazyLoadGlobal). A task that
+                // touches only `sys` pays 1 deepCopy instead of N.
+                //
+                // Nested async: if THIS VM is itself a task, slots we
+                // haven't loaded yet still hold Value() in `globals` —
+                // fall through to OUR snapshot so the child task sees the
+                // value the grand-parent had, not nil.
+                //
+                // Indices map is copied verbatim (not rebuilt) so slot
+                // numbering matches between parent and task — the chunk's
+                // shared globalSlotCache is correct in both VMs.
+                std::vector<Value> globalsCopy;
+                globalsCopy.reserve(globals.size());
+                for (size_t s = 0; s < globals.size(); s++) {
+                    if (isTaskVm_ && !loadedMask_[s])
+                        globalsCopy.push_back(globalsSnapshot_[s]);
+                    else
+                        globalsCopy.push_back(globals[s]);
+                }
+                auto indicesCopy = globalIndices;
 
                 // Snapshot upvalues and deep-copy so captured arrays/maps/instances
                 // are isolated from the caller
                 std::vector<Value> upvalueSnapshot;
                 for (int i = 0; i < closureSrc->upvalueCount; i++) {
                     auto* uv = closureSrc->upvalues[i];
-                    upvalueSnapshot.push_back(uv ? deepCopy(*uv->location) : Value());
+                    upvalueSnapshot.push_back(uv ? deepCopyForTask(*uv->location, visited) : Value());
                 }
 
                 // For bound methods, deep-copy the receiver so the task
                 // doesn't share instance fields with the caller.
                 // For constructors, the instance is created fresh in the task.
-                Value receiverCopy = bound ? deepCopy(bound->receiver) : Value();
+                Value receiverCopy = bound ? deepCopyForTask(bound->receiver, visited) : Value();
                 auto defClass = bound ? bound->definingClass
                               : initVmcc ? initOwner : nullptr;
 
-                // Pin every deep-copied root for this task in the parent VM's
-                // GC. See VM::inflightTaskRoots_. The lambda captures
-                // rootsHolder by copy so it stays alive for the lambda's
-                // lifetime; the parent's GC reaches the same Values via the
-                // weak_ptr registered below.
+                // Pin the deep-copied receiver / upvalues / args (those
+                // are gcNew'd on the parent thread, so they're tracked in
+                // *this* heap but only reachable via the lambda capture on
+                // another thread). The globals snapshot does NOT need
+                // pinning — its entries point to objects the parent's
+                // gcMarkRoots already covers through this VM's live
+                // `globals` vector. See audit fix #10 for the original
+                // bug this guards against.
                 auto rootsHolder = std::make_shared<std::vector<Value>>();
                 if (!receiverCopy.isNil()) rootsHolder->push_back(receiverCopy);
-                for (auto& [name, val] : globalsCopy) rootsHolder->push_back(val);
                 for (auto& uv : upvalueSnapshot) rootsHolder->push_back(uv);
                 for (auto& a : args) rootsHolder->push_back(a);
                 {
@@ -2131,7 +2223,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                 }
 
                 sharedFuture = std::async(std::launch::async,
-                    [fn, args, globalsCopy = std::move(globalsCopy), arity,
+                    [fn, args, globalsCopy = std::move(globalsCopy),
+                     indicesCopy = std::move(indicesCopy), arity,
                      upvalueSnapshot = std::move(upvalueSnapshot),
                      builtinNames = builtinNames_,
                      receiverCopy = std::move(receiverCopy),
@@ -2140,41 +2233,29 @@ VM::Result VM::execute(int baseFrameCount_) {
                      isConstructor, klass]() mutable -> Value {
                         VM taskVm;
                         GcHeap::current().disable(); // task VMs are short-lived
-                        // Populate the task VM's slot-indexed globals from
-                        // the deep-copied name→Value snapshot.
-                        for (auto& [name, value] : globalsCopy) {
-                            int slot = taskVm.ensureGlobalSlot(name);
-                            taskVm.globals[slot] = std::move(value);
-                        }
+                        // Lazy/COW globals setup. globalsCopy here is the
+                        // shallow snapshot (parent's shared_ptrs). The
+                        // task's own `globals` vector starts as all-nil
+                        // and is filled in by lazyLoadGlobal as each slot
+                        // is first touched.
+                        taskVm.isTaskVm_ = true;
+                        taskVm.globalIndices = std::move(indicesCopy);
+                        taskVm.globalsSnapshot_ = std::move(globalsCopy);
+                        taskVm.globals.assign(taskVm.globalsSnapshot_.size(), Value());
+                        taskVm.loadedMask_.assign(taskVm.globalsSnapshot_.size(), 0);
                         taskVm.builtinNames_ = std::move(builtinNames);
                         taskVm.suppressErrors_ = true; // errors propagate to await, not stderr
 
-                        // Recursively rewire VMClosureCallable vm pointers to taskVm.
-                        // Track visited objects to handle cycles.
+                        // Rewire VMClosureCallable vm pointers in the
+                        // eagerly deep-copied args / upvalues / receiver
+                        // (globals are rewired lazily inside lazyLoadGlobal
+                        // on first touch). Shared visited so cross-batch
+                        // identity matches what deepCopyForTask produced.
                         std::unordered_set<void*> rewireVisited;
-                        std::function<void(Value&)> rewire;
-                        rewire = [&taskVm, &rewire, &rewireVisited](Value& v) {
-                            if (v.isCallable()) {
-                                auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
-                                if (vc) vc->vm = &taskVm;
-                            }
-                            if (v.isMap()) {
-                                void* p = static_cast<void*>(v.asMap().get());
-                                if (rewireVisited.insert(p).second)
-                                    for (auto& [mk, mv] : v.asMap()->entries) rewire(mv);
-                            }
-                            if (v.isArray()) {
-                                void* p = static_cast<void*>(v.asArray().get());
-                                if (rewireVisited.insert(p).second)
-                                    for (auto& el : v.asArray()->elements) rewire(el);
-                            }
-                            if (v.isInstance()) {
-                                void* p = static_cast<void*>(v.asInstance().get());
-                                if (rewireVisited.insert(p).second)
-                                    for (auto& [k, fv] : v.asInstance()->fields) rewire(fv);
-                            }
-                        };
-                        for (auto& v : taskVm.globals) rewire(v);
+                        for (auto& a : args) rewireForTaskVm(a, &taskVm, rewireVisited);
+                        for (auto& u : upvalueSnapshot) rewireForTaskVm(u, &taskVm, rewireVisited);
+                        if (!receiverCopy.isNil())
+                            rewireForTaskVm(receiverCopy, &taskVm, rewireVisited);
 
                         // Pad args to match arity
                         std::vector<Value> paddedArgs = args;
@@ -2414,6 +2495,12 @@ void VM::gcMarkRoots(GcHeap& heap) {
 
     // Globals
     for (auto& v : globals)
+        heap.markValue(v);
+
+    // Lazy task-VM snapshot. Empty for non-task VMs; defensive even for
+    // task VMs (GC is disabled inside them today, but mark would be
+    // correct if that ever changed).
+    for (auto& v : globalsSnapshot_)
         heap.markValue(v);
 
     // Call frame classes (for super resolution)
