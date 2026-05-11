@@ -11,6 +11,24 @@ think to write, but that still tickle a code path into crashing.
 | `fuzz_json` | `json.parse` | `src/builtins/json.cpp` |
 | `fuzz_yaml` | `yaml.parse` | `src/builtins/yaml.cpp` |
 | `fuzz_lex_parse` | Lexer + Parser on Praia source | `src/lexer.cpp` + `src/parser.cpp` |
+| `fuzz_bytes_unpack` | `bytes.unpack` format-parse + data-walk | `src/builtins/bytes.cpp` |
+
+### Input layout
+
+For `fuzz_bytes_unpack`, the input is a single byte stream split into a
+format string and a data buffer:
+
+- byte 0: format length F (0..255)
+- bytes 1..F+1: format string
+- bytes F+1..end: data buffer
+
+This lets the mutator vary both sides independently. Seeds in
+`fuzz/seeds/bytes_unpack/` are pre-encoded in this layout — each seed
+covers one shape (single u16, big-endian u32, packed float/double,
+mixed counts, pad bytes, etc.).
+
+The other three targets take the input bytes directly as the parser
+input.
 
 ## Build
 

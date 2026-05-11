@@ -232,10 +232,14 @@ FUZZ_PARSE_SRCS = fuzz/fuzz_lex_parse.cpp \
                   src/parser.cpp \
                   src/unicode.cpp \
                   fuzz/gc_heap_fuzz.cpp
+FUZZ_BYTES_SRCS = fuzz/fuzz_bytes_unpack.cpp \
+                  src/builtins/bytes.cpp \
+                  fuzz/gc_heap_fuzz.cpp
 
 FUZZ_BINS = $(FUZZ_BUILD)/fuzz_json \
             $(FUZZ_BUILD)/fuzz_yaml \
-            $(FUZZ_BUILD)/fuzz_lex_parse
+            $(FUZZ_BUILD)/fuzz_lex_parse \
+            $(FUZZ_BUILD)/fuzz_bytes_unpack
 
 .PHONY: fuzz fuzz-clean
 fuzz: $(FUZZ_BINS)
@@ -250,6 +254,9 @@ $(FUZZ_BUILD)/fuzz_yaml: $(FUZZ_YAML_SRCS) | $(FUZZ_BUILD)
 	$(CXX_FUZZ) $(FUZZ_FLAGS) -I$(SRC_DIR) $^ -o $@
 
 $(FUZZ_BUILD)/fuzz_lex_parse: $(FUZZ_PARSE_SRCS) | $(FUZZ_BUILD)
+	$(CXX_FUZZ) $(FUZZ_FLAGS) -I$(SRC_DIR) $^ -o $@
+
+$(FUZZ_BUILD)/fuzz_bytes_unpack: $(FUZZ_BYTES_SRCS) | $(FUZZ_BUILD)
 	$(CXX_FUZZ) $(FUZZ_FLAGS) -I$(SRC_DIR) $^ -o $@
 
 fuzz-clean:
