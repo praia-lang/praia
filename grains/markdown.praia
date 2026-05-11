@@ -205,9 +205,10 @@ func _highlightPraia(code) {
               "try", "catch", "throw", "ensure", "async", "await",
               "use", "export", "as", "lam", "this", "super"]
     let consts = ["true", "false", "nil"]
-    let builtins = ["print", "len", "push", "pop", "type", "str", "num",
+    let builtins = ["print", "len", "push", "pop", "type", "str", "num", "int",
                     "fromCharCode", "sort", "filter", "map", "each", "keys",
-                    "values", "loadNative", "Lock", "Channel"]
+                    "values", "loadNative", "Lock", "Queue", "Channel",
+                    "SharedMap", "CancellationToken"]
     let nss = ["sys", "http", "json", "yaml", "net", "bytes", "crypto",
                "random", "time", "math", "base64", "path", "url", "futures", "sqlite"]
 

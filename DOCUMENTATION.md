@@ -2545,11 +2545,11 @@ print(u.query)     // "key=val"
 
 The HTTP server is **single-threaded** — handlers run one at a time, serially. The next request is not accepted until the current handler returns. This means there are no race conditions by default.
 
-You can still use `async` inside a handler for fire-and-forget background work or to parallelise I/O — just remember the cross-task isolation rules: each async task gets a deep copy of globals/upvalues/args, so Praia maps are NOT shared. To communicate, use `Channel`, `await`, or external resources (sqlite, files).
+You can still use `async` inside a handler for fire-and-forget background work or to parallelise I/O — just remember the cross-task isolation rules: each async task gets a deep copy of globals/upvalues/args, so Praia maps are NOT shared. To communicate, use `Queue`, `await`, or external resources (sqlite, files).
 
 ### Lock
 
-`Lock()` is a mutex for serializing concurrent access to **external resources** — files, sqlite handles, sockets, native plugin state. It does not, and cannot, make a Praia value shared across tasks; for that, use a Channel.
+`Lock()` is a mutex for serializing concurrent access to **external resources** — files, sqlite handles, sockets, native plugin state. It does not, and cannot, make a Praia value shared across tasks; for that, use a Queue.
 
 ```
 let lock = Lock()
@@ -2676,7 +2676,7 @@ print(m)              // {} — the task mutated its own copy
 To communicate, use:
 
 - **`SharedMap`** — cross-task key-value store. Use this when async tasks need shared state by key (progress trackers, job state, caches).
-- **`Channel`** — built for cross-task messaging; the channel itself isn't deep-copied.
+- **`Queue`** — built for cross-task messaging; the queue itself isn't deep-copied.
 - **`CancellationToken`** — cooperative cancel signal. The caller flips the flag; long-running tasks poll and bail.
 - **External resources** — files, SQLite, sockets, native plugin state. These live outside the Praia heap, so all tasks see the same underlying resource. Use `Lock()` to coordinate concurrent access.
 - **`await`** — collect results back from the task. The future's return value is moved across the boundary.
@@ -2768,43 +2768,53 @@ print(await f)        // "cancelled"
 
 The flag is `std::atomic<bool>` — both methods are lock-free. Cancellation is a one-way transition. Make a fresh `CancellationToken()` per logical operation.
 
-### Channels
+### Queues
 
-Channels are thread-safe queues for communication between async tasks.
+Queues are thread-safe FIFO queues for communication between async tasks.
 
 ```
-let ch = Channel()      // unbuffered channel
-let ch = Channel(10)    // buffered channel (up to 10 items)
+let q = Queue()      // unbounded queue — send() never blocks (until closed)
+let q = Queue(10)    // bounded queue — send() blocks while 10 items are pending
 ```
+
+> **Renamed in this release.** Previously `Channel()`. The name `Channel`
+> still works as a deprecated alias and prints a one-line warning to
+> stderr on first use; rename to `Queue` to silence it. Method names
+> (`send` / `recv` / `tryRecv` / `close` / `isClosed` / `isEmpty` /
+> `closed`) are unchanged.
 
 | Method | Description |
 |--------|-------------|
-| `ch.send(val)` | Send a value (blocks on buffered channel if full) |
-| `ch.recv()` | Receive a value (blocks until available, returns nil when closed + empty) |
-| `ch.tryRecv()` | Non-blocking receive (returns nil immediately if empty) |
-| `ch.close()` | Close the channel (no more sends allowed) |
-| `ch.isClosed()` | True once `close()` has been called. The "can I still send?" check for producers. |
-| `ch.isEmpty()` | True when the buffer has no pending values. The "is there anything to read?" check for consumers. |
-| `ch.closed()` | True when **closed AND drained** (= `isClosed() && isEmpty()`). The "is this channel done forever?" check for shutdown logic. |
+| `q.send(val)` | Send a value. Blocks when bounded and full; never blocks when unbounded. Throws if the queue is closed. |
+| `q.recv()` | Receive a value. Blocks until one is available; returns nil once the queue is closed AND drained. |
+| `q.tryRecv()` | Non-blocking receive. Returns nil immediately if no value is pending. |
+| `q.close()` | Close the queue — no more sends allowed. |
+| `q.isClosed()` | True once `close()` has been called. The "can I still send?" check for producers. |
+| `q.isEmpty()` | True when the buffer has no pending values. The "is there anything to read?" check for consumers. |
+| `q.closed()` | True when **closed AND drained** (= `isClosed() && isEmpty()`). The "is this queue done forever?" check for shutdown logic. |
 
 The three flags answer different questions. A producer wanting to bail out cleanly should consult `isClosed()` — `closed()` stays false until the buffer drains, so a producer checking it can race past a `close()` call and only see it once their own buffered values have already been consumed.
+
+> **Not a rendezvous channel.** `Queue()` is a queue, not Go-style hand-to-hand
+> coordination. Senders don't wait for receivers — values pile up in the buffer
+> until consumed. Use `Queue(N)` if you want backpressure.
 
 #### Producer-consumer pattern
 
 ```
-let ch = Channel()
+let q = Queue()
 
-func producer(ch) {
+func producer(q) {
     for (i in 0..5) {
-        ch.send(i)
+        q.send(i)
     }
-    ch.close()
+    q.close()
 }
 
-async producer(ch)
+async producer(q)
 
 while (true) {
-    let val = ch.recv()
+    let val = q.recv()
     if (val == nil) { break }
     print(val)
 }
@@ -2813,7 +2823,7 @@ while (true) {
 #### Fan-out: multiple workers
 
 ```
-let results = Channel()
+let results = Queue()
 
 func scan(target, results) {
     let r = sys.exec("ping -c1 -W1 " + target)
