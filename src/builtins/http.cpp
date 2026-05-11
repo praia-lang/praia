@@ -381,13 +381,40 @@ static const char* reasonPhrase(int status) {
     }
 }
 
+// True if the header field is safe to emit on the wire. Refuses CR/LF/NUL
+// in values, and CR/LF/NUL/colon in names. CRLF in either is a header-
+// injection (response-splitting) attempt: an attacker controlling part
+// of a header could close the current header line and inject further
+// headers or a fake response body.
+//
+// Exposed via anonymous namespace at file scope so all four serialization
+// sites and the user-facing http.redirect / outbound client path can
+// share the same predicate.
+bool headerFieldSafe(const std::string& name, const std::string& value) {
+    if (name.empty()) return false;
+    for (char c : name) {
+        if (c == '\r' || c == '\n' || c == '\0' || c == ':') return false;
+    }
+    for (char c : value) {
+        if (c == '\r' || c == '\n' || c == '\0') return false;
+    }
+    return true;
+}
+
 void sendHttpResponse(int client, int status, const std::string& body,
                        const std::unordered_map<std::string, std::string>& headers) {
     std::string resp = "HTTP/1.1 " + std::to_string(status) + " " + reasonPhrase(status) + "\r\n";
     auto hdrs = headers;
     hdrs["Content-Length"] = std::to_string(body.size());
     hdrs["Connection"] = "close";
-    for (auto& [k, v] : hdrs) resp += k + ": " + v + "\r\n";
+    // Defense-in-depth: skip any header containing CR/LF/NUL. Upstream
+    // validation should have rejected these already, but this final
+    // gate ensures injection never reaches the wire even if a new
+    // header-producing code path forgets to validate.
+    for (auto& [k, v] : hdrs) {
+        if (!headerFieldSafe(k, v)) continue;
+        resp += k + ": " + v + "\r\n";
+    }
     resp += "\r\n" + body;
     // Loop until the whole response is written. send() can return short on
     // congested sockets; a bare send() without the loop silently truncates.
@@ -417,7 +444,11 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
     auto hdrs = extraHeaders;
     hdrs["Content-Length"] = std::to_string(static_cast<long long>(st.st_size));
     hdrs["Connection"] = "close";
-    for (auto& [k, v] : hdrs) head += k + ": " + v + "\r\n";
+    // Same injection guard as sendHttpResponse — skip CRLF-tainted headers.
+    for (auto& [k, v] : hdrs) {
+        if (!headerFieldSafe(k, v)) continue;
+        head += k + ": " + v + "\r\n";
+    }
     head += "\r\n";
 
     // sendAll: loop until the whole buffer is written or the peer disconnects.
@@ -453,6 +484,21 @@ Value doHttpRequest(const std::string& method, const std::string& url,
                     const std::string& body,
                     const std::unordered_map<std::string, std::string>& extraHeaders) {
     auto p = parseUrl(url);
+    // Reject method/path/host/header CR/LF/NUL BEFORE any network I/O.
+    // Failing fast saves a DNS lookup + TCP/TLS handshake on garbage
+    // input and lets the user see the real error.
+    for (char c : method) if (c == '\r' || c == '\n' || c == '\0')
+        throw RuntimeError("Invalid HTTP method: contains CR/LF/NUL", 0);
+    for (char c : p.path) if (c == '\r' || c == '\n' || c == '\0')
+        throw RuntimeError("Invalid URL path: contains CR/LF/NUL", 0);
+    for (char c : p.host) if (c == '\r' || c == '\n' || c == '\0')
+        throw RuntimeError("Invalid host: contains CR/LF/NUL", 0);
+    for (auto& [k, v] : extraHeaders) {
+        if (!headerFieldSafe(k, v))
+            throw RuntimeError("Invalid request header \"" + k +
+                               "\": contains CR/LF/NUL (header injection)", 0);
+    }
+
     SocketConn conn;
     conn.fd = connectToHost(p.host, p.port);
 
@@ -514,6 +560,8 @@ Value doHttpRequest(const std::string& method, const std::string& url,
     }
 #endif
 
+    // CR/LF/NUL validation already happened above before connect — trust
+    // these inputs here. Serialize straight to the wire.
     std::string req = method + " " + p.path + " HTTP/1.1\r\n";
     req += "Host: " + p.host + "\r\n";
     req += "Connection: close\r\n";
@@ -617,8 +665,13 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
                     respBody = "";
                 }
                 if (e.count("headers") && e["headers"].isMap()) {
-                    for (auto& [k, v] : e["headers"].asMap()->entries)
-                        respHeaders[k.toString()] = v.toString();
+                    for (auto& [k, v] : e["headers"].asMap()->entries) {
+                        std::string kn = k.toString(), vn = v.toString();
+                        if (!headerFieldSafe(kn, vn))
+                            throw RuntimeError("Invalid response header \"" + kn +
+                                               "\": contains CR/LF/NUL (header injection)", 0);
+                        respHeaders[kn] = vn;
+                    }
                 }
                 if (respHeaders.find("Content-Type") == respHeaders.end() &&
                     respHeaders.find("content-type") == respHeaders.end())

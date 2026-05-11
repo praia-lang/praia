@@ -1357,10 +1357,22 @@ Interpreter::Interpreter() {
         }));
 
     // http.redirect(url, status?) → {status, body, headers}
+    // The URL is rejected if it contains CR/LF/NUL — without this check
+    // an attacker who controls part of the redirect target (e.g. a
+    // `?next=...` query param echoed into http.redirect) could close
+    // the Location line and inject further headers (Set-Cookie, etc.)
+    // or a fake response body. This is the classic "response splitting"
+    // vector — refuse at the call site.
     httpMap->entries[Value("redirect")] = Value(makeNative("http.redirect", -1,
         [](const std::vector<Value>& args) -> Value {
             if (args.empty() || !args[0].isString())
                 throw RuntimeError("http.redirect() requires a URL string", 0);
+            const std::string& url = args[0].asString();
+            for (char c : url) {
+                if (c == '\r' || c == '\n' || c == '\0')
+                    throw RuntimeError("http.redirect(): URL contains CR/LF/NUL "
+                                       "(header injection)", 0);
+            }
             int status = 302;
             if (args.size() > 1 && args[1].isNumber())
                 status = static_cast<int>(args[1].asNumber());
@@ -1368,7 +1380,7 @@ Interpreter::Interpreter() {
             res->entries[Value("status")] = Value(static_cast<double>(status));
             res->entries[Value("body")] = Value(std::string(""));
             auto hdrs = gcNew<PraiaMap>();
-            hdrs->entries[Value("Location")] = Value(args[0].asString());
+            hdrs->entries[Value("Location")] = Value(url);
             res->entries[Value("headers")] = Value(hdrs);
             return Value(res);
         }));
