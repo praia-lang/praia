@@ -664,9 +664,29 @@ static int runTestsCommand(const std::string& dir, bool useVm) {
     }
 
     std::vector<std::string> files;
-    for (auto& entry : fs::recursive_directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        auto& p = entry.path();
+    // Don't recurse into directory symlinks (loop risk), but file symlinks
+    // are fine — match the default behavior of Go/Rust/Java/Python/find.
+    // skip_permission_denied prevents throws on unreadable subtrees.
+    fs::recursive_directory_iterator it(
+        dir, fs::directory_options::skip_permission_denied);
+    fs::recursive_directory_iterator end;
+    for (; it != end; ++it) {
+        const auto& entry = *it;
+        bool isFile;
+        if (entry.is_symlink()) {
+            std::error_code ec;
+            auto st = fs::status(entry.path(), ec);
+            if (ec || !fs::exists(st)) continue;       // broken: skip
+            if (fs::is_directory(st)) {
+                it.disable_recursion_pending();          // don't follow
+                continue;
+            }
+            isFile = fs::is_regular_file(st);
+        } else {
+            isFile = entry.is_regular_file();
+        }
+        if (!isFile) continue;
+        const auto& p = entry.path();
         if (p.extension() == ".praia" &&
             p.filename().string().starts_with("test_")) {
             files.push_back(p.string());

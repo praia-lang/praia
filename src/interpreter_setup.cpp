@@ -15,6 +15,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -1713,25 +1714,66 @@ Interpreter::Interpreter() {
             return Value(fs::absolute(args[0].asString()).string());
         }));
 
-    // path.walk(dir) — recursively list all files as relative paths
+    // Walk `dir` recursively, invoking `visit` on each regular file. Matches
+    // the default behavior of Go's filepath.Walk, Rust's walkdir, Java's
+    // Files.walk, Python's os.walk, and Unix `find`:
+    //
+    //   - Symlinks to **directories** are not followed (avoids loops; a
+    //     subdir pointing at an ancestor would otherwise wedge the
+    //     iterator forever).
+    //   - Symlinks to **files** are yielded like any other file — they're
+    //     useful and pose no DoS risk.
+    //   - Broken symlinks are silently skipped.
+    //
+    // skip_permission_denied also covers unreadable subtrees mid-walk.
+    // Used by path.walk and the recursive branch of path.glob.
+    auto walkRegularFiles = [](const std::string& dir,
+                               std::function<void(const fs::directory_entry&)> visit) {
+        fs::recursive_directory_iterator it(
+            dir, fs::directory_options::skip_permission_denied);
+        fs::recursive_directory_iterator end;
+        for (; it != end; ++it) {
+            const auto& entry = *it;
+            if (entry.is_symlink()) {
+                // Decide based on what the link points at. status() follows
+                // the symlink; on a broken link it throws/returns "not
+                // found" — guard with error_code so we silently skip.
+                std::error_code ec;
+                auto st = fs::status(entry.path(), ec);
+                if (ec || !fs::exists(st)) continue; // broken: skip
+                if (fs::is_directory(st)) {
+                    // Don't recurse into the target — that's the loop risk.
+                    it.disable_recursion_pending();
+                    continue;
+                }
+                if (fs::is_regular_file(st)) visit(entry);
+                continue;
+            }
+            if (entry.is_regular_file()) visit(entry);
+        }
+    };
+
+    // path.walk(dir) — recursively list all files as relative paths.
+    // Skips symlinks (see walkRegularFiles).
     pathMap->entries[Value("walk")] = Value(makeNative("path.walk", 1,
-        [](const std::vector<Value>& args) -> Value {
+        [walkRegularFiles](const std::vector<Value>& args) -> Value {
             if (!args[0].isString())
                 throw RuntimeError("path.walk() requires a string path", 0);
             auto& dir = args[0].asString();
             if (!fs::is_directory(dir))
                 throw RuntimeError("path.walk(): not a directory: " + dir, 0);
             auto arr = gcNew<PraiaArray>();
-            for (auto& entry : fs::recursive_directory_iterator(dir)) {
-                if (entry.is_regular_file())
-                    arr->elements.push_back(Value(entry.path().string()));
-            }
+            walkRegularFiles(dir, [&](const fs::directory_entry& e) {
+                arr->elements.push_back(Value(e.path().string()));
+            });
             return Value(arr);
         }));
 
-    // path.glob(dir, pattern) — match files by extension pattern (e.g. "*.praia", "*.cpp")
+    // path.glob(dir, pattern) — match files by extension pattern (e.g. "*.praia", "*.cpp").
+    // Recursive (`**`) variant skips symlinks; non-recursive variant only
+    // visits direct children so symlink loops can't arise there.
     pathMap->entries[Value("glob")] = Value(makeNative("path.glob", 2,
-        [](const std::vector<Value>& args) -> Value {
+        [walkRegularFiles](const std::vector<Value>& args) -> Value {
             if (!args[0].isString() || !args[1].isString())
                 throw RuntimeError("path.glob() requires (directory, pattern)", 0);
             auto& dir = args[0].asString();
@@ -1750,16 +1792,27 @@ Interpreter::Interpreter() {
             }
 
             auto arr = gcNew<PraiaArray>();
+            auto matches = [&](const fs::path& p) {
+                return ext.empty() || p.extension().string() == ext;
+            };
             if (recursive) {
-                for (auto& entry : fs::recursive_directory_iterator(dir)) {
-                    if (!entry.is_regular_file()) continue;
-                    if (ext.empty() || entry.path().extension().string() == ext)
-                        arr->elements.push_back(Value(entry.path().string()));
-                }
+                walkRegularFiles(dir, [&](const fs::directory_entry& e) {
+                    if (matches(e.path()))
+                        arr->elements.push_back(Value(e.path().string()));
+                });
             } else {
-                for (auto& entry : fs::directory_iterator(dir)) {
-                    if (!entry.is_regular_file()) continue;
-                    if (ext.empty() || entry.path().extension().string() == ext)
+                // Non-recursive: no loop risk, so symlink-to-file is fine.
+                // Just resolve through symlinks for the regular-file check.
+                fs::directory_iterator it(
+                    dir, fs::directory_options::skip_permission_denied);
+                fs::directory_iterator end;
+                for (; it != end; ++it) {
+                    const auto& entry = *it;
+                    std::error_code ec;
+                    auto st = entry.is_symlink() ? fs::status(entry.path(), ec)
+                                                 : entry.status(ec);
+                    if (ec || !fs::is_regular_file(st)) continue;
+                    if (matches(entry.path()))
                         arr->elements.push_back(Value(entry.path().string()));
                 }
             }
