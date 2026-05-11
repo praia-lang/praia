@@ -3044,7 +3044,7 @@ Instead of manually building response maps, use these helpers:
 | `http.text(str, status?)` | Plain text response |
 | `http.html(str, status?)` | HTML response with `charset=utf-8` |
 | `http.redirect(url, status?)` | Redirect (302 by default) |
-| `http.file(path, status?)` | Serve a file with auto-detected MIME type |
+| `http.file(path, status?, opts?)` | Serve a file with auto-detected MIME type |
 
 ```
 // Before
@@ -3066,7 +3066,24 @@ return http.file("public/style.css")     // auto-detects text/css
 
 ```
 server.get("/static/:filename", lam{ req, params in
-    return http.file("public/" + params.filename)
+    // Always pair user-controlled paths with withinDir — see below.
+    return http.file("public/" + params.filename, {withinDir: "public"})
+})
+```
+
+#### Path traversal — withinDir
+
+`http.file` and `http.fileStream` will serve whatever path you give them — including `/etc/passwd`. By design: if you're serving a hard-coded asset (`http.file("public/index.html")`), you don't pay any path-resolution overhead. **But if any part of the path comes from a request** (URL params, query strings, headers, form fields), you must constrain where it can resolve to, or an attacker passing `../../etc/passwd` will read whatever the server process can read.
+
+Use the `withinDir` option. It resolves both the path and the dir to their canonical absolute forms (handling `..`, relative components, and symlinks) and throws if the path escapes the dir. Symlinks targeting outside the jail are blocked.
+
+```
+server.get("/files/:name", lam{ req, params in
+    try {
+        return http.file("uploads/" + params.name, {withinDir: "uploads"})
+    } catch (e) {
+        return http.text("not found", 404)
+    }
 })
 ```
 

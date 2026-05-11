@@ -1300,11 +1300,50 @@ Interpreter::Interpreter() {
             return Value(res);
         }));
 
+    // Path-traversal guard for http.file / http.fileStream. When the caller
+    // supplies a `withinDir` option, both the path and the dir are resolved
+    // to canonical absolute paths (handles `..`, relative components, and
+    // symlinks via weakly_canonical so non-existent paths don't throw at
+    // resolve time — the file-open will surface a clean "not found" later).
+    // Then we check the resolved path sits under the resolved dir with a
+    // trailing-slash boundary so /var/www-evil can't pass against /var/www.
+    //
+    // Symlinks are resolved through, so a symlink in the served dir
+    // pointing at /etc/passwd is correctly rejected.
+    auto validatePathWithin = [](const std::string& path, const std::string& withinDir) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        auto resolvedPath = fs::weakly_canonical(fs::path(path), ec);
+        if (ec)
+            throw RuntimeError("Invalid path: " + path, 0);
+        auto resolvedDir = fs::weakly_canonical(fs::path(withinDir), ec);
+        if (ec)
+            throw RuntimeError("Invalid withinDir: " + withinDir, 0);
+        // Append a separator so /var/www doesn't accidentally match
+        // /var/www-evil/secret.
+        std::string dirStr = resolvedDir.string();
+        if (dirStr.empty() || dirStr.back() != fs::path::preferred_separator)
+            dirStr.push_back(fs::path::preferred_separator);
+        std::string pathStr = resolvedPath.string();
+        // Allow exact match against the dir itself (rare but legal — e.g.
+        // serving the directory entry, which open() will then reject).
+        if (pathStr + fs::path::preferred_separator != dirStr &&
+            pathStr.compare(0, dirStr.size(), dirStr) != 0) {
+            throw RuntimeError("Path escapes withinDir: " + path, 0);
+        }
+    };
+
     // http.file(path, status?, options?) → {status, body, headers} with MIME detection.
-    // options: {download: bool|string} — adds Content-Disposition: attachment.
-    //   true     → use the path's basename as the suggested filename
-    //   "name"   → use the given filename (e.g. for renaming on download)
-    auto httpFileImpl = [](const std::vector<Value>& args) -> Value {
+    // options:
+    //   {download: bool|string}  — adds Content-Disposition: attachment.
+    //     true   → use the path's basename as the suggested filename
+    //     "name" → use the given filename (e.g. for renaming on download)
+    //   {withinDir: "/path"}     — opt-in jail. Resolves `path` and `withinDir`
+    //     and refuses to serve anything outside the jail. Use whenever any
+    //     part of `path` came from user input (URL params, query strings,
+    //     form fields). Defaults to off — by design, callers without user
+    //     input pay no resolution overhead and can serve anywhere.
+    auto httpFileImpl = [validatePathWithin](const std::vector<Value>& args) -> Value {
             if (args.empty() || !args[0].isString())
                 throw RuntimeError("http.file() requires a file path", 0);
             auto& path = args[0].asString();
@@ -1314,6 +1353,12 @@ Interpreter::Interpreter() {
             for (size_t i = 1; i < args.size(); i++) {
                 if (args[i].isNumber()) status = static_cast<int>(args[i].asNumber());
                 else if (args[i].isMap()) opts = args[i].asMap();
+            }
+
+            if (opts) {
+                auto wd = opts->entries.find(Value("withinDir"));
+                if (wd != opts->entries.end() && wd->second.isString())
+                    validatePathWithin(path, wd->second.asString());
             }
 
             std::ifstream f(path, std::ios::binary);
@@ -1410,7 +1455,7 @@ Interpreter::Interpreter() {
     // into memory. Use this for large file responses (videos, archives, etc.).
     // Options accepted: same as http.file (currently {download: bool|string}).
     httpMap->entries[Value("fileStream")] = Value(makeNative("http.fileStream", -1,
-        [](const std::vector<Value>& args) -> Value {
+        [validatePathWithin](const std::vector<Value>& args) -> Value {
             if (args.empty() || !args[0].isString())
                 throw RuntimeError("http.fileStream() requires a file path", 0);
             auto& path = args[0].asString();
@@ -1419,6 +1464,12 @@ Interpreter::Interpreter() {
             for (size_t i = 1; i < args.size(); i++) {
                 if (args[i].isNumber()) status = static_cast<int>(args[i].asNumber());
                 else if (args[i].isMap()) opts = args[i].asMap();
+            }
+
+            if (opts) {
+                auto wd = opts->entries.find(Value("withinDir"));
+                if (wd != opts->entries.end() && wd->second.isString())
+                    validatePathWithin(path, wd->second.asString());
             }
 
             // MIME type detection from extension (mirrors http.file).

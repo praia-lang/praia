@@ -1,6 +1,7 @@
 #include "../builtins.h"
 #include "../gc_heap.h"
 #include "scope_guards.h"
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -536,10 +537,17 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             }
 
             std::string actualHex = toHexString(derived, 32);
-            // Constant-time comparison
-            if (actualHex.size() != expectedHex.size()) return Value(false);
-            int diff = 0;
-            for (size_t i = 0; i < actualHex.size(); i++)
+            // Constant-time comparison. Don't early-return on size mismatch —
+            // textbook timing-leak: an early return shortcuts the work and
+            // leaks length info via wall time. Instead, fold the length
+            // diff into the running XOR accumulator so the loop runs over
+            // min(a, b) bytes regardless and the final result is true iff
+            // both lengths and bytes match. In practice actualHex is always
+            // 64 chars and expectedHex is a stored hash that should also be
+            // 64, so this branch is rarely hit — but the fix is free.
+            int diff = static_cast<int>(actualHex.size() ^ expectedHex.size());
+            size_t n = std::min(actualHex.size(), expectedHex.size());
+            for (size_t i = 0; i < n; i++)
                 diff |= actualHex[i] ^ expectedHex[i];
             return Value(diff == 0);
         }));

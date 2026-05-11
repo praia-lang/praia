@@ -1423,20 +1423,26 @@ VM::Result VM::execute(int baseFrameCount_) {
                 RUNTIME_ERR("Internal error: OP_CLOSURE constant is not a VM closure");
             }
 
-            allClosures.push_back(std::make_unique<ObjClosure>(vmcc->closure->function));
-            auto* closure = allClosures.back().get();
-
-            // Read upvalue descriptors
-            for (int i = 0; i < closure->upvalueCount; i++) {
+            // Construct-before-publish: build the closure on a local
+            // unique_ptr and fully populate its upvalues before handing
+            // ownership to allClosures. captureUpvalue's only realistic
+            // throw is std::bad_alloc; if that fires mid-loop, the local
+            // unique_ptr's destructor cleans up and no half-initialized
+            // closure ever enters allClosures. unique_ptr's move ctor is
+            // noexcept, so push_back has the strong exception guarantee.
+            auto pending = std::make_unique<ObjClosure>(vmcc->closure->function);
+            for (int i = 0; i < pending->upvalueCount; i++) {
                 uint8_t isLocal = READ_BYTE();
                 uint16_t index = READ_U16();
                 if (isLocal) {
-                    closure->upvalues[i] = captureUpvalue(&stack[FRAME.baseSlot + index]);
+                    pending->upvalues[i] = captureUpvalue(&stack[FRAME.baseSlot + index]);
                 } else {
-                    closure->upvalues[i] = FRAME.closure->upvalues[index];
+                    pending->upvalues[i] = FRAME.closure->upvalues[index];
                 }
             }
 
+            allClosures.push_back(std::move(pending));
+            auto* closure = allClosures.back().get();
             auto wrapper = std::make_shared<VMClosureCallable>(closure);
             wrapper->vm = this;
             push(Value(std::static_pointer_cast<Callable>(wrapper)));
