@@ -28,6 +28,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         // benign
     }
 
+    // Counter is per-process; libFuzzer's parallel modes use separate
+    // processes, so no race. See fuzz_json.cpp for full reasoning.
     static unsigned counter = 0;
     if ((++counter & 0xFFF) == 0) {
         GcHeap::current().collect();

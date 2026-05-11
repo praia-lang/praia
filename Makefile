@@ -241,7 +241,7 @@ FUZZ_BINS = $(FUZZ_BUILD)/fuzz_json \
             $(FUZZ_BUILD)/fuzz_lex_parse \
             $(FUZZ_BUILD)/fuzz_bytes_unpack
 
-.PHONY: fuzz fuzz-clean
+.PHONY: fuzz fuzz-clean fuzz-run
 fuzz: $(FUZZ_BINS)
 
 $(FUZZ_BUILD):
@@ -261,5 +261,19 @@ $(FUZZ_BUILD)/fuzz_bytes_unpack: $(FUZZ_BYTES_SRCS) | $(FUZZ_BUILD)
 
 fuzz-clean:
 	rm -rf $(FUZZ_BUILD)
+
+# Convenience runner: `make fuzz-run TARGET=json [SECONDS=60]`.
+# Always uses the safe seeds-read-only + corpus-writable layout so an
+# accidental single-dir invocation can't pollute fuzz/seeds/.
+fuzz-run:
+	@if [ -z "$(TARGET)" ]; then \
+		echo "Usage: make fuzz-run TARGET=<json|yaml|lex_parse|bytes_unpack> [SECONDS=60]"; \
+		exit 1; \
+	fi
+	@mkdir -p fuzz/corpus/$(TARGET) fuzz/crashes/$(TARGET)
+	./$(FUZZ_BUILD)/fuzz_$(TARGET) fuzz/corpus/$(TARGET)/ fuzz/seeds/$(TARGET)/ \
+	    -max_total_time=$(if $(SECONDS),$(SECONDS),60) \
+	    -artifact_prefix=fuzz/crashes/$(TARGET)/ \
+	    -print_final_stats=1
 
 .PHONY: all clean install uninstall test test-input plugin

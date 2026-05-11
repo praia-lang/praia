@@ -64,10 +64,12 @@ void GcHeap::collectIfNeeded() {
 }
 
 // Simplified: just prune expired weak_ptrs. No mark, no cycle-breaking.
+// `lastCollected_` and threshold auto-tuning aren't maintained here —
+// fuzz targets call collect() directly on a fixed cadence, not through
+// collectIfNeeded(), so the tuning would have no effect anyway.
 void GcHeap::collect() {
     std::erase_if(entries_, [](const GcEntry& e) { return e.weak.expired(); });
     allocsSinceGc_ = 0;
-    lastCollected_ = 0;
 }
 
 // Mark functions kept as no-ops to satisfy the class declaration.

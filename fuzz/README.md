@@ -58,9 +58,11 @@ progresses) and additional read-only seed dirs. We split them:
 Pass the writable corpus first, then the read-only seeds:
 
 ```sh
-mkdir -p fuzz/corpus/json fuzz/crashes/json
+# Convenience: uses the safe layout automatically.
+make fuzz-run TARGET=json SECONDS=60
 
-# One hour, single thread, mutate from seeds + accumulated corpus.
+# Or invoke libFuzzer directly:
+mkdir -p fuzz/corpus/json fuzz/crashes/json
 ./build_fuzz/fuzz_json fuzz/corpus/json/ fuzz/seeds/json/ \
     -max_total_time=3600 \
     -artifact_prefix=fuzz/crashes/json/
@@ -69,9 +71,17 @@ mkdir -p fuzz/corpus/json fuzz/crashes/json
 ./build_fuzz/fuzz_json fuzz/corpus/json/ fuzz/seeds/json/ \
     -jobs=8 -workers=8
 
-# Quick smoke (60 s, no corpus, no I/O)
+# Quick smoke (no dirs at all — libFuzzer won't touch the filesystem)
 ./build_fuzz/fuzz_yaml -max_total_time=60
 ```
+
+> **Footgun warning.** If you pass a *single* directory to libFuzzer, it
+> treats that directory as the writable corpus and *will* write
+> hash-named files into it as it discovers new coverage. Never pass
+> `fuzz/seeds/<target>/` as the only argument — it'll pollute the
+> committed seeds. Either use `make fuzz-run` (always safe) or pass two
+> dirs (corpus first, seeds second) — libFuzzer writes only to the
+> first.
 
 Useful flags:
 - `-max_total_time=N` — stop after N seconds.

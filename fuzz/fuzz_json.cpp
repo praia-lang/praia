@@ -43,6 +43,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     // Periodic sweep of expired weak_ptrs in the GC heap. Every 4096
     // inputs is plenty — the actual cost is one pass over entries_.
+    // The static counter is per-process. libFuzzer's parallel modes
+    // (-jobs / -fork) use separate processes, so no race; libFuzzer
+    // itself is documented as single-threaded within a process.
     static unsigned counter = 0;
     if ((++counter & 0xFFF) == 0) {
         GcHeap::current().collect();

@@ -114,7 +114,6 @@ Value bytesUnpack(const std::string& fmt, const std::string& data) {
 }
 
 void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
-
     // bytes.pack(format, values)
     bytesMap->entries[Value("pack")] = Value(makeNative("bytes.pack", 2,
         [](const std::vector<Value>& args) -> Value {
