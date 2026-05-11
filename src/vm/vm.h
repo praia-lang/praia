@@ -4,6 +4,7 @@
 #include "chunk.h"
 #include "compiler.h"
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -181,6 +182,19 @@ private:
     // Closures created during execution (RAII ownership)
     std::vector<std::unique_ptr<ObjClosure>> allClosures;
     std::vector<std::unique_ptr<ObjUpvalue>> allUpvalues;
+
+    // In-flight async task roots. The deepCopy in OP_ASYNC runs on the parent
+    // thread, so its gcNew'd containers are tracked in *this* VM's heap. The
+    // running task holds them only via the std::async lambda capture (on a
+    // different thread), so they are unreachable from this VM's GC roots and
+    // would be swept mid-task. Each async dispatch builds a
+    // shared_ptr<vector<Value>> of every deep-copied root, registers a
+    // weak_ptr here, and captures the strong shared_ptr in the lambda. The
+    // lambda's lifetime spans task execution AND any held futures (so this
+    // covers both in-flight and pending-await phases). gcMarkRoots locks
+    // these and marks live entries; expired ones are pruned.
+    std::mutex inflightRootsMtx_;
+    std::vector<std::weak_ptr<std::vector<Value>>> inflightTaskRoots_;
 
     // Module system
     std::string currentFile;

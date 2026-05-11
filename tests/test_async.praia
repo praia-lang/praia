@@ -176,4 +176,24 @@ testing.test("CancellationToken signals across async VMs", lam{ in
         "cancel should bail the loop before natural end (iters=" + iters.toString() + ")")
 })
 
+// Regression: deep-copied containers passed to async tasks must not be
+// swept by the parent VM's GC mid-task. Previously, gcNew in deepCopy
+// tracked the clones in the parent's heap, but the lambda capture (only
+// reachable from the task thread) was invisible to parent-side roots —
+// after enough allocations the parent's collectIfNeeded() would clear
+// the clone's entries while the task was using them. The minimal repro:
+// many sequential `async fn(sharedMap)` iterations with any extra `let`
+// in scope deterministically failed around iter ~40.
+testing.test("async deep-copy survives parent GC pressure", lam{ in
+    let m = SharedMap()
+    m.set("n", 0)
+    func inc(s) { s.set("n", 1) }
+    let unused = 99
+    for (i in 0..200) {
+        let f = async inc(m)
+        await f
+    }
+    testing.assertEqual(m.get("n"), 1, "task ran each iteration without corruption")
+})
+
 testing.done()

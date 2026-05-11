@@ -45,6 +45,29 @@ testing.test("channel closed", lam{ in
     testing.assert(ch.closed(), "should report closed")
 })
 
+// closed() is "closed AND drained". A producer that just wants to know
+// whether send() will throw needs isClosed() — which flips the instant
+// close() is called, even while the buffer still has values.
+testing.test("channel isClosed / isEmpty / closed semantics", lam{ in
+    let ch = Channel(3)
+    ch.send(1)
+    ch.send(2)
+    testing.assertEqual(ch.isClosed(), false, "open channel")
+    testing.assertEqual(ch.isEmpty(),  false, "buffer has values")
+    testing.assertEqual(ch.closed(),   false, "neither closed nor drained")
+
+    ch.close()
+    testing.assertEqual(ch.isClosed(), true,  "close() flipped isClosed")
+    testing.assertEqual(ch.isEmpty(),  false, "values still buffered")
+    testing.assertEqual(ch.closed(),   false, "closed but not yet drained")
+
+    testing.assertEqual(ch.recv(), 1, nil)
+    testing.assertEqual(ch.recv(), 2, nil)
+    testing.assertEqual(ch.isClosed(), true,  nil)
+    testing.assertEqual(ch.isEmpty(),  true,  "fully drained")
+    testing.assertEqual(ch.closed(),   true,  "closed AND drained")
+})
+
 testing.test("send on closed channel throws", lam{ in
     let ch = Channel()
     ch.close()

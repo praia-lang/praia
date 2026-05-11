@@ -24,7 +24,7 @@ func setTimeout(fn, ms) {
 
 func _runTimeout(fn, ms, stop) {
     time.sleep(ms)
-    if (!stop.closed()) { fn() }
+    if (!stop.isClosed()) { fn() }
 }
 
 // Run fn every ms milliseconds. Returns a handle with a .clear() method that
@@ -37,9 +37,9 @@ func setInterval(fn, ms) {
 }
 
 func _runInterval(fn, ms, stop) {
-    while (!stop.closed()) {
+    while (!stop.isClosed()) {
         time.sleep(ms)
-        if (stop.closed()) { break }
+        if (stop.isClosed()) { break }
         fn()
     }
 }

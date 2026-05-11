@@ -25,6 +25,12 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
                     return Value();
                 }));
 
+            // withLock(fn) — acquire, call fn, release on return *or* throw.
+            // The lock_guard's destructor releases on stack unwind, so the
+            // mutex is always released even when fn throws. We do NOT roll
+            // back any state fn mutated before throwing — Lock has no idea
+            // what user state is being guarded. Document the "build new
+            // state locally, commit on the last line" pattern for users.
             lock->entries[Value("withLock")] = Value(makeNative("withLock", 1,
                 [mtx, self](const std::vector<Value>& args) -> Value {
                     if (!args[0].isCallable())
@@ -102,6 +108,32 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
                     return Value();
                 }));
 
+            // isClosed() — true once close() has been called, regardless of
+            // whether the buffer still has values. This is what a *producer*
+            // wants to consult before send(): "can I still send, or will
+            // send() throw?". The legacy closed() method confuses producers
+            // by returning false until the buffer drains.
+            ch->entries[Value("isClosed")] = Value(makeNative("isClosed", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    std::lock_guard<std::mutex> lock(state->mtx);
+                    return Value(state->closed);
+                }));
+
+            // isEmpty() — true when the buffer has no pending values. What a
+            // *consumer* wants to consult before tryRecv() / a peek-style
+            // check. Orthogonal to isClosed().
+            ch->entries[Value("isEmpty")] = Value(makeNative("isEmpty", 0,
+                [state](const std::vector<Value>&) -> Value {
+                    std::lock_guard<std::mutex> lock(state->mtx);
+                    return Value(state->buffer.empty());
+                }));
+
+            // closed() — "fully drained": close() has been called AND the
+            // buffer is empty. Equivalent to isClosed() && isEmpty(). This
+            // is the "is this channel done forever?" question — useful for
+            // consumers shutting down after the producer is gone. Kept for
+            // backwards compatibility; new code should prefer isClosed() /
+            // isEmpty() to make the intent explicit.
             ch->entries[Value("closed")] = Value(makeNative("closed", 0,
                 [state](const std::vector<Value>&) -> Value {
                     std::lock_guard<std::mutex> lock(state->mtx);
@@ -202,6 +234,14 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
             // update(k, fn) — atomic read-modify-write. fn receives the
             // current value (or nil) and returns the new value to store.
             // The lock is held across fn, so don't do I/O inside it.
+            //
+            // Throw semantics: the slot write only happens on successful
+            // return, so a throw leaves entries[k] untouched. *But* `current`
+            // is passed by reference — if fn mutates it via aliases (e.g.
+            // s.foo = bar) before throwing, those mutations stick even
+            // though the slot wasn't reassigned. Document that gotcha for
+            // users; we don't snapshot here (deep-copy would change the
+            // semantics of the existing in-place mutation pattern).
             m->entries[Value("update")] = Value(makeNative("update", 2,
                 [state, self](const std::vector<Value>& args) -> Value {
                     if (!args[1].isCallable())

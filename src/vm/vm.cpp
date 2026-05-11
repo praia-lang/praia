@@ -2115,12 +2115,28 @@ VM::Result VM::execute(int baseFrameCount_) {
                 auto defClass = bound ? bound->definingClass
                               : initVmcc ? initOwner : nullptr;
 
+                // Pin every deep-copied root for this task in the parent VM's
+                // GC. See VM::inflightTaskRoots_. The lambda captures
+                // rootsHolder by copy so it stays alive for the lambda's
+                // lifetime; the parent's GC reaches the same Values via the
+                // weak_ptr registered below.
+                auto rootsHolder = std::make_shared<std::vector<Value>>();
+                if (!receiverCopy.isNil()) rootsHolder->push_back(receiverCopy);
+                for (auto& [name, val] : globalsCopy) rootsHolder->push_back(val);
+                for (auto& uv : upvalueSnapshot) rootsHolder->push_back(uv);
+                for (auto& a : args) rootsHolder->push_back(a);
+                {
+                    std::lock_guard<std::mutex> lk(inflightRootsMtx_);
+                    inflightTaskRoots_.push_back(rootsHolder);
+                }
+
                 sharedFuture = std::async(std::launch::async,
                     [fn, args, globalsCopy = std::move(globalsCopy), arity,
                      upvalueSnapshot = std::move(upvalueSnapshot),
                      builtinNames = builtinNames_,
                      receiverCopy = std::move(receiverCopy),
                      defClass = std::move(defClass),
+                     rootsHolder, // pinned roots — keep alive while lambda lives
                      isConstructor, klass]() mutable -> Value {
                         VM taskVm;
                         GcHeap::current().disable(); // task VMs are short-lived
@@ -2292,8 +2308,16 @@ VM::Result VM::execute(int baseFrameCount_) {
                     RUNTIME_ERR(native->name() + "() expected " + std::to_string(arity) +
                         " " + argStr(arity) + " but got " + std::to_string(args.size()));
                 }
+                // Pin deep-copied args for the native task — see comment in the
+                // VMClosureCallable path above.
+                auto rootsHolder = std::make_shared<std::vector<Value>>(args);
+                {
+                    std::lock_guard<std::mutex> lk(inflightRootsMtx_);
+                    inflightTaskRoots_.push_back(rootsHolder);
+                }
                 sharedFuture = std::async(std::launch::async,
-                    [native, args]() -> Value {
+                    [native, args, rootsHolder]() -> Value {
+                        (void)rootsHolder; // capture-only: keeps roots alive
                         return native->fn(args);
                     }).share();
             } else {
@@ -2415,4 +2439,20 @@ void VM::gcMarkRoots(GcHeap& heap) {
     // Grain cache
     for (auto& [k, v] : grainCache)
         heap.markValue(v);
+
+    // In-flight async task roots — deep-copied containers used by running
+    // tasks live in this VM's heap (because deepCopy ran on this thread).
+    // Mark them through the weak_ptr registry so they survive until the task
+    // completes and the future is dropped.
+    {
+        std::lock_guard<std::mutex> lk(inflightRootsMtx_);
+        inflightTaskRoots_.erase(
+            std::remove_if(inflightTaskRoots_.begin(), inflightTaskRoots_.end(),
+                [](const std::weak_ptr<std::vector<Value>>& wp) { return wp.expired(); }),
+            inflightTaskRoots_.end());
+        for (auto& wp : inflightTaskRoots_) {
+            if (auto sp = wp.lock())
+                for (auto& v : *sp) heap.markValue(v);
+        }
+    }
 }

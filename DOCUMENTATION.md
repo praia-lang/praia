@@ -2579,6 +2579,17 @@ await f2
 
 The lock is re-entrant (recursive) — the same thread can acquire it multiple times without deadlocking.
 
+#### What happens if `fn` throws
+
+`withLock` releases the mutex on throw, but does **not** roll back any state `fn` mutated before throwing. For compound state that needs to be all-or-nothing on failure, build the new state locally inside `fn` and only commit it on the last line, after everything that could throw:
+
+```praia
+lock.withLock(lam{ in
+    let staged = computeNextState()   // may throw — nothing committed yet
+    db.run("UPDATE ...", [staged])    // commit
+})
+```
+
 ---
 
 ## Async / Await
@@ -2696,6 +2707,35 @@ print(jobs.get("abc"))     // {progress: 50}
 
 Use `update` for compound mutations (increments, conditional writes); the lock guarantees no other task observes a half-update. Don't do I/O inside `update`. The lock is recursive — `fn` can call other `SharedMap` methods on the same map without deadlocking.
 
+#### What happens if `fn` throws
+
+The slot itself is all-or-nothing: if `fn` throws, the SharedMap entry for `k` is **not** overwritten and the throw propagates out of `update`.
+
+But the value `fn` receives is the *same map/array/instance* the SharedMap is holding (Praia maps and arrays are reference types). If `fn` mutates that value in place before throwing, those partial mutations stick — the original ends up half-modified even though the slot wasn't reassigned:
+
+```praia
+m.set("k", {a: 1, b: 2})
+try {
+    m.update("k", lam{ s in
+        s.a = 99       // mutates the shared map directly
+        throw "oops"   // slot write is skipped, but s.a = 99 already happened
+        return s
+    })
+} catch (e) {}
+print(m.get("k"))   // {a: 99, b: 2} — half-modified
+```
+
+If you need transactional semantics, build a fresh value inside `fn` and only return it on success:
+
+```praia
+m.update("k", lam{ s in
+    let next = {a: s.a, b: s.b}    // snapshot
+    next.a = 99
+    if (somethingBad) { throw "oops" }
+    return next                    // only stored on success
+})
+```
+
 ### CancellationToken
 
 `CancellationToken()` is a flag that any task can flip to "cancelled". Pass it to long-running async tasks and have them poll `cancelled()` to bail out cleanly. This is the cooperative alternative to killing a task by signal — the task gets to clean up its own subprocess.
@@ -2743,7 +2783,11 @@ let ch = Channel(10)    // buffered channel (up to 10 items)
 | `ch.recv()` | Receive a value (blocks until available, returns nil when closed + empty) |
 | `ch.tryRecv()` | Non-blocking receive (returns nil immediately if empty) |
 | `ch.close()` | Close the channel (no more sends allowed) |
-| `ch.closed()` | Returns true if closed and empty |
+| `ch.isClosed()` | True once `close()` has been called. The "can I still send?" check for producers. |
+| `ch.isEmpty()` | True when the buffer has no pending values. The "is there anything to read?" check for consumers. |
+| `ch.closed()` | True when **closed AND drained** (= `isClosed() && isEmpty()`). The "is this channel done forever?" check for shutdown logic. |
+
+The three flags answer different questions. A producer wanting to bail out cleanly should consult `isClosed()` — `closed()` stays false until the buffer drains, so a producer checking it can race past a `close()` call and only see it once their own buffered values have already been consumed.
 
 #### Producer-consumer pattern
 
