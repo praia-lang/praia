@@ -206,18 +206,25 @@ func wrapper(fn) {
 
 ## Data Types
 
-Praia has 7 types:
+`type(v)` returns one of the following strings. These are the values you'll
+see at runtime; use them with the `is` operator (`x is "int"`, `x is MyClass`).
 
-| Type | Examples | Notes |
-|------|---------|-------|
-| `nil` | `nil` | The absence of a value |
-| `bool` | `true`, `false` | |
-| `int` | `42`, `0xFF`, `0b1010`, `0o17` | 64-bit integer (exact up to 2^63). Supports hex, binary, octal. |
-| `float` | `3.14`, `1e3`, `2.5e-4` | Double-precision float. Supports scientific notation. |
-| `string` | `"hello"` | UTF-8, supports interpolation, escape sequences, and Unicode (`\u{...}`) |
-| `array` | `[1, 2, 3]` | Ordered, mixed-type, reference semantics |
-| `map` | `{name: "Ada"}` | String keys, reference semantics |
-| `function` | `func add(a, b) { ... }` | First-class, supports closures |
+| Type        | Examples                            | Notes |
+|-------------|-------------------------------------|-------|
+| `nil`       | `nil`                               | The absence of a value. |
+| `bool`      | `true`, `false`                     | |
+| `int`       | `42`, `0xFF`, `0b1010`, `0o17`      | 64-bit integer (exact up to 2^63). Supports hex, binary, octal. |
+| `float`     | `3.14`, `1e3`, `2.5e-4`             | IEEE-754 double. Supports scientific notation. |
+| `string`    | `"hello"`                           | UTF-8, supports interpolation, escape sequences, and Unicode (`\u{...}`). |
+| `array`     | `[1, 2, 3]`                         | Ordered, mixed-type, reference semantics. |
+| `map`       | `{name: "Ada", [42]: "answer"}`     | Hash map. Reference semantics. Keys can be any hashable value: `nil`, bool, int, float, string, or tagged value. Bare-identifier keys (`name`) desugar to string keys; bracket-expression keys (`[42]`) take the evaluated value. |
+| `function`  | `func add(a, b) { ... }`            | First-class, supports closures. Includes user `func` / `lam` and built-in natives. |
+| `instance`  | `MyClass(...)`                      | Instance of a user-defined `class`. Use `x is MyClass` to check class identity (walks the `extends` chain). |
+| `tagged`    | `Ok(42)`, `Err("nope")`             | Tagged values from a `CapitalizedName(args...)` constructor call on an undefined identifier. Used for sum types / result-like patterns; see the `match` section. |
+| `future`    | `async f()`                         | Handle for an in-flight async task. `await` blocks for the result. |
+| `generator` | `g()` where `g` contains `yield`    | Iterator produced by a generator function. Use `.next()` / `for x in g`. |
+
+Classes themselves (the `class X { ... }` declaration value) are also `function`-typed — they're callable to construct an instance.
 
 ### Number Literals
 

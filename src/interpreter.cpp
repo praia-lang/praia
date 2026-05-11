@@ -76,16 +76,18 @@ static std::string binaryDunder(TokenType op) {
 static bool checkIs(const Value& subject, const Value& typeVal, int line, int column) {
     if (typeVal.isString()) {
         auto& tn = typeVal.asString();
-        if (tn == "nil")      return subject.isNil();
-        if (tn == "bool")     return subject.isBool();
-        if (tn == "int")      return subject.isInt();
-        if (tn == "float")    return subject.isDouble();
-        if (tn == "string")   return subject.isString();
-        if (tn == "array")    return subject.isArray();
-        if (tn == "map")      return subject.isMap();
-        if (tn == "function") return subject.isCallable();
-        if (tn == "instance") return subject.isInstance();
-        if (tn == "tagged")  return subject.isTagged();
+        if (tn == "nil")       return subject.isNil();
+        if (tn == "bool")      return subject.isBool();
+        if (tn == "int")       return subject.isInt();
+        if (tn == "float")     return subject.isDouble();
+        if (tn == "string")    return subject.isString();
+        if (tn == "array")     return subject.isArray();
+        if (tn == "map")       return subject.isMap();
+        if (tn == "function")  return subject.isCallable();
+        if (tn == "instance")  return subject.isInstance();
+        if (tn == "tagged")    return subject.isTagged();
+        if (tn == "future")    return subject.isFuture();
+        if (tn == "generator") return subject.isGenerator();
         throw RuntimeError("Unknown type name '" + tn + "'", line, column);
     }
     if (typeVal.isCallable()) {

@@ -1,6 +1,7 @@
 #include "../builtins.h"
 #include "../value.h"
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -307,8 +308,19 @@ static std::string jsonStringifyRec(const Value& val, int indent, int depth,
     if (val.isBool()) return val.asBool() ? "true" : "false";
     if (val.isInt()) return std::to_string(val.asInt());
     if (val.isDouble()) {
+        double d = val.asNumber();
+        // JSON has no representation for NaN or ±Infinity. Reject rather
+        // than emit `nan` / `inf` (which most parsers fail on) or `null`
+        // (which silently swallows the value). Matches Python's
+        // json.dumps(allow_nan=False) behavior and our cycle rejection.
+        if (!std::isfinite(d)) {
+            const char* what = std::isnan(d) ? "NaN" :
+                               (d > 0 ? "Infinity" : "-Infinity");
+            throw RuntimeError(std::string("json.stringify: cannot represent ") +
+                               what + " in JSON", 0);
+        }
         std::ostringstream o;
-        o << std::setprecision(17) << val.asNumber();
+        o << std::setprecision(17) << d;
         return o.str();
     }
     if (val.isString()) {

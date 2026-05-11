@@ -203,7 +203,9 @@ Interpreter::Interpreter() {
             if (v.isArray())    return Value("array");
             if (v.isMap())      return Value("map");
             if (v.isInstance()) return Value("instance");
-            if (v.isTagged())  return Value("tagged");
+            if (v.isTagged())   return Value("tagged");
+            if (v.isFuture())   return Value("future");
+            if (v.isGenerator()) return Value("generator");
             if (v.isCallable()) return Value("function");
             return Value("unknown");
         })));

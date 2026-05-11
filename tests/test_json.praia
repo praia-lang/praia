@@ -49,4 +49,41 @@ testing.test("parse errors include context", lam{ in
     testing.assert(msg.contains("12"), nil)
 })
 
+// Regression: json.stringify used to emit `inf` / `-inf` / `nan` for
+// non-finite doubles, which aren't valid JSON. Now rejected with a
+// clear error (same pattern as cyclic-reference rejection).
+testing.test("json.stringify rejects Infinity", lam{ in
+    testing.assertThrows(lam{ in json.stringify(math.INF) }, "Infinity")
+    testing.assertThrows(lam{ in json.stringify(0 - math.INF) }, "Infinity")
+})
+
+testing.test("json.stringify rejects NaN", lam{ in
+    testing.assertThrows(lam{ in json.stringify(math.INF - math.INF) }, "NaN")
+})
+
+testing.test("json.stringify still emits ordinary floats", lam{ in
+    testing.assertEqual(json.stringify(3.5), "3.5", nil)
+    testing.assertEqual(json.stringify(0.0), "0", nil)
+})
+
+// Companion: type() now reports `future` and `generator` instead of
+// leaking `unknown`, and the `is` operator recognises both.
+testing.test("type() reports future and generator", lam{ in
+    func g() { yield 1 }
+    testing.assertEqual(type(g()), "generator", nil)
+    func nullary() { return 1 }
+    let fut = async nullary()
+    testing.assertEqual(type(fut), "future", nil)
+    await fut
+})
+
+testing.test("`is` recognises future and generator", lam{ in
+    func g() { yield 1 }
+    testing.assert(g() is "generator", nil)
+    func nullary() { return 1 }
+    let fut = async nullary()
+    testing.assert(fut is "future", nil)
+    await fut
+})
+
 testing.done()

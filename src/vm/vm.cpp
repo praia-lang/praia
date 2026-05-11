@@ -1097,16 +1097,18 @@ VM::Result VM::execute(int baseFrameCount_) {
             if (right.isString()) {
                 auto& tn = right.asString();
                 bool result = false;
-                if      (tn == "nil")      result = left.isNil();
-                else if (tn == "bool")     result = left.isBool();
-                else if (tn == "int")      result = left.isInt();
-                else if (tn == "float")    result = left.isDouble();
-                else if (tn == "string")   result = left.isString();
-                else if (tn == "array")    result = left.isArray();
-                else if (tn == "map")      result = left.isMap();
-                else if (tn == "function") result = left.isCallable();
-                else if (tn == "instance") result = left.isInstance();
-                else if (tn == "tagged")  result = left.isTagged();
+                if      (tn == "nil")       result = left.isNil();
+                else if (tn == "bool")      result = left.isBool();
+                else if (tn == "int")       result = left.isInt();
+                else if (tn == "float")     result = left.isDouble();
+                else if (tn == "string")    result = left.isString();
+                else if (tn == "array")     result = left.isArray();
+                else if (tn == "map")       result = left.isMap();
+                else if (tn == "function")  result = left.isCallable();
+                else if (tn == "instance")  result = left.isInstance();
+                else if (tn == "tagged")    result = left.isTagged();
+                else if (tn == "future")    result = left.isFuture();
+                else if (tn == "generator") result = left.isGenerator();
                 else { RUNTIME_ERR("Unknown type name '" + tn + "'"); }
                 push(Value(result));
             } else if (right.isCallable()) {
