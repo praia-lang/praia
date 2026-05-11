@@ -1112,8 +1112,8 @@ VM::Result VM::execute(int baseFrameCount_) {
             }
             break;
         }
-        case OpCode::OP_LESS:          { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__lt",{b});if(ok){push(r);break;}} if(a.isString()&&b.isString()){push(Value(a.asString()<b.asString()));break;} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '<' must be numbers or strings");} push(Value(a.asNumber()<b.asNumber())); break; }
-        case OpCode::OP_GREATER:       { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__gt",{b});if(ok){push(r);break;}} if(a.isString()&&b.isString()){push(Value(a.asString()>b.asString()));break;} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '>' must be numbers or strings");} push(Value(a.asNumber()>b.asNumber())); break; }
+        case OpCode::OP_LESS:          { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__lt",{b});if(ok){push(r);break;}} if(a.isString()&&b.isString()){push(Value(a.asString()<b.asString()));break;} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '<' must be numbers or strings");} push(Value(numbersLess(a, b))); break; }
+        case OpCode::OP_GREATER:       { Value b=pop(),a=pop(); if(a.isInstance()){auto[ok,r]=vmCallDunder(*this,a,"__gt",{b});if(ok){push(r);break;}} if(a.isString()&&b.isString()){push(Value(a.asString()>b.asString()));break;} if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '>' must be numbers or strings");} push(Value(numbersLess(b, a))); break; }
         case OpCode::OP_LESS_EQUAL:    {
             Value b=pop(),a=pop();
             if(a.isInstance()){
@@ -1125,7 +1125,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             }
             if(a.isString()&&b.isString()){push(Value(a.asString()<=b.asString()));break;}
             if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '<=' must be numbers or strings");}
-            push(Value(a.asNumber()<=b.asNumber())); break;
+            push(Value(!numbersLess(b, a))); break;
         }
         case OpCode::OP_GREATER_EQUAL: {
             Value b=pop(),a=pop();
@@ -1138,7 +1138,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             }
             if(a.isString()&&b.isString()){push(Value(a.asString()>=b.asString()));break;}
             if(!a.isNumber()||!b.isNumber()){RUNTIME_ERR("Operands of '>=' must be numbers or strings");}
-            push(Value(a.asNumber()>=b.asNumber())); break;
+            push(Value(!numbersLess(a, b))); break;
         }
         case OpCode::OP_NOT: { push(Value(!pop().isTruthy())); break; }
 

@@ -61,7 +61,7 @@ void vmRegisterNatives(VM& vm) {
     auto globals = interp.getGlobals();
 
     std::vector<std::string> globalNames = {
-        "print", "len", "push", "pop", "type", "str", "num", "fromCharCode",
+        "print", "len", "push", "pop", "type", "str", "num", "int", "fromCharCode",
         "Lock", "Channel", "SharedMap", "CancellationToken",
         "futures", "sort", "filter", "map", "each", "reduce", "any", "all",
         "flatMap", "unique", "zip", "enumerate", "groupBy", "findIndex", "flatten", "keys", "values",

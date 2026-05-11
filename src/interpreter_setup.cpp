@@ -256,6 +256,79 @@ Interpreter::Interpreter() {
                                                         : "unknown") + ") to a number", 0);
         })));
 
+    // int(x) — convert to int64. Useful for keeping precision in mixed
+    // arithmetic: `bigInt + int(1.0)` stays int instead of routing
+    // through double. Companion to `num()`.
+    //   int(int)         → unchanged
+    //   int(double)      → truncated toward zero; throws on NaN/inf or
+    //                      values outside [INT64_MIN, INT64_MAX]
+    //   int(bool)        → 1 / 0
+    //   int("123")       → 123 (whole-number string parse)
+    //   int("3.14")      → 3 (parses as double, truncates)
+    //   int(otherwise)   → error
+    globals->define("int", Value(makeNative("int", 1,
+        [](const std::vector<Value>& args) -> Value {
+            const Value& v = args[0];
+            if (v.isInt()) return v;
+            if (v.isBool()) return Value(static_cast<int64_t>(v.asBool() ? 1 : 0));
+            if (v.isDouble()) {
+                double d = v.asNumber();
+                if (std::isnan(d))
+                    throw RuntimeError("int(): cannot convert NaN", 0);
+                if (!std::isfinite(d))
+                    throw RuntimeError("int(): cannot convert infinity", 0);
+                // i64 range check. The upper bound is exclusive in double
+                // because 2^63 is exactly representable as double but is
+                // one past INT64_MAX. The lower bound is inclusive — -2^63
+                // exactly representable and equals INT64_MIN.
+                if (d >= 9223372036854775808.0 || d < -9223372036854775808.0)
+                    throw RuntimeError("int(): " + v.toString() +
+                                       " out of int64 range", 0);
+                return Value(static_cast<int64_t>(std::trunc(d)));
+            }
+            if (v.isString()) {
+                const std::string& s = v.asString();
+                // Try whole-number parse first (preserves int64 precision
+                // for big values that wouldn't round-trip through double).
+                try {
+                    size_t pos = 0;
+                    long long n = std::stoll(s, &pos);
+                    if (pos == s.size())
+                        return Value(static_cast<int64_t>(n));
+                    // Trailing content — fall through to double parse.
+                } catch (...) {
+                    // Fall through to double parse.
+                }
+                try {
+                    size_t pos = 0;
+                    double d = std::stod(s, &pos);
+                    if (pos != s.size())
+                        throw RuntimeError("int(): cannot parse \"" + s +
+                                           "\" as an int", 0);
+                    if (std::isnan(d) || !std::isfinite(d))
+                        throw RuntimeError("int(): cannot parse \"" + s +
+                                           "\" as an int", 0);
+                    if (d >= 9223372036854775808.0 || d < -9223372036854775808.0)
+                        throw RuntimeError("int(): \"" + s +
+                                           "\" out of int64 range", 0);
+                    return Value(static_cast<int64_t>(std::trunc(d)));
+                } catch (const RuntimeError&) {
+                    throw;
+                } catch (...) {
+                    throw RuntimeError("int(): cannot parse \"" + s +
+                                       "\" as an int", 0);
+                }
+            }
+            throw RuntimeError("int(): cannot convert " + v.toString() +
+                               " (" + std::string(
+                                   v.isNil()      ? "nil"
+                                 : v.isArray()    ? "array"
+                                 : v.isMap()      ? "map"
+                                 : v.isInstance() ? "instance"
+                                 : v.isCallable() ? "function"
+                                                  : "unknown") + ") to int", 0);
+        })));
+
     globals->define("fromCharCode", Value(makeNative("fromCharCode", 1,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isNumber())

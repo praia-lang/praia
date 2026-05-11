@@ -7,7 +7,7 @@
 
 class Environment; // forward declaration
 
-enum class GcType { Array, Map, Instance, Class, Generator, Environment };
+enum class GcType { Array, Tagged, Map, Instance, Class, Generator, Environment };
 
 class GcHeap {
 public:
@@ -57,6 +57,7 @@ private:
 
     // Type-specific mark helpers
     void markArray(PraiaArray* arr);
+    void markTagged(PraiaTagged* tag);
     void markMap(PraiaMap* map);
     void markInstance(PraiaInstance* inst);
     void markClass(PraiaClass* cls);

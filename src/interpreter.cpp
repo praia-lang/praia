@@ -1090,25 +1090,25 @@ Value Interpreter::evaluate(const Expr* expr) {
             throw RuntimeError("Operands of '%' must be numbers", e->line, e->column);
         case TokenType::LT:
             if (left.isNumber() && right.isNumber())
-                return Value(left.asNumber() < right.asNumber());
+                return Value(numbersLess(left, right));
             if (left.isString() && right.isString())
                 return Value(left.asString() < right.asString());
             throw RuntimeError("Operands of '<' must be numbers or strings", e->line, e->column);
         case TokenType::GT:
             if (left.isNumber() && right.isNumber())
-                return Value(left.asNumber() > right.asNumber());
+                return Value(numbersLess(right, left));
             if (left.isString() && right.isString())
                 return Value(left.asString() > right.asString());
             throw RuntimeError("Operands of '>' must be numbers or strings", e->line, e->column);
         case TokenType::LTE:
             if (left.isNumber() && right.isNumber())
-                return Value(left.asNumber() <= right.asNumber());
+                return Value(!numbersLess(right, left));
             if (left.isString() && right.isString())
                 return Value(left.asString() <= right.asString());
             throw RuntimeError("Operands of '<=' must be numbers or strings", e->line, e->column);
         case TokenType::GTE:
             if (left.isNumber() && right.isNumber())
-                return Value(left.asNumber() >= right.asNumber());
+                return Value(!numbersLess(left, right));
             if (left.isString() && right.isString())
                 return Value(left.asString() >= right.asString());
             throw RuntimeError("Operands of '>=' must be numbers or strings", e->line, e->column);
@@ -1117,25 +1117,29 @@ Value Interpreter::evaluate(const Expr* expr) {
         case TokenType::IS:
             return Value(checkIs(left, right, e->line, e->column));
 
+        // For bitwise ops, take int operands directly. For doubles, fall
+        // back to the double→int64 cast (lossy for |n| > 2^53 but the
+        // user explicitly opted into a double operand). Avoids the
+        // previous always-via-asNumber round-trip that truncated big ints.
         case TokenType::BIT_AND:
             if (left.isNumber() && right.isNumber())
-                return Value(static_cast<int64_t>(left.asNumber()) & static_cast<int64_t>(right.asNumber()));
+                return Value(left.toInt64ForBitwise() & right.toInt64ForBitwise());
             throw RuntimeError("Operands of '&' must be numbers", e->line, e->column);
         case TokenType::BIT_OR:
             if (left.isNumber() && right.isNumber())
-                return Value(static_cast<int64_t>(left.asNumber()) | static_cast<int64_t>(right.asNumber()));
+                return Value(left.toInt64ForBitwise() | right.toInt64ForBitwise());
             throw RuntimeError("Operands of '|' must be numbers", e->line, e->column);
         case TokenType::BIT_XOR:
             if (left.isNumber() && right.isNumber())
-                return Value(static_cast<int64_t>(left.asNumber()) ^ static_cast<int64_t>(right.asNumber()));
+                return Value(left.toInt64ForBitwise() ^ right.toInt64ForBitwise());
             throw RuntimeError("Operands of '^' must be numbers", e->line, e->column);
         case TokenType::SHL:
             if (left.isNumber() && right.isNumber())
-                return Value(static_cast<int64_t>(left.asNumber()) << static_cast<int64_t>(right.asNumber()));
+                return Value(left.toInt64ForBitwise() << right.toInt64ForBitwise());
             throw RuntimeError("Operands of '<<' must be numbers", e->line, e->column);
         case TokenType::SHR:
             if (left.isNumber() && right.isNumber())
-                return Value(static_cast<int64_t>(left.asNumber()) >> static_cast<int64_t>(right.asNumber()));
+                return Value(left.toInt64ForBitwise() >> right.toInt64ForBitwise());
             throw RuntimeError("Operands of '>>' must be numbers", e->line, e->column);
 
         default:

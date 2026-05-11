@@ -115,4 +115,28 @@ testing.test("GC preserves generator state", lam{ in
     testing.assertEqual(g.next().value, 3, nil)
 })
 
+// Regression: tagged values used to be tracked as GcType::Array, so
+// markValue had no case for them and their children were swept while
+// still reachable. Sweep then static_cast'd PraiaTagged* to PraiaArray*
+// and called .clear() at the wrong field offset — UB / heap corruption.
+// Pre-fix repro crashed; post-fix the inner array survives GC.
+testing.test("tagged value children survive GC", lam{ in
+    let v = Ok([1, 2])
+    for (i in 0..2000) { let a = [i] }
+    testing.assertEqual(v.values, [[1, 2]], "inner array reachable through tag")
+    testing.assertEqual(v.values[0][0], 1, nil)
+    testing.assertEqual(v.values[0][1], 2, nil)
+})
+
+testing.test("tagged cycles are collected without crashing", lam{ in
+    // arr -> tagged -> arr cycle. Exercises the new GcType::Tagged sweep
+    // case (clears `values` rather than mis-casting to PraiaArray).
+    for (i in 0..1000) {
+        let arr = []
+        let t = Ok(arr)
+        push(arr, t)
+    }
+    testing.assert(true, "1000 tagged cycles broken without crash")
+})
+
 testing.done()

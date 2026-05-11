@@ -95,6 +95,13 @@ struct Value {
         if (isInt()) return static_cast<double>(std::get<int64_t>(data));
         return std::get<double>(data);
     }
+    // For bitwise ops: returns int64 directly if isInt() (no precision
+    // loss for |n| > 2^53), otherwise rounds the double via static_cast.
+    // Callers must verify isNumber() first.
+    int64_t                     toInt64ForBitwise() const {
+        if (isInt()) return std::get<int64_t>(data);
+        return static_cast<int64_t>(std::get<double>(data));
+    }
     const std::string&          asString()   const { return std::get<std::string>(data); }
     std::shared_ptr<Callable>   asCallable() const { return std::get<std::shared_ptr<Callable>>(data); }
     std::shared_ptr<PraiaArray> asArray()    const { return std::get<std::shared_ptr<PraiaArray>>(data); }
@@ -120,21 +127,101 @@ inline bool isHashable(const Value& v) {
     return v.isNil() || v.isBool() || v.isInt() || v.isDouble() || v.isString();
 }
 
+// ── Numeric comparison + hashing helpers ────────────────────────────────
+//
+// 64-bit integers and IEEE-754 doubles can't be losslessly intermixed for
+// equality/ordering/hashing without care. The naive approach of routing
+// everything through `asNumber()` (double) is wrong for `int` values whose
+// magnitude exceeds 2^53 — adjacent ints round to the same double and
+// compare equal, collapse to one map key, and hash to one bucket.
+//
+// The rules below preserve exact int64 semantics for pure-int operations
+// while still letting mixed int↔double compare in the obvious way:
+//
+//   - int  vs int  : compare as int64 (exact).
+//   - dbl  vs dbl  : compare as double (IEEE 754).
+//   - int  vs dbl  : if the double is integer-valued and within i64 range,
+//                    convert the double to int64 and compare exactly.
+//                    Otherwise (fractional, infinite, or out of i64 range)
+//                    promote the int to double and compare as double.
+//
+// For hashing to be consistent with `numbersEqual`, an int that is
+// *exactly* representable as a double must hash to the same value as that
+// double. The check `(int64_t)(double)n == n` decides whether n is
+// representable. Ints outside that range hash via their int64
+// representation, which can't collide with any double (since no double
+// equals them under the rules above).
+//
+// `numbersEqualNaNEq` is the map-key variant that treats NaN == NaN, like
+// JavaScript Map / Java HashMap / Swift Dictionary. The user-visible `==`
+// keeps IEEE 754 NaN != NaN.
+
+inline bool numbersEqualHelper(const Value& a, const Value& b, bool nanEq) {
+    if (a.isInt() && b.isInt()) return a.asInt() == b.asInt();
+    if (a.isDouble() && b.isDouble()) {
+        double da = a.asNumber(), db = b.asNumber();
+        if (nanEq && std::isnan(da) && std::isnan(db)) return true;
+        return da == db;
+    }
+    // Mixed. Pick the int side and the double side.
+    int64_t i = a.isInt() ? a.asInt() : b.asInt();
+    double  d = a.isDouble() ? std::get<double>(a.data) : std::get<double>(b.data);
+    if (nanEq && std::isnan(d)) return false; // int can't be NaN
+    // If the double is integer-valued and fits in [INT64_MIN, INT64_MAX],
+    // compare as int — exact even for big ints whose double-form would lose
+    // precision.
+    if (std::isfinite(d) && d == std::trunc(d) &&
+        d >= -9223372036854775808.0 && d <  9223372036854775808.0) {
+        return i == static_cast<int64_t>(d);
+    }
+    // Fractional or out-of-range double: fall back to double compare. This
+    // matches IEEE semantics for non-integer doubles and is the only
+    // sensible answer for doubles outside the i64 envelope.
+    return static_cast<double>(i) == d;
+}
+
+inline bool numbersEqual(const Value& a, const Value& b) {
+    return numbersEqualHelper(a, b, /*nanEq=*/false);
+}
+
+inline bool numbersLess(const Value& a, const Value& b) {
+    if (a.isInt() && b.isInt()) return a.asInt() < b.asInt();
+    if (a.isDouble() && b.isDouble()) return a.asNumber() < b.asNumber();
+    // Mixed. Same int-side / double-side recovery as numbersEqual.
+    bool aIsInt = a.isInt();
+    int64_t i = aIsInt ? a.asInt() : b.asInt();
+    double  d = aIsInt ? std::get<double>(b.data) : std::get<double>(a.data);
+    if (std::isnan(d)) return false; // ordering with NaN is always false
+    if (std::isfinite(d) && d == std::trunc(d) &&
+        d >= -9223372036854775808.0 && d <  9223372036854775808.0) {
+        int64_t di = static_cast<int64_t>(d);
+        return aIsInt ? (i < di) : (di < i);
+    }
+    return aIsInt ? (static_cast<double>(i) < d) : (d < static_cast<double>(i));
+}
+
+inline size_t hashNumber(const Value& v) {
+    if (v.isInt()) {
+        int64_t n = v.asInt();
+        // If n is exactly representable as a double, hash via double so
+        // it collides with the equal double value. Otherwise hash int64.
+        double d = static_cast<double>(n);
+        if (std::isfinite(d) && static_cast<int64_t>(d) == n) {
+            return std::hash<double>{}(d);
+        }
+        return std::hash<int64_t>{}(n);
+    }
+    double d = std::get<double>(v.data);
+    if (std::isnan(d)) return 0;       // canonicalize NaN
+    if (d == 0.0) return std::hash<double>{}(0.0); // canonicalize ±0
+    return std::hash<double>{}(d);
+}
+
 struct ValueHash {
     size_t operator()(const Value& v) const {
         if (v.isNil()) return 0;
         if (v.isBool()) return std::hash<bool>{}(v.asBool());
-        // Hash all numbers as double to be consistent with operator==
-        // (which compares int and double via asNumber()).
-        // Canonicalize NaN (all bit patterns hash the same) and -0.0 (which
-        // is == to +0.0 but has a distinct bit pattern) so map lookups stay
-        // consistent with PraiaMap's NaN-aware key equality below.
-        if (v.isInt() || v.isDouble()) {
-            double d = v.asNumber();
-            if (std::isnan(d)) return 0;
-            if (d == 0.0) return std::hash<double>{}(0.0);
-            return std::hash<double>{}(d);
-        }
+        if (v.isInt() || v.isDouble()) return hashNumber(v);
         if (v.isString()) return std::hash<std::string>{}(v.asString());
         if (v.isTagged()) return hashTagged(v);
         return 0;
@@ -149,11 +236,8 @@ struct ValueHash {
 // follows IEEE 754 (NaN != NaN); only PraiaMap lookups use this predicate.
 struct ValueKeyEqual {
     bool operator()(const Value& a, const Value& b) const {
-        if (a.isNumber() && b.isNumber()) {
-            double da = a.asNumber(), db = b.asNumber();
-            if (std::isnan(da) && std::isnan(db)) return true;
-            return da == db;
-        }
+        if (a.isNumber() && b.isNumber())
+            return numbersEqualHelper(a, b, /*nanEq=*/true);
         return a == b;
     }
 };
@@ -281,7 +365,7 @@ inline bool Value::operator==(const Value& o) const {
     if (isNil()    && o.isNil())    return true;
     if (isNil()    || o.isNil())    return false;
     if (isBool()   && o.isBool())   return asBool()   == o.asBool();
-    if (isNumber() && o.isNumber()) return asNumber()  == o.asNumber();
+    if (isNumber() && o.isNumber()) return numbersEqual(*this, o);
     if (isString() && o.isString()) return asString()  == o.asString();
     if (isArray()  && o.isArray()) {
         auto& a = asArray()->elements;

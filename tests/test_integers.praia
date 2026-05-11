@@ -75,4 +75,93 @@ testing.test("overflow promotes to float", lam{ in
     testing.assertEqual(type(50 * 30), "int", nil)
 })
 
+// Regression: comparison, hashing, and bitwise ops on int64 values used
+// to round through double. Two adjacent ints above 2^53 collapsed to one
+// double and compared equal / hashed to the same bucket. Now ints
+// compare and hash as int64 directly; mixed int↔double comparisons
+// preserve int precision by promoting the *double* to int64 when it's
+// integer-valued (Option B from the design).
+testing.test("adjacent ints above 2^53 distinguishable", lam{ in
+    let a = 9007199254740992   // 2^53
+    let b = 9007199254740993   // 2^53 + 1 — same double as a if routed via double
+    testing.assertEqual(a == b, false, "ints differ at int64 precision")
+    testing.assertEqual(a != b, true, nil)
+    testing.assertEqual(a < b, true, nil)
+    testing.assertEqual(b > a, true, nil)
+    testing.assertEqual(a <= b, true, nil)
+    testing.assertEqual(b >= a, true, nil)
+    testing.assertEqual(a < a, false, nil)
+})
+
+testing.test("big ints don't collapse as map keys", lam{ in
+    let a = 9007199254740992
+    let b = 9007199254740993
+    let m = {}
+    m[a] = "A"
+    m[b] = "B"
+    testing.assertEqual(len(m), 2, "distinct keys")
+    testing.assertEqual(m[a], "A", nil)
+    testing.assertEqual(m[b], "B", nil)
+})
+
+testing.test("int 1 and double 1.0 still equate and share map slot", lam{ in
+    // Option B preserves the conventional `1 == 1.0` from dynamic
+    // languages. Hash must agree so map lookups collide.
+    testing.assertEqual(1 == 1.0, true, nil)
+    testing.assertEqual(1 < 1.5, true, nil)
+    testing.assertEqual(2 > 1.5, true, nil)
+    let m = {}
+    m[1] = "int"
+    m[1.0] = "double"
+    testing.assertEqual(len(m), 1, "1 and 1.0 share a map slot")
+})
+
+testing.test("bitwise ops preserve int64 precision", lam{ in
+    let a = 9007199254740992  // 2^53, even
+    let b = 9007199254740993  // 2^53 + 1, odd
+    testing.assertEqual(a & 1, 0, "2^53 is even")
+    testing.assertEqual(b & 1, 1, "2^53+1 is odd")
+    testing.assertEqual(a | 1, b, "OR with 1 distinguishes adjacent ints")
+    testing.assertEqual(b ^ 1, a, "XOR with 1 toggles the low bit")
+})
+
+// int() builtin — converts to int64. Useful for keeping int precision
+// when mixing with whole-number doubles: `bigInt + int(1.0)` stays int.
+testing.test("int() identity and bool", lam{ in
+    testing.assertEqual(int(42), 42, nil)
+    testing.assertEqual(type(int(42)), "int", nil)
+    testing.assertEqual(int(true), 1, nil)
+    testing.assertEqual(int(false), 0, nil)
+})
+
+testing.test("int() truncates doubles toward zero", lam{ in
+    testing.assertEqual(int(3.7), 3, nil)
+    testing.assertEqual(int(-3.7), -3, nil)
+    testing.assertEqual(int(0.0), 0, nil)
+    testing.assertEqual(type(int(3.7)), "int", "result is int, not double")
+})
+
+testing.test("int() parses string forms", lam{ in
+    testing.assertEqual(int("123"), 123, nil)
+    testing.assertEqual(int("-42"), -42, nil)
+    testing.assertEqual(int("3.7"), 3, "decimal string truncated")
+    testing.assertEqual(int("9223372036854775807"), 9223372036854775807,
+                       "INT64_MAX round-trips through string")
+})
+
+testing.test("int() recovers precision in mixed arithmetic", lam{ in
+    // The motivating use case: int(1.0) keeps the operation on int64
+    // rails instead of routing through double.
+    let big = 9007199254740993
+    testing.assertEqual(big + int(1.0), 9007199254740994, nil)
+    testing.assertEqual(type(big + int(1.0)), "int", nil)
+})
+
+testing.test("int() rejects bad inputs", lam{ in
+    testing.assertThrows(lam{ in int(nil) }, "int")
+    testing.assertThrows(lam{ in int([1, 2]) }, "int")
+    testing.assertThrows(lam{ in int({a: 1}) }, "int")
+    testing.assertThrows(lam{ in int("abc") }, "int")
+})
+
 testing.done()

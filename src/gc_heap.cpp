@@ -35,7 +35,7 @@ void GcHeap::track(const std::shared_ptr<PraiaGenerator>& p) {
     allocsSinceGc_++;
 }
 void GcHeap::track(const std::shared_ptr<PraiaTagged>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Array}); // tagged values are simple containers like arrays
+    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Tagged});
     allocsSinceGc_++;
 }
 void GcHeap::track(const std::shared_ptr<Environment>& p) {
@@ -85,6 +85,8 @@ void GcHeap::markValue(const Value& v) {
 
     if (v.isArray()) {
         markArray(v.asArray().get());
+    } else if (v.isTagged()) {
+        markTagged(v.asTagged().get());
     } else if (v.isMap()) {
         markMap(v.asMap().get());
     } else if (v.isInstance()) {
@@ -100,6 +102,12 @@ void GcHeap::markArray(PraiaArray* arr) {
     if (!arr) return;
     if (!marked_.insert(static_cast<void*>(arr)).second) return;
     for (auto& elem : arr->elements) markValue(elem);
+}
+
+void GcHeap::markTagged(PraiaTagged* tag) {
+    if (!tag) return;
+    if (!marked_.insert(static_cast<void*>(tag)).second) return;
+    for (auto& v : tag->values) markValue(v);
 }
 
 void GcHeap::markMap(PraiaMap* map) {
@@ -208,6 +216,11 @@ void GcHeap::sweep() {
         switch (item.type) {
             case GcType::Array:
                 static_cast<PraiaArray*>(item.rawPtr)->elements.clear();
+                break;
+            case GcType::Tagged:
+                // tag is a plain std::string (no GC roots); only the
+                // values vector can carry cycles back into the heap.
+                static_cast<PraiaTagged*>(item.rawPtr)->values.clear();
                 break;
             case GcType::Map:
                 static_cast<PraiaMap*>(item.rawPtr)->entries.clear();
