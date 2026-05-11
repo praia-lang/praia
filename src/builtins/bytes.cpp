@@ -11,7 +11,16 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
 
     struct StructField { char type; int size; };
 
-    auto parseStructFmt = [](const std::string& fmt, bool& bigEndian) -> std::vector<StructField> {
+    // Per-field byte cap. `>9999999999h` would otherwise overflow the
+    // count accumulator silently and push a near-infinite number of
+    // StructFields. We bound `count * sz` to 16 MiB per field — comfortably
+    // larger than any realistic struct-format unpack (audio buffers, image
+    // rows, protocol parsing) while bounding worst-case allocation. The
+    // accumulator is also bounded during digit parsing so a giant numeric
+    // prefix throws before it can wrap.
+    constexpr int64_t kMaxFieldBytes = 16 * 1024 * 1024;
+
+    auto parseStructFmt = [&](const std::string& fmt, bool& bigEndian) -> std::vector<StructField> {
         std::vector<StructField> fields;
         size_t i = 0;
         bigEndian = true; // default big-endian
@@ -20,9 +29,11 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             i = 1;
         }
         while (i < fmt.size()) {
-            int count = 0;
+            int64_t count = 0;
             while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9') {
                 count = count * 10 + (fmt[i] - '0');
+                if (count > kMaxFieldBytes)
+                    throw RuntimeError("Struct format count exceeds 16 MiB limit", 0);
                 i++;
             }
             if (count == 0) count = 1;
@@ -39,7 +50,9 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
                 case 'x': sz = 1; break;
                 default: throw RuntimeError(std::string("Unknown struct format char: '") + c + "'", 0);
             }
-            for (int j = 0; j < count; j++) fields.push_back({c, sz});
+            if (count * sz > kMaxFieldBytes)
+                throw RuntimeError("Struct format field would consume more than 16 MiB", 0);
+            for (int64_t j = 0; j < count; j++) fields.push_back({c, sz});
         }
         return fields;
     };
