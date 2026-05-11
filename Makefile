@@ -191,4 +191,68 @@ endif
 plugin:
 	$(CXX) -std=c++20 -shared -fPIC -I$(SRC_DIR) $(PLUGIN_LDFLAGS) -o $(OUT) $(SRC)
 
+# ── Fuzz targets ──
+# Coverage-guided fuzzing via libFuzzer + ASan + UBSan. Built separately
+# from the main g++ pipeline because libFuzzer is Clang-only and the
+# sanitizer instrumentation needs to be applied at compile time. Outputs
+# live in build_fuzz/ so they don't collide with the main `build/`.
+#
+# Usage:
+#   make fuzz                    # builds all fuzz binaries
+#   ./build_fuzz/fuzz_json fuzz/corpus/json/ -max_total_time=60
+#
+# See fuzz/README.md for triage workflow.
+#
+# Apple's bundled Clang doesn't ship the libFuzzer runtime, so on macOS
+# we prefer Homebrew LLVM if present (provides libclang_rt.fuzzer_osx.a).
+# On Linux distro Clang typically ships the runtime; plain `clang++`
+# works. CXX_FUZZ can be overridden on the command line:
+#   make fuzz CXX_FUZZ=/usr/bin/clang++-17
+LLVM_PREFIX := $(shell brew --prefix llvm 2>/dev/null)
+ifneq ($(LLVM_PREFIX),)
+  CXX_FUZZ ?= $(LLVM_PREFIX)/bin/clang++
+else
+  CXX_FUZZ ?= clang++
+endif
+
+FUZZ_FLAGS  = -std=c++20 -O1 -g -fno-omit-frame-pointer \
+              -Wno-deprecated-declarations \
+              -fsanitize=fuzzer,address,undefined \
+              -D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE
+FUZZ_BUILD  = build_fuzz
+
+FUZZ_JSON_SRCS  = fuzz/fuzz_json.cpp \
+                  src/builtins/json.cpp \
+                  fuzz/gc_heap_fuzz.cpp
+FUZZ_YAML_SRCS  = fuzz/fuzz_yaml.cpp \
+                  src/builtins/yaml.cpp \
+                  fuzz/gc_heap_fuzz.cpp
+FUZZ_PARSE_SRCS = fuzz/fuzz_lex_parse.cpp \
+                  src/lexer.cpp \
+                  src/parser.cpp \
+                  src/unicode.cpp \
+                  fuzz/gc_heap_fuzz.cpp
+
+FUZZ_BINS = $(FUZZ_BUILD)/fuzz_json \
+            $(FUZZ_BUILD)/fuzz_yaml \
+            $(FUZZ_BUILD)/fuzz_lex_parse
+
+.PHONY: fuzz fuzz-clean
+fuzz: $(FUZZ_BINS)
+
+$(FUZZ_BUILD):
+	mkdir -p $@
+
+$(FUZZ_BUILD)/fuzz_json: $(FUZZ_JSON_SRCS) | $(FUZZ_BUILD)
+	$(CXX_FUZZ) $(FUZZ_FLAGS) -I$(SRC_DIR) $^ -o $@
+
+$(FUZZ_BUILD)/fuzz_yaml: $(FUZZ_YAML_SRCS) | $(FUZZ_BUILD)
+	$(CXX_FUZZ) $(FUZZ_FLAGS) -I$(SRC_DIR) $^ -o $@
+
+$(FUZZ_BUILD)/fuzz_lex_parse: $(FUZZ_PARSE_SRCS) | $(FUZZ_BUILD)
+	$(CXX_FUZZ) $(FUZZ_FLAGS) -I$(SRC_DIR) $^ -o $@
+
+fuzz-clean:
+	rm -rf $(FUZZ_BUILD)
+
 .PHONY: all clean install uninstall test test-input plugin

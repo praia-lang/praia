@@ -1,0 +1,6 @@
+let add = lam{ a, b in a + b }
+let nums = [1, 2, 3, 4, 5]
+let doubled = nums |> map(lam{ x in x * 2 })
+let sum = nums |> reduce(0, lam{ acc, x in acc + x })
+print(doubled)
+print(sum)

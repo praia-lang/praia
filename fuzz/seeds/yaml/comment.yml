@@ -1,0 +1,8 @@
+# comment at top
+key: value  # inline comment
+# blank lines below
+
+list:
+  # nested comment
+  - item1
+  - item2

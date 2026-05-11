@@ -1,4 +1,8 @@
 build/
+build_fuzz/
+fuzz/corpus/
+fuzz/crashes/
 praia
 *.o
+*.dSYM/
 .DS_Store
