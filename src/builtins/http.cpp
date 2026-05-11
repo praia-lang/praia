@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
 #include "../gc_heap.h"
@@ -19,6 +20,7 @@
 #ifdef HAVE_OPENSSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
 #endif
 
 namespace {
@@ -452,9 +454,44 @@ Value doHttpRequest(const std::string& method, const std::string& url,
         SSL_CTX_set_verify(conn.ctx, SSL_VERIFY_PEER, nullptr);
         conn.ssl = SSL_new(conn.ctx);
         SSL_set_fd(conn.ssl, conn.fd);
+
+        // SNI — server-name extension; tells the server which vhost we want.
         SSL_set_tlsext_host_name(conn.ssl, p.host.c_str());
+
+        // Cert verification: tell OpenSSL to also check that the cert's
+        // Subject/SAN matches the host/IP we connected to. SNI + chain
+        // verification alone is NOT enough — without this, a valid cert
+        // for ANY hostname signed by a trusted CA would pass. The check
+        // runs as part of SSL_connect's verification; a mismatch surfaces
+        // as X509_V_ERR_HOSTNAME_MISMATCH / X509_V_ERR_IP_ADDRESS_MISMATCH
+        // in SSL_get_verify_result.
+        {
+            X509_VERIFY_PARAM* vp = SSL_get0_param(conn.ssl);
+            // IP literals (IPv4 or IPv6) take the IP-match path; everything
+            // else is treated as a DNS name. inet_pton returns 1 on success.
+            unsigned char ipbuf[16];
+            bool isIp = (inet_pton(AF_INET,  p.host.c_str(), ipbuf) == 1 ||
+                         inet_pton(AF_INET6, p.host.c_str(), ipbuf) == 1);
+            if (isIp) {
+                X509_VERIFY_PARAM_set1_ip_asc(vp, p.host.c_str());
+            } else {
+                X509_VERIFY_PARAM_set1_host(vp, p.host.c_str(), p.host.size());
+                // Reject partial-wildcard patterns (e.g. `f*.example.com`);
+                // only full-label wildcards (`*.example.com`) are allowed.
+                X509_VERIFY_PARAM_set_hostflags(vp, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            }
+        }
+
         if (SSL_connect(conn.ssl) <= 0) {
+            // Verification errors (expired cert, hostname mismatch, etc.)
+            // surface as SSL_connect failures. Surface the verify result
+            // if it explains the failure; otherwise generic message.
+            long vr = SSL_get_verify_result(conn.ssl);
             conn.shutdown_close();
+            if (vr != X509_V_OK) {
+                throw RuntimeError("SSL certificate verification failed for " + p.host +
+                                   ": " + X509_verify_cert_error_string(vr), 0);
+            }
             throw RuntimeError("SSL handshake failed for " + p.host, 0);
         }
         long vr = SSL_get_verify_result(conn.ssl);
