@@ -1,0 +1,47 @@
+use "testing"
+
+// Regression: HTTP header serialization used to emit CR/LF in values
+// straight to the wire, enabling response-splitting attacks where an
+// attacker-controlled query param echoed into a response header (or a
+// redirect URL) could close the line and inject Set-Cookie, fake
+// Content-Length, an arbitrary body, etc. All entry points now reject
+// CR/LF/NUL.
+
+testing.test("http.redirect rejects CRLF in URL", lam{ in
+    testing.assertThrows(
+        lam{ in http.redirect("https://x/\r\nSet-Cookie: pwned=1") },
+        "should reject CRLF in redirect URL")
+})
+
+testing.test("http.redirect rejects bare LF in URL", lam{ in
+    testing.assertThrows(
+        lam{ in http.redirect("https://x/\nInjected: 1") },
+        "should reject bare LF in redirect URL")
+})
+
+testing.test("http.request rejects CRLF in header value", lam{ in
+    testing.assertThrows(
+        lam{ in http.request({
+            method: "GET",
+            url: "http://example.invalid:1/",
+            headers: {"X-Bad": "ok\r\nInjected: 1"}
+        }) },
+        "should reject CRLF in request header value")
+})
+
+testing.test("http.request rejects CRLF in method", lam{ in
+    testing.assertThrows(
+        lam{ in http.request({
+            method: "GET\r\nX-Bad: 1",
+            url: "http://example.invalid:1/"
+        }) },
+        "should reject CRLF in HTTP method")
+})
+
+testing.test("http.request rejects CRLF in URL path", lam{ in
+    testing.assertThrows(
+        lam{ in http.get("http://example.invalid:1/foo\r\nX-Bad: 1") },
+        "should reject CRLF in URL path")
+})
+
+testing.done()

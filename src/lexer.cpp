@@ -139,7 +139,9 @@ void Lexer::scanToken() {
         case ' ':
         case '\r':
         case '\t':
+            break;
         case ';':
+            addToken(TokenType::SEMICOLON);
             break;
         case '\n':
             line++;

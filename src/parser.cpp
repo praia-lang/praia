@@ -4,6 +4,31 @@
 
 Parser::Parser(const std::vector<Token>& tokens) : tokens(tokens) {}
 
+// After a statement, either a semicolon or a newline-equivalent (a token
+// on a later line) acts as the separator. Reject adjacent statements
+// on the same line with neither — e.g. `let x = 1 2` used to silently
+// parse as two expression statements because `;` was discarded as
+// whitespace, masking what's almost certainly a typo.
+//
+// Exception: if the previous statement ended with `}` (a block-form
+// statement: if/while/for/func/class/try/inner block), the brace
+// itself is the separator and a one-liner like
+//   func f(x) { if (x) { return 1 } return 0 }
+// is legitimate Praia style. Only expression-tailed statements
+// (let/return/break/expression) require an explicit `;` or newline.
+void Parser::consumeStatementSeparator() {
+    if (current == 0) return;                       // nothing parsed yet
+    Token& last = tokens[current - 1];
+    bool sawSemi = false;
+    while (match(TokenType::SEMICOLON)) sawSemi = true;
+    if (sawSemi) return;                             // explicit separator
+    if (isAtEnd() || check(TokenType::RBRACE)) return; // block/file ended
+    if (peek().line != last.line) return;            // newline-implicit
+    if (last.type == TokenType::RBRACE) return;      // `}` is its own separator
+    throw error(peek(),
+        "Expected ';' or newline between statements (got '" + peek().lexeme + "')");
+}
+
 std::vector<StmtPtr> Parser::parse() {
     std::vector<StmtPtr> statements;
     while (!isAtEnd()) {
@@ -14,6 +39,7 @@ std::vector<StmtPtr> Parser::parse() {
                 statements.push_back(std::move(pending_.front()));
                 pending_.pop_front();
             }
+            consumeStatementSeparator();
         } catch (const ParseError&) {
             synchronize();
         }
@@ -254,6 +280,7 @@ StmtPtr Parser::classStatement() {
         functionDepth++;
         while (!check(TokenType::RBRACE) && !isAtEnd()) {
             method.body.push_back(statement());
+            consumeStatementSeparator();
         }
         functionDepth--;
         method.isGenerator = (yieldCount > 0);
@@ -482,6 +509,7 @@ StmtPtr Parser::returnStatement() {
         case TokenType::SUPER:
         case TokenType::NOT:
         case TokenType::MINUS:
+        case TokenType::BIT_NOT:
             stmt->value = expression();
             break;
         default:
@@ -641,6 +669,7 @@ StmtPtr Parser::block() {
                 blk->statements.push_back(std::move(pending_.front()));
                 pending_.pop_front();
             }
+            consumeStatementSeparator();
         } catch (const ParseError&) {
             synchronize();
         }
@@ -1223,6 +1252,7 @@ ExprPtr Parser::primary() {
                 t == TokenType::IDENTIFIER || t == TokenType::LPAREN ||
                 t == TokenType::LBRACKET || t == TokenType::LBRACE ||
                 t == TokenType::MINUS || t == TokenType::NOT ||
+                t == TokenType::BIT_NOT ||
                 t == TokenType::TRUE || t == TokenType::FALSE ||
                 t == TokenType::NIL || t == TokenType::THIS ||
                 t == TokenType::SUPER || t == TokenType::LAM ||
@@ -1289,13 +1319,24 @@ ExprPtr Parser::primary() {
 
         // Check if this lambda has an 'in' keyword (explicit params) or not (implicit 'it')
         // Scan ahead to find 'in' before '}' — if absent, inject 'it' as sole parameter.
+        // Track all three nesting kinds: an `in` inside `for (x in arr)` or
+        // an array/map literal at the body level is part of that nested
+        // construct, not the lambda's parameter separator.
         bool hasIn = false;
         {
-            int depth = 1; // track nested braces
+            int braceDepth = 1, parenDepth = 0, bracketDepth = 0;
             for (int look = current; look < static_cast<int>(tokens.size()); look++) {
-                if (tokens[look].type == TokenType::LBRACE) depth++;
-                else if (tokens[look].type == TokenType::RBRACE) { depth--; if (depth == 0) break; }
-                else if (tokens[look].type == TokenType::IN && depth == 1) { hasIn = true; break; }
+                auto t = tokens[look].type;
+                if      (t == TokenType::LBRACE)   braceDepth++;
+                else if (t == TokenType::RBRACE)   { braceDepth--; if (braceDepth == 0) break; }
+                else if (t == TokenType::LPAREN)   parenDepth++;
+                else if (t == TokenType::RPAREN)   parenDepth--;
+                else if (t == TokenType::LBRACKET) bracketDepth++;
+                else if (t == TokenType::RBRACKET) bracketDepth--;
+                else if (t == TokenType::IN &&
+                         braceDepth == 1 && parenDepth == 0 && bracketDepth == 0) {
+                    hasIn = true; break;
+                }
             }
         }
 
@@ -1346,6 +1387,7 @@ ExprPtr Parser::primary() {
                 lam->body.push_back(std::move(pending_.front()));
                 pending_.pop_front();
             }
+            consumeStatementSeparator();
         }
         functionDepth--;
         lam->isGenerator = (yieldCount > 0);
@@ -1539,6 +1581,7 @@ void Parser::synchronize() {
     advance();
     while (!isAtEnd()) {
         if (previous().type == TokenType::RBRACE) return;
+        if (previous().type == TokenType::SEMICOLON) return;
         switch (peek().type) {
             case TokenType::LET:
             case TokenType::FUNC:

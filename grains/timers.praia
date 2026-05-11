@@ -10,14 +10,14 @@
 //   timers.repeat(5, 200, lam{ i in print("tick", i) })
 //
 // Note: callbacks run in a fresh VM with a deep copy of globals — see
-// `advanced/async` for the cross-VM semantics. Use Channel/files/sqlite to
+// `advanced/async` for the cross-VM semantics. Use Queue/files/sqlite to
 // share state with the caller.
 
 // Run fn after ms milliseconds. Returns a handle with a .clear() method that
 // suppresses the callback if not yet fired (the timer thread still runs out
 // the sleep, but fn won't be invoked).
 func setTimeout(fn, ms) {
-    let stop = Channel()
+    let stop = Queue()
     async _runTimeout(fn, ms, stop)
     return { clear: lam{ in stop.close() } }
 }
@@ -31,7 +31,7 @@ func _runTimeout(fn, ms, stop) {
 // stops the interval after the current tick. fn does not fire immediately —
 // the first call happens after ms.
 func setInterval(fn, ms) {
-    let stop = Channel()
+    let stop = Queue()
     async _runInterval(fn, ms, stop)
     return { clear: lam{ in stop.close() } }
 }

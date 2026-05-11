@@ -1,0 +1,95 @@
+use "testing"
+
+testing.test("queue send and recv", lam{ in
+    let q = Queue()
+    func producer(q) {
+        q.send(1)
+        q.send(2)
+        q.send(3)
+        q.close()
+    }
+    async producer(q)
+    let results = []
+    while (true) {
+        let val = q.recv()
+        if (val == nil) { break }
+        push(results, val)
+    }
+    testing.assertEqual(results, [1, 2, 3], nil)
+})
+
+testing.test("bounded queue", lam{ in
+    let q = Queue(3)
+    q.send("a")
+    q.send("b")
+    q.send("c")
+    testing.assertEqual(q.recv(), "a", nil)
+    testing.assertEqual(q.recv(), "b", nil)
+    testing.assertEqual(q.recv(), "c", nil)
+})
+
+testing.test("tryRecv non-blocking", lam{ in
+    let q = Queue()
+    testing.assertEqual(q.tryRecv(), nil, "tryRecv on empty should be nil")
+    q.send(42)
+    testing.assertEqual(q.tryRecv(), 42, nil)
+    testing.assertEqual(q.tryRecv(), nil, "tryRecv after drain should be nil")
+})
+
+testing.test("queue closed", lam{ in
+    let q = Queue()
+    q.send(1)
+    q.close()
+    testing.assertEqual(q.recv(), 1, "should get value before close")
+    testing.assertEqual(q.recv(), nil, "should get nil after close + empty")
+    testing.assert(q.closed(), "should report closed")
+})
+
+// closed() is "closed AND drained". A producer that just wants to know
+// whether send() will throw needs isClosed() — which flips the instant
+// close() is called, even while the buffer still has values.
+testing.test("queue isClosed / isEmpty / closed semantics", lam{ in
+    let q = Queue(3)
+    q.send(1)
+    q.send(2)
+    testing.assertEqual(q.isClosed(), false, "open queue")
+    testing.assertEqual(q.isEmpty(),  false, "buffer has values")
+    testing.assertEqual(q.closed(),   false, "neither closed nor drained")
+
+    q.close()
+    testing.assertEqual(q.isClosed(), true,  "close() flipped isClosed")
+    testing.assertEqual(q.isEmpty(),  false, "values still buffered")
+    testing.assertEqual(q.closed(),   false, "closed but not yet drained")
+
+    testing.assertEqual(q.recv(), 1, nil)
+    testing.assertEqual(q.recv(), 2, nil)
+    testing.assertEqual(q.isClosed(), true,  nil)
+    testing.assertEqual(q.isEmpty(),  true,  "fully drained")
+    testing.assertEqual(q.closed(),   true,  "closed AND drained")
+})
+
+testing.test("send on closed queue throws", lam{ in
+    let q = Queue()
+    q.close()
+    testing.assertThrows(lam{ in q.send(1) }, nil)
+})
+
+testing.test("multiple producers", lam{ in
+    let q = Queue()
+    func worker(id, q) {
+        q.send(id)
+    }
+    async worker(1, q)
+    async worker(2, q)
+    async worker(3, q)
+    let results = []
+    for (i in 0..3) {
+        push(results, q.recv())
+    }
+    testing.assertEqual(len(results), 3, nil)
+    testing.assert(results.contains(1), "should have worker 1")
+    testing.assert(results.contains(2), "should have worker 2")
+    testing.assert(results.contains(3), "should have worker 3")
+})
+
+testing.done()

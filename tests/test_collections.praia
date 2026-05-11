@@ -119,4 +119,54 @@ testing.test("keys() returns value keys", lam{ in
     testing.assertEqual(len(k), 2, nil)
 })
 
+// Regression: print / equality / json.stringify / yaml.stringify on
+// cyclic structures used to recurse forever and crash the process.
+// Now toString emits `[...]` / `{...}` / `Tag(...)` markers for cycles;
+// stringify throws a catchable RuntimeError; equality short-circuits
+// on container identity.
+testing.test("print on self-referential array doesn't crash", lam{ in
+    let a = []
+    push(a, a)
+    testing.assertEqual(str(a), "[[...]]", "self-array marker")
+})
+
+testing.test("print on self-referential map doesn't crash", lam{ in
+    let m = {}
+    m.self = m
+    testing.assertEqual(str(m), "{self: {...}}", "self-map marker")
+})
+
+testing.test("print on cyclic tagged doesn't crash", lam{ in
+    let t = Ok([])
+    push(t.values[0], t)
+    testing.assertEqual(str(t), "Ok([Ok(...)])", "tagged cycle marker")
+})
+
+testing.test("shared-but-not-cyclic prints fully", lam{ in
+    // A shared subtree must render at each occurrence — cycle marker
+    // only triggers when we'd re-enter a container already on the
+    // active recursion path.
+    let inner = [1, 2]
+    let outer = [inner, inner]
+    testing.assertEqual(str(outer), "[[1, 2], [1, 2]]", nil)
+})
+
+testing.test("equality on cyclic array (identity)", lam{ in
+    let c = []
+    push(c, c)
+    testing.assert(c == c, "a == a for cyclic a")
+})
+
+testing.test("json.stringify rejects cycles cleanly", lam{ in
+    let a = []
+    push(a, a)
+    testing.assertThrows(lam{ in json.stringify(a) }, "cyclic")
+})
+
+testing.test("yaml.stringify rejects cycles cleanly", lam{ in
+    let m = {}
+    m.self = m
+    testing.assertThrows(lam{ in yaml.stringify(m) }, "cyclic")
+})
+
 testing.done()

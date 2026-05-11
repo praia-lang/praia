@@ -101,6 +101,8 @@ enum class TokenType {
     LBRACKET,   // [
     RBRACKET,   // ]
     COMMA,      // ,
+    SEMICOLON,  // ;  — statement separator (also accepted between
+                //      same-line statements; newlines suffice otherwise)
 
     // Special
     EOF_TOKEN,
@@ -200,6 +202,7 @@ inline std::string tokenTypeToString(TokenType type) {
         case TokenType::LBRACKET:    return "LBRACKET";
         case TokenType::RBRACKET:    return "RBRACKET";
         case TokenType::COMMA:       return "COMMA";
+        case TokenType::SEMICOLON:   return "SEMICOLON";
         case TokenType::EOF_TOKEN:   return "EOF";
     }
     return "UNKNOWN";

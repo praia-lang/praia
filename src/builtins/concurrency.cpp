@@ -1,6 +1,7 @@
 #include "../builtins.h"
 #include <atomic>
 #include <condition_variable>
+#include <iostream>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -42,105 +43,124 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
             return Value(lock);
         })));
 
-    // ── Channel() — thread-safe queue for async communication ──
-
-    struct ChannelState {
+    // ── Queue() — thread-safe FIFO queue for async communication ──
+    //
+    // `Queue()` (no arg) is unbounded — `send` never blocks unless the
+    // queue is closed. `Queue(N)` is bounded; `send` blocks while the
+    // buffer holds N values, providing backpressure. Both are
+    // closeable; receivers see `nil` once the queue is closed and
+    // drained. Named to match the semantic (Python's queue.Queue,
+    // Java's BlockingQueue) rather than Go's rendezvous channel.
+    //
+    // The deprecated `Channel` alias below points at the same factory
+    // and prints a one-shot stderr warning on first use.
+    struct QueueState {
         std::mutex mtx;
         std::condition_variable cv;
         std::queue<Value> buffer;
         bool closed = false;
     };
 
-    globals->define("Channel", Value(makeNative("Channel", -1,
-        [](const std::vector<Value>& args) -> Value {
-            auto state = std::make_shared<ChannelState>();
-            int capacity = 0; // unbuffered by default
-            if (!args.empty() && args[0].isNumber())
-                capacity = static_cast<int>(args[0].asNumber());
+    auto queueFactory = [](const std::vector<Value>& args) -> Value {
+        auto state = std::make_shared<QueueState>();
+        int capacity = 0; // 0 = unbounded
+        if (!args.empty() && args[0].isNumber())
+            capacity = static_cast<int>(args[0].asNumber());
 
-            auto ch = gcNew<PraiaMap>();
+        auto q = gcNew<PraiaMap>();
 
-            ch->entries[Value("send")] = Value(makeNative("send", 1,
-                [state, capacity](const std::vector<Value>& args) -> Value {
-                    std::unique_lock<std::mutex> lock(state->mtx);
-                    if (state->closed)
-                        throw RuntimeError("Cannot send on a closed channel", 0);
-                    if (capacity > 0) {
-                        state->cv.wait(lock, [&] {
-                            return static_cast<int>(state->buffer.size()) < capacity || state->closed;
-                        });
-                        if (state->closed)
-                            throw RuntimeError("Cannot send on a closed channel", 0);
-                    }
-                    state->buffer.push(args[0]);
-                    state->cv.notify_all();
-                    return Value();
-                }));
-
-            ch->entries[Value("recv")] = Value(makeNative("recv", 0,
-                [state](const std::vector<Value>&) -> Value {
-                    std::unique_lock<std::mutex> lock(state->mtx);
+        q->entries[Value("send")] = Value(makeNative("send", 1,
+            [state, capacity](const std::vector<Value>& args) -> Value {
+                std::unique_lock<std::mutex> lock(state->mtx);
+                if (state->closed)
+                    throw RuntimeError("Cannot send on a closed queue", 0);
+                if (capacity > 0) {
                     state->cv.wait(lock, [&] {
-                        return !state->buffer.empty() || state->closed;
+                        return static_cast<int>(state->buffer.size()) < capacity || state->closed;
                     });
-                    if (state->buffer.empty()) return Value(); // closed + empty = nil
-                    Value val = state->buffer.front();
-                    state->buffer.pop();
-                    state->cv.notify_all();
-                    return val;
-                }));
+                    if (state->closed)
+                        throw RuntimeError("Cannot send on a closed queue", 0);
+                }
+                state->buffer.push(args[0]);
+                state->cv.notify_all();
+                return Value();
+            }));
 
-            ch->entries[Value("tryRecv")] = Value(makeNative("tryRecv", 0,
-                [state](const std::vector<Value>&) -> Value {
-                    std::lock_guard<std::mutex> lock(state->mtx);
-                    if (state->buffer.empty()) return Value(); // nil
-                    Value val = state->buffer.front();
-                    state->buffer.pop();
-                    state->cv.notify_all();
-                    return val;
-                }));
+        q->entries[Value("recv")] = Value(makeNative("recv", 0,
+            [state](const std::vector<Value>&) -> Value {
+                std::unique_lock<std::mutex> lock(state->mtx);
+                state->cv.wait(lock, [&] {
+                    return !state->buffer.empty() || state->closed;
+                });
+                if (state->buffer.empty()) return Value(); // closed + empty = nil
+                Value val = state->buffer.front();
+                state->buffer.pop();
+                state->cv.notify_all();
+                return val;
+            }));
 
-            ch->entries[Value("close")] = Value(makeNative("close", 0,
-                [state](const std::vector<Value>&) -> Value {
-                    std::lock_guard<std::mutex> lock(state->mtx);
-                    state->closed = true;
-                    state->cv.notify_all();
-                    return Value();
-                }));
+        q->entries[Value("tryRecv")] = Value(makeNative("tryRecv", 0,
+            [state](const std::vector<Value>&) -> Value {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                if (state->buffer.empty()) return Value();
+                Value val = state->buffer.front();
+                state->buffer.pop();
+                state->cv.notify_all();
+                return val;
+            }));
 
-            // isClosed() — true once close() has been called, regardless of
-            // whether the buffer still has values. This is what a *producer*
-            // wants to consult before send(): "can I still send, or will
-            // send() throw?". The legacy closed() method confuses producers
-            // by returning false until the buffer drains.
-            ch->entries[Value("isClosed")] = Value(makeNative("isClosed", 0,
-                [state](const std::vector<Value>&) -> Value {
-                    std::lock_guard<std::mutex> lock(state->mtx);
-                    return Value(state->closed);
-                }));
+        q->entries[Value("close")] = Value(makeNative("close", 0,
+            [state](const std::vector<Value>&) -> Value {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                state->closed = true;
+                state->cv.notify_all();
+                return Value();
+            }));
 
-            // isEmpty() — true when the buffer has no pending values. What a
-            // *consumer* wants to consult before tryRecv() / a peek-style
-            // check. Orthogonal to isClosed().
-            ch->entries[Value("isEmpty")] = Value(makeNative("isEmpty", 0,
-                [state](const std::vector<Value>&) -> Value {
-                    std::lock_guard<std::mutex> lock(state->mtx);
-                    return Value(state->buffer.empty());
-                }));
+        // isClosed() — true once close() has been called, regardless of
+        // whether the buffer still has values. This is what a *producer*
+        // wants to consult before send(): "can I still send, or will
+        // send() throw?". The legacy closed() method confuses producers
+        // by returning false until the buffer drains.
+        q->entries[Value("isClosed")] = Value(makeNative("isClosed", 0,
+            [state](const std::vector<Value>&) -> Value {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                return Value(state->closed);
+            }));
 
-            // closed() — "fully drained": close() has been called AND the
-            // buffer is empty. Equivalent to isClosed() && isEmpty(). This
-            // is the "is this channel done forever?" question — useful for
-            // consumers shutting down after the producer is gone. Kept for
-            // backwards compatibility; new code should prefer isClosed() /
-            // isEmpty() to make the intent explicit.
-            ch->entries[Value("closed")] = Value(makeNative("closed", 0,
-                [state](const std::vector<Value>&) -> Value {
-                    std::lock_guard<std::mutex> lock(state->mtx);
-                    return Value(state->closed && state->buffer.empty());
-                }));
+        // isEmpty() — true when the buffer has no pending values. What
+        // a *consumer* wants to consult before tryRecv() / a peek-style
+        // check. Orthogonal to isClosed().
+        q->entries[Value("isEmpty")] = Value(makeNative("isEmpty", 0,
+            [state](const std::vector<Value>&) -> Value {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                return Value(state->buffer.empty());
+            }));
 
-            return Value(ch);
+        // closed() — "fully drained": close() has been called AND the
+        // buffer is empty. Equivalent to isClosed() && isEmpty().
+        q->entries[Value("closed")] = Value(makeNative("closed", 0,
+            [state](const std::vector<Value>&) -> Value {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                return Value(state->closed && state->buffer.empty());
+            }));
+
+        return Value(q);
+    };
+
+    globals->define("Queue", Value(makeNative("Queue", -1, queueFactory)));
+
+    // Channel — deprecated alias for Queue. Prints a one-shot warning
+    // to stderr on first use so existing callers see the rename
+    // without breaking. Remove at 1.0.
+    static std::atomic<bool> channelWarned{false};
+    globals->define("Channel", Value(makeNative("Channel", -1,
+        [queueFactory](const std::vector<Value>& args) -> Value {
+            if (!channelWarned.exchange(true)) {
+                std::cerr << "[deprecated] Channel() is now Queue(); rename "
+                             "the constructor (methods unchanged)\n";
+            }
+            return queueFactory(args);
         })));
 
     // ── CancellationToken() — cross-VM cooperative cancel signal ──

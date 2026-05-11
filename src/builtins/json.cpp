@@ -1,10 +1,12 @@
 #include "../builtins.h"
 #include "../value.h"
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include "../gc_heap.h"
 
 namespace {
@@ -292,7 +294,11 @@ static std::string jsonQuote(const std::string& s) {
     return r + "\"";
 }
 
-std::string jsonStringify(const Value& val, int indent, int depth) {
+// Recursive helper. `visited` holds container pointers on the active
+// path; cycles throw rather than emit a placeholder (JSON can't
+// represent them, matching what Python's json.dumps does).
+static std::string jsonStringifyRec(const Value& val, int indent, int depth,
+                                    std::unordered_set<const void*>& visited) {
     std::string pad(depth * indent, ' ');
     std::string childPad((depth + 1) * indent, ' ');
     bool pretty = indent > 0;
@@ -302,26 +308,44 @@ std::string jsonStringify(const Value& val, int indent, int depth) {
     if (val.isBool()) return val.asBool() ? "true" : "false";
     if (val.isInt()) return std::to_string(val.asInt());
     if (val.isDouble()) {
+        double d = val.asNumber();
+        // JSON has no representation for NaN or ±Infinity. Reject rather
+        // than emit `nan` / `inf` (which most parsers fail on) or `null`
+        // (which silently swallows the value). Matches Python's
+        // json.dumps(allow_nan=False) behavior and our cycle rejection.
+        if (!std::isfinite(d)) {
+            const char* what = std::isnan(d) ? "NaN" :
+                               (d > 0 ? "Infinity" : "-Infinity");
+            throw RuntimeError(std::string("json.stringify: cannot represent ") +
+                               what + " in JSON", 0);
+        }
         std::ostringstream o;
-        o << std::setprecision(17) << val.asNumber();
+        o << std::setprecision(17) << d;
         return o.str();
     }
     if (val.isString()) {
         return jsonQuote(val.asString());
     }
     if (val.isArray()) {
+        const void* key = static_cast<const void*>(val.asArray().get());
+        if (!visited.insert(key).second)
+            throw RuntimeError("json.stringify: cyclic reference", 0);
         auto& elems = val.asArray()->elements;
-        if (elems.empty()) return "[]";
+        if (elems.empty()) { visited.erase(key); return "[]"; }
         std::string r = "[" + nl;
         for (size_t i = 0; i < elems.size(); i++) {
             if (i > 0) r += "," + nl;
-            r += childPad + jsonStringify(elems[i], indent, depth + 1);
+            r += childPad + jsonStringifyRec(elems[i], indent, depth + 1, visited);
         }
+        visited.erase(key);
         return r + nl + pad + "]";
     }
     if (val.isMap()) {
+        const void* key = static_cast<const void*>(val.asMap().get());
+        if (!visited.insert(key).second)
+            throw RuntimeError("json.stringify: cyclic reference", 0);
         auto& entries = val.asMap()->entries;
-        if (entries.empty()) return "{}";
+        if (entries.empty()) { visited.erase(key); return "{}"; }
         std::string r = "{" + nl;
         bool first = true;
         for (auto& [k, v] : entries) {
@@ -330,9 +354,15 @@ std::string jsonStringify(const Value& val, int indent, int depth) {
             if (!first) r += "," + nl;
             first = false;
             r += childPad + jsonQuote(k.asString()) + ":" + (pretty ? " " : "");
-            r += jsonStringify(v, indent, depth + 1);
+            r += jsonStringifyRec(v, indent, depth + 1, visited);
         }
+        visited.erase(key);
         return r + nl + pad + "}";
     }
     return "null"; // functions, futures, instances → null
+}
+
+std::string jsonStringify(const Value& val, int indent, int depth) {
+    std::unordered_set<const void*> visited;
+    return jsonStringifyRec(val, indent, depth, visited);
 }

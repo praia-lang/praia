@@ -1,0 +1,31 @@
+use "testing"
+
+// Regression: stdlib exceptions escaping a native used to abort the
+// whole process (e.g. std::invalid_argument from std::stoi on a
+// malformed port string in http.get). The native-call boundary in both
+// engines now wraps any non-RuntimeError std::exception into a
+// RuntimeError tagged with the function name, so it's catchable from
+// Praia code.
+
+testing.test("http.get malformed port — empty", lam{ in
+    testing.assertThrows(lam{ in http.get("http://example.com:") },
+                         "port")
+})
+
+testing.test("http.get malformed port — non-numeric", lam{ in
+    testing.assertThrows(lam{ in http.get("http://example.com:abc/") },
+                         "port")
+})
+
+testing.test("http.get malformed port — out of range", lam{ in
+    testing.assertThrows(lam{ in http.get("http://example.com:99999/") },
+                         "port")
+})
+
+testing.test("native RuntimeError passes through unchanged", lam{ in
+    // Native that throws RuntimeError directly — the wrapper must rethrow
+    // unchanged, not wrap a second time with "num(): num(): ...".
+    testing.assertThrows(lam{ in num("not a number") }, "num")
+})
+
+testing.done()

@@ -591,7 +591,19 @@ bool VM::callValue(Value callee, int argCount, int line) {
             std::vector<Value> args(argCount);
             for (int i = argCount - 1; i >= 0; i--) args[i] = pop();
             pop(); // the callable
-            Value result = native->fn(args);
+            // Defense-in-depth: any stdlib exception that escapes the
+            // native (std::invalid_argument from stoi, std::bad_alloc,
+            // std::regex_error, etc.) becomes a RuntimeError. Without
+            // this, those abort the process. RuntimeError passes through
+            // unchanged so line/column survive.
+            Value result;
+            try {
+                result = native->fn(args);
+            } catch (const RuntimeError&) {
+                throw;
+            } catch (const std::exception& e) {
+                throw RuntimeError(native->name() + "(): " + e.what(), line);
+            }
             push(std::move(result));
             return true;
         }
@@ -1085,16 +1097,18 @@ VM::Result VM::execute(int baseFrameCount_) {
             if (right.isString()) {
                 auto& tn = right.asString();
                 bool result = false;
-                if      (tn == "nil")      result = left.isNil();
-                else if (tn == "bool")     result = left.isBool();
-                else if (tn == "int")      result = left.isInt();
-                else if (tn == "float")    result = left.isDouble();
-                else if (tn == "string")   result = left.isString();
-                else if (tn == "array")    result = left.isArray();
-                else if (tn == "map")      result = left.isMap();
-                else if (tn == "function") result = left.isCallable();
-                else if (tn == "instance") result = left.isInstance();
-                else if (tn == "tagged")  result = left.isTagged();
+                if      (tn == "nil")       result = left.isNil();
+                else if (tn == "bool")      result = left.isBool();
+                else if (tn == "int")       result = left.isInt();
+                else if (tn == "float")     result = left.isDouble();
+                else if (tn == "string")    result = left.isString();
+                else if (tn == "array")     result = left.isArray();
+                else if (tn == "map")       result = left.isMap();
+                else if (tn == "function")  result = left.isCallable();
+                else if (tn == "instance")  result = left.isInstance();
+                else if (tn == "tagged")    result = left.isTagged();
+                else if (tn == "future")    result = left.isFuture();
+                else if (tn == "generator") result = left.isGenerator();
                 else { RUNTIME_ERR("Unknown type name '" + tn + "'"); }
                 push(Value(result));
             } else if (right.isCallable()) {

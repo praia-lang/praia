@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
 #include "../gc_heap.h"
@@ -19,6 +20,7 @@
 #ifdef HAVE_OPENSSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
 #endif
 
 namespace {
@@ -152,7 +154,18 @@ ParsedUrl parseUrl(const std::string& url) {
     auto colon = hostPort.find(':');
     if (colon != std::string::npos) {
         r.host = hostPort.substr(0, colon);
-        r.port = std::stoi(hostPort.substr(colon + 1));
+        const std::string portStr = hostPort.substr(colon + 1);
+        if (portStr.empty())
+            throw RuntimeError("Invalid URL: empty port in \"" + url + "\"", 0);
+        size_t pos = 0;
+        int port;
+        try { port = std::stoi(portStr, &pos); }
+        catch (...) {
+            throw RuntimeError("Invalid URL: bad port \"" + portStr + "\" in \"" + url + "\"", 0);
+        }
+        if (pos != portStr.size() || port < 0 || port > 65535)
+            throw RuntimeError("Invalid URL: bad port \"" + portStr + "\" in \"" + url + "\"", 0);
+        r.port = port;
     } else {
         r.host = hostPort;
     }
@@ -368,13 +381,40 @@ static const char* reasonPhrase(int status) {
     }
 }
 
+// True if the header field is safe to emit on the wire. Refuses CR/LF/NUL
+// in values, and CR/LF/NUL/colon in names. CRLF in either is a header-
+// injection (response-splitting) attempt: an attacker controlling part
+// of a header could close the current header line and inject further
+// headers or a fake response body.
+//
+// Exposed via anonymous namespace at file scope so all four serialization
+// sites and the user-facing http.redirect / outbound client path can
+// share the same predicate.
+bool headerFieldSafe(const std::string& name, const std::string& value) {
+    if (name.empty()) return false;
+    for (char c : name) {
+        if (c == '\r' || c == '\n' || c == '\0' || c == ':') return false;
+    }
+    for (char c : value) {
+        if (c == '\r' || c == '\n' || c == '\0') return false;
+    }
+    return true;
+}
+
 void sendHttpResponse(int client, int status, const std::string& body,
                        const std::unordered_map<std::string, std::string>& headers) {
     std::string resp = "HTTP/1.1 " + std::to_string(status) + " " + reasonPhrase(status) + "\r\n";
     auto hdrs = headers;
     hdrs["Content-Length"] = std::to_string(body.size());
     hdrs["Connection"] = "close";
-    for (auto& [k, v] : hdrs) resp += k + ": " + v + "\r\n";
+    // Defense-in-depth: skip any header containing CR/LF/NUL. Upstream
+    // validation should have rejected these already, but this final
+    // gate ensures injection never reaches the wire even if a new
+    // header-producing code path forgets to validate.
+    for (auto& [k, v] : hdrs) {
+        if (!headerFieldSafe(k, v)) continue;
+        resp += k + ": " + v + "\r\n";
+    }
     resp += "\r\n" + body;
     // Loop until the whole response is written. send() can return short on
     // congested sockets; a bare send() without the loop silently truncates.
@@ -404,7 +444,11 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
     auto hdrs = extraHeaders;
     hdrs["Content-Length"] = std::to_string(static_cast<long long>(st.st_size));
     hdrs["Connection"] = "close";
-    for (auto& [k, v] : hdrs) head += k + ": " + v + "\r\n";
+    // Same injection guard as sendHttpResponse — skip CRLF-tainted headers.
+    for (auto& [k, v] : hdrs) {
+        if (!headerFieldSafe(k, v)) continue;
+        head += k + ": " + v + "\r\n";
+    }
     head += "\r\n";
 
     // sendAll: loop until the whole buffer is written or the peer disconnects.
@@ -440,6 +484,21 @@ Value doHttpRequest(const std::string& method, const std::string& url,
                     const std::string& body,
                     const std::unordered_map<std::string, std::string>& extraHeaders) {
     auto p = parseUrl(url);
+    // Reject method/path/host/header CR/LF/NUL BEFORE any network I/O.
+    // Failing fast saves a DNS lookup + TCP/TLS handshake on garbage
+    // input and lets the user see the real error.
+    for (char c : method) if (c == '\r' || c == '\n' || c == '\0')
+        throw RuntimeError("Invalid HTTP method: contains CR/LF/NUL", 0);
+    for (char c : p.path) if (c == '\r' || c == '\n' || c == '\0')
+        throw RuntimeError("Invalid URL path: contains CR/LF/NUL", 0);
+    for (char c : p.host) if (c == '\r' || c == '\n' || c == '\0')
+        throw RuntimeError("Invalid host: contains CR/LF/NUL", 0);
+    for (auto& [k, v] : extraHeaders) {
+        if (!headerFieldSafe(k, v))
+            throw RuntimeError("Invalid request header \"" + k +
+                               "\": contains CR/LF/NUL (header injection)", 0);
+    }
+
     SocketConn conn;
     conn.fd = connectToHost(p.host, p.port);
 
@@ -452,9 +511,44 @@ Value doHttpRequest(const std::string& method, const std::string& url,
         SSL_CTX_set_verify(conn.ctx, SSL_VERIFY_PEER, nullptr);
         conn.ssl = SSL_new(conn.ctx);
         SSL_set_fd(conn.ssl, conn.fd);
+
+        // SNI — server-name extension; tells the server which vhost we want.
         SSL_set_tlsext_host_name(conn.ssl, p.host.c_str());
+
+        // Cert verification: tell OpenSSL to also check that the cert's
+        // Subject/SAN matches the host/IP we connected to. SNI + chain
+        // verification alone is NOT enough — without this, a valid cert
+        // for ANY hostname signed by a trusted CA would pass. The check
+        // runs as part of SSL_connect's verification; a mismatch surfaces
+        // as X509_V_ERR_HOSTNAME_MISMATCH / X509_V_ERR_IP_ADDRESS_MISMATCH
+        // in SSL_get_verify_result.
+        {
+            X509_VERIFY_PARAM* vp = SSL_get0_param(conn.ssl);
+            // IP literals (IPv4 or IPv6) take the IP-match path; everything
+            // else is treated as a DNS name. inet_pton returns 1 on success.
+            unsigned char ipbuf[16];
+            bool isIp = (inet_pton(AF_INET,  p.host.c_str(), ipbuf) == 1 ||
+                         inet_pton(AF_INET6, p.host.c_str(), ipbuf) == 1);
+            if (isIp) {
+                X509_VERIFY_PARAM_set1_ip_asc(vp, p.host.c_str());
+            } else {
+                X509_VERIFY_PARAM_set1_host(vp, p.host.c_str(), p.host.size());
+                // Reject partial-wildcard patterns (e.g. `f*.example.com`);
+                // only full-label wildcards (`*.example.com`) are allowed.
+                X509_VERIFY_PARAM_set_hostflags(vp, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            }
+        }
+
         if (SSL_connect(conn.ssl) <= 0) {
+            // Verification errors (expired cert, hostname mismatch, etc.)
+            // surface as SSL_connect failures. Surface the verify result
+            // if it explains the failure; otherwise generic message.
+            long vr = SSL_get_verify_result(conn.ssl);
             conn.shutdown_close();
+            if (vr != X509_V_OK) {
+                throw RuntimeError("SSL certificate verification failed for " + p.host +
+                                   ": " + X509_verify_cert_error_string(vr), 0);
+            }
             throw RuntimeError("SSL handshake failed for " + p.host, 0);
         }
         long vr = SSL_get_verify_result(conn.ssl);
@@ -466,6 +560,8 @@ Value doHttpRequest(const std::string& method, const std::string& url,
     }
 #endif
 
+    // CR/LF/NUL validation already happened above before connect — trust
+    // these inputs here. Serialize straight to the wire.
     std::string req = method + " " + p.path + " HTTP/1.1\r\n";
     req += "Host: " + p.host + "\r\n";
     req += "Connection: close\r\n";
@@ -569,8 +665,13 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
                     respBody = "";
                 }
                 if (e.count("headers") && e["headers"].isMap()) {
-                    for (auto& [k, v] : e["headers"].asMap()->entries)
-                        respHeaders[k.toString()] = v.toString();
+                    for (auto& [k, v] : e["headers"].asMap()->entries) {
+                        std::string kn = k.toString(), vn = v.toString();
+                        if (!headerFieldSafe(kn, vn))
+                            throw RuntimeError("Invalid response header \"" + kn +
+                                               "\": contains CR/LF/NUL (header injection)", 0);
+                        respHeaders[kn] = vn;
+                    }
                 }
                 if (respHeaders.find("Content-Type") == respHeaders.end() &&
                     respHeaders.find("content-type") == respHeaders.end())

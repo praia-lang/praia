@@ -1,4 +1,4 @@
-// Sync — concurrency primitives beyond Lock and Channel
+// Sync — concurrency primitives beyond Lock and Queue
 //
 // Usage:
 //   use "sync"
@@ -14,8 +14,8 @@
 // Counting semaphore — limits concurrent access to N
 class Semaphore {
     func init(permits) {
-        this.ch = Channel(permits)
-        // Pre-fill channel with permits
+        this.ch = Queue(permits)
+        // Pre-fill queue with permits
         for (i in 0..permits) {
             this.ch.send(true)
         }

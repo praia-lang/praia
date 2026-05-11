@@ -160,4 +160,34 @@ testing.test("error messages include column info", lam{ in
     testing.assert(r3.stderr.contains("[line 2:col"), "line 2 error should have column")
 })
 
+// Regression: semicolons used to be discarded as whitespace by the
+// lexer, so adjacent expressions on one line silently parsed as two
+// statements. `let x = 1 2; print(x)` printed 1 instead of failing.
+// Now SEMICOLON is a real token and the parser requires either a
+// semicolon or a newline between expression-tailed statements on the
+// same line.
+testing.test("adjacent expressions require separator", lam{ in
+    let r = sys.exec("./praia -c \"let x = 1 2; print(x)\"")
+    testing.assert(r.stderr.contains("between statements"),
+                   "adjacent statements without separator should error")
+})
+
+testing.test("adjacent let statements require separator", lam{ in
+    let r = sys.exec("./praia -c \"let a = 1 let b = 2\"")
+    testing.assert(r.stderr.contains("between statements"), nil)
+})
+
+testing.test("semicolon separator accepts same-line statements", lam{ in
+    let r = sys.exec("./praia -c \"let a = 1; let b = 2; print(a + b)\"")
+    testing.assertEqual(r.stdout.strip(), "3", nil)
+})
+
+testing.test("} ends a statement — same-line follow-up is legal", lam{ in
+    // Block-form statements (if/while/for/func) end with `}`; the
+    // brace is its own separator, so a return after `}` on the same
+    // line is valid Praia style.
+    let r = sys.exec("./praia -c \"func f(x) { if (x > 0) { return 1 } return 0 } print(f(5))\"")
+    testing.assertEqual(r.stdout.strip(), "1", nil)
+})
+
 testing.done()
