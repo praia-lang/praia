@@ -1128,10 +1128,39 @@ Interpreter::Interpreter() {
                     if (args.empty())
                         throw RuntimeError("send() requires data", 0);
                     std::string msg;
-                    // Optional event name
-                    if (args.size() > 1 && args[1].isString())
-                        msg += "event: " + args[1].asString() + "\n";
-                    msg += "data: " + args[0].toString() + "\n\n";
+                    // Optional event name. Per the SSE spec the event field
+                    // is a single line — newlines inside it would break the
+                    // frame, so strip them rather than re-emit (a multi-line
+                    // event name doesn't have a sensible meaning).
+                    if (args.size() > 1 && args[1].isString()) {
+                        std::string evt = args[1].asString();
+                        for (char& c : evt) if (c == '\n' || c == '\r') c = ' ';
+                        msg += "event: " + evt + "\n";
+                    }
+                    // SSE frames every line of the payload with its own
+                    // `data:` prefix; the message ends with a blank line.
+                    // Normalize \r\n and \r to \n first, then split.
+                    const std::string& payload = args[0].toString();
+                    std::string line;
+                    auto emit = [&]() {
+                        msg += "data: ";
+                        msg += line;
+                        msg += "\n";
+                        line.clear();
+                    };
+                    for (size_t i = 0; i < payload.size(); i++) {
+                        char c = payload[i];
+                        if (c == '\r') {
+                            emit();
+                            if (i + 1 < payload.size() && payload[i + 1] == '\n') i++;
+                        } else if (c == '\n') {
+                            emit();
+                        } else {
+                            line += c;
+                        }
+                    }
+                    emit(); // trailing/final line (even if empty for "")
+                    msg += "\n"; // blank line terminator
                     ssize_t sent = ::send(clientFd, msg.c_str(), msg.size(), 0);
                     if (sent < 0)
                         throw RuntimeError("SSE client disconnected", 0);
