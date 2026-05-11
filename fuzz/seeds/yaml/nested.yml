@@ -1,0 +1,12 @@
+server:
+  http:
+    port: 8080
+    host: 0.0.0.0
+  db:
+    driver: sqlite
+    path: ./data.db
+clients:
+  - name: foo
+    port: 1234
+  - name: bar
+    port: 5678

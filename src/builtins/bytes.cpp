@@ -2,64 +2,121 @@
 #include <cstring>
 #include "../gc_heap.h"
 
+// ── Struct format helpers ──
+// Format: optional endian prefix (> big, < little, default big-endian)
+// followed by type chars with optional repeat counts:
+//   b/B = i8/u8, h/H = i16/u16, i/I = i32/u32, q/Q = i64/u64,
+//   f = f32, d = f64, x = pad byte. Example: ">3BHI" = 3 bytes + u16 + u32.
+//
+// File-scope (rather than scoped inside registerBytesBuiltins) so the fuzz
+// target in fuzz/fuzz_bytes_unpack.cpp can link against these symbols.
+
+struct StructField { char type; int size; };
+
+// Per-field byte cap. `>9999999999h` would otherwise overflow the
+// count accumulator silently and push a near-infinite number of
+// StructFields. We bound `count * sz` to 16 MiB per field — comfortably
+// larger than any realistic struct-format unpack (audio buffers, image
+// rows, protocol parsing) while bounding worst-case allocation. The
+// accumulator is also bounded during digit parsing so a giant numeric
+// prefix throws before it can wrap.
+constexpr int64_t kMaxFieldBytes = 16 * 1024 * 1024;
+
+std::vector<StructField> parseStructFmt(const std::string& fmt, bool& bigEndian) {
+    std::vector<StructField> fields;
+    size_t i = 0;
+    bigEndian = true; // default big-endian
+    if (!fmt.empty() && (fmt[0] == '>' || fmt[0] == '!' || fmt[0] == '<' || fmt[0] == '=')) {
+        bigEndian = (fmt[0] == '>' || fmt[0] == '!');
+        i = 1;
+    }
+    while (i < fmt.size()) {
+        int64_t count = 0;
+        while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9') {
+            count = count * 10 + (fmt[i] - '0');
+            if (count > kMaxFieldBytes)
+                throw RuntimeError("Struct format count exceeds 16 MiB limit", 0);
+            i++;
+        }
+        if (count == 0) count = 1;
+        if (i >= fmt.size()) throw RuntimeError("Incomplete struct format", 0);
+        char c = fmt[i++];
+        int sz = 0;
+        switch (c) {
+            case 'b': case 'B': sz = 1; break;
+            case 'h': case 'H': sz = 2; break;
+            case 'i': case 'I': sz = 4; break;
+            case 'q': case 'Q': sz = 8; break;
+            case 'f': sz = 4; break;
+            case 'd': sz = 8; break;
+            case 'x': sz = 1; break;
+            default: throw RuntimeError(std::string("Unknown struct format char: '") + c + "'", 0);
+        }
+        if (count * sz > kMaxFieldBytes)
+            throw RuntimeError("Struct format field would consume more than 16 MiB", 0);
+        for (int64_t j = 0; j < count; j++) fields.push_back({c, sz});
+    }
+    return fields;
+}
+
+// bytes.unpack(format, data) — implementation extracted to file scope so
+// fuzz/fuzz_bytes_unpack.cpp can drive it directly without standing up an
+// Interpreter. The native registration below just forwards.
+Value bytesUnpack(const std::string& fmt, const std::string& data) {
+    auto result = gcNew<PraiaArray>();
+    bool big;
+    auto fields = parseStructFmt(fmt, big);
+    size_t pos = 0;
+    auto b = [&](size_t i) -> uint8_t { return static_cast<uint8_t>(data[pos + i]); };
+
+    for (auto& f : fields) {
+        if (pos + f.size > data.size())
+            throw RuntimeError("bytes.unpack: data too short for format", 0);
+        if (f.type == 'x') { pos += 1; continue; }
+
+        if (f.type == 'f') {
+            uint32_t bits = 0;
+            for (int j = 0; j < 4; j++)
+                bits |= static_cast<uint32_t>(b(big ? (3-j) : j)) << (j*8);
+            float fv; std::memcpy(&fv, &bits, 4);
+            result->elements.push_back(Value(static_cast<double>(fv)));
+            pos += 4; continue;
+        }
+        if (f.type == 'd') {
+            uint64_t bits = 0;
+            for (int j = 0; j < 8; j++)
+                bits |= static_cast<uint64_t>(b(big ? (7-j) : j)) << (j*8);
+            double dv; std::memcpy(&dv, &bits, 8);
+            result->elements.push_back(Value(dv));
+            pos += 8; continue;
+        }
+
+        // Integer types
+        uint64_t raw = 0;
+        for (int j = 0; j < f.size; j++)
+            raw |= static_cast<uint64_t>(b(big ? (f.size-1-j) : j)) << (j*8);
+
+        int64_t val;
+        bool isSigned = (f.type >= 'a' && f.type <= 'z'); // b,h,i,q are signed
+        if (isSigned) {
+            int bits = f.size * 8;
+            if (bits < 64 && (raw & (1ULL << (bits - 1))))
+                val = static_cast<int64_t>(raw | (~0ULL << bits));
+            else
+                val = static_cast<int64_t>(raw);
+        } else {
+            val = static_cast<int64_t>(raw);
+        }
+        result->elements.push_back(Value(val));
+        pos += f.size;
+    }
+    return Value(result);
+}
+
 void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
-    // ── Struct format helpers ──
-    // Format: optional endian prefix (> big, < little, default big-endian)
-    // followed by type chars with optional repeat counts:
-    //   b/B = i8/u8, h/H = i16/u16, i/I = i32/u32, q/Q = i64/u64,
-    //   f = f32, d = f64, x = pad byte. Example: ">3BHI" = 3 bytes + u16 + u32.
-
-    struct StructField { char type; int size; };
-
-    // Per-field byte cap. `>9999999999h` would otherwise overflow the
-    // count accumulator silently and push a near-infinite number of
-    // StructFields. We bound `count * sz` to 16 MiB per field — comfortably
-    // larger than any realistic struct-format unpack (audio buffers, image
-    // rows, protocol parsing) while bounding worst-case allocation. The
-    // accumulator is also bounded during digit parsing so a giant numeric
-    // prefix throws before it can wrap.
-    constexpr int64_t kMaxFieldBytes = 16 * 1024 * 1024;
-
-    auto parseStructFmt = [&](const std::string& fmt, bool& bigEndian) -> std::vector<StructField> {
-        std::vector<StructField> fields;
-        size_t i = 0;
-        bigEndian = true; // default big-endian
-        if (!fmt.empty() && (fmt[0] == '>' || fmt[0] == '!' || fmt[0] == '<' || fmt[0] == '=')) {
-            bigEndian = (fmt[0] == '>' || fmt[0] == '!');
-            i = 1;
-        }
-        while (i < fmt.size()) {
-            int64_t count = 0;
-            while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9') {
-                count = count * 10 + (fmt[i] - '0');
-                if (count > kMaxFieldBytes)
-                    throw RuntimeError("Struct format count exceeds 16 MiB limit", 0);
-                i++;
-            }
-            if (count == 0) count = 1;
-            if (i >= fmt.size()) throw RuntimeError("Incomplete struct format", 0);
-            char c = fmt[i++];
-            int sz = 0;
-            switch (c) {
-                case 'b': case 'B': sz = 1; break;
-                case 'h': case 'H': sz = 2; break;
-                case 'i': case 'I': sz = 4; break;
-                case 'q': case 'Q': sz = 8; break;
-                case 'f': sz = 4; break;
-                case 'd': sz = 8; break;
-                case 'x': sz = 1; break;
-                default: throw RuntimeError(std::string("Unknown struct format char: '") + c + "'", 0);
-            }
-            if (count * sz > kMaxFieldBytes)
-                throw RuntimeError("Struct format field would consume more than 16 MiB", 0);
-            for (int64_t j = 0; j < count; j++) fields.push_back({c, sz});
-        }
-        return fields;
-    };
-
     // bytes.pack(format, values)
     bytesMap->entries[Value("pack")] = Value(makeNative("bytes.pack", 2,
-        [parseStructFmt](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isString() || !args[1].isArray())
                 throw RuntimeError("bytes.pack(format, values) requires a format string and array", 0);
             auto& fmt = args[0].asString();
@@ -102,65 +159,15 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
 
     // bytes.unpack(format, data) — returns array of numbers
     bytesMap->entries[Value("unpack")] = Value(makeNative("bytes.unpack", 2,
-        [parseStructFmt](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isString() || !args[1].isString())
                 throw RuntimeError("bytes.unpack(format, data) requires strings", 0);
-            auto& fmt = args[0].asString();
-            auto& data = args[1].asString();
-            auto result = gcNew<PraiaArray>();
-
-            bool big;
-            auto fields = parseStructFmt(fmt, big);
-            size_t pos = 0;
-            auto b = [&](size_t i) -> uint8_t { return static_cast<uint8_t>(data[pos + i]); };
-
-            for (auto& f : fields) {
-                if (pos + f.size > data.size())
-                    throw RuntimeError("bytes.unpack: data too short for format", 0);
-                if (f.type == 'x') { pos += 1; continue; }
-
-                if (f.type == 'f') {
-                    uint32_t bits = 0;
-                    for (int j = 0; j < 4; j++)
-                        bits |= static_cast<uint32_t>(b(big ? (3-j) : j)) << (j*8);
-                    float fv; std::memcpy(&fv, &bits, 4);
-                    result->elements.push_back(Value(static_cast<double>(fv)));
-                    pos += 4; continue;
-                }
-                if (f.type == 'd') {
-                    uint64_t bits = 0;
-                    for (int j = 0; j < 8; j++)
-                        bits |= static_cast<uint64_t>(b(big ? (7-j) : j)) << (j*8);
-                    double dv; std::memcpy(&dv, &bits, 8);
-                    result->elements.push_back(Value(dv));
-                    pos += 8; continue;
-                }
-
-                // Integer types
-                uint64_t raw = 0;
-                for (int j = 0; j < f.size; j++)
-                    raw |= static_cast<uint64_t>(b(big ? (f.size-1-j) : j)) << (j*8);
-
-                int64_t val;
-                bool isSigned = (f.type >= 'a' && f.type <= 'z'); // b,h,i,q are signed
-                if (isSigned) {
-                    int bits = f.size * 8;
-                    if (bits < 64 && (raw & (1ULL << (bits - 1))))
-                        val = static_cast<int64_t>(raw | (~0ULL << bits));
-                    else
-                        val = static_cast<int64_t>(raw);
-                } else {
-                    val = static_cast<int64_t>(raw);
-                }
-                result->elements.push_back(Value(val));
-                pos += f.size;
-            }
-            return Value(result);
+            return bytesUnpack(args[0].asString(), args[1].asString());
         }));
 
     // bytes.calcsize(format) — return total byte size of a struct format
     bytesMap->entries[Value("calcsize")] = Value(makeNative("bytes.calcsize", 1,
-        [parseStructFmt](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isString())
                 throw RuntimeError("bytes.calcsize() requires a format string", 0);
             bool big;

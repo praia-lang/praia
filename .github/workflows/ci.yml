@@ -37,3 +37,63 @@ jobs:
 
       - name: Test (tree-walker)
         run: ./praia --tree test
+
+  # Coverage-guided fuzz regression. For each parser target, build the
+  # fuzz binary and run for ~60 s against the committed seeds. Any crash
+  # fails the job and uploads the offending input + sanitizer log so the
+  # PR author can reproduce. This catches re-introduced bugs fast (the
+  # seed corpus already exercises the historical edge cases). Long-tail
+  # *new* bug discovery is what OSS-Fuzz is for — this job is the
+  # regression net.
+  #
+  # Linux-only: Ubuntu's stock Clang ships libFuzzer; macOS would need
+  # Homebrew LLVM, doubling setup time for no platform-specific signal.
+  fuzz:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [json, yaml, lex_parse, bytes_unpack]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        # Fuzz binaries don't link the main build's system libs
+        # (sqlite/openssl/etc.) — just need Clang with libFuzzer.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build fuzz target
+        # The Makefile auto-detects Homebrew LLVM on macOS and falls back
+        # to plain `clang++` on Linux, which on Ubuntu 24.04 ships with
+        # libFuzzer included. Override FUZZ_BINS so we only build the one
+        # binary this matrix shard needs.
+        run: make fuzz FUZZ_BINS=build_fuzz/fuzz_${{ matrix.target }}
+
+      - name: Run fuzz (60 s against committed seeds)
+        run: |
+          mkdir -p /tmp/corpus_${{ matrix.target }} fuzz/crashes/${{ matrix.target }}
+          ./build_fuzz/fuzz_${{ matrix.target }} \
+              /tmp/corpus_${{ matrix.target }} \
+              fuzz/seeds/${{ matrix.target }} \
+              -max_total_time=60 \
+              -artifact_prefix=fuzz/crashes/${{ matrix.target }}/ \
+              -print_final_stats=1
+
+      - name: Check for crashes
+        run: |
+          if [ -n "$(ls -A fuzz/crashes/${{ matrix.target }}/ 2>/dev/null)" ]; then
+            echo "::error::Fuzz target fuzz_${{ matrix.target }} found a crash."
+            ls -la fuzz/crashes/${{ matrix.target }}/
+            exit 1
+          fi
+          echo "No crashes in fuzz_${{ matrix.target }}."
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: fuzz/crashes/${{ matrix.target }}/
+          if-no-files-found: ignore

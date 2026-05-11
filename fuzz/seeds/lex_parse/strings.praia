@@ -1,0 +1,9 @@
+let name = "world"
+let greeting = "hello, ${name}!"
+let multi = """
+this is a
+multiline string
+with ${name} interpolation
+"""
+print(greeting)
+print(multi)

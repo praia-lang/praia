@@ -1,0 +1,11 @@
+class Animal {
+    func init(name) { this.name = name }
+    func speak() { return this.name + " makes a sound" }
+}
+
+class Dog extends Animal {
+    func speak() { return this.name + " barks" }
+}
+
+let d = Dog("Rex")
+print(d.speak())

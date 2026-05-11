@@ -1,0 +1,9 @@
+int: 42
+float: 3.14
+bool_true: true
+bool_false: false
+nil: null
+quoted: "hello world"
+single: 'single quote'
+multi: hello world without quotes
+empty:
