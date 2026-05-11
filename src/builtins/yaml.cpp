@@ -11,6 +11,28 @@ namespace {
 class YamlParser {
     const std::string& src;
     size_t pos = 0;
+    int depth = 0;
+
+    // Cap on mapping/sequence nesting — same defense as JSON's parser.
+    // Deeply-nested YAML (an attacker-controllable shape) would otherwise
+    // blow the C++ stack via mutual recursion between parseValue,
+    // parseSequence, and parseMapping. 200 is plenty for any reasonable
+    // human- or machine-authored YAML.
+    static constexpr int MAX_DEPTH = 200;
+
+    // RAII helper: bumps depth on construction, decrements on destruction
+    // so exceptions still restore depth correctly. Throws when exceeding
+    // MAX_DEPTH.
+    struct DepthGuard {
+        YamlParser& p;
+        DepthGuard(YamlParser& parser) : p(parser) {
+            if (p.depth >= MAX_DEPTH)
+                throw RuntimeError("YAML nesting too deep (max " +
+                                   std::to_string(MAX_DEPTH) + ")", 0);
+            p.depth++;
+        }
+        ~DepthGuard() { p.depth--; }
+    };
 
     char peek() { return pos < src.size() ? src[pos] : '\0'; }
     char advance() { return pos < src.size() ? src[pos++] : '\0'; }
@@ -105,6 +127,7 @@ class YamlParser {
     }
 
     Value parseValue(int minIndent) {
+        DepthGuard g(*this);
         skipBlankLines();
         if (atEnd()) return Value();
 
@@ -135,6 +158,9 @@ class YamlParser {
     }
 
     Value parseSequence(int indent) {
+        // No DepthGuard — parseSequence is always reached from parseValue,
+        // which has already incremented depth for this nesting level.
+        // Iteration within the sequence is a loop, not recursion.
         auto arr = gcNew<PraiaArray>();
         while (!atEnd()) {
             skipBlankLines();
@@ -173,6 +199,10 @@ class YamlParser {
     }
 
     Value parseMapping(int indent) {
+        // No DepthGuard — same reasoning as parseSequence above. The
+        // direct parseSequence → parseMapping path (inline mapping inside
+        // a sequence item) doesn't increment depth, but the next nesting
+        // level inevitably reaches parseValue which does.
         auto map = gcNew<PraiaMap>();
         while (!atEnd()) {
             skipBlankLines();
