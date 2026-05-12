@@ -7,7 +7,7 @@ if (sys.platform != "darwin") {
 
 let pluginPath = "examples/plugins/mathext" + ext
 
-if (!sys.exists(pluginPath)) {
+if (!fs.exists(pluginPath)) {
     print("Skipping loadNative tests — plugin not built")
     print("Build with: make plugin SRC=examples/plugins/mathext.cpp OUT=examples/plugins/mathext" + ext)
     testing.done()

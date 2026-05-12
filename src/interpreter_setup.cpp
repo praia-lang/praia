@@ -619,127 +619,171 @@ Interpreter::Interpreter() {
 
     sysMap = gcNew<PraiaMap>();
 
-    sysMap->entries[Value("read")] = Value(makeNative("sys.read", 1,
-        [](const std::vector<Value>& args) -> Value {
+    // ── fs namespace ──
+    //
+    // The canonical home for filesystem I/O. sys.* used to absorb
+    // these (read/write/append/exists/mkdir/tempDir/remove/readDir/
+    // copy/move/readLines) but sys had become the kitchen sink of
+    // unrelated concerns — process control, env vars, signals,
+    // execvp, AND filesystem ops. fs.* is the new canonical name;
+    // the sys.* aliases below stay as one-shot-deprecation forwarders
+    // so existing callers keep working. Remove the aliases at 1.0.
+    auto fsMap = gcNew<PraiaMap>();
+
+    // Each impl is captured as a std::function so the same body
+    // serves both fs.<name> (canonical) and the sys.<name> deprecated
+    // forwarder. Error messages name the canonical fs.<name> form —
+    // when a sys.<name> call fails the user sees the deprecation
+    // banner first and the rename guidance in the error second.
+    using FsImpl = std::function<Value(const std::vector<Value>&)>;
+
+    FsImpl fsRead = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.read() requires a string path", 0);
+        std::ifstream f(args[0].asString());
+        if (!f.is_open())
+            throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        return Value(ss.str());
+    };
+
+    FsImpl fsWrite = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.write() requires a string path", 0);
+        std::ofstream f(args[0].asString());
+        if (!f.is_open())
+            throw RuntimeError("Cannot write file: " + args[0].asString(), 0);
+        f << args[1].toString();
+        return Value();
+    };
+
+    FsImpl fsAppend = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.append() requires a string path", 0);
+        std::ofstream f(args[0].asString(), std::ios::app);
+        if (!f.is_open())
+            throw RuntimeError("Cannot open file: " + args[0].asString(), 0);
+        f << args[1].toString();
+        return Value();
+    };
+
+    FsImpl fsExists = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.exists() requires a string path", 0);
+        return Value(fs::exists(args[0].asString()));
+    };
+
+    FsImpl fsMkdir = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.mkdir() requires a string path", 0);
+        fs::create_directories(args[0].asString());
+        return Value();
+    };
+
+    // fs.tempDir(prefix?) — atomic mkdtemp(3) under the system temp
+    // dir, mode 0700. Caller is responsible for removal.
+    FsImpl fsTempDir = [](const std::vector<Value>& args) -> Value {
+        std::string prefix = "praia";
+        if (!args.empty()) {
             if (!args[0].isString())
-                throw RuntimeError("sys.read() requires a string path", 0);
-            std::ifstream f(args[0].asString());
-            if (!f.is_open())
-                throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
-            std::stringstream ss;
-            ss << f.rdbuf();
-            return Value(ss.str());
-        }));
+                throw RuntimeError("fs.tempDir() prefix must be a string", 0);
+            prefix = args[0].asString();
+        }
+        std::error_code ec;
+        auto tmpPath = fs::temp_directory_path(ec);
+        if (ec)
+            throw RuntimeError("fs.tempDir(): " + ec.message(), 0);
+        std::string tmpl = tmpPath.string() + "/" + prefix + ".XXXXXX";
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        if (!mkdtemp(buf.data()))
+            throw RuntimeError("fs.tempDir(): " + std::string(std::strerror(errno)), 0);
+        return Value(std::string(buf.data()));
+    };
 
-    sysMap->entries[Value("write")] = Value(makeNative("sys.write", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.write() requires a string path", 0);
-            std::ofstream f(args[0].asString());
-            if (!f.is_open())
-                throw RuntimeError("Cannot write file: " + args[0].asString(), 0);
-            f << args[1].toString();
-            return Value();
-        }));
+    FsImpl fsRemove = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.remove() requires a string path", 0);
+        auto& p = args[0].asString();
+        if (!fs::exists(p))
+            throw RuntimeError("Cannot remove: " + p + " (not found)", 0);
+        fs::remove_all(p);
+        return Value();
+    };
 
-    sysMap->entries[Value("append")] = Value(makeNative("sys.append", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.append() requires a string path", 0);
-            std::ofstream f(args[0].asString(), std::ios::app);
-            if (!f.is_open())
-                throw RuntimeError("Cannot open file: " + args[0].asString(), 0);
-            f << args[1].toString();
-            return Value();
-        }));
+    FsImpl fsReadDir = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.readDir() requires a string path", 0);
+        auto& p = args[0].asString();
+        if (!fs::is_directory(p))
+            throw RuntimeError("fs.readDir(): not a directory: " + p, 0);
+        auto arr = gcNew<PraiaArray>();
+        for (auto& entry : fs::directory_iterator(p))
+            arr->elements.push_back(Value(entry.path().filename().string()));
+        return Value(arr);
+    };
 
-    sysMap->entries[Value("exists")] = Value(makeNative("sys.exists", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.exists() requires a string path", 0);
-            return Value(fs::exists(args[0].asString()));
-        }));
+    FsImpl fsCopy = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString() || !args[1].isString())
+            throw RuntimeError("fs.copy() requires two string paths", 0);
+        auto& src = args[0].asString();
+        auto& dst = args[1].asString();
+        if (!fs::exists(src))
+            throw RuntimeError("Cannot copy: " + src + " (not found)", 0);
+        fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+        return Value();
+    };
 
-    sysMap->entries[Value("mkdir")] = Value(makeNative("sys.mkdir", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.mkdir() requires a string path", 0);
-            fs::create_directories(args[0].asString());
-            return Value();
-        }));
+    FsImpl fsMove = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString() || !args[1].isString())
+            throw RuntimeError("fs.move() requires two string paths", 0);
+        auto& src = args[0].asString();
+        auto& dst = args[1].asString();
+        if (!fs::exists(src))
+            throw RuntimeError("Cannot move: " + src + " (not found)", 0);
+        fs::rename(src, dst);
+        return Value();
+    };
 
-    // sys.tempDir(prefix?) — create a unique temp directory under the system
-    // temp dir and return its absolute path. Uses mkdtemp(3) for atomic
-    // creation with mode 0700. Caller is responsible for removing it.
-    sysMap->entries[Value("tempDir")] = Value(makeNative("sys.tempDir", -1,
-        [](const std::vector<Value>& args) -> Value {
-            std::string prefix = "praia";
-            if (!args.empty()) {
-                if (!args[0].isString())
-                    throw RuntimeError("sys.tempDir() prefix must be a string", 0);
-                prefix = args[0].asString();
-            }
-            std::string base;
-            std::error_code ec;
-            auto tmpPath = fs::temp_directory_path(ec);
-            if (ec)
-                throw RuntimeError("sys.tempDir(): " + ec.message(), 0);
-            base = tmpPath.string();
-            std::string tmpl = base + "/" + prefix + ".XXXXXX";
-            std::vector<char> buf(tmpl.begin(), tmpl.end());
-            buf.push_back('\0');
-            if (!mkdtemp(buf.data()))
-                throw RuntimeError("sys.tempDir(): " + std::string(std::strerror(errno)), 0);
-            return Value(std::string(buf.data()));
-        }));
+    // Register canonical fs.* entries.
+    fsMap->entries[Value("read")]    = Value(makeNative("fs.read",    1,  fsRead));
+    fsMap->entries[Value("write")]   = Value(makeNative("fs.write",   2,  fsWrite));
+    fsMap->entries[Value("append")]  = Value(makeNative("fs.append",  2,  fsAppend));
+    fsMap->entries[Value("exists")]  = Value(makeNative("fs.exists",  1,  fsExists));
+    fsMap->entries[Value("mkdir")]   = Value(makeNative("fs.mkdir",   1,  fsMkdir));
+    fsMap->entries[Value("tempDir")] = Value(makeNative("fs.tempDir", -1, fsTempDir));
+    fsMap->entries[Value("remove")]  = Value(makeNative("fs.remove",  1,  fsRemove));
+    fsMap->entries[Value("readDir")] = Value(makeNative("fs.readDir", 1,  fsReadDir));
+    fsMap->entries[Value("copy")]    = Value(makeNative("fs.copy",    2,  fsCopy));
+    fsMap->entries[Value("move")]    = Value(makeNative("fs.move",    2,  fsMove));
 
-    sysMap->entries[Value("remove")] = Value(makeNative("sys.remove", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.remove() requires a string path", 0);
-            auto& p = args[0].asString();
-            if (!fs::exists(p))
-                throw RuntimeError("Cannot remove: " + p + " (not found)", 0);
-            fs::remove_all(p);
-            return Value();
-        }));
+    // Helper: register a deprecated sys.<name> forwarder that calls
+    // through to the canonical fs.<name> implementation, emitting a
+    // one-shot stderr warning on the first call per process. Each
+    // forwarder gets its own warned-flag (shared_ptr-wrapped so it
+    // can sit in a captured lambda without being moved).
+    auto registerDeprecatedSys = [&](const std::string& fnName, int arity, FsImpl impl) {
+        auto warned = std::make_shared<std::atomic<bool>>(false);
+        sysMap->entries[Value(fnName)] = Value(makeNative("sys." + fnName, arity,
+            [warned, fnName, impl](const std::vector<Value>& args) -> Value {
+                if (!warned->exchange(true))
+                    std::cerr << "[deprecated] sys." << fnName << "() is now fs."
+                              << fnName << "(); update callers\n";
+                return impl(args);
+            }));
+    };
 
-    sysMap->entries[Value("readDir")] = Value(makeNative("sys.readDir", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.readDir() requires a string path", 0);
-            auto& p = args[0].asString();
-            if (!fs::is_directory(p))
-                throw RuntimeError("sys.readDir(): not a directory: " + p, 0);
-            auto arr = gcNew<PraiaArray>();
-            for (auto& entry : fs::directory_iterator(p))
-                arr->elements.push_back(Value(entry.path().filename().string()));
-            return Value(arr);
-        }));
-
-    sysMap->entries[Value("copy")] = Value(makeNative("sys.copy", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString() || !args[1].isString())
-                throw RuntimeError("sys.copy() requires two string paths", 0);
-            auto& src = args[0].asString();
-            auto& dst = args[1].asString();
-            if (!fs::exists(src))
-                throw RuntimeError("Cannot copy: " + src + " (not found)", 0);
-            fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
-            return Value();
-        }));
-
-    sysMap->entries[Value("move")] = Value(makeNative("sys.move", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString() || !args[1].isString())
-                throw RuntimeError("sys.move() requires two string paths", 0);
-            auto& src = args[0].asString();
-            auto& dst = args[1].asString();
-            if (!fs::exists(src))
-                throw RuntimeError("Cannot move: " + src + " (not found)", 0);
-            fs::rename(src, dst);
-            return Value();
-        }));
+    registerDeprecatedSys("read",    1,  fsRead);
+    registerDeprecatedSys("write",   2,  fsWrite);
+    registerDeprecatedSys("append",  2,  fsAppend);
+    registerDeprecatedSys("exists",  1,  fsExists);
+    registerDeprecatedSys("mkdir",   1,  fsMkdir);
+    registerDeprecatedSys("tempDir", -1, fsTempDir);
+    registerDeprecatedSys("remove",  1,  fsRemove);
+    registerDeprecatedSys("readDir", 1,  fsReadDir);
+    registerDeprecatedSys("copy",    2,  fsCopy);
+    registerDeprecatedSys("move",    2,  fsMove);
 
     auto execImpl = makeNative("sys.exec", -1,
         [](const std::vector<Value>& args) -> Value {
@@ -1107,6 +1151,9 @@ Interpreter::Interpreter() {
     sysMap->entries[Value("args")] = Value(emptyArgs);
 
     globals->define("sys", Value(sysMap));
+    // fsMap is the same shared_ptr after additional entries (readLines)
+    // get tacked on below, so registering it here is fine.
+    globals->define("fs", Value(fsMap));
 
     // ── http namespace ──
 
@@ -2477,19 +2524,30 @@ Interpreter::Interpreter() {
             return Value();
         }));
 
-    sysMap->entries[Value("readLines")] = Value(makeNative("sys.readLines", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.readLines() requires a string path", 0);
-            std::ifstream f(args[0].asString());
-            if (!f.is_open())
-                throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
-            auto result = gcNew<PraiaArray>();
-            std::string line;
-            while (std::getline(f, line))
-                result->elements.push_back(Value(std::move(line)));
-            return Value(result);
-        }));
+    // fs.readLines (canonical) + sys.readLines deprecated forwarder.
+    FsImpl fsReadLines = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.readLines() requires a string path", 0);
+        std::ifstream f(args[0].asString());
+        if (!f.is_open())
+            throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
+        auto result = gcNew<PraiaArray>();
+        std::string line;
+        while (std::getline(f, line))
+            result->elements.push_back(Value(std::move(line)));
+        return Value(result);
+    };
+    fsMap->entries[Value("readLines")] = Value(makeNative("fs.readLines", 1, fsReadLines));
+    {
+        auto warned = std::make_shared<std::atomic<bool>>(false);
+        sysMap->entries[Value("readLines")] = Value(makeNative("sys.readLines", 1,
+            [warned, fsReadLines](const std::vector<Value>& args) -> Value {
+                if (!warned->exchange(true))
+                    std::cerr << "[deprecated] sys.readLines() is now fs.readLines(); "
+                                 "update callers\n";
+                return fsReadLines(args);
+            }));
+    }
 
     sysMap->entries[Value("cwd")] = Value(makeNative("sys.cwd", 0,
         [](const std::vector<Value>&) -> Value {

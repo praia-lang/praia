@@ -33,12 +33,12 @@ print(["a", "b", "c"].join(", "))
 
 // ── sys namespace ──
 // Write a file, read it back, clean up
-sys.write("/tmp/praia_test.txt", "hello from praia!")
-let content = sys.read("/tmp/praia_test.txt")
+fs.write("/tmp/praia_test.txt", "hello from praia!")
+let content = fs.read("/tmp/praia_test.txt")
 print("file says:", content)
-print("exists?", sys.exists("/tmp/praia_test.txt"))
-sys.remove("/tmp/praia_test.txt")
-print("after remove?", sys.exists("/tmp/praia_test.txt"))
+print("exists?", fs.exists("/tmp/praia_test.txt"))
+fs.remove("/tmp/praia_test.txt")
+print("after remove?", fs.exists("/tmp/praia_test.txt"))
 
 // Run a command
 let result = sys.exec("echo 'praia says hi'")

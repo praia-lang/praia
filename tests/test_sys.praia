@@ -1,75 +1,11 @@
 use "testing"
 
-testing.test("sys.write and sys.read", lam{ in
-    sys.write("/tmp/praia_test_sys.txt", "hello praia")
-    testing.assertEqual(sys.read("/tmp/praia_test_sys.txt"), "hello praia", nil)
-    sys.remove("/tmp/praia_test_sys.txt")
-})
-
-testing.test("sys.append", lam{ in
-    sys.write("/tmp/praia_test_append.txt", "line1")
-    sys.append("/tmp/praia_test_append.txt", "\nline2")
-    testing.assertEqual(sys.read("/tmp/praia_test_append.txt"), "line1\nline2", nil)
-    sys.remove("/tmp/praia_test_append.txt")
-})
-
-testing.test("sys.exists", lam{ in
-    sys.write("/tmp/praia_test_exists.txt", "x")
-    testing.assert(sys.exists("/tmp/praia_test_exists.txt"), "file should exist")
-    sys.remove("/tmp/praia_test_exists.txt")
-    testing.assert(!sys.exists("/tmp/praia_test_exists.txt"), "file should not exist")
-})
-
-testing.test("sys.mkdir and sys.remove directory", lam{ in
-    sys.mkdir("/tmp/praia_test_mkdir/sub")
-    testing.assert(sys.exists("/tmp/praia_test_mkdir/sub"), "nested dir should exist")
-    sys.write("/tmp/praia_test_mkdir/sub/f.txt", "data")
-    sys.remove("/tmp/praia_test_mkdir")
-    testing.assert(!sys.exists("/tmp/praia_test_mkdir"), "dir should be removed recursively")
-})
-
-testing.test("sys.copy file", lam{ in
-    sys.write("/tmp/praia_test_cp_src.txt", "copy me")
-    sys.copy("/tmp/praia_test_cp_src.txt", "/tmp/praia_test_cp_dst.txt")
-    testing.assertEqual(sys.read("/tmp/praia_test_cp_dst.txt"), "copy me", nil)
-    sys.remove("/tmp/praia_test_cp_src.txt")
-    sys.remove("/tmp/praia_test_cp_dst.txt")
-})
-
-testing.test("sys.copy directory", lam{ in
-    sys.mkdir("/tmp/praia_test_cpdir/sub")
-    sys.write("/tmp/praia_test_cpdir/sub/f.txt", "nested")
-    sys.copy("/tmp/praia_test_cpdir", "/tmp/praia_test_cpdir2")
-    testing.assertEqual(sys.read("/tmp/praia_test_cpdir2/sub/f.txt"), "nested", nil)
-    sys.remove("/tmp/praia_test_cpdir")
-    sys.remove("/tmp/praia_test_cpdir2")
-})
-
-testing.test("sys.move", lam{ in
-    sys.write("/tmp/praia_test_mv.txt", "moved")
-    sys.move("/tmp/praia_test_mv.txt", "/tmp/praia_test_mv2.txt")
-    testing.assert(sys.exists("/tmp/praia_test_mv2.txt"), "dest should exist")
-    testing.assert(!sys.exists("/tmp/praia_test_mv.txt"), "src should not exist")
-    testing.assertEqual(sys.read("/tmp/praia_test_mv2.txt"), "moved", nil)
-    sys.remove("/tmp/praia_test_mv2.txt")
-})
-
-testing.test("sys.readDir", lam{ in
-    sys.mkdir("/tmp/praia_test_readdir")
-    sys.write("/tmp/praia_test_readdir/a.txt", "a")
-    sys.write("/tmp/praia_test_readdir/b.txt", "b")
-    sys.write("/tmp/praia_test_readdir/c.praia", "c")
-    let files = sort(sys.readDir("/tmp/praia_test_readdir"))
-    testing.assertEqual(len(files), 3, nil)
-    testing.assertEqual(files[0], "a.txt", nil)
-    testing.assertEqual(files[1], "b.txt", nil)
-    testing.assertEqual(files[2], "c.praia", nil)
-    sys.remove("/tmp/praia_test_readdir")
-})
-
-testing.test("sys.readDir on nonexistent throws", lam{ in
-    testing.assertThrows(lam{ in sys.readDir("/tmp/praia_nonexistent_dir_xyz") }, nil)
-})
+// Filesystem ops (read/write/append/exists/mkdir/tempDir/remove/
+// readDir/copy/move/readLines) used to live on sys.* but now live
+// on fs.*; coverage for those is in tests/test_fs_grain.praia. The
+// sys.* aliases still work via deprecation forwarders, which
+// test_fs_grain.praia exercises explicitly. This file covers the
+// genuine sys.* concerns: process metadata, env, cwd, exec.
 
 testing.test("sys.currentFile returns this script's path", lam{ in
     let f = sys.currentFile()
@@ -111,18 +47,6 @@ testing.test("sys.exec captures stderr", lam{ in
 testing.test("sys.exec captures exit code", lam{ in
     let r = sys.exec("exit 42")
     testing.assertEqual(r.exitCode, 42, nil)
-})
-
-testing.test("sys.remove nonexistent throws", lam{ in
-    testing.assertThrows(lam{ in sys.remove("/tmp/praia_nonexistent_xyz") }, nil)
-})
-
-testing.test("sys.copy nonexistent throws", lam{ in
-    testing.assertThrows(lam{ in sys.copy("/tmp/praia_nonexistent_xyz", "/tmp/dst") }, nil)
-})
-
-testing.test("sys.move nonexistent throws", lam{ in
-    testing.assertThrows(lam{ in sys.move("/tmp/praia_nonexistent_xyz", "/tmp/dst") }, nil)
 })
 
 testing.done()

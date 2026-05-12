@@ -49,16 +49,16 @@ let adults = data
 print("adults:", adults)
 
 // File processing pipeline
-sys.write("/tmp/pipe_test.txt", "apple\nbanana\ncherry\navocado\napricot")
+fs.write("/tmp/pipe_test.txt", "apple\nbanana\ncherry\navocado\napricot")
 
-let a_fruits = sys.read("/tmp/pipe_test.txt")
+let a_fruits = fs.read("/tmp/pipe_test.txt")
     |> lam{ s in s.split("\n") }
     |> filter(lam{ f in f.startsWith("a") })
     |> map(lam{ f in f.capitalizeFirst() })
     |> sort
 
 print("a-fruits:", a_fruits)
-sys.remove("/tmp/pipe_test.txt")
+fs.remove("/tmp/pipe_test.txt")
 
 // Pipe works with any function
 func double(x) { return x * 2 }

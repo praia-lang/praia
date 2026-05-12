@@ -850,7 +850,7 @@ Wrap code that might fail in a `try` block. If an error occurs — either from `
 
 ```
 try {
-    let data = sys.read("config.txt")
+    let data = fs.read("config.txt")
     print(data)
 } catch (err) {
     print("failed to read config:", err)
@@ -862,7 +862,7 @@ try {
 Add a `finally` block for cleanup that always runs — whether the try succeeds, the catch runs, or an exception is re-thrown.
 
 ```
-let file = sys.read("data.txt")
+let file = fs.read("data.txt")
 try {
     process(file)
 } catch (err) {
@@ -2012,29 +2012,32 @@ arr.reverse()                   // [3, 2, 1]
 
 ### File I/O
 
+Filesystem operations live on the `fs` namespace. (They used to live on `sys`; the old `sys.read` / `sys.write` / etc. still work but print a one-shot deprecation warning to stderr. Rename to `fs.*` at your convenience — the aliases will be removed at 1.0.)
+
 ```
 // Write a file
-sys.write("output.txt", "hello from praia")
+fs.write("output.txt", "hello from praia")
 
 // Read a file
-let content = sys.read("output.txt")
+let content = fs.read("output.txt")
 print(content)          // hello from praia
 
 // Append to a file
-sys.append("output.txt", "\nmore text")
+fs.append("output.txt", "\nmore text")
 ```
 
 ### File System
 
 ```
-sys.mkdir("my/nested/dir")          // creates all parent dirs
-print(sys.exists("output.txt"))     // true
-sys.remove("output.txt")            // delete a file
-sys.remove("my/nested/dir")         // delete a directory (recursive)
-sys.copy("src.txt", "dst.txt")      // copy a file
-sys.copy("srcdir", "dstdir")        // copy a directory (recursive)
-sys.move("old.txt", "new.txt")      // move / rename a file or directory
-let files = sys.readDir("my/dir")   // returns array of filenames in directory
+fs.mkdir("my/nested/dir")          // creates all parent dirs
+print(fs.exists("output.txt"))     // true
+fs.remove("output.txt")            // delete a file
+fs.remove("my/nested/dir")         // delete a directory (recursive)
+fs.copy("src.txt", "dst.txt")      // copy a file
+fs.copy("srcdir", "dstdir")        // copy a directory (recursive)
+fs.move("old.txt", "new.txt")      // move / rename a file or directory
+let files = fs.readDir("my/dir")   // returns array of filenames in directory
+let tmp = fs.tempDir("myapp")      // race-free mkdtemp under the system tmp
 ```
 
 ### Running Commands
@@ -2318,7 +2321,7 @@ try { r2 = expr } catch (e) { r2 = handler(e) }
 ### Data processing pipeline
 
 ```
-let adults = sys.read("users.json")
+let adults = fs.read("users.json")
     |> json.parse
     |> filter(lam{ it.age >= 18 })
     |> map(lam{ it.name })
@@ -2476,7 +2479,7 @@ print(yaml.stringify(obj))
 ### Practical: reading config files
 
 ```
-let config = yaml.parse(sys.read("config.yaml"))
+let config = yaml.parse(fs.read("config.yaml"))
 print("Listening on port %{config.server.port}")
 ```
 
@@ -3668,20 +3671,37 @@ print("took", time.now() - start, "ms")
 
 ---
 
+## Filesystem (fs)
+
+`fs` is the canonical home for filesystem I/O.
+
+| Function | Description |
+|----------|-------------|
+| `fs.read(path)` | Read entire file as string |
+| `fs.write(path, str)` | Write string to file (creates/truncates) |
+| `fs.append(path, str)` | Append string to file |
+| `fs.readLines(path)` | Read file as array of lines (no trailing newlines) |
+| `fs.exists(path)` | `true` if the path exists |
+| `fs.mkdir(path)` | Create directory, including parents |
+| `fs.remove(path)` | Delete file or directory (recursive) |
+| `fs.readDir(path)` | Array of entry names in a directory |
+| `fs.copy(src, dst)` | Copy file or directory (recursive) |
+| `fs.move(src, dst)` | Move / rename a file or directory |
+| `fs.tempDir(prefix?)` | Race-free mkdtemp(3) under the system temp dir (mode 0700) |
+
+The old `sys.read` / `sys.write` / etc. names still work but emit a one-shot deprecation warning on first use per process. They'll be removed at 1.0 — rename `sys.<op>` to `fs.<op>` whenever you touch the file.
+
 ## OS extras (sys)
 
-In addition to file/directory operations, `sys` provides:
+`sys` covers process-level concerns: environment, working directory, process metadata, signals, exec, terminal control.
 
 | Field/Function | Description |
 |----------------|-------------|
-| `sys.copy(src, dst)` | Copy a file or directory (recursive) |
-| `sys.move(src, dst)` | Move / rename a file or directory |
 | `sys.env(name)` | Read environment variable (returns nil if not set) |
 | `sys.envAll()` | Returns all environment variables as a map |
 | `sys.setenv(name, value)` | Set an environment variable |
 | `sys.cwd()` | Current working directory |
 | `sys.chdir(path)` | Change working directory |
-| `sys.readLines(path)` | Read file as array of lines (no trailing newlines) |
 | `sys.uid()` | Effective user ID (`geteuid()`) |
 | `sys.isRoot()` | `true` if running as root (uid 0) |
 | `sys.getpid()` | Current process ID |

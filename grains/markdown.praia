@@ -190,7 +190,7 @@ func _inline(text) {
 
 // Render a markdown file to HTML
 func renderFile(path) {
-    return render(sys.read(path))
+    return render(fs.read(path))
 }
 
 // ── Praia syntax highlighting ──

@@ -88,7 +88,7 @@ func render(tmpl, data) {
 }
 
 func renderFile(path, data) {
-    let tmpl = sys.read(path)
+    let tmpl = fs.read(path)
     return render(tmpl, data)
 }
 
