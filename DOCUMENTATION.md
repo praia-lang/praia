@@ -5087,6 +5087,35 @@ sudo dnf install utf8proc-devel
 
 ---
 
+## Compression (zlib)
+
+`zlib` is one-shot gzip and raw-deflate. Two pairs of inverses:
+
+| Function | Format | Use when |
+|----------|--------|----------|
+| `zlib.gzip(bytes, level?)` / `zlib.gunzip(bytes)` | RFC 1952 (10-byte header + crc32 + isize) | `.gz` files, HTTP `Content-Encoding: gzip`, log rotation — any payload that needs to be self-framing |
+| `zlib.deflate(bytes, level?)` / `zlib.inflate(bytes)` | RFC 1951 raw deflate (no header, no checksum) | Inner layer of a protocol that already frames the compressed body |
+
+`level` is an integer 0..9: 0 = stored (no compression), 1 = fastest, 9 = best. Omit it for zlib's default (currently 6) — a good ratio/CPU balance for typical text.
+
+```
+let body = fs.read("server.log")
+let gz = zlib.gzip(body)                 // ~10x smaller for typical text
+fs.write("server.log.gz", gz)
+
+let raw = fs.read("server.log.gz")
+print(zlib.gunzip(raw))                  // recover the original
+
+// HTTP body inflate — the server says Content-Encoding: gzip
+let body = zlib.gunzip(resp.body)
+```
+
+Invalid input (bytes that aren't gzip-framed, truncated streams, wrong format for the inverse) throws `zlib: inflate failed: <detail>`. Mixing formats — for instance calling `gunzip` on raw-deflate output — is an immediate failure rather than silent corruption.
+
+Streaming variants (process a multi-gigabyte file without holding the whole thing in memory) are intentionally not included; the one-shot API covers nearly all practical use cases. Pair `fs.open` chunked reads with manual chunking if you really need it; open an issue for a real `zlib.deflater()` stateful builder if you have one of the rare workloads where this matters.
+
+---
+
 ## Formatting (fmt)
 
 `fmt` is a Go-style formatter for building strings with width, precision, sign control, and typed verbs. Reach for it when string interpolation gets too noisy (`"%-10s | %6.2f"` is clearer than concatenating padded substrings) or when you need precise control over numeric output.

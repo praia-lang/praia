@@ -80,6 +80,15 @@ else
   endif
 endif
 
+# Auto-detect zlib (gzip / deflate compression). Universally available
+# on macOS / Linux distros, so we default to assuming it's there; the
+# detection is just a safety net for unusual sysroots.
+HAVE_ZLIB := $(shell echo 'int main(){}' | $(CXX) -x c++ - -lz -o /dev/null 2>/dev/null && echo 1)
+ifeq ($(HAVE_ZLIB),1)
+  CXXFLAGS += -DHAVE_ZLIB
+  LDLIBS += -lz
+endif
+
 # libresolv for DNS queries (net.query)
 HAVE_RESOLV := $(shell echo 'int main(){}' | $(CXX) -x c++ - -lresolv -o /dev/null 2>/dev/null && echo 1)
 ifeq ($(HAVE_RESOLV),1)

@@ -2725,6 +2725,10 @@ Interpreter::Interpreter() {
     registerFmtBuiltins(fmtMap);
     globals->define("fmt", Value(fmtMap));
 
+    auto zlibMap = gcNew<PraiaMap>();
+    registerZlibBuiltins(zlibMap);
+    globals->define("zlib", Value(zlibMap));
+
     // ── random namespace ──
     //
     // Mersenne Twister, seeded from std::random_device. Fast and
