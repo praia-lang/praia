@@ -2417,6 +2417,65 @@ let restored = json.parse(str)
 print(restored.users[0].name)   // Alice
 ```
 
+### json.parser(input) — streaming parser
+
+`json.parser` is a pull-parser for streaming over JSON that doesn't fit in memory, or for newline-delimited JSON (NDJSON) feeds. `input` is either a string or a file handle (anything with a `.read(n)` method, typically the value returned by `fs.open`). The returned object exposes four methods:
+
+| Method | Description |
+|--------|-------------|
+| `.next()` | Advance to the next token. Returns an event map `{type, value}`, or `nil` once the stream is exhausted |
+| `.nextValue()` | Materialize one whole top-level value. Returns `nil` at EOF (use `eof()` to disambiguate from a literal `null`) |
+| `.eof()` | `true` once no more data remains (after skipping whitespace) |
+| `.close()` | No-op for string inputs; for handle inputs, the underlying handle is NOT closed (the caller still owns it) |
+
+Event `type` is one of `"objectStart"`, `"objectEnd"`, `"arrayStart"`, `"arrayEnd"`, `"key"`, `"string"`, `"number"`, `"bool"`, `"null"`. For `key`, `string`, `number`, and `bool` the event also has a `value` field; for `null` the value is `nil`.
+
+#### NDJSON loop
+
+```
+let h = fs.open("server.log.ndjson", "r")
+let p = json.parser(h)
+while (!p.eof()) {
+    let record = p.nextValue()
+    if (record.level == "error") {
+        print(record)
+    }
+}
+h.close()
+```
+
+The parser refills its 16 KiB internal buffer from the handle on demand, so a multi-gigabyte log file streams through one chunk at a time. NDJSON works transparently — the parser accepts any number of whitespace-separated top-level values rather than insisting on a single root.
+
+#### Token-level walk
+
+Use `.next()` when you want to skip uninteresting subtrees without materializing them:
+
+```
+let p = json.parser(huge)
+while (!p.eof()) {
+    let e = p.next()
+    if (e == nil) { break }
+    if (e.type == "key" && e.value == "secret") {
+        // skip this value
+        let depth = 0
+        let ev = p.next()
+        while (depth > 0 || (ev.type != "string" && ev.type != "number"
+                          && ev.type != "bool"   && ev.type != "null")) {
+            if (ev.type == "objectStart" || ev.type == "arrayStart") { depth += 1 }
+            if (ev.type == "objectEnd"   || ev.type == "arrayEnd")   { depth -= 1 }
+            if (depth == 0) { break }
+            ev = p.next()
+        }
+        continue
+    }
+    // ...
+}
+```
+
+#### Errors
+
+Malformed input throws `json.parser: <detail> at byte <N>`. Specifically: unterminated strings, dangling escape sequences, invalid `\u` escapes (lone surrogates), trailing commas in objects or arrays, mismatched closers, unescaped control characters in strings, and depth nesting beyond 200 levels.
+
 ---
 
 ## YAML

@@ -233,17 +233,22 @@ std::string formatQuoted(const std::string& v) {
 }
 
 // Mirror the type() builtin's classification so %T and type() agree.
+// Keep the names exactly in sync with src/interpreter_setup.cpp's
+// type() registration — drift here is confusing for users who do
+// `if (type(x) == fmt.sprintf("%T", x)) { ... }` style checks.
 std::string typeName(const Value& v) {
-    if (v.isNil())     return "nil";
-    if (v.isBool())    return "bool";
-    if (v.isInt())     return "int";
-    if (v.isDouble())  return "number";
-    if (v.isString())  return "string";
-    if (v.isArray())   return "array";
-    if (v.isMap())     return "map";
-    if (v.isTagged())  return "tagged";
-    if (v.isFuture())  return "future";
-    if (v.isGenerator())return "generator";
+    if (v.isNil())       return "nil";
+    if (v.isBool())      return "bool";
+    if (v.isInt())       return "int";
+    if (v.isDouble())    return "float";
+    if (v.isString())    return "string";
+    if (v.isArray())     return "array";
+    if (v.isMap())       return "map";
+    if (v.isInstance())  return "instance";
+    if (v.isTagged())    return "tagged";
+    if (v.isFuture())    return "future";
+    if (v.isGenerator()) return "generator";
+    if (v.isCallable())  return "function";
     return "unknown";
 }
 

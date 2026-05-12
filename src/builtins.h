@@ -58,6 +58,7 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
 // ── JSON (builtins/json.cpp) ─────────────────────────────────
 Value jsonParse(const std::string& src);
 std::string jsonStringify(const Value& val, int indent = 0, int depth = 0);
+Value jsonParserCreate(const Value& input);
 
 // ── YAML (builtins/yaml.cpp) ─────────────────────────────────
 Value yamlParse(const std::string& src);

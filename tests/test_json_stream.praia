@@ -1,0 +1,210 @@
+use "testing"
+
+// Streaming JSON parser. Pull-parser style: each .next() advances
+// the state machine and yields one event; .nextValue() materializes
+// a complete top-level value. Works on strings (in-memory) or file
+// handles (incremental). NDJSON loops are the killer use case.
+
+// ── Token-level events ─────────────────────────────────────────
+
+testing.test("token events on a simple object", lam{ in
+    let p = json.parser("{\"name\":\"Ada\",\"age\":36}")
+    let types = []
+    while (!p.eof()) {
+        push(types, p.next().type)
+    }
+    testing.assertEqual(types,
+        ["objectStart", "key", "string", "key", "number", "objectEnd"],
+        nil)
+})
+
+testing.test("token events carry values", lam{ in
+    let p = json.parser("{\"k\":\"v\"}")
+    p.next()                          // objectStart
+    let ke = p.next()
+    testing.assertEqual(ke.type, "key", nil)
+    testing.assertEqual(ke.value, "k", nil)
+    let ve = p.next()
+    testing.assertEqual(ve.type, "string", nil)
+    testing.assertEqual(ve.value, "v", nil)
+})
+
+testing.test("array events", lam{ in
+    let p = json.parser("[1, true, null]")
+    let types = []
+    while (!p.eof()) { push(types, p.next().type) }
+    testing.assertEqual(types,
+        ["arrayStart", "number", "bool", "null", "arrayEnd"], nil)
+})
+
+testing.test("empty containers", lam{ in
+    let p = json.parser("[]")
+    testing.assertEqual(p.next().type, "arrayStart", nil)
+    testing.assertEqual(p.next().type, "arrayEnd", nil)
+
+    let p2 = json.parser("{}")
+    testing.assertEqual(p2.next().type, "objectStart", nil)
+    testing.assertEqual(p2.next().type, "objectEnd", nil)
+})
+
+// ── nextValue: full materialization ───────────────────────────
+
+testing.test("nextValue on a flat object", lam{ in
+    let p = json.parser("{\"name\":\"Ada\",\"score\":42}")
+    let v = p.nextValue()
+    testing.assertEqual(v.name, "Ada", nil)
+    testing.assertEqual(v.score, 42, nil)
+    testing.assert(p.eof(), "should be at EOF after consuming the value")
+})
+
+testing.test("nextValue on a nested structure", lam{ in
+    let v = json.parser("{\"a\":[1,2,{\"b\":3}],\"c\":null}").nextValue()
+    testing.assertEqual(v.a[0], 1, nil)
+    testing.assertEqual(v.a[2].b, 3, nil)
+    testing.assertEqual(v.c, nil, nil)
+})
+
+testing.test("nextValue on each JSON scalar type", lam{ in
+    testing.assertEqual(json.parser("42").nextValue(), 42, nil)
+    testing.assertEqual(json.parser("3.14").nextValue(), 3.14, nil)
+    testing.assertEqual(json.parser("\"x\"").nextValue(), "x", nil)
+    testing.assertEqual(json.parser("true").nextValue(), true, nil)
+    testing.assertEqual(json.parser("false").nextValue(), false, nil)
+    testing.assertEqual(json.parser("null").nextValue(), nil, nil)
+})
+
+// ── NDJSON ────────────────────────────────────────────────────
+
+testing.test("nextValue iterates NDJSON records", lam{ in
+    let nd = "{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n"
+    let p = json.parser(nd)
+    let sum = 0
+    while (!p.eof()) {
+        let r = p.nextValue()
+        sum += r.a
+    }
+    testing.assertEqual(sum, 6, nil)
+})
+
+testing.test("NDJSON works without trailing newline", lam{ in
+    let p = json.parser("{\"x\":1} {\"x\":2}")
+    let xs = []
+    while (!p.eof()) { push(xs, p.nextValue().x) }
+    testing.assertEqual(xs, [1, 2], nil)
+})
+
+// ── Number forms ──────────────────────────────────────────────
+
+testing.test("integer vs float distinction", lam{ in
+    testing.assertEqual(type(json.parser("42").nextValue()), "int", nil)
+    testing.assertEqual(type(json.parser("3.14").nextValue()), "float", nil)
+    testing.assertEqual(type(json.parser("1e10").nextValue()), "float",
+                        "scientific notation yields a float")
+    testing.assertEqual(json.parser("-7").nextValue(), -7, nil)
+    testing.assertEqual(json.parser("1.5e2").nextValue(), 150, nil)
+})
+
+testing.test("number too big for int64 falls back to double", lam{ in
+    let v = json.parser("99999999999999999999").nextValue()
+    testing.assertEqual(type(v), "float", "spills to double, not int")
+})
+
+// ── String escapes ────────────────────────────────────────────
+
+testing.test("standard escape sequences decode", lam{ in
+    testing.assertEqual(json.parser("\"a\\nb\"").nextValue(), "a\nb", nil)
+    testing.assertEqual(json.parser("\"a\\tb\"").nextValue(), "a\tb", nil)
+    testing.assertEqual(json.parser("\"\\\"\\\\\"").nextValue(), "\"\\", nil)
+})
+
+testing.test("\\uXXXX BMP escape decodes to UTF-8", lam{ in
+    // U+00E9 is "é" — two UTF-8 bytes when encoded.
+    let s = json.parser("\"\\u00e9\"").nextValue()
+    testing.assertEqual(s, "\u{E9}", nil)
+})
+
+testing.test("\\uD83D\\uDE00 surrogate pair → supplementary plane emoji", lam{ in
+    testing.assertEqual(json.parser("\"\\uD83D\\uDE00\"").nextValue(),
+                        "\u{1F600}", nil)
+})
+
+testing.test("lone high surrogate is rejected", lam{ in
+    testing.assertThrows(lam{ in json.parser("\"\\uD83D\"").nextValue() },
+                         "surrogate")
+})
+
+testing.test("unterminated string throws", lam{ in
+    testing.assertThrows(lam{ in json.parser("\"abc").nextValue() },
+                         "unterminated string")
+})
+
+testing.test("unescaped control character rejected", lam{ in
+    testing.assertThrows(lam{ in json.parser("\"a\u{01}b\"").nextValue() },
+                         "control character")
+})
+
+// ── Malformed input ───────────────────────────────────────────
+
+testing.test("trailing comma in array throws", lam{ in
+    testing.assertThrows(lam{ in json.parser("[1,2,]").nextValue() },
+                         "unexpected ']'")
+})
+
+testing.test("trailing comma in object throws", lam{ in
+    testing.assertThrows(lam{ in json.parser("{\"k\":1,}").nextValue() },
+                         "unexpected '}'")
+})
+
+testing.test("mismatched closers throw", lam{ in
+    testing.assertThrows(lam{ in json.parser("[1}").nextValue() },
+                         "mismatched closer")
+})
+
+testing.test("bare key (unquoted) throws", lam{ in
+    testing.assertThrows(lam{ in json.parser("{k:1}").nextValue() },
+                         "json.parser")
+})
+
+testing.test("missing colon throws", lam{ in
+    testing.assertThrows(lam{ in json.parser("{\"k\" 1}").nextValue() },
+                         "unexpected value")
+})
+
+testing.test("depth cap blocks pathological nesting", lam{ in
+    // Build a 201-deep array — should exceed the cap.
+    let deep = "[".repeat(201) + "1" + "]".repeat(201)
+    testing.assertThrows(lam{ in json.parser(deep).nextValue() },
+                         "nesting too deep")
+})
+
+// ── File-handle source ────────────────────────────────────────
+
+testing.test("parser reads from a file handle (NDJSON)", lam{ in
+    let d = fs.tempDir("p-stream")
+    let path = d + "/log.ndjson"
+    // Use a payload bigger than one 16 KiB read so refill is exercised.
+    let oneLine = "{\"event\":\"x\",\"data\":\"" + "y".repeat(200) + "\"}\n"
+    fs.write(path, oneLine.repeat(100))
+    let h = fs.open(path, "r")
+    let p = json.parser(h)
+    let count = 0
+    while (!p.eof()) {
+        let r = p.nextValue()
+        if (r.event == "x") { count += 1 }
+    }
+    h.close()
+    testing.assertEqual(count, 100, "all 100 records reached")
+    fs.remove(d)
+})
+
+testing.test("parser rejects non-handle map input", lam{ in
+    testing.assertThrows(lam{ in json.parser({not_a_handle: true}) },
+                         ".read")
+})
+
+testing.test("parser rejects non-string non-map input", lam{ in
+    testing.assertThrows(lam{ in json.parser(42) },
+                         "string or a file handle")
+})
+
+testing.done()

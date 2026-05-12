@@ -272,7 +272,565 @@ public:
     }
 };
 
+// ── Streaming JSON parser ──────────────────────────────────────
+//
+// Pull-parser style: each .next() call advances the state machine
+// and returns one event map describing the token just consumed.
+// Callers drive the loop themselves (no native generator backing),
+// which keeps the implementation engine-agnostic and lets them stop
+// early without paying for the rest of the document.
+//
+// Input is either a string (in-memory, no refilling) or a Praia
+// file handle (with a .read(n) native method — typically the value
+// returned by fs.open). For the handle path we top up an internal
+// buffer in 16 KiB chunks via the handle's read() so files larger
+// than RAM stream through one chunk at a time.
+//
+// NDJSON is supported transparently: after a complete top-level
+// value, the parser resets `expect` back to "value" and accepts
+// the next record. The .nextValue() helper consumes one whole top-
+// level value per call, which is the common loop body for
+// newline-delimited streams.
+
+class JsonStreamParser {
+public:
+    enum class EventType {
+        ObjectStart, ObjectEnd,
+        ArrayStart,  ArrayEnd,
+        Key, String,
+        Number, Bool, Null,
+        Eof
+    };
+
+    struct Event {
+        EventType type;
+        std::string strVal;
+        int64_t  intVal  = 0;
+        double   numVal  = 0;
+        bool     isInt   = false;
+        bool     boolVal = false;
+
+        // Tag-only constructor for events with no payload (objectStart,
+        // arrayEnd, eof, null). Silences -Wmissing-field-initializers
+        // and reads cleaner than `Event{type, {}, 0, 0, false, false}`.
+        explicit Event(EventType t) : type(t) {}
+        Event(EventType t, std::string s) : type(t), strVal(std::move(s)) {}
+        Event(EventType t, std::string s, int64_t iv, double nv, bool ii, bool bv)
+            : type(t), strVal(std::move(s)),
+              intVal(iv), numVal(nv), isInt(ii), boolVal(bv) {}
+    };
+
+    // Source: either a raw string or a callable that returns the
+    // next chunk of bytes when invoked with (size_t maxBytes). The
+    // callable receives a Praia Value (int) for the max bytes and
+    // returns a Value(string).
+    JsonStreamParser(std::string sourceString)
+        : buf_(std::move(sourceString)), sourceExhausted_(true) {}
+
+    JsonStreamParser(std::shared_ptr<NativeFunction> readFn, Value handleVal)
+        : readFn_(std::move(readFn)),
+          handleVal_(std::move(handleVal)) {}
+
+    bool eof() {
+        skipWhitespace();
+        return pos_ >= buf_.size() && sourceExhausted_;
+    }
+
+    // Pull the next event. Returns an Event with type=Eof once the
+    // stream is exhausted; subsequent calls keep returning Eof.
+    Event next() {
+        skipWhitespace();
+        if (!ensure(1)) return Event{EventType::Eof};
+
+        char c = buf_[pos_];
+
+        // Container closers: only valid when we expect either
+        // CommaOrEnd (after a value) or KeyOrEnd (immediately after '{').
+        if (c == '}' || c == ']') {
+            if (stack_.empty())
+                fail("unexpected '" + std::string(1, c) + "' at top level");
+            char open = stack_.back();
+            if ((c == '}' && open != '{') || (c == ']' && open != '['))
+                fail("mismatched closer '" + std::string(1, c) +
+                     "' (expected closer for '" + std::string(1, open) + "')");
+            // Reject trailing commas: `[1,]` ends in ValueAfterComma,
+            // `{"k":1,}` ends in KeyAfterComma — both illegal per
+            // RFC 8259. Colon / ValueAfterKey would mean we have a
+            // dangling "key:" with nothing after.
+            if (expect_ == Expect::Colon || expect_ == Expect::ValueAfterKey ||
+                expect_ == Expect::ValueAfterComma ||
+                expect_ == Expect::KeyAfterComma)
+                fail("unexpected '" + std::string(1, c) + "' (expected a value)");
+            pos_++;
+            stack_.pop_back();
+            popExpectAfterValue();
+            return Event{c == '}' ? EventType::ObjectEnd : EventType::ArrayEnd};
+        }
+
+        // Separators eaten silently — we never expose them as events.
+        if (c == ',') {
+            if (expect_ != Expect::CommaOrEnd)
+                fail("unexpected ','");
+            pos_++;
+            if (!stack_.empty() && stack_.back() == '{') expect_ = Expect::KeyAfterComma;
+            else expect_ = Expect::ValueAfterComma;
+            return next();
+        }
+        if (c == ':') {
+            if (expect_ != Expect::Colon)
+                fail("unexpected ':'");
+            pos_++;
+            expect_ = Expect::ValueAfterKey;
+            return next();
+        }
+
+        // A string here is either a key or a value depending on state.
+        if (c == '"') {
+            bool isKey = (expect_ == Expect::Key || expect_ == Expect::KeyAfterComma);
+            std::string s = parseStringBody();
+            if (isKey) {
+                expect_ = Expect::Colon;
+                return Event{EventType::Key, std::move(s)};
+            }
+            // String value.
+            requireValueAllowed();
+            popExpectAfterValue();
+            return Event{EventType::String, std::move(s)};
+        }
+
+        // Object / array openers — must be in a value-allowed position.
+        if (c == '{') {
+            requireValueAllowed();
+            // Match the non-streaming parser's depth cap (200); blocks
+            // the `[[[[[[...` DoS without limiting any human-written
+            // or sensible machine-generated JSON.
+            if (stack_.size() >= 200)
+                fail("JSON nesting too deep (max 200)");
+            pos_++;
+            stack_.push_back('{');
+            // Empty object handled by the closer branch above next call.
+            expect_ = Expect::Key;
+            // But '{' itself was consumed; mark "value just produced" so a
+            // following ',' is illegal until we close the open object. The
+            // CommaOrEnd is set by popExpectAfterValue once the closer is
+            // reached.
+            return Event{EventType::ObjectStart};
+        }
+        if (c == '[') {
+            requireValueAllowed();
+            if (stack_.size() >= 200)
+                fail("JSON nesting too deep (max 200)");
+            pos_++;
+            stack_.push_back('[');
+            expect_ = Expect::Value;
+            return Event{EventType::ArrayStart};
+        }
+
+        // Literals: true / false / null.
+        if (c == 't' || c == 'f' || c == 'n') {
+            return parseLiteral();
+        }
+
+        // Number: -? digit ... (with optional frac and exp).
+        if (c == '-' || (c >= '0' && c <= '9')) {
+            return parseNumber();
+        }
+
+        fail(std::string("unexpected character '") + c + "'");
+    }
+
+    // Materialize one whole top-level value from a stream of events.
+    // Used by NDJSON loops where each record is a full value.
+    // Returns Value() (nil) at EOF; callers can disambiguate from a
+    // literal null by calling eof() before nextValue().
+    Value nextValue() {
+        Event ev = next();
+        if (ev.type == EventType::Eof) return Value();
+        return buildValueFromEvent(ev);
+    }
+
+    void close() { /* nothing to release; handle stays caller-owned */ }
+
+private:
+    // Where the parser thinks it is inside the current container.
+    // Top-level is treated as a virtual "outer array" that accepts
+    // any number of values separated by whitespace (which is what
+    // NDJSON is in practice).
+    enum class Expect {
+        Value,              // very top-level, or after '['
+        ValueAfterComma,    // after ',' inside an array
+        ValueAfterKey,      // after ':' in an object
+        Key,                // after '{' (or KeyAfterComma)
+        KeyAfterComma,      // after ',' inside an object
+        Colon,              // after a key
+        CommaOrEnd          // after a value in any container
+    };
+
+    // Source state. For a string source, sourceExhausted_ is true
+    // from the start and refill() is a no-op. For a handle source,
+    // refill() pulls chunks until the source returns "".
+    std::shared_ptr<NativeFunction> readFn_;
+    Value handleVal_;
+    std::string buf_;
+    size_t pos_ = 0;
+    bool sourceExhausted_ = false;
+
+    std::vector<char> stack_;
+    Expect expect_ = Expect::Value;
+
+    [[noreturn]] void fail(const std::string& msg) {
+        throw RuntimeError("json.parser: " + msg + " at byte " +
+                           std::to_string(pos_), 0);
+    }
+
+    void requireValueAllowed() {
+        if (expect_ == Expect::Key || expect_ == Expect::KeyAfterComma ||
+            expect_ == Expect::Colon || expect_ == Expect::CommaOrEnd)
+            fail("unexpected value (expected " +
+                 std::string(expect_ == Expect::Colon ? "':'" :
+                             expect_ == Expect::CommaOrEnd ? "',' or closer" :
+                             "a key string") + ")");
+    }
+
+    // After a complete value, the next slot depends on the
+    // surrounding container:
+    //   inside any container: expect ',' or closer
+    //   at the top level:     accept another value (NDJSON), or EOF
+    void popExpectAfterValue() {
+        if (stack_.empty()) expect_ = Expect::Value;
+        else expect_ = Expect::CommaOrEnd;
+    }
+
+    // Ensure at least `n` bytes are buffered beyond pos_. Returns
+    // false only when the source is exhausted and we still can't
+    // satisfy the request (callers treat that as EOF).
+    bool ensure(size_t n) {
+        while (pos_ + n > buf_.size() && !sourceExhausted_) refill();
+        return pos_ + n <= buf_.size();
+    }
+
+    void refill() {
+        if (sourceExhausted_) return;
+        if (!readFn_) { sourceExhausted_ = true; return; }
+        constexpr int CHUNK = 16384;
+        std::vector<Value> args{Value(static_cast<int64_t>(CHUNK))};
+        Value got = readFn_->fn(args);
+        if (!got.isString()) {
+            sourceExhausted_ = true;
+            return;
+        }
+        const auto& s = got.asString();
+        if (s.empty()) {
+            sourceExhausted_ = true;
+            return;
+        }
+        // Compact the buffer if we've consumed most of it, otherwise
+        // appending forever grows it linearly with the file size.
+        if (pos_ > buf_.size() / 2) {
+            buf_.erase(0, pos_);
+            pos_ = 0;
+        }
+        buf_.append(s);
+    }
+
+    void skipWhitespace() {
+        while (true) {
+            if (!ensure(1)) return;
+            char c = buf_[pos_];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { pos_++; continue; }
+            return;
+        }
+    }
+
+    // Parse a JSON string body. Pos points at the opening '"' on
+    // entry; on return pos is past the closing '"'.
+    std::string parseStringBody() {
+        if (!ensure(1) || buf_[pos_] != '"') fail("expected '\"'");
+        pos_++;  // opening quote
+        std::string out;
+        while (true) {
+            if (!ensure(1)) fail("unterminated string");
+            unsigned char c = static_cast<unsigned char>(buf_[pos_++]);
+            if (c == '"') return out;
+            if (c == '\\') {
+                if (!ensure(1)) fail("dangling backslash in string");
+                char esc = buf_[pos_++];
+                switch (esc) {
+                    case '"':  out += '"';  break;
+                    case '\\': out += '\\'; break;
+                    case '/':  out += '/';  break;
+                    case 'b':  out += '\b'; break;
+                    case 'f':  out += '\f'; break;
+                    case 'n':  out += '\n'; break;
+                    case 'r':  out += '\r'; break;
+                    case 't':  out += '\t'; break;
+                    case 'u': {
+                        if (!ensure(4)) fail("truncated \\u escape");
+                        int32_t cp = parseHex4();
+                        // Surrogate pair handling: a high surrogate must
+                        // be followed by \uXXXX with a low surrogate.
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            if (!ensure(6) || buf_[pos_] != '\\' || buf_[pos_+1] != 'u')
+                                fail("high surrogate \\u" +
+                                     std::to_string(cp) + " not followed by \\u low surrogate");
+                            pos_ += 2;
+                            int32_t low = parseHex4();
+                            if (low < 0xDC00 || low > 0xDFFF)
+                                fail("invalid low surrogate after high surrogate");
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                            fail("lone low surrogate \\u" + std::to_string(cp));
+                        }
+                        // Emit as UTF-8.
+                        if (cp < 0x80) {
+                            out += static_cast<char>(cp);
+                        } else if (cp < 0x800) {
+                            out += static_cast<char>(0xC0 | (cp >> 6));
+                            out += static_cast<char>(0x80 | (cp & 0x3F));
+                        } else if (cp < 0x10000) {
+                            out += static_cast<char>(0xE0 | (cp >> 12));
+                            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                            out += static_cast<char>(0x80 | (cp & 0x3F));
+                        } else {
+                            out += static_cast<char>(0xF0 | (cp >> 18));
+                            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                            out += static_cast<char>(0x80 | (cp & 0x3F));
+                        }
+                        break;
+                    }
+                    default:
+                        fail(std::string("invalid escape \\") + esc);
+                }
+            } else if (c < 0x20) {
+                fail("unescaped control character in string");
+            } else {
+                out += static_cast<char>(c);
+            }
+        }
+    }
+
+    int32_t parseHex4() {
+        int32_t cp = 0;
+        for (int i = 0; i < 4; ++i) {
+            char h = buf_[pos_++];
+            int d;
+            if      (h >= '0' && h <= '9') d = h - '0';
+            else if (h >= 'a' && h <= 'f') d = 10 + (h - 'a');
+            else if (h >= 'A' && h <= 'F') d = 10 + (h - 'A');
+            else fail(std::string("invalid hex digit in \\u escape: '") + h + "'");
+            cp = (cp << 4) | d;
+        }
+        return cp;
+    }
+
+    Event parseLiteral() {
+        // The current byte is 't', 'f', or 'n'. Validate position
+        // (literals are only legal where a value is expected) BEFORE
+        // consuming, so a bad-context error leaves pos_ pointing at
+        // the offending char for the error message.
+        requireValueAllowed();
+        char first = buf_[pos_];
+        const char* expected;
+        size_t len;
+        if      (first == 't') { expected = "true";  len = 4; }
+        else if (first == 'f') { expected = "false"; len = 5; }
+        else                   { expected = "null";  len = 4; }
+        if (!ensure(len) || buf_.compare(pos_, len, expected) != 0)
+            fail(std::string("invalid literal (expected ") + expected + ")");
+        pos_ += len;
+        popExpectAfterValue();
+        if (first == 't') return Event(EventType::Bool, "", 0, 0, false, true);
+        if (first == 'f') return Event(EventType::Bool, "", 0, 0, false, false);
+        return Event{EventType::Null};
+    }
+
+    Event parseNumber() {
+        // Validate position before consuming the first digit. Numbers
+        // are only legal in value-allowed slots.
+        requireValueAllowed();
+        // Build up the textual form of the number, refilling as needed,
+        // until we hit a non-numeric char. Then stoll/stod the captured
+        // text — handing it to the standard library beats reimplementing
+        // float parsing in a streaming context.
+        std::string lexeme;
+        bool isFloat = false;
+        // Optional leading '-'.
+        if (buf_[pos_] == '-') { lexeme += '-'; pos_++; }
+        // Integer part: '0' alone or '1-9' followed by digits.
+        if (!ensure(1)) fail("incomplete number");
+        if (buf_[pos_] == '0') { lexeme += '0'; pos_++; }
+        else if (buf_[pos_] >= '1' && buf_[pos_] <= '9') {
+            while (ensure(1) && buf_[pos_] >= '0' && buf_[pos_] <= '9') {
+                lexeme += buf_[pos_++];
+            }
+        }
+        else fail("invalid number");
+        // Optional fractional part.
+        if (ensure(1) && buf_[pos_] == '.') {
+            isFloat = true;
+            lexeme += '.'; pos_++;
+            bool sawDigit = false;
+            while (ensure(1) && buf_[pos_] >= '0' && buf_[pos_] <= '9') {
+                lexeme += buf_[pos_++]; sawDigit = true;
+            }
+            if (!sawDigit) fail("expected digits after '.'");
+        }
+        // Optional exponent.
+        if (ensure(1) && (buf_[pos_] == 'e' || buf_[pos_] == 'E')) {
+            isFloat = true;
+            lexeme += buf_[pos_++];
+            if (ensure(1) && (buf_[pos_] == '+' || buf_[pos_] == '-'))
+                lexeme += buf_[pos_++];
+            bool sawDigit = false;
+            while (ensure(1) && buf_[pos_] >= '0' && buf_[pos_] <= '9') {
+                lexeme += buf_[pos_++]; sawDigit = true;
+            }
+            if (!sawDigit) fail("expected exponent digits");
+        }
+        popExpectAfterValue();
+        Event ev{EventType::Number};
+        if (isFloat) {
+            ev.numVal = std::stod(lexeme);
+            ev.isInt = false;
+        } else {
+            try {
+                ev.intVal = std::stoll(lexeme);
+                ev.isInt = true;
+            } catch (const std::out_of_range&) {
+                // Integer too big for int64 — fall back to double.
+                ev.numVal = std::stod(lexeme);
+                ev.isInt = false;
+            }
+        }
+        return ev;
+    }
+
+    // Recursive helper: given the current event, build up the full
+    // Praia value, descending into nested containers via additional
+    // .next() calls.
+    Value buildValueFromEvent(const Event& ev) {
+        switch (ev.type) {
+            case EventType::Null:        return Value();
+            case EventType::Bool:        return Value(ev.boolVal);
+            case EventType::String:      return Value(ev.strVal);
+            case EventType::Number:
+                return ev.isInt ? Value(ev.intVal) : Value(ev.numVal);
+            case EventType::ArrayStart: {
+                auto arr = gcNew<PraiaArray>();
+                while (true) {
+                    Event inner = next();
+                    if (inner.type == EventType::ArrayEnd) return Value(arr);
+                    if (inner.type == EventType::Eof) fail("unexpected EOF inside array");
+                    arr->elements.push_back(buildValueFromEvent(inner));
+                }
+            }
+            case EventType::ObjectStart: {
+                auto obj = gcNew<PraiaMap>();
+                while (true) {
+                    Event inner = next();
+                    if (inner.type == EventType::ObjectEnd) return Value(obj);
+                    if (inner.type != EventType::Key)
+                        fail("expected key inside object");
+                    Value v = buildValueFromEvent(next());
+                    obj->entries[Value(inner.strVal)] = std::move(v);
+                }
+            }
+            default:
+                fail("unexpected event type inside value");
+        }
+    }
+};
+
+// Translate an Event into the {type, value} map Praia callers see.
+static Value eventToMap(const JsonStreamParser::Event& ev) {
+    auto m = gcNew<PraiaMap>();
+    switch (ev.type) {
+        case JsonStreamParser::EventType::ObjectStart:
+            m->entries[Value("type")] = Value("objectStart"); break;
+        case JsonStreamParser::EventType::ObjectEnd:
+            m->entries[Value("type")] = Value("objectEnd"); break;
+        case JsonStreamParser::EventType::ArrayStart:
+            m->entries[Value("type")] = Value("arrayStart"); break;
+        case JsonStreamParser::EventType::ArrayEnd:
+            m->entries[Value("type")] = Value("arrayEnd"); break;
+        case JsonStreamParser::EventType::Key:
+            m->entries[Value("type")]  = Value("key");
+            m->entries[Value("value")] = Value(ev.strVal);
+            break;
+        case JsonStreamParser::EventType::String:
+            m->entries[Value("type")]  = Value("string");
+            m->entries[Value("value")] = Value(ev.strVal);
+            break;
+        case JsonStreamParser::EventType::Number:
+            m->entries[Value("type")]  = Value("number");
+            m->entries[Value("value")] = ev.isInt ? Value(ev.intVal) : Value(ev.numVal);
+            break;
+        case JsonStreamParser::EventType::Bool:
+            m->entries[Value("type")]  = Value("bool");
+            m->entries[Value("value")] = Value(ev.boolVal);
+            break;
+        case JsonStreamParser::EventType::Null:
+            m->entries[Value("type")]  = Value("null");
+            m->entries[Value("value")] = Value();
+            break;
+        case JsonStreamParser::EventType::Eof:
+            return Value();  // nil
+    }
+    return Value(m);
+}
+
 } // namespace
+
+// json.parser(input) factory exposed publicly so interpreter_setup
+// can wire it into the json namespace alongside parse/stringify.
+Value jsonParserCreate(const Value& input) {
+    std::shared_ptr<JsonStreamParser> p;
+    if (input.isString()) {
+        p = std::make_shared<JsonStreamParser>(input.asString());
+    } else if (input.isMap()) {
+        // Extract the .read method from a file-handle-shaped map.
+        auto& entries = input.asMap()->entries;
+        auto it = entries.find(Value("read"));
+        if (it == entries.end() || !it->second.isCallable())
+            throw RuntimeError("json.parser(): handle must have a .read(n) method", 0);
+        auto callable = it->second.asCallable();
+        auto native = std::dynamic_pointer_cast<NativeFunction>(callable);
+        if (!native)
+            throw RuntimeError("json.parser(): handle.read must be a native function", 0);
+        p = std::make_shared<JsonStreamParser>(native, input);
+    } else {
+        throw RuntimeError("json.parser(input): input must be a string or a file handle", 0);
+    }
+
+    // Return a Praia map of methods that all close over the same
+    // parser shared_ptr — same shared-mutable-state-via-shared_ptr
+    // pattern as FileHandle in fs.open.
+    auto handleMap = gcNew<PraiaMap>();
+
+    handleMap->entries[Value("next")] = Value(makeNative("JsonParser.next", 0,
+        [p](const std::vector<Value>&) -> Value {
+            return eventToMap(p->next());
+        }));
+
+    handleMap->entries[Value("nextValue")] = Value(makeNative("JsonParser.nextValue", 0,
+        [p](const std::vector<Value>&) -> Value {
+            return p->nextValue();
+        }));
+
+    handleMap->entries[Value("eof")] = Value(makeNative("JsonParser.eof", 0,
+        [p](const std::vector<Value>&) -> Value {
+            return Value(p->eof());
+        }));
+
+    handleMap->entries[Value("close")] = Value(makeNative("JsonParser.close", 0,
+        [p](const std::vector<Value>&) -> Value {
+            p->close();
+            return Value();
+        }));
+
+    return Value(handleMap);
+}
 
 Value jsonParse(const std::string& src) {
     JsonParser parser(src);

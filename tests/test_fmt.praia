@@ -85,7 +85,7 @@ testing.test("%v is default formatting (via toString)", lam{ in
 
 testing.test("%T returns the value's type name", lam{ in
     testing.assertEqual(fmt.sprintf("%T", 1),       "int", nil)
-    testing.assertEqual(fmt.sprintf("%T", 3.14),    "number", nil)
+    testing.assertEqual(fmt.sprintf("%T", 3.14),    "float", nil)
     testing.assertEqual(fmt.sprintf("%T", "x"),     "string", nil)
     testing.assertEqual(fmt.sprintf("%T", true),    "bool", nil)
     testing.assertEqual(fmt.sprintf("%T", [1]),     "array", nil)

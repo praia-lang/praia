@@ -2210,6 +2210,15 @@ Interpreter::Interpreter() {
             return Value(jsonStringify(args[0], indent, 0));
         }));
 
+    // json.parser(input) — pull-parser for streaming reads. `input`
+    // is either a string (parsed in-memory) or a file handle with a
+    // .read(n) method (read incrementally). Returns a handle with
+    // .next() / .nextValue() / .eof() / .close().
+    jsonMap->entries[Value("parser")] = Value(makeNative("json.parser", 1,
+        [](const std::vector<Value>& args) -> Value {
+            return jsonParserCreate(args[0]);
+        }));
+
     globals->define("json", Value(jsonMap));
 
     // ── yaml namespace ──
