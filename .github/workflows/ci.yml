@@ -86,8 +86,10 @@ jobs:
           echo "LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
           # Sanity check — emit the version the build will pick up.
-          # If this prints the system 3.0.x instead of our pin, the
-          # link-time env vars haven't taken effect.
+          # $GITHUB_ENV writes only apply to LATER steps, so we have
+          # to also export LD_LIBRARY_PATH inline here for the openssl
+          # binary to find its sibling libs at runtime.
+          export LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}
           $PREFIX/bin/openssl version
 
       - name: Install other dependencies (Linux)
