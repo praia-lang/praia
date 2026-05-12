@@ -1,4 +1,16 @@
-// Stack — LIFO (last in, first out)
+// Common data structures. Every class header documents Big-O for its
+// methods so callers can reason about hot-loop cost without reading
+// the implementation. All classes are pure-Praia: for the rare cases
+// where the per-call overhead matters, build the structure inline
+// rather than going through the class wrappers.
+
+// ── Stack — LIFO ───────────────────────────────────────────────
+// Array-backed, last-in / first-out. The natural representation in
+// Praia: array.push / array.pop are the operations we want.
+//
+// Complexity (amortized):
+//   push, pop, peek, size, isEmpty    O(1)
+//   toArray                           O(n)
 class Stack {
     func init() {
         this.items = []
@@ -35,117 +47,24 @@ class Stack {
     }
 }
 
-// Queue — FIFO (first in, first out)
-class Queue {
-    func init() {
-        this.items = []
-    }
-
-    func enqueue(val) {
-        this.items.push(val)
-    }
-
-    func dequeue() {
-        ensure (len(this.items) > 0) else { throw "dequeue() on empty queue" }
-        let first = this.items[0]
-        let newItems = []
-        for (i in 1..len(this.items)) {
-            newItems.push(this.items[i])
-        }
-        this.items = newItems
-        return first
-    }
-
-    func peek() {
-        ensure (len(this.items) > 0) else { throw "peek() on empty queue" }
-        return this.items[0]
-    }
-
-    func size() {
-        return len(this.items)
-    }
-
-    func isEmpty() {
-        return len(this.items) == 0
-    }
-
-    func toArray() {
-        let result = []
-        for (item in this.items) {
-            result.push(item)
-        }
-        return result
-    }
-}
-
-// Set — unique values only
-class Set {
-    func init() {
-        this.items = []
-    }
-
-    func add(val) {
-        if (!this.has(val)) {
-            this.items.push(val)
-        }
-    }
-
-    func has(val) {
-        return this.items.contains(val)
-    }
-
-    func remove(val) {
-        let newItems = []
-        for (item in this.items) {
-            if (item != val) {
-                newItems.push(item)
-            }
-        }
-        this.items = newItems
-    }
-
-    func size() {
-        return len(this.items)
-    }
-
-    func toArray() {
-        let result = []
-        for (item in this.items) {
-            result.push(item)
-        }
-        return result
-    }
-
-    func union(other) {
-        let result = Set()
-        for (item in this.items) { result.add(item) }
-        for (item in other.items) { result.add(item) }
-        return result
-    }
-
-    func intersect(other) {
-        let result = Set()
-        for (item in this.items) {
-            if (other.has(item)) { result.add(item) }
-        }
-        return result
-    }
-
-    func difference(other) {
-        let result = Set()
-        for (item in this.items) {
-            if (!other.has(item)) { result.add(item) }
-        }
-        return result
-    }
-}
-
-// Deque — double-ended queue with O(1) amortized push/pop on both ends
-// Uses two stacks (front reversed, back normal) to avoid O(n) shifts
+// ── Deque — double-ended queue ─────────────────────────────────
+// Two-stack implementation: pushFront/pushBack append to one of two
+// internal arrays; a pop from the empty side triggers a one-time
+// rebalance that reverses the other side into it. The rebalance is
+// O(n) but happens at most every n ops, so amortized cost stays O(1).
+//
+// Complexity (amortized):
+//   pushFront, pushBack                O(1)
+//   popFront, popBack                  O(1)
+//   peekFront, peekBack                O(1)
+//   size, isEmpty                      O(1)
+//   toArray                            O(n)
 class Deque {
     func init() {
-        this.front = []   // reversed — front[last] is the logical first element
-        this.back = []    // normal order
+        // front: reversed — front[last] is the logical first element.
+        // back: normal order — back[last] is the logical last element.
+        this.front = []
+        this.back  = []
     }
 
     func pushFront(val) {
@@ -158,7 +77,7 @@ class Deque {
 
     func popFront() {
         ensure (this.size() > 0) else { throw "popFront() on empty deque" }
-        if (len(this.front) == 0) { this._rebalance() }
+        if (len(this.front) == 0) { this._rebalanceFront() }
         return this.front.pop()
     }
 
@@ -170,7 +89,7 @@ class Deque {
 
     func peekFront() {
         ensure (this.size() > 0) else { throw "peekFront() on empty deque" }
-        if (len(this.front) == 0) { this._rebalance() }
+        if (len(this.front) == 0) { this._rebalanceFront() }
         return this.front[len(this.front) - 1]
     }
 
@@ -188,8 +107,9 @@ class Deque {
         return this.size() == 0
     }
 
-    // Move all back items to front (reversed)
-    func _rebalance() {
+    // Move all back items into front (reversed). Triggered when the
+    // front is empty and we need to pop or peek the front.
+    func _rebalanceFront() {
         let i = len(this.back) - 1
         while (i >= 0) {
             this.front.push(this.back[i])
@@ -198,7 +118,6 @@ class Deque {
         this.back = []
     }
 
-    // Move all front items to back (reversed)
     func _rebalanceBack() {
         let i = len(this.front) - 1
         while (i >= 0) {
@@ -222,7 +141,137 @@ class Deque {
     }
 }
 
-// OrderedMap — map that maintains insertion order
+// ── Queue — FIFO ───────────────────────────────────────────────
+// Wraps a Deque so dequeue runs in O(1) amortized rather than the
+// O(n) you'd get from a naive array-shift queue. (Pre-refactor this
+// class did the array shift on every dequeue, which made Queue a
+// performance trap on anything > a few hundred elements.)
+//
+// Complexity (amortized):
+//   enqueue, dequeue, peek, size, isEmpty    O(1)
+//   toArray                                  O(n)
+class Queue {
+    func init() {
+        this._d = Deque()
+    }
+
+    func enqueue(val) {
+        this._d.pushBack(val)
+    }
+
+    func dequeue() {
+        ensure (this._d.size() > 0) else { throw "dequeue() on empty queue" }
+        return this._d.popFront()
+    }
+
+    func peek() {
+        ensure (this._d.size() > 0) else { throw "peek() on empty queue" }
+        return this._d.peekFront()
+    }
+
+    func size() {
+        return this._d.size()
+    }
+
+    func isEmpty() {
+        return this._d.isEmpty()
+    }
+
+    func toArray() {
+        return this._d.toArray()
+    }
+}
+
+// ── Set — unique values, map-backed ────────────────────────────
+// Pre-refactor this was array-backed with O(n) add/has/remove (a
+// trap on anything beyond a few dozen elements). Map-backed now,
+// so each of those is O(1) amortized. Any hashable value works as
+// an element — strings, numbers, bools, tagged values.
+//
+// Complexity (amortized):
+//   add, has, remove, size              O(1)
+//   toArray                             O(n)
+//   union, intersect, difference        O(n + m)  where m = |other|
+class Set {
+    func init() {
+        this._m = {}
+    }
+
+    func add(val) {
+        this._m[val] = true
+    }
+
+    func has(val) {
+        return this._m.has(val)
+    }
+
+    func remove(val) {
+        if (this._m.has(val)) {
+            this._m.delete(val)
+        }
+    }
+
+    func size() {
+        return len(keys(this._m))
+    }
+
+    func isEmpty() {
+        return this.size() == 0
+    }
+
+    func toArray() {
+        let result = []
+        for (k in keys(this._m)) {
+            result.push(k)
+        }
+        return result
+    }
+
+    func union(other) {
+        let result = Set()
+        for (k in keys(this._m))       { result.add(k) }
+        for (k in keys(other._m))      { result.add(k) }
+        return result
+    }
+
+    func intersect(other) {
+        let result = Set()
+        // Iterate the smaller side for better practical performance.
+        let a = this._m
+        let b = other._m
+        if (len(keys(b)) < len(keys(a))) { a = other._m; b = this._m }
+        for (k in keys(a)) {
+            if (b.has(k)) { result.add(k) }
+        }
+        return result
+    }
+
+    func difference(other) {
+        let result = Set()
+        for (k in keys(this._m)) {
+            if (!other._m.has(k)) { result.add(k) }
+        }
+        return result
+    }
+}
+
+// ── OrderedMap — insertion-ordered map ─────────────────────────
+// Praia's primitive map iterates in unspecified order (it's an
+// std::unordered_map under the hood). Use this when iteration
+// order has to match insertion order — for JSON-style serialization
+// that should preserve user-visible field order, or for tests that
+// pin output to insertion sequence.
+//
+// Internal representation: a key-order array plus a backing map.
+// The map handles O(1) lookups; the array makes iteration order
+// deterministic.
+//
+// Complexity (amortized):
+//   set, get, has              O(1)
+//   remove                     O(n)   — must scan the key-order array
+//   size                       O(1)
+//   getKeys, getValues         O(n)
+//   entries, toMap             O(n)
 class OrderedMap {
     func init() {
         this._keys = []
@@ -230,38 +279,37 @@ class OrderedMap {
     }
 
     func set(key, value) {
-        if (!keys(this._data).contains(key)) {
+        if (!this._data.has(key)) {
             this._keys.push(key)
         }
         this._data[key] = value
     }
 
     func get(key) {
-        if (!keys(this._data).contains(key)) { return nil }
+        if (!this._data.has(key)) { return nil }
         return this._data[key]
     }
 
     func has(key) {
-        return keys(this._data).contains(key)
+        return this._data.has(key)
     }
 
     func remove(key) {
-        if (!this.has(key)) { return }
+        if (!this._data.has(key)) { return }
+        this._data.delete(key)
         let newKeys = []
         for (k in this._keys) {
             if (k != key) { newKeys.push(k) }
         }
         this._keys = newKeys
-        // Rebuild data without the key
-        let newData = {}
-        for (k in this._keys) {
-            newData[k] = this._data[k]
-        }
-        this._data = newData
     }
 
     func size() {
         return len(this._keys)
+    }
+
+    func isEmpty() {
+        return this.size() == 0
     }
 
     func getKeys() {
@@ -295,4 +343,199 @@ class OrderedMap {
     }
 }
 
-export { Stack, Queue, Set, Deque, OrderedMap }
+// ── Counter — multiset / frequency count ───────────────────────
+// `Counter(iterable?)` initializes from an array, counting each
+// occurrence; with no argument, starts empty. Missing keys read as
+// 0 (so callers can `c.increment("rare")` without a guard); negative
+// counts are allowed (Python's Counter does too).
+//
+// Complexity (amortized):
+//   increment, decrement, count, set    O(1)
+//   update, subtract                    O(m)  where m = |other|
+//   total                               O(n)  where n = unique keys
+//   mostCommon                          O(n log n)  full sort + slice
+//   keys, values, entries, toMap        O(n)
+//   size                                O(1)
+class Counter {
+    func init(iterable = nil) {
+        this._m = {}
+        if (iterable != nil) {
+            for (item in iterable) {
+                this.increment(item)
+            }
+        }
+    }
+
+    func increment(key, by = 1) {
+        if (this._m.has(key)) {
+            this._m[key] = this._m[key] + by
+        } else {
+            this._m[key] = by
+        }
+    }
+
+    func decrement(key, by = 1) {
+        this.increment(key, -by)
+    }
+
+    // Returns the count for `key`, or 0 if never seen. Matches
+    // Python's Counter.__getitem__ behavior — no KeyError on miss.
+    func count(key) {
+        if (!this._m.has(key)) { return 0 }
+        return this._m[key]
+    }
+
+    // Set an explicit count. Useful for loading saved Counter state.
+    func set(key, n) {
+        this._m[key] = n
+    }
+
+    // Sum of all counts. For a count of words, this is the total
+    // word count; for distinct keys use size().
+    func total() {
+        let t = 0
+        for (k in keys(this._m)) { t = t + this._m[k] }
+        return t
+    }
+
+    // Add counts from another Counter (or array). Mirrors the
+    // shape of Python's update(): an array adds 1 per occurrence;
+    // a Counter adds its existing counts.
+    func update(other) {
+        if (other is "instance" && other.toMap != nil) {
+            // Treat as another Counter (or compatible — has toMap()).
+            let m = other.toMap()
+            for (k in keys(m)) { this.increment(k, m[k]) }
+        } elif (other is "array") {
+            for (item in other) { this.increment(item) }
+        } else {
+            throw "Counter.update: expected another Counter or an array"
+        }
+    }
+
+    func subtract(other) {
+        if (other is "instance" && other.toMap != nil) {
+            let m = other.toMap()
+            for (k in keys(m)) { this.decrement(k, m[k]) }
+        } elif (other is "array") {
+            for (item in other) { this.decrement(item) }
+        } else {
+            throw "Counter.subtract: expected another Counter or an array"
+        }
+    }
+
+    // Top-n keys by count, as an array of {key, count} maps in
+    // descending order. With no n, returns all keys sorted; with
+    // n, returns the first n.
+    func mostCommon(n = nil) {
+        let pairs = []
+        for (k in keys(this._m)) {
+            pairs.push({key: k, count: this._m[k]})
+        }
+        // Praia sort comparator: negative → first arg sorts first.
+        // For descending we want the larger count first, so the
+        // comparator returns (y.count - x.count).
+        let sorted = sort(pairs, lam{ x, y in y.count - x.count })
+        if (n == nil) { return sorted }
+        let result = []
+        for (i in 0..len(sorted)) {
+            if (i >= n) { break }
+            result.push(sorted[i])
+        }
+        return result
+    }
+
+    // All keys (including zero-count if explicitly set to 0).
+    func getKeys() {
+        let result = []
+        for (k in keys(this._m)) { result.push(k) }
+        return result
+    }
+
+    func size() {
+        return len(keys(this._m))
+    }
+
+    func toMap() {
+        let result = {}
+        for (k in keys(this._m)) { result[k] = this._m[k] }
+        return result
+    }
+}
+
+// ── DefaultDict — auto-creating map ────────────────────────────
+// `DefaultDict(factory)` where `factory` is a zero-arg callable
+// invoked on the first .get() for each missing key to install a
+// default. Common idioms:
+//   DefaultDict(lam{ in [] })   // group items into per-key arrays
+//   DefaultDict(lam{ in 0 })    // tally counts (or use Counter)
+//   DefaultDict(lam{ in {} })   // nested maps
+//
+// Complexity (amortized):
+//   get, set, has, delete            O(1)
+//   keys, values, entries, toMap     O(n)
+//   size                             O(1)
+class DefaultDict {
+    func init(factory) {
+        ensure (factory is "function") else {
+            throw "DefaultDict requires a zero-arg factory function"
+        }
+        this._m = {}
+        this._factory = factory
+    }
+
+    // Auto-creates the entry on a miss. Subsequent .get() calls
+    // return the same stored value (so `dd.get(k).push(x)` works
+    // for array-valued defaults — the array is created once and
+    // mutated in place).
+    func get(key) {
+        if (!this._m.has(key)) {
+            this._m[key] = (this._factory)()
+        }
+        return this._m[key]
+    }
+
+    func set(key, value) {
+        this._m[key] = value
+    }
+
+    func has(key) {
+        return this._m.has(key)
+    }
+
+    func delete(key) {
+        if (this._m.has(key)) { this._m.delete(key) }
+    }
+
+    func size() {
+        return len(keys(this._m))
+    }
+
+    func getKeys() {
+        let result = []
+        for (k in keys(this._m)) { result.push(k) }
+        return result
+    }
+
+    func getValues() {
+        let result = []
+        for (k in keys(this._m)) { result.push(this._m[k]) }
+        return result
+    }
+
+    func entries() {
+        let result = []
+        for (k in keys(this._m)) {
+            result.push({key: k, value: this._m[k]})
+        }
+        return result
+    }
+
+    func toMap() {
+        let result = {}
+        for (k in keys(this._m)) { result[k] = this._m[k] }
+        return result
+    }
+}
+
+export { Stack, Queue, Set, Deque, OrderedMap, Counter, DefaultDict }

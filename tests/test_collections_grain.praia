@@ -1,0 +1,274 @@
+use "testing"
+use "collections"
+
+// Coverage for the data structures shipped in grains/collections.praia.
+// Each class header documents Big-O for its methods; these tests focus
+// on correctness, with a handful of mid-scale operations that would
+// time out under O(n²) implementations (regression net against the
+// pre-refactor Set/Queue performance traps).
+
+// ── Stack ─────────────────────────────────────────────────────
+
+testing.test("Stack: LIFO ordering", lam{ in
+    let s = collections.Stack()
+    s.push(1)
+    s.push(2)
+    s.push(3)
+    testing.assertEqual(s.size(), 3, nil)
+    testing.assertEqual(s.peek(), 3, nil)
+    testing.assertEqual(s.pop(), 3, nil)
+    testing.assertEqual(s.pop(), 2, nil)
+    testing.assertEqual(s.pop(), 1, nil)
+    testing.assert(s.isEmpty(), nil)
+})
+
+testing.test("Stack: pop on empty throws", lam{ in
+    let s = collections.Stack()
+    testing.assertThrows(lam{ in s.pop() }, "empty stack")
+})
+
+// ── Queue ─────────────────────────────────────────────────────
+
+testing.test("Queue: FIFO ordering", lam{ in
+    let q = collections.Queue()
+    q.enqueue("a")
+    q.enqueue("b")
+    q.enqueue("c")
+    testing.assertEqual(q.peek(), "a", nil)
+    testing.assertEqual(q.dequeue(), "a", nil)
+    testing.assertEqual(q.dequeue(), "b", nil)
+    testing.assertEqual(q.dequeue(), "c", nil)
+    testing.assert(q.isEmpty(), nil)
+})
+
+testing.test("Queue: dequeue is O(1) amortized (large-N regression)", lam{ in
+    // Pre-refactor Queue did an O(n) array-shift on every dequeue,
+    // so this loop was O(n²). Post-refactor it's O(n) amortized.
+    // Keep the bound generous so this doesn't flake on slow runners,
+    // but small enough that a regression to O(n²) blows the timeout.
+    let q = collections.Queue()
+    for (i in 0..5000) { q.enqueue(i) }
+    let total = 0
+    while (!q.isEmpty()) { total = total + q.dequeue() }
+    testing.assertEqual(total, 5000 * 4999 / 2, "0+1+..+4999 = 12497500")
+})
+
+testing.test("Queue: dequeue on empty throws", lam{ in
+    let q = collections.Queue()
+    testing.assertThrows(lam{ in q.dequeue() }, "empty queue")
+})
+
+// ── Set ───────────────────────────────────────────────────────
+
+testing.test("Set: add / has / remove", lam{ in
+    let s = collections.Set()
+    s.add(1)
+    s.add("hello")
+    s.add(true)
+    testing.assertEqual(s.size(), 3, nil)
+    testing.assert(s.has(1), nil)
+    testing.assert(s.has("hello"), nil)
+    testing.assert(!s.has("missing"), nil)
+    s.remove(1)
+    testing.assert(!s.has(1), nil)
+    testing.assertEqual(s.size(), 2, nil)
+})
+
+testing.test("Set: add is idempotent (no duplicates)", lam{ in
+    let s = collections.Set()
+    s.add("x")
+    s.add("x")
+    s.add("x")
+    testing.assertEqual(s.size(), 1, "three adds of same value → size 1")
+})
+
+testing.test("Set: union / intersect / difference", lam{ in
+    let a = collections.Set()
+    for (v in [1, 2, 3, 4]) { a.add(v) }
+    let b = collections.Set()
+    for (v in [3, 4, 5, 6]) { b.add(v) }
+
+    let u = sort(a.union(b).toArray())
+    testing.assertEqual(u, [1, 2, 3, 4, 5, 6], nil)
+
+    let i = sort(a.intersect(b).toArray())
+    testing.assertEqual(i, [3, 4], nil)
+
+    let d = sort(a.difference(b).toArray())
+    testing.assertEqual(d, [1, 2], "elements in a but not in b")
+})
+
+testing.test("Set: large-N regression (O(1) add/has)", lam{ in
+    // Pre-refactor Set was array-backed and O(n) per add; 10k inserts
+    // were ~50M comparisons. Map-backed now, so this should complete
+    // near-instantly.
+    let s = collections.Set()
+    for (i in 0..10000) { s.add(i) }
+    testing.assertEqual(s.size(), 10000, nil)
+    testing.assert(s.has(5000), nil)
+    testing.assert(!s.has(10001), nil)
+})
+
+// ── Deque ─────────────────────────────────────────────────────
+
+testing.test("Deque: pushFront / pushBack / popFront / popBack", lam{ in
+    let d = collections.Deque()
+    d.pushBack(2)
+    d.pushBack(3)
+    d.pushFront(1)
+    d.pushFront(0)
+    // Logical order: [0, 1, 2, 3]
+    testing.assertEqual(d.toArray(), [0, 1, 2, 3], nil)
+    testing.assertEqual(d.popFront(), 0, nil)
+    testing.assertEqual(d.popBack(),  3, nil)
+    testing.assertEqual(d.toArray(), [1, 2], nil)
+})
+
+testing.test("Deque: rebalancing handles all-on-one-side", lam{ in
+    // All pushFront, then popBack — exercises the rebalance from
+    // front into back exactly once for the first popBack.
+    let d = collections.Deque()
+    for (i in 0..5) { d.pushFront(i) }
+    // Logical order: [4, 3, 2, 1, 0]
+    testing.assertEqual(d.popBack(), 0, nil)
+    testing.assertEqual(d.popBack(), 1, nil)
+    testing.assertEqual(d.popBack(), 2, nil)
+    testing.assertEqual(d.peekBack(), 3, nil)
+})
+
+// ── OrderedMap ────────────────────────────────────────────────
+
+testing.test("OrderedMap: preserves insertion order", lam{ in
+    let om = collections.OrderedMap()
+    om.set("z", 1)
+    om.set("a", 2)
+    om.set("m", 3)
+    testing.assertEqual(om.getKeys(), ["z", "a", "m"], nil)
+    testing.assertEqual(om.getValues(), [1, 2, 3], nil)
+})
+
+testing.test("OrderedMap: re-setting a key keeps its original position", lam{ in
+    let om = collections.OrderedMap()
+    om.set("a", 1)
+    om.set("b", 2)
+    om.set("c", 3)
+    om.set("b", 20)  // update — should NOT move "b" to the end
+    testing.assertEqual(om.getKeys(), ["a", "b", "c"], nil)
+    testing.assertEqual(om.get("b"), 20, nil)
+})
+
+testing.test("OrderedMap: remove keeps order of the rest", lam{ in
+    let om = collections.OrderedMap()
+    for (p in [["a", 1], ["b", 2], ["c", 3], ["d", 4]]) {
+        om.set(p[0], p[1])
+    }
+    om.remove("b")
+    testing.assertEqual(om.getKeys(), ["a", "c", "d"], nil)
+    testing.assert(!om.has("b"), nil)
+})
+
+// ── Counter ───────────────────────────────────────────────────
+
+testing.test("Counter: count from an iterable", lam{ in
+    let c = collections.Counter(["a", "b", "a", "c", "a", "b"])
+    testing.assertEqual(c.count("a"), 3, nil)
+    testing.assertEqual(c.count("b"), 2, nil)
+    testing.assertEqual(c.count("c"), 1, nil)
+    testing.assertEqual(c.count("missing"), 0, "missing key reads as 0, no throw")
+    testing.assertEqual(c.total(), 6, nil)
+    testing.assertEqual(c.size(), 3, "three distinct keys")
+})
+
+testing.test("Counter: increment / decrement", lam{ in
+    let c = collections.Counter()
+    c.increment("x")
+    c.increment("x", 5)
+    c.decrement("x")
+    testing.assertEqual(c.count("x"), 5, "1 + 5 - 1")
+    c.decrement("y", 10)
+    testing.assertEqual(c.count("y"), -10, "negative counts allowed (matches Python's Counter)")
+})
+
+testing.test("Counter: mostCommon returns descending {key, count}", lam{ in
+    let c = collections.Counter(["a", "b", "a", "c", "a", "b", "d"])
+    let top = c.mostCommon(2)
+    testing.assertEqual(len(top), 2, nil)
+    testing.assertEqual(top[0].key, "a", nil)
+    testing.assertEqual(top[0].count, 3, nil)
+    testing.assertEqual(top[1].key, "b", nil)
+    testing.assertEqual(top[1].count, 2, nil)
+})
+
+testing.test("Counter: mostCommon without n returns all entries", lam{ in
+    let c = collections.Counter(["a", "b", "a"])
+    let all = c.mostCommon()
+    testing.assertEqual(len(all), 2, nil)
+    testing.assertEqual(all[0].key, "a", nil)
+})
+
+testing.test("Counter: update / subtract with another Counter", lam{ in
+    let a = collections.Counter(["x", "x", "y"])
+    let b = collections.Counter(["x", "z"])
+    a.update(b)
+    testing.assertEqual(a.count("x"), 3, "2 + 1")
+    testing.assertEqual(a.count("y"), 1, nil)
+    testing.assertEqual(a.count("z"), 1, "new key from update")
+
+    a.subtract(b)
+    testing.assertEqual(a.count("x"), 2, "back where we started")
+    testing.assertEqual(a.count("z"), 0, nil)
+})
+
+testing.test("Counter: update from an array", lam{ in
+    let c = collections.Counter()
+    c.update(["a", "a", "b"])
+    testing.assertEqual(c.count("a"), 2, nil)
+    testing.assertEqual(c.count("b"), 1, nil)
+})
+
+testing.test("Counter: toMap roundtrip", lam{ in
+    let c = collections.Counter(["a", "a", "b", "c", "c", "c"])
+    let m = c.toMap()
+    testing.assertEqual(m.a, 2, nil)
+    testing.assertEqual(m.b, 1, nil)
+    testing.assertEqual(m.c, 3, nil)
+})
+
+// ── DefaultDict ───────────────────────────────────────────────
+
+testing.test("DefaultDict: factory fires once per missing key", lam{ in
+    let calls = 0
+    let dd = collections.DefaultDict(lam{ in calls = calls + 1; return [] })
+    dd.get("a").push(1)
+    dd.get("a").push(2)
+    dd.get("b").push(99)
+    testing.assertEqual(calls, 2, "factory invoked once for 'a' and once for 'b'")
+    testing.assertEqual(dd.get("a"), [1, 2], nil)
+    testing.assertEqual(dd.get("b"), [99], nil)
+})
+
+testing.test("DefaultDict: group items by key", lam{ in
+    let dd = collections.DefaultDict(lam{ in [] })
+    let words = ["apple", "ant", "banana", "berry", "avocado"]
+    for (w in words) { dd.get(w[0]).push(w) }
+    testing.assertEqual(dd.get("a"), ["apple", "ant", "avocado"], nil)
+    testing.assertEqual(dd.get("b"), ["banana", "berry"], nil)
+})
+
+testing.test("DefaultDict: explicit set and delete", lam{ in
+    let dd = collections.DefaultDict(lam{ in 0 })
+    dd.set("k", 42)
+    testing.assertEqual(dd.get("k"), 42, nil)
+    testing.assert(dd.has("k"), nil)
+    dd.delete("k")
+    testing.assert(!dd.has("k"), nil)
+    // After delete, next get() should fire the factory again.
+    testing.assertEqual(dd.get("k"), 0, "factory re-invoked after delete")
+})
+
+testing.test("DefaultDict: factory must be callable", lam{ in
+    testing.assertThrows(lam{ in collections.DefaultDict(42) },
+                         "zero-arg factory function")
+})
+
+testing.done()
