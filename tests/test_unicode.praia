@@ -172,4 +172,122 @@ testing.test("regex matchAll index is grapheme-based", lam{ in
     testing.assertEqual(ms[1].index, 2, "b is at grapheme index 2")
 })
 
+// ── Phase 1 of the Unicode rework: normalize / displayWidth / ──
+// ── collateKey / foldKey / grapheme-aware .reverse() ──────────
+
+testing.test("normalize NFD then NFC returns the original NFC form", lam{ in
+    let s = "h\u{E9}llo"
+    let d = unicode.normalize(s, "NFD")
+    testing.assert(len(d.bytes()) > len(s.bytes()),
+                   "NFD form is longer than NFC")
+    testing.assertEqual(unicode.normalize(d, "NFC"), s,
+                        "NFC(NFD(s)) == original NFC")
+})
+
+testing.test("normalize NFKC folds compatibility forms", lam{ in
+    // Full-width digit 1 (U+FF11) and ligature ﬁ (U+FB01).
+    testing.assertEqual(unicode.normalize("\u{FF11}", "NFKC"), "1", nil)
+    testing.assertEqual(unicode.normalize("\u{FB01}", "NFKC"), "fi", nil)
+})
+
+testing.test("normalize rejects unknown form", lam{ in
+    testing.assertThrows(lam{ in unicode.normalize("x", "wat") },
+                         "unknown form")
+})
+
+testing.test("displayWidth: ASCII is 1 per character", lam{ in
+    testing.assertEqual(unicode.displayWidth("hello"), 5, nil)
+    testing.assertEqual(unicode.displayWidth(""), 0, nil)
+})
+
+testing.test("displayWidth: precomposed and decomposed agree", lam{ in
+    let pre = "h\u{E9}llo"
+    let dec = unicode.normalize(pre, "NFD")
+    testing.assertEqual(unicode.displayWidth(pre), 5, "precomposed")
+    testing.assertEqual(unicode.displayWidth(dec), 5, "decomposed")
+})
+
+testing.test("displayWidth: CJK is wide (2 cells per char)", lam{ in
+    // 你好 — two CJK ideographs, each cell-width 2.
+    testing.assertEqual(unicode.displayWidth("\u{4F60}\u{597D}"), 4, nil)
+})
+
+testing.test("displayWidth: emoji ZWJ cluster is a single wide unit", lam{ in
+    // Family ZWJ: width is the base emoji's width (2), not the sum
+    // of each component glyph (8).
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
+    testing.assertEqual(unicode.displayWidth(family), 2, nil)
+})
+
+testing.test("collateKey is case-insensitive", lam{ in
+    testing.assertEqual(unicode.collateKey("Apple"),
+                        unicode.collateKey("apple"), nil)
+})
+
+testing.test("collateKey sorts unaccented before accented", lam{ in
+    // Documented behavior: NFD + casefold sends combining-mark bytes
+    // to the back of their letter's range. "elan" < "Élan".
+    testing.assert(unicode.collateKey("elan") < unicode.collateKey("\u{C9}lan"),
+                   "'elan' < 'Élan' under collateKey")
+})
+
+testing.test("collateKey produces a usable case-insensitive sort", lam{ in
+    let names = ["\u{C9}lan", "Eve", "Adam", "elan", "edge"]
+    let sorted = sort(names, lam{ a, b in
+        unicode.collateKey(a) < unicode.collateKey(b)
+    })
+    testing.assertEqual(sorted, ["Adam", "edge", "elan", "Eve", "\u{C9}lan"], nil)
+})
+
+testing.test("foldKey makes accented and unaccented compare equal", lam{ in
+    testing.assertEqual(unicode.foldKey("\u{C9}lan"),
+                        unicode.foldKey("elan"),
+                        "accents stripped")
+    testing.assertEqual(unicode.foldKey("caf\u{E9}"),
+                        unicode.foldKey("CAFE"),
+                        "accents + case both folded")
+    testing.assertEqual(unicode.foldKey("na\u{EF}ve"),
+                        unicode.foldKey("naive"), nil)
+})
+
+testing.test("foldKey still distinguishes different letters", lam{ in
+    testing.assert(unicode.foldKey("cafe") != unicode.foldKey("cape"),
+                   "different base letters still differ")
+})
+
+testing.test("reverse on ASCII", lam{ in
+    testing.assertEqual("hello".reverse(), "olleh", nil)
+    testing.assertEqual("".reverse(), "", nil)
+})
+
+testing.test("reverse keeps precomposed accents attached", lam{ in
+    testing.assertEqual("h\u{E9}llo".reverse(), "oll\u{E9}h", nil)
+})
+
+testing.test("reverse keeps DECOMPOSED accents attached to base", lam{ in
+    // Hard case: byte-reverse would put the combining mark before
+    // its base letter, producing garbage. Grapheme-aware reverse
+    // keeps the cluster together so the result NFC-normalizes back
+    // to the precomposed-reverse form.
+    let decomposed = unicode.normalize("h\u{E9}llo", "NFD")
+    let reversed = decomposed.reverse()
+    testing.assertEqual(unicode.normalize(reversed, "NFC"),
+                        "oll\u{E9}h", nil)
+})
+
+testing.test("reverse keeps emoji ZWJ cluster intact", lam{ in
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
+    testing.assertEqual(family.reverse(), family,
+                        "single cluster reverses to itself")
+})
+
+testing.test("reverse pair: two emoji clusters swap as units", lam{ in
+    // Swedish flag (🇸🇪) and US flag (🇺🇸) are each a single grapheme
+    // cluster (regional-indicator pair). Reversing should swap them
+    // whole — not interleave their underlying codepoints.
+    let se = "\u{1F1F8}\u{1F1EA}"
+    let us = "\u{1F1FA}\u{1F1F8}"
+    testing.assertEqual((se + us).reverse(), us + se, nil)
+})
+
 testing.done()

@@ -490,6 +490,24 @@ Value getStringMethod(const std::string& strRef,
             return Value(str.substr(0, end + 1));
         }));
     }
+    if (name == "reverse") {
+        // Grapheme-aware reverse: "héllo" (regardless of whether é is
+        // precomposed or e+combining) round-trips correctly, and emoji
+        // ZWJ sequences (👨‍👩‍👧‍👦) stay intact as a single cluster.
+        // Falls back to byte-reverse when utf8proc isn't linked — the
+        // ASCII case still works there.
+        return Value(makeNative("reverse", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
+#ifdef HAVE_UTF8PROC
+            auto gs = utf8_graphemes(str);
+            std::string out;
+            out.reserve(str.size());
+            for (auto it = gs.rbegin(); it != gs.rend(); ++it) out += *it;
+            return Value(std::move(out));
+#else
+            return Value(std::string(str.rbegin(), str.rend()));
+#endif
+        }));
+    }
     if (name == "graphemes") {
         return Value(makeNative("graphemes", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
             auto arr = gcNew<PraiaArray>();

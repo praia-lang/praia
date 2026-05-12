@@ -4973,6 +4973,7 @@ These operations count and index by grapheme cluster:
 - `.split("")` — split into grapheme clusters
 - `.indexOf()` / `.lastIndexOf()` — returns grapheme index
 - `.padStart(n)` / `.padEnd(n)` — counts graphemes for target length
+- `.reverse()` — reverses grapheme clusters (so accents stay on their base, ZWJ sequences stay intact)
 - `.charCode(i)` — first codepoint of i-th grapheme
 
 ### What stays byte-based
@@ -4997,9 +4998,53 @@ Three methods give access to every level:
 "A\u{1F600}".bytes()         // [65, 240, 159, 152, 128]  — raw UTF-8 bytes
 ```
 
+### Normalization, display width, and collation (`unicode.*`)
+
+The `unicode` namespace exposes operations that need to look at the codepoint stream as a whole, not just walk it.
+
+| Function | Description |
+|----------|-------------|
+| `unicode.normalize(s, form)` | Canonicalize. `form` is `"NFC"`, `"NFD"`, `"NFKC"`, or `"NFKD"` |
+| `unicode.displayWidth(s)` | Monospace cell count: ASCII = 1, CJK / emoji = 2, combining marks = 0. Useful for TUI layout |
+| `unicode.collateKey(s)` | Sortable, case-insensitive key. NFD + casefold; accented variants sort to the end of their letter's range |
+| `unicode.foldKey(s)` | Like `collateKey` but ALSO strips combining marks — diacritic-INSENSITIVE comparison |
+
+```
+// Storage / comparison: normalize before storing so equality works
+// regardless of which form the input came in as.
+let cleaned = unicode.normalize(userInput, "NFC")
+
+// Terminal layout — wrap or pad based on visual cells, not byte count.
+let cellsUsed = unicode.displayWidth(label)
+let padding = " ".repeat(20 - cellsUsed)
+
+// Case-insensitive alphabetical sort.
+let sorted = sort(names, lam{ a, b in
+    unicode.collateKey(a) < unicode.collateKey(b)
+})
+
+// Accent-tolerant search ("Élan" finds "elan", "naïve" finds "naive").
+if (unicode.foldKey(query) == unicode.foldKey(candidate)) {
+    print("match")
+}
+```
+
+`collateKey` is good enough for case-insensitive alphabetical sort of user-visible names but is not a UCA-grade locale collator. It uses Unicode-default ordering: accented variants of a letter sort to the END of that letter's section rather than interleaving with un-accented variants (real UCA would put "élan" right after "elan"). Applications that need real locale-specific tailoring — Spanish "ll", Swedish ä-after-z, Turkish dotless-i — should link ICU and call `ucol_*` directly.
+
+### Grapheme-aware reverse
+
+`.reverse()` on strings reverses grapheme clusters, not bytes or codepoints. This is the only sane choice for visually correct reversal — naive byte-reverse would place combining marks before their base letter and shred emoji ZWJ sequences.
+
+```
+"hello".reverse()         // "olleh"
+"héllo".reverse()         // "olléh" — accent stays attached to e
+"\u{1F1F8}\u{1F1EA}\u{1F1FA}\u{1F1F8}".reverse()
+                          // "🇺🇸🇸🇪" — whole flags swap; codepoints inside each flag stay paired
+```
+
 ### Without utf8proc
 
-If Praia is built without utf8proc, all string operations fall back to byte-based behavior (each byte is treated as a character). Install utf8proc for proper Unicode support:
+If Praia is built without utf8proc, all string operations fall back to byte-based behavior (each byte is treated as a character). `unicode.*` throws — there's no useful fallback for normalization or grapheme-aware width. Install utf8proc for proper Unicode support:
 
 ```sh
 # macOS

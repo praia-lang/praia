@@ -66,7 +66,7 @@ void vmRegisterNatives(VM& vm) {
         "futures", "sort", "filter", "map", "each", "reduce", "any", "all",
         "flatMap", "unique", "zip", "enumerate", "groupBy", "findIndex", "flatten", "keys", "values",
         "sys", "fs", "http", "json", "yaml", "base64", "path", "url", "net",
-        "bytes", "crypto", "random", "time", "math",
+        "bytes", "crypto", "random", "time", "math", "unicode",
         "loadNative",
 #ifdef HAVE_SQLITE
         "sqlite",
