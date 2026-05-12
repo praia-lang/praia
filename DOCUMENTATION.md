@@ -4973,6 +4973,7 @@ These operations count and index by grapheme cluster:
 - `.split("")` — split into grapheme clusters
 - `.indexOf()` / `.lastIndexOf()` — returns grapheme index
 - `.padStart(n)` / `.padEnd(n)` — counts graphemes for target length
+- `.reverse()` — reverses grapheme clusters (so accents stay on their base, ZWJ sequences stay intact)
 - `.charCode(i)` — first codepoint of i-th grapheme
 
 ### What stays byte-based
@@ -4997,9 +4998,81 @@ Three methods give access to every level:
 "A\u{1F600}".bytes()         // [65, 240, 159, 152, 128]  — raw UTF-8 bytes
 ```
 
+### Normalization, display width, and collation (`unicode.*`)
+
+The `unicode` namespace exposes operations that need to look at the codepoint stream as a whole, not just walk it.
+
+| Function | Description |
+|----------|-------------|
+| `unicode.normalize(s, form)` | Canonicalize. `form` is `"NFC"`, `"NFD"`, `"NFKC"`, or `"NFKD"` |
+| `unicode.displayWidth(s)` | Monospace cell count: ASCII = 1, CJK / emoji = 2, combining marks = 0. Useful for TUI layout |
+| `unicode.collateKey(s)` | Sortable, case-insensitive key. NFD + casefold; accented variants sort to the end of their letter's range |
+| `unicode.foldKey(s)` | Like `collateKey` but ALSO strips combining marks — diacritic-INSENSITIVE comparison |
+
+```
+// Storage / comparison: normalize before storing so equality works
+// regardless of which form the input came in as.
+let cleaned = unicode.normalize(userInput, "NFC")
+
+// Terminal layout — wrap or pad based on visual cells, not byte count.
+let cellsUsed = unicode.displayWidth(label)
+let padding = " ".repeat(20 - cellsUsed)
+
+// Case-insensitive alphabetical sort.
+let sorted = sort(names, lam{ a, b in
+    unicode.collateKey(a) < unicode.collateKey(b)
+})
+
+// Accent-tolerant search ("Élan" finds "elan", "naïve" finds "naive").
+if (unicode.foldKey(query) == unicode.foldKey(candidate)) {
+    print("match")
+}
+```
+
+`collateKey` is good enough for case-insensitive alphabetical sort of user-visible names but is not a UCA-grade locale collator. It uses Unicode-default ordering: accented variants of a letter sort to the END of that letter's section rather than interleaving with un-accented variants (real UCA would put "élan" right after "elan"). Applications that need real locale-specific tailoring — Spanish "ll", Swedish ä-after-z, Turkish dotless-i — should link ICU and call `ucol_*` directly.
+
+### Encoding conversions
+
+`s.encode(encoding)` converts a UTF-8 string into bytes in the named encoding; `bytes.decode(b, encoding)` is the inverse.
+
+| Encoding | Notes |
+|----------|-------|
+| `"utf-8"` | Identity with validation — invalid UTF-8 throws rather than passing through |
+| `"utf-16le"` / `"utf-16be"` | Surrogate pairs for codepoints ≥ U+10000; odd byte counts and lone surrogates rejected on decode |
+| `"latin-1"` (alias `"iso-8859-1"`) | Single-byte per codepoint; codepoints > U+00FF throw on encode |
+| `"ascii"` | Codepoints/bytes must be < U+0080 / < 0x80 |
+
+Encoding names are case-insensitive and ignore `-` / `_`, so `"UTF-8"`, `"utf8"`, and `"Utf_8"` all resolve to the same encoder.
+
+```
+"café".encode("latin-1")           // bytes 63 61 66 e9 (4 bytes, "é" as a single byte 0xE9)
+"café".encode("utf-8")             // bytes 63 61 66 c3 a9 (5 bytes, "é" as two)
+"\u{1F600}".encode("utf-16le")     // bytes 3d d8 00 de (surrogate pair, little-endian units)
+
+let raw = fs.read("legacy.txt")    // unknown — treat as bytes
+let text = bytes.decode(raw, "latin-1")  // most "binary safe" interpretation
+
+// Unencodable codepoints throw rather than silently corrupting:
+"\u{1F600}".encode("latin-1")      // throws: "codepoint U+01F600 is not encodable in latin-1"
+"\u{E9}".encode("ascii")           // throws: "codepoint U+00E9 is not encodable in ASCII"
+```
+
+Asian legacy encodings (Shift-JIS, GBK, EUC-KR, Big5, Windows-125x) are out of scope and not bundled — they need either table-based decoders or libiconv. Open an issue if you have a concrete interop need.
+
+### Grapheme-aware reverse
+
+`.reverse()` on strings reverses grapheme clusters, not bytes or codepoints. This is the only sane choice for visually correct reversal — naive byte-reverse would place combining marks before their base letter and shred emoji ZWJ sequences.
+
+```
+"hello".reverse()         // "olleh"
+"héllo".reverse()         // "olléh" — accent stays attached to e
+"\u{1F1F8}\u{1F1EA}\u{1F1FA}\u{1F1F8}".reverse()
+                          // "🇺🇸🇸🇪" — whole flags swap; codepoints inside each flag stay paired
+```
+
 ### Without utf8proc
 
-If Praia is built without utf8proc, all string operations fall back to byte-based behavior (each byte is treated as a character). Install utf8proc for proper Unicode support:
+If Praia is built without utf8proc, all string operations fall back to byte-based behavior (each byte is treated as a character). `unicode.*` throws — there's no useful fallback for normalization or grapheme-aware width. Install utf8proc for proper Unicode support:
 
 ```sh
 # macOS
@@ -5010,6 +5083,85 @@ sudo apt install libutf8proc-dev
 
 # Fedora / RHEL
 sudo dnf install utf8proc-devel
+```
+
+---
+
+## Formatting (fmt)
+
+`fmt` is a Go-style formatter for building strings with width, precision, sign control, and typed verbs. Reach for it when string interpolation gets too noisy (`"%-10s | %6.2f"` is clearer than concatenating padded substrings) or when you need precise control over numeric output.
+
+| Function | Description |
+|----------|-------------|
+| `fmt.sprintf(format, args...)` | Format and return the resulting string |
+| `fmt.printf(format, args...)` | Format and write to stdout (no trailing newline) |
+| `fmt.println(args...)` | Print args separated by spaces, with a trailing newline (no format string) |
+| `fmt.errorf(format, args...)` | Same body as `sprintf`. Named so `throw fmt.errorf(...)` reads naturally |
+
+### Verbs
+
+| Verb | Argument | Output |
+|------|----------|--------|
+| `%d` | integer (or integer-valued float) | base 10 |
+| `%b` `%o` `%x` `%X` | integer | binary / octal / lower-hex / upper-hex |
+| `%f` `%F` | number | fixed-point decimal (default 6 fractional digits) |
+| `%e` `%E` | number | scientific (default 6 fractional digits) |
+| `%g` `%G` | number | shortest of `%e`/`%f` |
+| `%s` | any | `toString()` of the value |
+| `%q` | any | Go-style quoted string (escapes `"`, `\`, control chars) |
+| `%t` | bool | `"true"` / `"false"` |
+| `%c` | integer codepoint | UTF-8 character (e.g. `%c` of `0x1F600` is `😀`) |
+| `%v` | any | default formatting (same as `%s`) |
+| `%T` | any | type name (`"int"`, `"string"`, `"map"`, …) |
+| `%%` | — | literal `%` |
+
+### Flags
+
+| Flag | Effect |
+|------|--------|
+| `-` | left-align inside `width` |
+| `+` | force sign on positives |
+| ` ` (space) | leading space for positives (sign placeholder) |
+| `0` | zero-pad numeric verbs (ignored with `-`) |
+| `#` | alternate form: `0b` / `0o` / `0x` prefix for `%b`/`%o`/`%x` |
+
+### Width and precision
+
+`%[flags][width][.precision]verb`. `width` is the minimum output size; `.precision` truncates strings or sets decimal digits for floats. Width is counted in grapheme clusters for non-numeric verbs, matching Praia's `len()`.
+
+```
+fmt.sprintf("%10s",   "hi")          // "        hi"
+fmt.sprintf("%-10s",  "hi")          // "hi        "
+fmt.sprintf("%05d",   42)            // "00042"
+fmt.sprintf("%05d",  -42)            // "-0042"     (zero-pad goes AFTER the sign)
+fmt.sprintf("%.3f",   3.14159)       // "3.142"
+fmt.sprintf("%010.2f", -3.5)         // "-000003.50"
+fmt.sprintf("%.3s",   "hello world") // "hel"
+fmt.sprintf("%#x",    255)           // "0xff"
+fmt.sprintf("%+d",    42)            // "+42"
+fmt.sprintf("%c",     0x1F600)       // "😀"
+fmt.sprintf("%q",     "say \"hi\"")  // "\"say \\\"hi\\\"\""
+fmt.sprintf("%T",     [1, 2])        // "array"
+```
+
+### Errors
+
+Format-or-argument mismatches throw — `fmt.sprintf` deliberately fails loudly rather than producing Go's `%!d(string=foo)` "fail-open" output. Throw cases:
+
+- Wrong arg type for a verb (`"%d"` with a string, `"%t"` with a number).
+- Too few or too many arguments for the format string.
+- Unknown verb (`"%z"`).
+- Incomplete spec (`"%5.2"` with no verb).
+- Non-integer or out-of-range codepoint for `%c`.
+
+### `throw fmt.errorf(...)` pattern
+
+Praia throws strings; `errorf` makes formatted error messages a one-liner:
+
+```
+if (port < 0 || port > 65535) {
+    throw fmt.errorf("port %d out of range (expected 0..65535)", port)
+}
 ```
 
 ---

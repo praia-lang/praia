@@ -1,4 +1,5 @@
 #include "../builtins.h"
+#include "../encoding.h"
 #include <cstring>
 #include "../gc_heap.h"
 
@@ -242,6 +243,24 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             if (!args[0].isString())
                 throw RuntimeError("bytes.len() requires a string", 0);
             return Value(static_cast<int64_t>(args[0].asString().size()));
+        }));
+
+    // bytes.decode(b, encoding) — interpret raw bytes in the named
+    // encoding and return a Praia (UTF-8) string. Inverse of
+    // `str.encode(encoding)`. Throws on invalid input — partial
+    // utf-16 pairs, non-ASCII bytes in ascii mode, unknown encoding
+    // names. Supported: utf-8, utf-16le, utf-16be, latin-1, ascii.
+    bytesMap->entries[Value("decode")] = Value(makeNative("bytes.decode", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("bytes.decode() requires bytes (a string) as the first argument", 0);
+            if (!args[1].isString())
+                throw RuntimeError("bytes.decode() requires an encoding name string", 0);
+            try {
+                return Value(praia::encoding::decode(args[0].asString(), args[1].asString()));
+            } catch (const praia::encoding::EncodingError& e) {
+                throw RuntimeError(std::string("bytes.decode(): ") + e.what(), 0);
+            }
         }));
 
     // bytes.slice(s, start, end?) — byte-indexed substring (string is treated as raw bytes)

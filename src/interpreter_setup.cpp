@@ -6,6 +6,9 @@
 #include "unicode.h"
 #include "url.h"
 #include "vm/vm.h"
+#ifdef HAVE_UTF8PROC
+#include <utf8proc.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
@@ -2569,6 +2572,140 @@ Interpreter::Interpreter() {
 
     globals->define("url", Value(urlMap));
 
+    // ── unicode namespace ──
+    //
+    // Phase 1 of the text/Unicode rework: normalization, display
+    // width, and sortable keys. All backed by utf8proc. Real
+    // locale-aware collation (Spanish "ll", Swedish ä-after-z,
+    // Turkish dotless-i) needs ICU as a dependency and is out of
+    // scope here — collateKey gives Unicode-default ordering, which
+    // is the right answer for 90% of "sort these names" needs and
+    // wrong for the long tail of locale-specific tailoring.
+
+    auto unicodeMap = gcNew<PraiaMap>();
+
+#ifdef HAVE_UTF8PROC
+    // Shared helper: call utf8proc_map with a flag combo and return
+    // the result as a std::string (taking ownership of the malloc'd
+    // buffer utf8proc hands back).
+    auto u8procMap = [](const std::string& in, int options) -> std::string {
+        utf8proc_uint8_t* out = nullptr;
+        utf8proc_ssize_t n = utf8proc_map(
+            reinterpret_cast<const utf8proc_uint8_t*>(in.data()),
+            static_cast<utf8proc_ssize_t>(in.size()),
+            &out,
+            static_cast<utf8proc_option_t>(options));
+        if (n < 0) {
+            if (out) free(out);
+            throw RuntimeError(std::string("utf8proc failed: ") +
+                               utf8proc_errmsg(n), 0);
+        }
+        std::string result(reinterpret_cast<char*>(out), static_cast<size_t>(n));
+        free(out);
+        return result;
+    };
+
+    // unicode.normalize(s, form) — NFC / NFD / NFKC / NFKD.
+    //   NFC  = canonical composition (default in most pipelines)
+    //   NFD  = canonical decomposition (combining marks separated)
+    //   NFKC = compatibility composition (½ → 1/2-style folding)
+    //   NFKD = compatibility decomposition
+    // Pick NFC when you need a canonical form for storage or
+    // comparison; NFD when you need to inspect combining marks
+    // (or strip them); NFKC when you want forms that look the same
+    // to compare equal ("ｦ" vs "ヲ"); NFKD likewise but decomposed.
+    unicodeMap->entries[Value("normalize")] = Value(makeNative("unicode.normalize", 2,
+        [u8procMap](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("unicode.normalize() requires a string", 0);
+            if (!args[1].isString())
+                throw RuntimeError("unicode.normalize(s, form): form must be 'NFC', 'NFD', 'NFKC', or 'NFKD'", 0);
+            const auto& s = args[0].asString();
+            const auto& form = args[1].asString();
+            int opts = UTF8PROC_STABLE;
+            if      (form == "NFC")  opts |= UTF8PROC_COMPOSE;
+            else if (form == "NFD")  opts |= UTF8PROC_DECOMPOSE;
+            else if (form == "NFKC") opts |= UTF8PROC_COMPOSE   | UTF8PROC_COMPAT;
+            else if (form == "NFKD") opts |= UTF8PROC_DECOMPOSE | UTF8PROC_COMPAT;
+            else throw RuntimeError("unicode.normalize: unknown form \"" + form +
+                                    "\" (expected NFC / NFD / NFKC / NFKD)", 0);
+            return Value(u8procMap(s, opts));
+        }));
+
+    // unicode.displayWidth(s) — sum of monospace cell widths across
+    // grapheme clusters. ASCII = 1 per char, CJK / emoji = 2, combining
+    // marks = 0 (they attach to the previous cluster). Approximation:
+    // we take the width of each cluster's FIRST codepoint, so multi-
+    // codepoint emoji ZWJ sequences (👨‍👩‍👧‍👦) render as the width of
+    // the base emoji (2). Control chars contribute 0 — terminals
+    // render tab/newline however they like; this function doesn't
+    // expand them.
+    unicodeMap->entries[Value("displayWidth")] = Value(makeNative("unicode.displayWidth", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("unicode.displayWidth() requires a string", 0);
+            const auto& s = args[0].asString();
+            int total = 0;
+            for (const auto& g : utf8_graphemes(s)) {
+                int32_t cp = utf8_first_codepoint(g);
+                int w = utf8proc_charwidth(cp);
+                if (w > 0) total += w;
+            }
+            return Value(static_cast<int64_t>(total));
+        }));
+
+    // unicode.collateKey(s) — NFD + casefold + STABLE. Use it as a
+    // sort key: `sort(names, lam{ a, b in unicode.collateKey(a) <
+    // unicode.collateKey(b) })`. Diacritic-SENSITIVE: "elan" and
+    // "Élan" produce different keys, and "elan" sorts before "Élan".
+    //
+    // The decomposed combining marks have high lead bytes (0xCC..),
+    // so accented variants of a letter sort to the END of that
+    // letter's section rather than interleaving with un-accented
+    // variants — e.g. ["elan", "Eve", "Élan"] in collateKey order,
+    // not the strict UCA ordering of ["elan", "Élan", "Eve"]. That's
+    // good enough for most user-facing sort needs (case-insensitive,
+    // accent-tolerant); applications that need real locale-aware
+    // collation (Spanish "ll", Swedish ä-after-z, Turkish dotless-i)
+    // should link ICU and use ucol_*.
+    unicodeMap->entries[Value("collateKey")] = Value(makeNative("unicode.collateKey", 1,
+        [u8procMap](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("unicode.collateKey() requires a string", 0);
+            return Value(u8procMap(args[0].asString(),
+                                   UTF8PROC_STABLE | UTF8PROC_DECOMPOSE | UTF8PROC_CASEFOLD));
+        }));
+
+    // unicode.foldKey(s) — like collateKey but ALSO strips combining
+    // marks (UTF8PROC_STRIPMARK). Diacritic-INSENSITIVE: "Élan" and
+    // "elan" produce the same key, so they compare equal under
+    // foldKey-based search. Useful for "search ignoring accents".
+    unicodeMap->entries[Value("foldKey")] = Value(makeNative("unicode.foldKey", 1,
+        [u8procMap](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("unicode.foldKey() requires a string", 0);
+            return Value(u8procMap(args[0].asString(),
+                                   UTF8PROC_STABLE | UTF8PROC_DECOMPOSE |
+                                   UTF8PROC_CASEFOLD | UTF8PROC_STRIPMARK));
+        }));
+#else
+    // utf8proc absent: every function throws so callers get a clear
+    // signal instead of silently-wrong output. Building without
+    // utf8proc is a degraded mode mainly for fuzz harnesses.
+    auto needUtf8proc = [](const std::string& fnName) {
+        return Value(makeNative(fnName, -1,
+            [fnName](const std::vector<Value>&) -> Value {
+                throw RuntimeError(fnName + " requires utf8proc (rebuild with HAVE_UTF8PROC)", 0);
+            }));
+    };
+    unicodeMap->entries[Value("normalize")]    = needUtf8proc("unicode.normalize");
+    unicodeMap->entries[Value("displayWidth")] = needUtf8proc("unicode.displayWidth");
+    unicodeMap->entries[Value("collateKey")]   = needUtf8proc("unicode.collateKey");
+    unicodeMap->entries[Value("foldKey")]      = needUtf8proc("unicode.foldKey");
+#endif
+
+    globals->define("unicode", Value(unicodeMap));
+
     // ── net namespace (TCP sockets) ──
 
 
@@ -2583,6 +2720,10 @@ Interpreter::Interpreter() {
     auto cryptoMap = gcNew<PraiaMap>();
     registerCryptoBuiltins(cryptoMap);
     globals->define("crypto", Value(cryptoMap));
+
+    auto fmtMap = gcNew<PraiaMap>();
+    registerFmtBuiltins(fmtMap);
+    globals->define("fmt", Value(fmtMap));
 
     // ── random namespace ──
     //
