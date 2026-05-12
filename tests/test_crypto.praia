@@ -111,4 +111,68 @@ testing.test("hashPassword custom iterations", lam{ in
     testing.assert(crypto.verifyPassword("test", result.hash, result.salt, 1000), nil)
 })
 
+// ── AES-256-GCM AEAD (seal / open) ────────────────────────────
+
+testing.test("seal/open roundtrip", lam{ in
+    let key = crypto.randomBytes(32)
+    let pt  = "Hello, AEAD world."
+    let sealed = crypto.seal(pt, key)
+    testing.assertEqual(crypto.open(sealed, key), pt, nil)
+})
+
+testing.test("seal/open empty plaintext", lam{ in
+    let key = crypto.randomBytes(32)
+    let sealed = crypto.seal("", key)
+    testing.assertEqual(crypto.open(sealed, key), "", nil)
+})
+
+testing.test("seal produces a different blob each call (fresh nonce)", lam{ in
+    let key = crypto.randomBytes(32)
+    let a = crypto.seal("same plaintext", key)
+    let b = crypto.seal("same plaintext", key)
+    testing.assert(a != b, "two seals of the same plaintext must differ")
+})
+
+testing.test("open rejects tampered ciphertext", lam{ in
+    let key = crypto.randomBytes(32)
+    let sealed = crypto.seal("important data", key)
+    // Flip a bit somewhere in the ciphertext portion (offset 15 lands
+    // past the 12-byte nonce, before the tag).
+    let arr = bytes.toArray(sealed)
+    arr[15] = arr[15] ^ 1
+    let tampered = bytes.from(arr)
+    testing.assertThrows(lam{ in crypto.open(tampered, key) },
+                         "authentication failed")
+})
+
+testing.test("open rejects wrong key", lam{ in
+    let key1 = crypto.randomBytes(32)
+    let key2 = crypto.randomBytes(32)
+    let sealed = crypto.seal("x", key1)
+    testing.assertThrows(lam{ in crypto.open(sealed, key2) },
+                         "authentication failed")
+})
+
+testing.test("AAD binds context to tag", lam{ in
+    let key = crypto.randomBytes(32)
+    let sealed = crypto.seal("payload", key, "user-id:42")
+    // Correct AAD verifies.
+    testing.assertEqual(crypto.open(sealed, key, "user-id:42"), "payload", nil)
+    // Different AAD fails.
+    testing.assertThrows(lam{ in crypto.open(sealed, key, "user-id:43") },
+                         "authentication failed")
+    // Missing AAD on a sealed-with-AAD blob fails.
+    testing.assertThrows(lam{ in crypto.open(sealed, key) },
+                         "authentication failed")
+})
+
+testing.test("seal rejects wrong-size key", lam{ in
+    testing.assertThrows(lam{ in crypto.seal("x", "short") }, "32 bytes")
+})
+
+testing.test("open rejects short sealed blob", lam{ in
+    let key = crypto.randomBytes(32)
+    testing.assertThrows(lam{ in crypto.open("tooshort", key) }, "too short")
+})
+
 testing.done()

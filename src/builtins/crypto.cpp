@@ -386,7 +386,158 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             return Value(generateRandomBytes(count));
         }));
 
-    // ── AES-256-CBC (requires OpenSSL) ──
+    // ── AES-256-GCM AEAD (requires OpenSSL) ──
+    //
+    // `seal` / `open` are the recommended symmetric-encryption API.
+    // They use AES-256-GCM, an authenticated cipher: a successful
+    // `open` proves the ciphertext was produced by someone holding the
+    // key AND that no bit of it has been altered. Compare with
+    // `encrypt` / `decrypt` below (CBC), which provide confidentiality
+    // only — an attacker who can modify ciphertext bits causes
+    // controlled plaintext modifications that decryption can't detect.
+    //
+    // Sealed output layout: nonce(12) ‖ ciphertext ‖ tag(16). The
+    // caller never sees the nonce as a separate value; it's generated
+    // freshly per call from the CSPRNG and bundled in.
+    //
+    // Optional `aad` (additional authenticated data) is bound to the
+    // tag but is NOT encrypted — use it for context that must match at
+    // open time (user ID, timestamp, protocol version) but doesn't
+    // need to be secret. Mismatched AAD fails authentication.
+
+#ifdef HAVE_OPENSSL
+    cryptoMap->entries[Value("seal")] = Value(makeNative("crypto.seal", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || !args[0].isString() || !args[1].isString())
+                throw RuntimeError("crypto.seal(plaintext, key, [aad]) — first two args must be strings", 0);
+            auto& plaintext = args[0].asString();
+            auto& key = args[1].asString();
+            if (key.size() != 32)
+                throw RuntimeError("crypto.seal(): key must be 32 bytes (256-bit)", 0);
+            std::string aad;
+            if (args.size() > 2) {
+                if (!args[2].isString())
+                    throw RuntimeError("crypto.seal(): aad must be a string if provided", 0);
+                aad = args[2].asString();
+            }
+
+            std::string nonce = generateRandomBytes(12);
+
+            praia::EvpCipherCtxGuard ctx(EVP_CIPHER_CTX_new());
+            if (!ctx) throw RuntimeError("crypto.seal(): failed to create context", 0);
+
+            if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
+                throw RuntimeError("crypto.seal(): init failed", 0);
+            if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1)
+                throw RuntimeError("crypto.seal(): set IV length failed", 0);
+            if (EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr,
+                    reinterpret_cast<const unsigned char*>(key.data()),
+                    reinterpret_cast<const unsigned char*>(nonce.data())) != 1)
+                throw RuntimeError("crypto.seal(): key/nonce setup failed", 0);
+
+            int len = 0;
+            if (!aad.empty()) {
+                if (EVP_EncryptUpdate(ctx.get(), nullptr, &len,
+                        reinterpret_cast<const unsigned char*>(aad.data()),
+                        static_cast<int>(aad.size())) != 1)
+                    throw RuntimeError("crypto.seal(): AAD update failed", 0);
+            }
+
+            // GCM doesn't pad, so ciphertext is exactly plaintext.size().
+            std::string ct(plaintext.size(), '\0');
+            if (EVP_EncryptUpdate(ctx.get(), reinterpret_cast<unsigned char*>(&ct[0]), &len,
+                    reinterpret_cast<const unsigned char*>(plaintext.data()),
+                    static_cast<int>(plaintext.size())) != 1)
+                throw RuntimeError("crypto.seal(): encrypt update failed", 0);
+            int totalLen = len;
+            int finalLen = 0;
+            if (EVP_EncryptFinal_ex(ctx.get(),
+                    reinterpret_cast<unsigned char*>(&ct[totalLen]), &finalLen) != 1)
+                throw RuntimeError("crypto.seal(): final failed", 0);
+            totalLen += finalLen;
+            ct.resize(totalLen);
+
+            std::string tag(16, '\0');
+            if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, 16,
+                    reinterpret_cast<unsigned char*>(&tag[0])) != 1)
+                throw RuntimeError("crypto.seal(): tag retrieval failed", 0);
+
+            return Value(nonce + ct + tag);
+        }));
+
+    cryptoMap->entries[Value("open")] = Value(makeNative("crypto.open", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || !args[0].isString() || !args[1].isString())
+                throw RuntimeError("crypto.open(sealed, key, [aad]) — first two args must be strings", 0);
+            auto& sealed = args[0].asString();
+            auto& key = args[1].asString();
+            if (key.size() != 32)
+                throw RuntimeError("crypto.open(): key must be 32 bytes (256-bit)", 0);
+            if (sealed.size() < 28)
+                throw RuntimeError("crypto.open(): sealed blob too short (need >=28 bytes: 12 nonce + 16 tag)", 0);
+            std::string aad;
+            if (args.size() > 2) {
+                if (!args[2].isString())
+                    throw RuntimeError("crypto.open(): aad must be a string if provided", 0);
+                aad = args[2].asString();
+            }
+
+            const unsigned char* base = reinterpret_cast<const unsigned char*>(sealed.data());
+            const unsigned char* noncePtr = base;
+            const unsigned char* ctPtr    = base + 12;
+            size_t ctLen                  = sealed.size() - 12 - 16;
+            const unsigned char* tagPtr   = base + sealed.size() - 16;
+
+            praia::EvpCipherCtxGuard ctx(EVP_CIPHER_CTX_new());
+            if (!ctx) throw RuntimeError("crypto.open(): failed to create context", 0);
+
+            if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
+                throw RuntimeError("crypto.open(): init failed", 0);
+            if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1)
+                throw RuntimeError("crypto.open(): set IV length failed", 0);
+            if (EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr,
+                    reinterpret_cast<const unsigned char*>(key.data()), noncePtr) != 1)
+                throw RuntimeError("crypto.open(): key/nonce setup failed", 0);
+
+            int len = 0;
+            if (!aad.empty()) {
+                if (EVP_DecryptUpdate(ctx.get(), nullptr, &len,
+                        reinterpret_cast<const unsigned char*>(aad.data()),
+                        static_cast<int>(aad.size())) != 1)
+                    throw RuntimeError("crypto.open(): AAD update failed", 0);
+            }
+
+            std::string pt(ctLen, '\0');
+            if (EVP_DecryptUpdate(ctx.get(), reinterpret_cast<unsigned char*>(&pt[0]), &len,
+                    ctPtr, static_cast<int>(ctLen)) != 1)
+                throw RuntimeError("crypto.open(): decrypt update failed", 0);
+            int totalLen = len;
+
+            // Set expected tag BEFORE final — final's return is the auth verdict.
+            if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, 16,
+                    const_cast<unsigned char*>(tagPtr)) != 1)
+                throw RuntimeError("crypto.open(): tag setup failed", 0);
+
+            int finalLen = 0;
+            if (EVP_DecryptFinal_ex(ctx.get(),
+                    reinterpret_cast<unsigned char*>(&pt[totalLen]), &finalLen) <= 0) {
+                throw RuntimeError("crypto.open(): authentication failed "
+                                   "(wrong key, tampered ciphertext, or AAD mismatch)", 0);
+            }
+            totalLen += finalLen;
+            pt.resize(totalLen);
+            return Value(std::move(pt));
+        }));
+#endif
+
+    // ── AES-256-CBC (requires OpenSSL) — UNAUTHENTICATED, low-level ──
+    //
+    // Confidentiality only. Anyone who can modify the ciphertext can
+    // make controlled changes to the decrypted plaintext that
+    // `decrypt()` won't notice (padding-oracle and bit-flipping
+    // attacks). Use `crypto.seal` / `crypto.open` (AEAD) for any new
+    // code. CBC stays available for interop with legacy systems that
+    // demand it.
 
 #ifdef HAVE_OPENSSL
     // crypto.encrypt(plaintext, key, iv) — AES-256-CBC, returns raw ciphertext
