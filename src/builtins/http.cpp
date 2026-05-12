@@ -333,6 +333,13 @@ Value parseHttpResponse(const std::string& raw) {
     }
 
     auto hdrs = gcNew<PraiaMap>();
+    // Set-Cookie is the one header that legitimately repeats — every
+    // cookie a server sets in one response is a separate Set-Cookie
+    // line. The headers map can only hold one value per key, so we
+    // expose the full list as a dedicated `cookies` array (in arrival
+    // order). For back-compat the headers map still carries the
+    // last value at "set-cookie" too.
+    auto cookies = gcNew<PraiaArray>();
     std::istringstream hs(headerSection);
     std::string line;
     std::getline(hs, line);
@@ -342,14 +349,18 @@ Value parseHttpResponse(const std::string& raw) {
         if (c != std::string::npos) {
             std::string key = line.substr(0, c);
             std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-            hdrs->entries[Value(key)] = Value(line.substr(c + 2));
+            std::string val = line.substr(c + 2);
+            if (key == "set-cookie")
+                cookies->elements.push_back(Value(val));
+            hdrs->entries[Value(key)] = Value(val);
         }
     }
 
     auto result = gcNew<PraiaMap>();
-    result->entries[Value("status")] = Value(static_cast<double>(status));
-    result->entries[Value("body")] = Value(body);
+    result->entries[Value("status")]  = Value(static_cast<double>(status));
+    result->entries[Value("body")]    = Value(body);
     result->entries[Value("headers")] = Value(hdrs);
+    result->entries[Value("cookies")] = Value(cookies);
     return Value(result);
 }
 

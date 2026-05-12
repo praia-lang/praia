@@ -3667,6 +3667,103 @@ If no options are passed, `cookie.build` uses safe defaults:
 - `SameSite=Lax` — prevents CSRF
 - `Path=/` — available on all paths
 
+### Parsing Set-Cookie response headers
+
+`cookie.parseSet(header)` parses a single `Set-Cookie` value into a structured map:
+
+```
+cookie.parseSet("session=abc123; Path=/api; Max-Age=3600; HttpOnly; Secure; SameSite=Strict")
+// {name: "session", value: "abc123", path: "/api", domain: nil,
+//  maxAge: 3600, expires: nil, secure: true, httpOnly: true,
+//  sameSite: "Strict"}
+```
+
+Attribute names are case-insensitive; unknown attributes are ignored. Returns `nil` on malformed input (no `=`, empty header).
+
+### Signed cookies
+
+`cookie.sign(value, key)` returns `value.signature` (dot-joined). The plaintext is readable to anyone with the cookie, but tampering with it makes `verify` return `nil`. Use it for cookies whose contents aren't secret but must be trustworthy — user IDs, role flags, CSRF tokens.
+
+```
+let signed = cookie.sign("uid=42", serverSecret)
+// "uid=42.bbfdf361250fd1f46b7331923300449d4b039190a37fe428ba6f2bd8d170aaac"
+
+let userId = cookie.verify(signed, serverSecret)
+// "uid=42"  — or nil if the cookie was tampered, truncated, or signed
+//             with a different key
+```
+
+`verify` uses `secrets.compare` for constant-time MAC comparison so timing-side-channel attacks can't recover the right signature byte-by-byte.
+
+### Encrypted cookies
+
+`cookie.encrypt(value, key)` wraps `value` in an AES-256-GCM AEAD envelope and base64url-encodes the result. The output is opaque — an observer learns only the length and that the cookie exists. `decrypt` returns the plaintext if the AEAD tag verifies, or `nil` on tamper / wrong key / garbage.
+
+```
+let key = secrets.token(32)   // generate ONCE, store in your secrets manager
+let sealed = cookie.encrypt("uid=42; role=admin", key)
+// "Xef3LdScPGbaWYxnPNqRPXCterJX8OdTh6JMI9bkikF433R9zrG3v8zFStt6jw"
+
+let plain = cookie.decrypt(sealed, key)
+// "uid=42; role=admin"  — or nil
+```
+
+The key must be exactly 32 bytes (a 256-bit AES key). Two `encrypt` calls with the same plaintext produce different outputs (fresh nonce per call), so an observer can't tell whether two cookies hold the same value.
+
+### Cookie jar
+
+`cookie.Jar()` is browser-style cookie state: feed it `Set-Cookie` response headers, get back the right `Cookie` request header for any subsequent URL.
+
+```
+let jar = cookie.Jar()
+
+// Login — server sends Set-Cookie. The jar parses every Set-Cookie
+// in response.cookies, applies domain/path/expiry defaults, and
+// stores it.
+let r1 = http.request({
+    url:    "https://api.example.com/login",
+    method: "POST",
+    body:   "...",
+})
+jar.acceptResponse("https://api.example.com/login", r1)
+
+// Subsequent request — pull the Cookie header for the target URL.
+let r2 = http.request({
+    url: "https://api.example.com/profile",
+    headers: {Cookie: jar.headerFor("https://api.example.com/profile")},
+})
+jar.acceptResponse("https://api.example.com/profile", r2)
+```
+
+The jar enforces:
+
+- **Host-only vs subdomain**: a `Set-Cookie` without a `Domain` attribute is host-only — only the exact host gets it. With a `Domain` attribute, the cookie matches `Domain` and all of its subdomains.
+- **Cross-origin Domain rejection**: a response from `evil.com` that tries to `Set-Cookie ...; Domain=bank.example.com` is dropped at acceptance time, not at retrieval.
+- **Path matching**: RFC 6265 §5.1.4. `Path=/api` matches `/api`, `/api/`, `/api/v1/x`, but not `/apix`.
+- **`Secure` cookies**: only emitted on `https://` URLs.
+- **Expiry**: `Max-Age` cookies disappear once expired; `Max-Age=0` deletes immediately.
+
+What the jar does NOT enforce:
+
+- **`HttpOnly`** is recorded but not enforced — it only matters when JS reads cookies, which doesn't apply to our HTTP client.
+- **`SameSite`** is recorded but not enforced — there's no "site" concept at the HTTP-client level.
+- **Public Suffix List**: a server can technically set `Domain=.com`. Cosmetic issue for browsers; rare to hit in programmatic clients. Open an issue if it bites.
+- **`Expires` (legacy format)**: only `Max-Age` is honored for expiry. Cookies with `Expires` but no `Max-Age` act as session cookies (safer default).
+
+#### Jar methods
+
+| Method | Description |
+|--------|-------------|
+| `jar.acceptResponse(reqUrl, response)` | Read every `Set-Cookie` in `response.cookies` and store with computed defaults |
+| `jar.headerFor(reqUrl)` | Return the `Cookie` header value for a request to `reqUrl` (or `""` if none match) |
+| `jar.cookies()` | Defensive copy of all stored cookies (useful for inspection / persistence) |
+| `jar.size()` | Total count (does not filter expired entries) |
+| `jar.clear()` | Empty the jar |
+
+#### Response `cookies` array
+
+`http.request` / `http.get` / `http.post` responses now expose `response.cookies`, an array of raw `Set-Cookie` header values in arrival order. The map at `response.headers["set-cookie"]` still works (and holds the last value) for back-compat, but real responses commonly emit several `Set-Cookie` headers — only the array preserves all of them.
+
 ---
 
 ## Sessions
