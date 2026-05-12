@@ -9,6 +9,7 @@
 //       output: {type: "string", short: "o", help: "Output file path"},
 //       count: {type: "number", default: 1}
 //   })
+//   if (cli.help) { print(cli.helpText); sys.exit(0) }
 //
 //   print(cli.port)       // 8080 (or value from --port / -p)
 //   print(cli.verbose)    // true if --verbose or -v was passed
@@ -23,7 +24,15 @@
 //   --bool-flag        boolean flags (no value needed)
 //   -v                 short boolean flags
 //   --                 stop parsing flags, rest are positional
-//   --help / -h        auto-generated help (if help text provided)
+//   --help / -h        sets cli.help = true and renders cli.helpText
+//
+// Help is returned as data rather than printed-and-exited. That keeps
+// args.parse pure: callers can unit-test the parser without
+// hijacking stdout, embed it in larger tools (where killing the
+// process is wrong), or render help to a different sink (a log, a
+// REPL response, a TUI status bar). The two-line "if (cli.help)..."
+// idiom above is how scripts opt back into the print-and-exit
+// behavior at the call site.
 
 func hasKey(m, k) {
     return keys(m).contains(k)
@@ -83,10 +92,14 @@ func parse(spec, rawArgs) {
             continue
         }
 
-        // --help / -h
+        // --help / -h short-circuits BEFORE we validate any other
+        // flags — `--help --unknown` should still render help rather
+        // than throwing "Unknown flag", and we don't want to coerce
+        // a bad value before the user sees the usage text.
         if (hasHelp && (arg == "--help" || arg == "-h")) {
-            printHelp(spec)
-            sys.exit(0)
+            result.help = true
+            result.helpText = renderHelp(spec)
+            return result
         }
 
         // Long flag with = (--port=8080)
@@ -198,9 +211,13 @@ func coerce(val, typ) {
     return val
 }
 
-func printHelp(spec) {
+// Render the usage block as a single newline-separated string.
+// Kept side-effect free so callers can route it wherever they want
+// (stdout, stderr, a log file, a TUI buffer) and so the test suite
+// can assert on its contents directly.
+func renderHelp(spec) {
     let specKeys = keys(spec)
-    print("Options:")
+    let out = "Options:\n"
     for (name in specKeys) {
         let opt = spec[name]
         let flags = "  --" + name
@@ -219,9 +236,17 @@ func printHelp(spec) {
         if (hasKey(opt, "default")) {
             line = line + " (default: " + str(opt.default) + ")"
         }
-        print(line)
+        out = out + line + "\n"
     }
-    print("  --help, -h                Show this help")
+    out = out + "  --help, -h                Show this help\n"
+    return out
 }
 
-export { parse }
+// Convenience wrapper for scripts that just want the help on stdout
+// — equivalent to `print(args.renderHelp(spec))` but reads naturally
+// in the common case.
+func printHelp(spec) {
+    print(renderHelp(spec))
+}
+
+export { parse, renderHelp, printHelp }

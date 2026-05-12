@@ -83,4 +83,60 @@ testing.test("missing value throws", lam{ in
     }, nil)
 })
 
+// ── Help path (no sys.exit, returns data) ───────────────────────
+// Regression: args.parse used to call sys.exit(0) when --help was
+// passed, which broke testing, embedding, and reuse. Help is now a
+// data result the caller acts on.
+
+testing.test("--help sets help flag and renders helpText", lam{ in
+    let cli = args.parse({
+        port: {type: "number", short: "p", default: 8080, help: "Port"},
+        verbose: {type: "bool", short: "v", help: "Verbose"}
+    }, ["--help"])
+    testing.assertEqual(cli.help, true, "help flag should be set")
+    testing.assert(cli.helpText.contains("--port"), "renders --port option")
+    testing.assert(cli.helpText.contains("--verbose"), "renders --verbose option")
+    testing.assert(cli.helpText.contains("--help"), "renders --help line")
+})
+
+testing.test("-h short form behaves the same", lam{ in
+    let cli = args.parse({
+        verbose: {type: "bool", help: "Verbose"}
+    }, ["-h"])
+    testing.assertEqual(cli.help, true, nil)
+    testing.assert(cli.helpText.contains("Verbose"), nil)
+})
+
+testing.test("--help short-circuits before unknown-flag throw", lam{ in
+    // The whole point of asking for help is that you don't know the
+    // correct flags yet — failing on a typo before showing usage is
+    // hostile. --help wins over later validation.
+    let cli = args.parse({
+        port: {type: "number", help: "Port"}
+    }, ["--help", "--not-a-flag"])
+    testing.assertEqual(cli.help, true, nil)
+})
+
+testing.test("no help flag when --help absent", lam{ in
+    let cli = args.parse({
+        port: {type: "number", default: 8080, help: "Port"}
+    }, ["--port", "9000"])
+    // help is unset (or false-y) on the normal path.
+    testing.assert(cli.help == nil || cli.help == false,
+                   "help should not be set on the normal path")
+    testing.assertEqual(cli.port, 9000, nil)
+})
+
+testing.test("renderHelp is pure and idempotent", lam{ in
+    let spec = {
+        port: {type: "number", short: "p", default: 8080, help: "Port"},
+        verbose: {type: "bool", help: "Verbose"}
+    }
+    let a = args.renderHelp(spec)
+    let b = args.renderHelp(spec)
+    testing.assertEqual(a, b, "renderHelp must be deterministic")
+    testing.assert(a.contains("Options:"), nil)
+    testing.assert(a.contains("(default: 8080)"), nil)
+})
+
 testing.done()
