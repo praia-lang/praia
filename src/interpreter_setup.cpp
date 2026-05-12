@@ -358,8 +358,14 @@ Interpreter::Interpreter() {
 
     // ── Functional built-ins (work great with |>) ──
 
+    // The functional natives below dispatch callbacks through g_currentInterp
+    // rather than capturing `this` at registration time. Capturing `this` would
+    // route async-task invocations back through the parent Interpreter on the
+    // task thread, racing on its env/savedEnvStack_. See the comment on
+    // g_currentInterp in interpreter.h.
+
     globals->define("sort", Value(makeNative("sort", -1,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (args.empty() || !args[0].isArray())
                 throw RuntimeError("sort() requires an array", 0);
             auto sorted = gcNew<PraiaArray>();
@@ -368,10 +374,9 @@ Interpreter::Interpreter() {
 
             if (args.size() > 1 && args[1].isCallable()) {
                 auto cmp = args[1].asCallable();
-                Interpreter* interp = this;
                 std::sort(elems.begin(), elems.end(),
-                    [interp, &cmp](const Value& a, const Value& b) -> bool {
-                        Value result = callSafe(*interp, cmp, {a, b});
+                    [&cmp](const Value& a, const Value& b) -> bool {
+                        Value result = callSafe(*g_currentInterp, cmp, {a, b});
                         if (result.isNumber()) return result.asNumber() < 0;
                         return result.isTruthy();
                     });
@@ -385,7 +390,7 @@ Interpreter::Interpreter() {
         })));
 
     globals->define("filter", Value(makeNative("filter", 2,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
                 throw RuntimeError("filter() requires an array as first argument", 0);
             if (!args[1].isCallable())
@@ -394,14 +399,14 @@ Interpreter::Interpreter() {
             auto result = gcNew<PraiaArray>();
             auto pred = args[1].asCallable();
             for (auto& elem : src) {
-                Value test = callSafe(*this, pred, {elem});
+                Value test = callSafe(*g_currentInterp, pred, {elem});
                 if (test.isTruthy()) result->elements.push_back(elem);
             }
             return Value(result);
         })));
 
     globals->define("map", Value(makeNative("map", 2,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
                 throw RuntimeError("map() requires an array as first argument", 0);
             if (!args[1].isCallable())
@@ -410,12 +415,12 @@ Interpreter::Interpreter() {
             auto result = gcNew<PraiaArray>();
             auto transform = args[1].asCallable();
             for (auto& elem : src)
-                result->elements.push_back(callSafe(*this, transform, {elem}));
+                result->elements.push_back(callSafe(*g_currentInterp, transform, {elem}));
             return Value(result);
         })));
 
     globals->define("each", Value(makeNative("each", 2,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
                 throw RuntimeError("each() requires an array as first argument", 0);
             if (!args[1].isCallable())
@@ -423,12 +428,12 @@ Interpreter::Interpreter() {
             auto& src = args[0].asArray()->elements;
             auto fn = args[1].asCallable();
             for (auto& elem : src)
-                callSafe(*this, fn, {elem});
+                callSafe(*g_currentInterp, fn, {elem});
             return args[0]; // return the array for chaining
         })));
 
     globals->define("reduce", Value(makeNative("reduce", -1,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (args.empty() || !args[0].isArray())
                 throw RuntimeError("reduce() requires an array as first argument", 0);
             if (args.size() < 2 || !args[1].isCallable())
@@ -446,12 +451,12 @@ Interpreter::Interpreter() {
                 start = 1;
             }
             for (size_t i = start; i < src.size(); i++)
-                acc = callSafe(*this, fn, {acc, src[i]});
+                acc = callSafe(*g_currentInterp, fn, {acc, src[i]});
             return acc;
         })));
 
     globals->define("any", Value(makeNative("any", 2,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
                 throw RuntimeError("any() requires an array as first argument", 0);
             if (!args[1].isCallable())
@@ -459,12 +464,12 @@ Interpreter::Interpreter() {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (auto& elem : src)
-                if (callSafe(*this, pred, {elem}).isTruthy()) return Value(true);
+                if (callSafe(*g_currentInterp, pred, {elem}).isTruthy()) return Value(true);
             return Value(false);
         })));
 
     globals->define("all", Value(makeNative("all", 2,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
                 throw RuntimeError("all() requires an array as first argument", 0);
             if (!args[1].isCallable())
@@ -472,12 +477,12 @@ Interpreter::Interpreter() {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (auto& elem : src)
-                if (!callSafe(*this, pred, {elem}).isTruthy()) return Value(false);
+                if (!callSafe(*g_currentInterp, pred, {elem}).isTruthy()) return Value(false);
             return Value(true);
         })));
 
     globals->define("flatMap", Value(makeNative("flatMap", 2,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
                 throw RuntimeError("flatMap() requires an array as first argument", 0);
             if (!args[1].isCallable())
@@ -486,7 +491,7 @@ Interpreter::Interpreter() {
             auto fn = args[1].asCallable();
             auto result = gcNew<PraiaArray>();
             for (auto& elem : src) {
-                Value mapped = callSafe(*this, fn, {elem});
+                Value mapped = callSafe(*g_currentInterp, fn, {elem});
                 if (mapped.isArray()) {
                     for (auto& inner : mapped.asArray()->elements)
                         result->elements.push_back(inner);
@@ -546,7 +551,7 @@ Interpreter::Interpreter() {
         })));
 
     globals->define("groupBy", Value(makeNative("groupBy", 2,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
                 throw RuntimeError("groupBy() requires an array as first argument", 0);
             if (!args[1].isCallable())
@@ -555,7 +560,7 @@ Interpreter::Interpreter() {
             auto fn = args[1].asCallable();
             auto result = gcNew<PraiaMap>();
             for (auto& elem : src) {
-                Value key = callSafe(*this, fn, {elem});
+                Value key = callSafe(*g_currentInterp, fn, {elem});
                 auto it = result->entries.find(key);
                 if (it == result->entries.end()) {
                     auto group = gcNew<PraiaArray>();
@@ -569,7 +574,7 @@ Interpreter::Interpreter() {
         })));
 
     globals->define("findIndex", Value(makeNative("findIndex", 2,
-        [this](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
                 throw RuntimeError("findIndex() requires an array as first argument", 0);
             if (!args[1].isCallable())
@@ -577,7 +582,7 @@ Interpreter::Interpreter() {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (size_t i = 0; i < src.size(); i++)
-                if (callSafe(*this, pred, {src[i]}).isTruthy())
+                if (callSafe(*g_currentInterp, pred, {src[i]}).isTruthy())
                     return Value(static_cast<int64_t>(i));
             return Value(static_cast<int64_t>(-1));
         })));
@@ -1795,18 +1800,22 @@ Interpreter::Interpreter() {
             return httpOpenStream(method, url, body, headers, httpOpts);
         }));
 
+    // listen() runs the request handler against the Interpreter that invoked
+    // listen() (resolved via g_currentInterp), not the one that constructed
+    // the server. That way listen() inside an async task drives the handler
+    // through the task's Interpreter instead of racing on the parent's.
     httpMap->entries[Value("createServer")] = Value(makeNative("http.createServer", 1,
-        [self](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isCallable())
                 throw RuntimeError("http.createServer() requires a handler function", 0);
             auto handler = args[0].asCallable();
 
             auto server = gcNew<PraiaMap>();
             server->entries[Value("listen")] = Value(makeNative("listen", 1,
-                [handler, self](const std::vector<Value>& args) -> Value {
+                [handler](const std::vector<Value>& args) -> Value {
                     if (!args[0].isNumber())
                         throw RuntimeError("listen() requires a port number", 0);
-                    httpServerListen(static_cast<int>(args[0].asNumber()), handler, *self);
+                    httpServerListen(static_cast<int>(args[0].asNumber()), handler, *g_currentInterp);
                     return Value();
                 }));
             return Value(server);
@@ -1816,7 +1825,7 @@ Interpreter::Interpreter() {
     // callback receives a send function: send(data, event?)
     // The connection stays open until the callback returns.
     httpMap->entries[Value("sse")] = Value(makeNative("http.sse", 2,
-        [self](const std::vector<Value>& args) -> Value {
+        [](const std::vector<Value>& args) -> Value {
             if (!args[0].isMap())
                 throw RuntimeError("http.sse() requires a request object", 0);
             if (!args[1].isCallable())
@@ -1883,10 +1892,11 @@ Interpreter::Interpreter() {
                     return Value();
                 });
 
-            // Call the callback with the send function
+            // Call the callback with the send function via the current
+            // (calling) Interpreter — see http.createServer comment.
             try {
                 std::vector<Value> cbArgs = {Value(std::static_pointer_cast<Callable>(sendFn))};
-                callSafe(*self, callback, cbArgs);
+                callSafe(*g_currentInterp, callback, cbArgs);
             } catch (const RuntimeError&) {
                 // Client likely disconnected — not an error
             }
