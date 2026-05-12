@@ -1,0 +1,104 @@
+// Binary search and sorted-list insertion on plain Praia arrays.
+// Mirrors Python's bisect module.
+//
+// All functions assume arr is already sorted ascending. Behavior is
+// undefined (results meaningless, but no crash) on an unsorted input.
+//
+// left and right return insertion points; they differ only when
+// val equals an existing element:
+//   left:  index of the first occurrence  (insert keeps val BEFORE)
+//   right: index just after the last      (insert keeps val AFTER)
+//
+// All functions accept an optional keyFn to map ARRAY ELEMENTS to
+// their comparison key. The val you pass is already the comparison
+// key — pass the bare key value, not an item-shaped object:
+//
+//   bisect.left(events, 250, lam{ e in e.timestamp })
+//
+// This matches Python's bisect, where key= only applies to the
+// sequence elements; the caller passes the precomputed key as x.
+// For insort, val IS the item being inserted, and keyFn is
+// applied to both val and array elements to find the position.
+//
+// Complexity (n = arr size):
+//   left, right, contains       O(log n)
+//   insort                      O(n)   — log n search + linear shift
+
+func _key(keyFn, x) {
+    if (keyFn == nil) { return x }
+    return keyFn(x)
+}
+
+// Leftmost insertion point: the lowest index i such that
+// keyFn(arr[i-1]) < val <= keyFn(arr[i]). Equivalent to
+// "where does a value with comparison key val go to keep the
+// array sorted, and if there's a tie, place it before the existing
+// element."
+func left(arr, val, keyFn = nil) {
+    let lo = 0
+    let hi = len(arr)
+    while (lo < hi) {
+        let mid = math.idiv(lo + hi, 2)
+        if (_key(keyFn, arr[mid]) < val) {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+// Rightmost insertion point: the lowest index i such that
+// keyFn(arr[i-1]) <= val < keyFn(arr[i]). Same as left() except
+// equal elements push the insertion to the right.
+func right(arr, val, keyFn = nil) {
+    let lo = 0
+    let hi = len(arr)
+    while (lo < hi) {
+        let mid = math.idiv(lo + hi, 2)
+        if (val < _key(keyFn, arr[mid])) {
+            hi = mid
+        } else {
+            lo = mid + 1
+        }
+    }
+    return lo
+}
+
+// Insert `val` into `arr` at the leftmost sorted position. Mutates
+// `arr` in place. O(n) overall because we have to shift elements
+// right to make room — this is the unavoidable cost of maintaining
+// a sorted contiguous list.
+//
+// Unlike left/right, `insort` operates on items, not raw keys: it
+// computes the key of `val` itself via the keyFn before searching.
+//
+// If you're doing many such inserts in a hot loop, consider using
+// the `heap` grain (O(log n) per insert at the cost of not
+// maintaining full sort), or accumulate and call array.sort once
+// at the end (O(n log n) total beats n × O(n)).
+func insort(arr, val, keyFn = nil) {
+    let i = left(arr, _key(keyFn, val), keyFn)
+    // Extend the array by 1 then shift right from end-2 down to i.
+    // Praia arrays have no native insertAt, so we push (just to
+    // grow the array) and overwrite the shifted range.
+    arr.push(val)
+    let j = len(arr) - 1
+    while (j > i) {
+        arr[j] = arr[j - 1]
+        j = j - 1
+    }
+    arr[i] = val
+}
+
+// Membership check via binary search — O(log n) versus
+// array.contains()'s O(n). `val` is the comparison key, same shape
+// as for left/right. Worth using when you query a sorted array many
+// times; for a single check the constant factor makes .contains()
+// faster up to maybe a few hundred elements.
+func contains(arr, val, keyFn = nil) {
+    let i = left(arr, val, keyFn)
+    return i < len(arr) && _key(keyFn, arr[i]) == val
+}
+
+export { left, right, insort, contains }

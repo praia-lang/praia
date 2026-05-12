@@ -1,0 +1,275 @@
+// Numeric descriptive statistics. Mirrors the most-used surface of
+// Python's `statistics` module: central tendency (mean / median /
+// mode), spread (variance / stdev), order statistics (quantiles,
+// range), and pairwise (covariance / correlation).
+//
+// All functions accept a plain array of numbers. Empty input throws;
+// non-numeric input will fail at the first arithmetic op, which is
+// usually what you want — pre-filter your data or let the throw
+// surface the bad row.
+//
+// Complexity (n = |data|):
+//   mean, sum, variance, pvariance, stdev, pstdev      O(n)
+//   median, medianLow, medianHigh                      O(n log n)  — sorts
+//   mode, multimode                                    O(n)
+//   quantiles                                          O(n log n)
+//   range                                              O(n)
+//   covariance, correlation                            O(n)
+
+func _ensureNonEmpty(data, fn) {
+    ensure (len(data) > 0) else {
+        throw "statistics." + fn + ": empty data"
+    }
+}
+
+func _sum(data) {
+    let s = 0
+    for (x in data) { s = s + x }
+    return s
+}
+
+func _sortedCopy(data) {
+    let copy = []
+    for (x in data) { copy.push(x) }
+    return sort(copy)
+}
+
+// Arithmetic mean. O(n).
+func mean(data) {
+    _ensureNonEmpty(data, "mean")
+    return _sum(data) / len(data)
+}
+
+// Median: the middle value of sorted data, or the average of the
+// two middle values for even-length input. O(n log n) due to the
+// sort; use medianLow / medianHigh for an exact element on even-
+// length input without averaging.
+func median(data) {
+    _ensureNonEmpty(data, "median")
+    let s = _sortedCopy(data)
+    let n = len(s)
+    let mid = math.idiv(n, 2)
+    if (n % 2 == 1) { return s[mid] }
+    return (s[mid - 1] + s[mid]) / 2
+}
+
+// Lower middle. On odd-length data identical to median; on even-
+// length returns the element just below the midpoint (no averaging,
+// so the result is always one of the input values).
+func medianLow(data) {
+    _ensureNonEmpty(data, "medianLow")
+    let s = _sortedCopy(data)
+    let n = len(s)
+    if (n % 2 == 1) { return s[math.idiv(n, 2)] }
+    return s[math.idiv(n, 2) - 1]
+}
+
+// Upper middle counterpart of medianLow.
+func medianHigh(data) {
+    _ensureNonEmpty(data, "medianHigh")
+    let s = _sortedCopy(data)
+    return s[math.idiv(len(s), 2)]
+}
+
+// Mode — the most-common value, breaking ties by first-occurrence
+// order. Matches modern Python's `statistics.mode`: never throws on
+// ties (only on empty input). Use multimode if you need all
+// equally-frequent values.
+func mode(data) {
+    _ensureNonEmpty(data, "mode")
+    let counts = {}
+    let firstSeen = []
+    for (x in data) {
+        if (!counts.has(x)) {
+            counts[x] = 0
+            firstSeen.push(x)
+        }
+        counts[x] = counts[x] + 1
+    }
+    let best = nil
+    let bestCount = -1
+    for (v in firstSeen) {
+        if (counts[v] > bestCount) {
+            bestCount = counts[v]
+            best = v
+        }
+    }
+    return best
+}
+
+// All values that appear with the maximum frequency, in first-seen
+// order. Returns a single-element array if there's a clear winner.
+func multimode(data) {
+    _ensureNonEmpty(data, "multimode")
+    let counts = {}
+    let firstSeen = []
+    for (x in data) {
+        if (!counts.has(x)) {
+            counts[x] = 0
+            firstSeen.push(x)
+        }
+        counts[x] = counts[x] + 1
+    }
+    let bestCount = 0
+    for (v in firstSeen) {
+        if (counts[v] > bestCount) { bestCount = counts[v] }
+    }
+    let result = []
+    for (v in firstSeen) {
+        if (counts[v] == bestCount) { result.push(v) }
+    }
+    return result
+}
+
+// Sample variance (Bessel-corrected, divisor n-1). Use when `data`
+// is a sample drawn from a larger population — this is the unbiased
+// estimator of the population variance.
+func variance(data) {
+    ensure (len(data) >= 2) else {
+        throw "statistics.variance: need at least 2 data points"
+    }
+    let m = mean(data)
+    let ss = 0
+    for (x in data) {
+        let d = x - m
+        ss = ss + d * d
+    }
+    return ss / (len(data) - 1)
+}
+
+// Population variance (divisor n). Use when `data` is the full
+// population, not a sample.
+func pvariance(data) {
+    _ensureNonEmpty(data, "pvariance")
+    let m = mean(data)
+    let ss = 0
+    for (x in data) {
+        let d = x - m
+        ss = ss + d * d
+    }
+    return ss / len(data)
+}
+
+// Sample standard deviation = sqrt(variance(data)).
+func stdev(data) {
+    return math.sqrt(variance(data))
+}
+
+// Population standard deviation.
+func pstdev(data) {
+    return math.sqrt(pvariance(data))
+}
+
+// max - min. Throws on empty.
+func range(data) {
+    _ensureNonEmpty(data, "range")
+    let lo = data[0]
+    let hi = data[0]
+    for (x in data) {
+        if (x < lo) { lo = x }
+        if (x > hi) { hi = x }
+    }
+    return hi - lo
+}
+
+// n-quantiles using the "exclusive" method, which is Python's
+// `statistics.quantiles` default. Returns `n - 1` cut points that
+// divide the data into `n` continuous intervals of equal probability.
+//
+// Default n = 4 → quartiles (Q1, Q2 = median, Q3).
+// n = 10 → deciles; n = 100 → percentiles.
+//
+// Linear interpolation between adjacent sorted values handles the
+// case where the quantile falls between two samples.
+func quantiles(data, n = 4) {
+    ensure (len(data) >= 2) else {
+        throw "statistics.quantiles: need at least 2 data points"
+    }
+    ensure (n >= 2) else {
+        throw "statistics.quantiles: n must be at least 2"
+    }
+    let s = _sortedCopy(data)
+    let ld = len(s)
+    let m = ld + 1
+    let result = []
+    let i = 1
+    while (i < n) {
+        let j = math.idiv(i * m, n)
+        if (j < 1) { j = 1 }
+        if (j > ld - 1) { j = ld - 1 }
+        let delta = i * m - j * n
+        // Interpolated value at the requested fraction.
+        let interp = (s[j - 1] * (n - delta) + s[j] * delta) / n
+        result.push(interp)
+        i = i + 1
+    }
+    return result
+}
+
+// Sample covariance (divisor n-1). Positive → x and y trend
+// together; negative → they trend opposite; zero → linearly
+// uncorrelated (though may still be non-linearly related).
+func covariance(x, y) {
+    ensure (len(x) == len(y)) else {
+        throw "statistics.covariance: arrays must be the same length"
+    }
+    ensure (len(x) >= 2) else {
+        throw "statistics.covariance: need at least 2 data points"
+    }
+    let mx = mean(x)
+    let my = mean(y)
+    let s = 0
+    for (i in 0..len(x)) {
+        s = s + (x[i] - mx) * (y[i] - my)
+    }
+    return s / (len(x) - 1)
+}
+
+// Pearson correlation coefficient in [-1, 1]. 1 is perfect positive
+// linear correlation, -1 is perfect negative, 0 is no linear
+// correlation. Like covariance but normalized by both stdevs, so
+// the result is scale-invariant.
+//
+// Throws if either input has zero variance (a constant sequence) —
+// the coefficient is undefined in that case (denominator is 0).
+func correlation(x, y) {
+    ensure (len(x) == len(y)) else {
+        throw "statistics.correlation: arrays must be the same length"
+    }
+    ensure (len(x) >= 2) else {
+        throw "statistics.correlation: need at least 2 data points"
+    }
+    let mx = mean(x)
+    let my = mean(y)
+    let num = 0
+    let dx = 0
+    let dy = 0
+    for (i in 0..len(x)) {
+        let a = x[i] - mx
+        let b = y[i] - my
+        num = num + a * b
+        dx = dx + a * a
+        dy = dy + b * b
+    }
+    ensure (dx > 0 && dy > 0) else {
+        throw "statistics.correlation: at least one input has zero variance"
+    }
+    return num / math.sqrt(dx * dy)
+}
+
+export {
+    mean,
+    median,
+    medianLow,
+    medianHigh,
+    mode,
+    multimode,
+    variance,
+    pvariance,
+    stdev,
+    pstdev,
+    range,
+    quantiles,
+    covariance,
+    correlation
+}

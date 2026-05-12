@@ -1,0 +1,138 @@
+// Binary min-heap (priority queue) operations on plain Praia arrays.
+//
+// The array itself IS the heap — these functions just maintain the
+// heap invariant after each mutation. Storing the heap as a regular
+// array means you can inspect, serialize, or pass it around without
+// going through a class wrapper.
+//
+// All comparison-based functions accept an optional `keyFn` that maps
+// each item to its comparison key. Without it, items are compared
+// directly. Pass a keyFn for priority-queue-style use:
+//
+//   let pq = []
+//   heap.push(pq, {prio: 3, task: "build"}, lam{ x in x.prio })
+//   heap.push(pq, {prio: 1, task: "lint"},  lam{ x in x.prio })
+//   heap.pop(pq, lam{ x in x.prio })   // → {prio: 1, task: "lint"}
+//
+// Complexity (n = heap size):
+//   push, pop, replace, pushPop    O(log n)
+//   peek, size, isEmpty            O(1)
+//   heapify                        O(n)         — Floyd's algorithm
+//
+// To get a max-heap with numeric keys, pass a negated keyFn:
+//   heap.push(arr, val, lam{ x in -x })
+// For non-numeric ordering needs, use array.sort with a custom
+// comparator instead — heap-grain stays min-heap-only for clarity.
+
+func _key(keyFn, x) {
+    if (keyFn == nil) { return x }
+    return keyFn(x)
+}
+
+func _swap(arr, i, j) {
+    let tmp = arr[i]
+    arr[i] = arr[j]
+    arr[j] = tmp
+}
+
+func _siftUp(arr, i, keyFn) {
+    while (i > 0) {
+        let parent = math.idiv(i - 1, 2)
+        if (_key(keyFn, arr[i]) < _key(keyFn, arr[parent])) {
+            _swap(arr, i, parent)
+            i = parent
+        } else {
+            break
+        }
+    }
+}
+
+func _siftDown(arr, i, keyFn) {
+    let n = len(arr)
+    while (true) {
+        let l = 2 * i + 1
+        let r = 2 * i + 2
+        let smallest = i
+        if (l < n && _key(keyFn, arr[l]) < _key(keyFn, arr[smallest])) {
+            smallest = l
+        }
+        if (r < n && _key(keyFn, arr[r]) < _key(keyFn, arr[smallest])) {
+            smallest = r
+        }
+        if (smallest == i) { break }
+        _swap(arr, i, smallest)
+        i = smallest
+    }
+}
+
+// Push `val` onto the heap. Mutates `arr` in place.
+func push(arr, val, keyFn = nil) {
+    arr.push(val)
+    _siftUp(arr, len(arr) - 1, keyFn)
+}
+
+// Remove and return the smallest element. Throws on empty heap so
+// callers can't silently process a `nil` and treat it as a value.
+func pop(arr, keyFn = nil) {
+    ensure (len(arr) > 0) else { throw "heap.pop: empty heap" }
+    let top = arr[0]
+    let last = arr.pop()
+    if (len(arr) > 0) {
+        arr[0] = last
+        _siftDown(arr, 0, keyFn)
+    }
+    return top
+}
+
+// View the smallest element without removing it. Throws on empty.
+func peek(arr) {
+    ensure (len(arr) > 0) else { throw "heap.peek: empty heap" }
+    return arr[0]
+}
+
+// Transform an arbitrary array into a heap in place. Floyd's
+// algorithm: sift down each non-leaf in reverse order. O(n) — much
+// better than the O(n log n) you'd get from n successive pushes.
+func heapify(arr, keyFn = nil) {
+    let i = math.idiv(len(arr), 2) - 1
+    while (i >= 0) {
+        _siftDown(arr, i, keyFn)
+        i = i - 1
+    }
+}
+
+func size(arr) {
+    return len(arr)
+}
+
+func isEmpty(arr) {
+    return len(arr) == 0
+}
+
+// Push `val` then pop the smallest, in one combined op. Slightly
+// faster than separate push + pop because only one sift runs.
+// Useful for top-K queries: invert the keyFn so the array acts as a
+// max-heap of size K, then `pushPop` each new candidate — the array
+// always holds the K smallest items seen so far.
+func pushPop(arr, val, keyFn = nil) {
+    if (len(arr) == 0 || _key(keyFn, val) <= _key(keyFn, arr[0])) {
+        return val
+    }
+    let result = arr[0]
+    arr[0] = val
+    _siftDown(arr, 0, keyFn)
+    return result
+}
+
+// Pop the smallest, then push `val`. Like pushPop but always pops
+// first — useful when you know the new value is going in regardless
+// of comparison with the current min.
+func replace(arr, val, keyFn = nil) {
+    ensure (len(arr) > 0) else { throw "heap.replace: empty heap" }
+    let result = arr[0]
+    arr[0] = val
+    _siftDown(arr, 0, keyFn)
+    return result
+}
+
+export { push, pop, peek, heapify, size, isEmpty, pushPop, replace }

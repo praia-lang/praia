@@ -1,0 +1,185 @@
+use "testing"
+use "statistics"
+
+// Numeric descriptive statistics. Values pinned against Python's
+// `statistics` module reference outputs so any algorithmic drift
+// shows up immediately.
+
+// ── Central tendency: mean, median variants ───────────────────
+
+testing.test("mean of basic data", lam{ in
+    testing.assertEqual(statistics.mean([1, 2, 3, 4]), 2.5, nil)
+    testing.assertEqual(statistics.mean([10]), 10, "single element")
+    testing.assertEqual(statistics.mean([-5, 5]), 0, "negatives cancel")
+})
+
+testing.test("mean on empty throws", lam{ in
+    testing.assertThrows(lam{ in statistics.mean([]) }, "empty data")
+})
+
+testing.test("median: odd length returns the middle", lam{ in
+    testing.assertEqual(statistics.median([3, 1, 2]), 2,
+                        "sorts internally; middle of [1,2,3] is 2")
+    testing.assertEqual(statistics.median([5]), 5, nil)
+})
+
+testing.test("median: even length averages the two middles", lam{ in
+    testing.assertEqual(statistics.median([1, 2, 3, 4]), 2.5, nil)
+    testing.assertEqual(statistics.median([10, 20]), 15, nil)
+})
+
+testing.test("medianLow / medianHigh on even length", lam{ in
+    testing.assertEqual(statistics.medianLow([1, 2, 3, 4]),  2, nil)
+    testing.assertEqual(statistics.medianHigh([1, 2, 3, 4]), 3, nil)
+    // On odd length they collapse to the same value as median.
+    testing.assertEqual(statistics.medianLow([1, 2, 3]),  2, nil)
+    testing.assertEqual(statistics.medianHigh([1, 2, 3]), 2, nil)
+})
+
+// ── Mode / multimode ─────────────────────────────────────────
+
+testing.test("mode returns the single most-common value", lam{ in
+    testing.assertEqual(statistics.mode([1, 2, 2, 3, 3, 3]), 3, nil)
+    testing.assertEqual(statistics.mode(["a", "b", "a", "c", "a"]), "a",
+                        "works on string data")
+})
+
+testing.test("mode breaks ties by first-occurrence", lam{ in
+    // Both 1 and 2 appear twice; "1" came first → wins.
+    testing.assertEqual(statistics.mode([1, 1, 2, 2, 3]), 1, nil)
+    // And the same data reordered:
+    testing.assertEqual(statistics.mode([2, 2, 1, 1, 3]), 2,
+                        "first-seen depends on input order, not value")
+})
+
+testing.test("multimode returns all max-frequency values in order", lam{ in
+    testing.assertEqual(statistics.multimode([1, 2, 2, 3, 3, 4]), [2, 3],
+                        "two-way tie")
+    testing.assertEqual(statistics.multimode([1, 1, 2, 2, 3, 3]), [1, 2, 3],
+                        "three-way tie, all included")
+    testing.assertEqual(statistics.multimode([5]), [5], "single value")
+})
+
+testing.test("mode / multimode on empty throw", lam{ in
+    testing.assertThrows(lam{ in statistics.mode([]) },      "empty data")
+    testing.assertThrows(lam{ in statistics.multimode([]) }, "empty data")
+})
+
+// ── Variance and standard deviation ──────────────────────────
+
+testing.test("variance: sample (Bessel-corrected)", lam{ in
+    // Classic teaching example: var([4,8,15,16,23,42]) = 182
+    // (verified against Python's statistics.variance).
+    testing.assertEqual(statistics.variance([4, 8, 15, 16, 23, 42]), 182, nil)
+    testing.assertEqual(statistics.variance([10, 10, 10]), 0, "constant data → 0")
+})
+
+testing.test("pvariance: population (divisor n)", lam{ in
+    // 5 / 6 * sample variance — pvariance < variance for the same data.
+    let sample = statistics.variance([4, 8, 15, 16, 23, 42])
+    let pop    = statistics.pvariance([4, 8, 15, 16, 23, 42])
+    testing.assert(pop < sample, "pvariance uses divisor n (no Bessel correction)")
+    // Numeric check: 182 * 5 / 6 ≈ 151.667
+    testing.assert(pop > 151.6 && pop < 151.7, "≈ 151.67")
+})
+
+testing.test("variance requires n >= 2", lam{ in
+    testing.assertThrows(lam{ in statistics.variance([1]) },
+                         "at least 2 data points")
+    testing.assertThrows(lam{ in statistics.variance([]) },
+                         "at least 2")
+})
+
+testing.test("stdev / pstdev are sqrt of their variances", lam{ in
+    let data = [4, 8, 15, 16, 23, 42]
+    let v  = statistics.variance(data)
+    let pv = statistics.pvariance(data)
+    let sd  = statistics.stdev(data)
+    let psd = statistics.pstdev(data)
+    testing.assert(math.abs(sd * sd - v) < 1e-9,
+                   "stdev² == variance")
+    testing.assert(math.abs(psd * psd - pv) < 1e-9,
+                   "pstdev² == pvariance")
+})
+
+// ── Range ────────────────────────────────────────────────────
+
+testing.test("range = max - min", lam{ in
+    testing.assertEqual(statistics.range([3, -1, 8, 4]), 9, nil)
+    testing.assertEqual(statistics.range([5, 5, 5]), 0, nil)
+    testing.assertEqual(statistics.range([42]), 0, "single element")
+})
+
+// ── Quantiles ────────────────────────────────────────────────
+
+testing.test("quartiles match Python's reference output", lam{ in
+    // Python: statistics.quantiles([10..100]) → [27.5, 55, 82.5]
+    let q = statistics.quantiles([10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
+    testing.assertEqual(q, [27.5, 55, 82.5], nil)
+})
+
+testing.test("deciles produce 9 cut points", lam{ in
+    let d = statistics.quantiles([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], 10)
+    testing.assertEqual(len(d), 9, "n=10 → 9 cuts")
+    testing.assertEqual(d[0], 11, nil)
+    testing.assertEqual(d[8], 99, nil)
+})
+
+testing.test("quantiles requires n >= 2 and len >= 2", lam{ in
+    testing.assertThrows(lam{ in statistics.quantiles([1, 2, 3], 1) },
+                         "at least 2")
+    testing.assertThrows(lam{ in statistics.quantiles([1]) },
+                         "at least 2")
+})
+
+// ── Pairwise: covariance + correlation ──────────────────────
+
+testing.test("correlation of identical sequences is +1", lam{ in
+    testing.assertEqual(statistics.correlation([1, 2, 3, 4, 5],
+                                                [1, 2, 3, 4, 5]), 1, nil)
+})
+
+testing.test("correlation of opposite sequences is -1", lam{ in
+    testing.assertEqual(statistics.correlation([1, 2, 3, 4, 5],
+                                                [5, 4, 3, 2, 1]), -1, nil)
+})
+
+testing.test("correlation: uncorrelated data is near 0", lam{ in
+    // Deliberately chose values where mean and shape don't co-move.
+    let x = [1, 2, 3, 4, 5, 6, 7, 8]
+    let y = [4, 1, 6, 2, 8, 3, 5, 7]
+    let c = statistics.correlation(x, y)
+    testing.assert(c > -0.5 && c < 0.5, "weak / near-zero correlation")
+})
+
+testing.test("correlation: scale-invariant (covariance is not)", lam{ in
+    // Multiplying y by 10 keeps the correlation but scales covariance.
+    let x = [1, 2, 3, 4, 5]
+    let y = [2, 4, 6, 8, 10]
+    let y10 = [20, 40, 60, 80, 100]
+    let c1 = statistics.correlation(x, y)
+    let c2 = statistics.correlation(x, y10)
+    testing.assert(math.abs(c1 - c2) < 1e-9,
+                   "correlation is unchanged by linear scale of either variable")
+    let cov1 = statistics.covariance(x, y)
+    let cov2 = statistics.covariance(x, y10)
+    testing.assert(math.abs(cov2 - 10 * cov1) < 1e-9,
+                   "covariance scales linearly with one variable")
+})
+
+testing.test("correlation: zero-variance input throws", lam{ in
+    testing.assertThrows(
+        lam{ in statistics.correlation([1, 2, 3], [5, 5, 5]) },
+        "zero variance")
+})
+
+testing.test("correlation / covariance: length mismatch throws", lam{ in
+    testing.assertThrows(
+        lam{ in statistics.correlation([1, 2], [1, 2, 3]) },
+        "same length")
+    testing.assertThrows(
+        lam{ in statistics.covariance([1, 2], [1, 2, 3]) },
+        "same length")
+})
+
+testing.done()

@@ -1,0 +1,178 @@
+use "testing"
+use "heap"
+
+// Binary min-heap operations on plain arrays. Tests pin both
+// algorithmic correctness (heap-sort produces a sorted output) and
+// the API surface (push/pop/peek/heapify/pushPop/replace + keyFn).
+
+// ── push / pop: heap-sort ─────────────────────────────────────
+
+testing.test("push + pop sorts ascending", lam{ in
+    let h = []
+    for (v in [5, 3, 8, 1, 9, 2, 7, 4, 6]) { heap.push(h, v) }
+    let out = []
+    while (!heap.isEmpty(h)) { out.push(heap.pop(h)) }
+    testing.assertEqual(out, [1, 2, 3, 4, 5, 6, 7, 8, 9], nil)
+})
+
+testing.test("push + pop handles duplicates", lam{ in
+    let h = []
+    for (v in [3, 1, 3, 1, 3, 1]) { heap.push(h, v) }
+    let out = []
+    while (!heap.isEmpty(h)) { out.push(heap.pop(h)) }
+    testing.assertEqual(out, [1, 1, 1, 3, 3, 3], nil)
+})
+
+testing.test("push + pop on negative numbers", lam{ in
+    let h = []
+    for (v in [-5, 0, -100, 50, -1]) { heap.push(h, v) }
+    testing.assertEqual(heap.pop(h), -100, nil)
+    testing.assertEqual(heap.pop(h), -5, nil)
+    testing.assertEqual(heap.pop(h), -1, nil)
+    testing.assertEqual(heap.pop(h), 0, nil)
+})
+
+testing.test("push + pop on strings (lexicographic)", lam{ in
+    let h = []
+    for (v in ["pear", "apple", "cherry", "banana"]) { heap.push(h, v) }
+    testing.assertEqual(heap.pop(h), "apple", nil)
+    testing.assertEqual(heap.pop(h), "banana", nil)
+})
+
+testing.test("peek shows the min without removing it", lam{ in
+    let h = []
+    heap.push(h, 5)
+    heap.push(h, 2)
+    heap.push(h, 8)
+    testing.assertEqual(heap.peek(h), 2, nil)
+    testing.assertEqual(heap.size(h), 3, "peek doesn't shrink")
+    testing.assertEqual(heap.peek(h), 2, "peek is idempotent")
+})
+
+testing.test("pop / peek on empty throw", lam{ in
+    testing.assertThrows(lam{ in heap.pop([]) },  "empty heap")
+    testing.assertThrows(lam{ in heap.peek([]) }, "empty heap")
+})
+
+// ── keyFn (priority queue) ────────────────────────────────────
+
+testing.test("keyFn enables priority-queue style use", lam{ in
+    let keyFn = lam{ x in x.prio }
+    let pq = []
+    heap.push(pq, {prio: 3, task: "build"}, keyFn)
+    heap.push(pq, {prio: 1, task: "lint"},  keyFn)
+    heap.push(pq, {prio: 2, task: "test"},  keyFn)
+    heap.push(pq, {prio: 0, task: "fmt"},   keyFn)
+    testing.assertEqual(heap.pop(pq, keyFn).task, "fmt",   nil)
+    testing.assertEqual(heap.pop(pq, keyFn).task, "lint",  nil)
+    testing.assertEqual(heap.pop(pq, keyFn).task, "test",  nil)
+    testing.assertEqual(heap.pop(pq, keyFn).task, "build", nil)
+})
+
+testing.test("negated keyFn produces a max-heap", lam{ in
+    let neg = lam{ x in -x }
+    let h = []
+    for (v in [5, 3, 8, 1, 9, 2, 7]) { heap.push(h, v, neg) }
+    testing.assertEqual(heap.pop(h, neg), 9, "max comes out first")
+    testing.assertEqual(heap.pop(h, neg), 8, nil)
+    testing.assertEqual(heap.pop(h, neg), 7, nil)
+})
+
+// ── heapify ────────────────────────────────────────────────────
+
+testing.test("heapify makes an arbitrary array into a heap", lam{ in
+    let a = [9, 4, 7, 1, -3, 12, 0, 5, 2]
+    heap.heapify(a)
+    testing.assertEqual(a[0], -3, "min is at the root after heapify")
+    // Drain and check ascending order.
+    let out = []
+    while (!heap.isEmpty(a)) { out.push(heap.pop(a)) }
+    testing.assertEqual(out, [-3, 0, 1, 2, 4, 5, 7, 9, 12], nil)
+})
+
+testing.test("heapify on empty / single-element arrays", lam{ in
+    let empty = []
+    heap.heapify(empty)
+    testing.assertEqual(empty, [], "empty stays empty")
+
+    let one = [42]
+    heap.heapify(one)
+    testing.assertEqual(one, [42], "single element stays put")
+    testing.assertEqual(heap.peek(one), 42, nil)
+})
+
+// ── pushPop and replace ───────────────────────────────────────
+
+testing.test("pushPop with smaller val just returns val (no mutation)", lam{ in
+    let h = [3, 5, 7]
+    heap.heapify(h)
+    testing.assertEqual(heap.pushPop(h, 1), 1, "val itself is smaller than root")
+    testing.assertEqual(h, [3, 5, 7], "heap unchanged")
+})
+
+testing.test("pushPop with larger val swaps in and returns the old min", lam{ in
+    let h = [3, 5, 7]
+    heap.heapify(h)
+    testing.assertEqual(heap.pushPop(h, 10), 3, nil)
+    testing.assertEqual(heap.peek(h), 5, "new root is the next smallest")
+    testing.assertEqual(heap.size(h), 3, nil)
+})
+
+testing.test("pushPop maintains a top-K accumulator", lam{ in
+    // Top-3 smallest of a stream, max-heap of size 3.
+    // Trick: invert key so root is the LARGEST of the K we've kept;
+    // pushPop discards any incoming bigger than that root.
+    let neg = lam{ x in -x }
+    let topK = []
+    for (v in [9, 5, 1, 8, 3, 7, 2, 4, 6]) {
+        if (len(topK) < 3) { heap.push(topK, v, neg) }
+        else { heap.pushPop(topK, v, neg) }
+    }
+    // topK holds the three smallest. Sort to assert deterministically.
+    let result = sort(topK)
+    testing.assertEqual(result, [1, 2, 3], "the three smallest of the stream")
+})
+
+testing.test("replace returns old min and inserts new", lam{ in
+    let h = [1, 5, 3]
+    heap.heapify(h)
+    testing.assertEqual(heap.replace(h, 4), 1, nil)
+    testing.assertEqual(heap.peek(h), 3, nil)
+    testing.assertEqual(heap.size(h), 3, "size unchanged")
+})
+
+testing.test("replace on empty throws", lam{ in
+    testing.assertThrows(lam{ in heap.replace([], 1) }, "empty heap")
+})
+
+// ── Size / isEmpty ────────────────────────────────────────────
+
+testing.test("size and isEmpty track the array", lam{ in
+    let h = []
+    testing.assert(heap.isEmpty(h), nil)
+    testing.assertEqual(heap.size(h), 0, nil)
+    heap.push(h, 7)
+    testing.assert(!heap.isEmpty(h), nil)
+    testing.assertEqual(heap.size(h), 1, nil)
+})
+
+// ── Larger-scale correctness ──────────────────────────────────
+
+testing.test("heap-sort of 1000 random-ish items matches array.sort", lam{ in
+    // Use a deterministic LCG so the test is reproducible.
+    let lcg = 12345
+    let arr = []
+    for (i in 0..1000) {
+        lcg = (lcg * 1103515245 + 12345) % 2147483648
+        arr.push(lcg)
+    }
+    let viaHeap = []
+    let copy = []
+    for (x in arr) { copy.push(x) }
+    heap.heapify(copy)
+    while (!heap.isEmpty(copy)) { viaHeap.push(heap.pop(copy)) }
+    let viaSort = sort(arr)
+    testing.assertEqual(viaHeap, viaSort, "heap-sort matches reference sort")
+})
+
+testing.done()
