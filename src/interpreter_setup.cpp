@@ -2721,6 +2721,10 @@ Interpreter::Interpreter() {
     registerCryptoBuiltins(cryptoMap);
     globals->define("crypto", Value(cryptoMap));
 
+    auto fmtMap = gcNew<PraiaMap>();
+    registerFmtBuiltins(fmtMap);
+    globals->define("fmt", Value(fmtMap));
+
     // ── random namespace ──
     //
     // Mersenne Twister, seeded from std::random_device. Fast and
