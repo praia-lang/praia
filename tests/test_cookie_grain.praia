@@ -141,8 +141,12 @@ testing.test("decrypt rejects wrong key", lam{ in
 testing.test("decrypt rejects tampered blob", lam{ in
     let key = secrets.token(32)
     let sealed = cookie.encrypt("payload", key)
-    // Flip the last character (in the ciphertext or tag region).
-    let tampered = sealed.slice(0, len(sealed) - 1) + (sealed[len(sealed) - 1] == "A" ? "B" : "A")
+    // Flip a character at the start of the blob (inside the nonce). We
+    // can't flip the *last* base64url char: the final group has 2 unused
+    // padding bits, so 4 different chars decode to the same byte, and
+    // ~25% of random nonces would let a "tampered" blob round-trip
+    // unchanged at the byte level — flaky across runs.
+    let tampered = (sealed[0] == "A" ? "B" : "A") + sealed.slice(1, len(sealed))
     testing.assertEqual(cookie.decrypt(tampered, key), nil, nil)
 })
 
