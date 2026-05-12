@@ -184,12 +184,19 @@ test-input: $(TARGET)
 
 # ── Plugin build helper ──
 # Usage: make plugin SRC=examples/plugins/mathext.cpp OUT=examples/plugins/mathext.dylib
+#
+# The defines mirror the main CXXFLAGS — fiber.h pulls in <ucontext.h>,
+# which on macOS errors out without _XOPEN_SOURCE, and the
+# swapcontext/getcontext family is deprecated on both macOS and recent
+# glibc (silence the warnings to keep plugin builds clean).
 PLUGIN_LDFLAGS =
 ifeq ($(UNAME_S),Darwin)
   PLUGIN_LDFLAGS = -undefined dynamic_lookup
 endif
 plugin:
-	$(CXX) -std=c++20 -shared -fPIC -I$(SRC_DIR) $(PLUGIN_LDFLAGS) -o $(OUT) $(SRC)
+	$(CXX) -std=c++20 -Wno-deprecated-declarations \
+	    -D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE \
+	    -shared -fPIC -I$(SRC_DIR) $(PLUGIN_LDFLAGS) -o $(OUT) $(SRC)
 
 # ── Fuzz targets ──
 # Coverage-guided fuzzing via libFuzzer + ASan + UBSan. Built separately

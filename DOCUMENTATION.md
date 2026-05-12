@@ -3877,18 +3877,51 @@ let iv = crypto.randomBytes(16)      // 16 random bytes (128-bit IV)
 let token = bytes.hex(crypto.randomBytes(16))  // hex string token
 ```
 
-### AES encryption (requires OpenSSL)
+### Authenticated encryption — `seal` / `open` (requires OpenSSL)
 
-AES-256-CBC symmetric encryption. Key must be 32 bytes, IV must be 16 bytes.
+`crypto.seal` and `crypto.open` are the recommended symmetric encryption API. They use AES-256-GCM, an authenticated (AEAD) cipher: a successful `open` proves both that the ciphertext was produced by someone holding the key AND that no bit of it has been altered. Use this for anything new — cookies, file encryption, request payloads, transport over an untrusted channel.
+
+```
+let key = crypto.randomBytes(32)          // 32-byte (256-bit) key
+
+let sealed = crypto.seal("secret data", key)
+let plain  = crypto.open(sealed, key)     // throws if tampered or wrong key
+print(plain)                              // "secret data"
+```
+
+The sealed blob is a single binary string laid out as `nonce(12) ‖ ciphertext ‖ tag(16)`. The nonce is generated freshly per call from the CSPRNG and bundled in; the caller never manages it. **Don't reuse a key for an indefinite number of seals** — birthday-collision probability for the 96-bit nonce becomes non-negligible after ~2^48 messages with the same key. Re-key well before that (rotate per day, per session, per ~10^12 messages, whatever fits).
+
+#### Additional Authenticated Data (AAD)
+
+An optional third argument binds context to the tag without encrypting it. The same value must be passed to `open`, or authentication fails. Use it for context that must match (user ID, timestamp, protocol version) but doesn't need to be secret:
+
+```
+let token = crypto.seal(user_data, key, "user-id:42|v=1")
+// ... later ...
+let data = crypto.open(token, key, "user-id:42|v=1")   // ok
+crypto.open(token, key, "user-id:43|v=1")              // throws: AAD mismatch
+```
+
+#### Errors
+
+`open` throws on **any** authentication failure — tampered ciphertext, wrong key, or AAD mismatch all surface as the same `authentication failed` error. By design: leaking which specific check failed gives an attacker a usable oracle.
+
+### AES-256-CBC — low-level, unauthenticated (requires OpenSSL)
+
+> **⚠ Read `seal` / `open` above first.** These primitives provide **confidentiality only**. An attacker who can modify the ciphertext bits causes controlled changes to the decrypted plaintext that `decrypt()` cannot detect (padding-oracle and bit-flipping attacks are classic exploits). Use AES-CBC only for interop with legacy systems that demand it; new code should use `crypto.seal` / `crypto.open`.
+
+AES-256-CBC. Key must be 32 bytes, IV must be 16 bytes and must never be reused with the same key.
 
 ```
 let key = crypto.randomBytes(32)
-let iv = crypto.randomBytes(16)
+let iv  = crypto.randomBytes(16)
 
 let encrypted = crypto.encrypt("secret data", key, iv)
 let decrypted = crypto.decrypt(encrypted, key, iv)
 print(decrypted)   // "secret data"
 ```
+
+If you must use CBC, also compute an HMAC over `iv || ciphertext` with a separate key and verify it before decrypting — that's the encrypt-then-MAC construction that makes CBC safe. Or just use `seal`/`open`.
 
 ### Password hashing (requires OpenSSL)
 

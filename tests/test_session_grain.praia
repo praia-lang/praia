@@ -1,0 +1,31 @@
+use "testing"
+use "session"
+
+// Regression: session.generateId used to mix random.float() (Mersenne
+// Twister, predictable after a handful of outputs) with time.now() and
+// hash the result. Now it pulls 256 bits straight from
+// crypto.randomBytes (the OS CSPRNG) and hex-encodes them.
+
+testing.test("session.generateId is 64 hex chars", lam{ in
+    let id = session.generateId()
+    testing.assertEqual(len(id), 64, "32 bytes = 64 hex chars")
+    // Every char must be a lowercase hex digit.
+    for (i in 0..len(id)) {
+        let c = id[i]
+        testing.assert("0123456789abcdef".contains(c),
+                       "non-hex char at " + i + ": " + c)
+    }
+})
+
+testing.test("session.generateId outputs are unique", lam{ in
+    // Birthday-paradox collision in a 256-bit space is astronomically
+    // unlikely; ten draws should all differ.
+    let seen = {}
+    for (i in 0..10) {
+        let id = session.generateId()
+        testing.assert(!keys(seen).contains(id), "id collision: " + id)
+        seen[id] = true
+    }
+})
+
+testing.done()

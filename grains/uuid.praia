@@ -1,36 +1,29 @@
 // UUID v4 generator
-// Generates RFC 4122 compliant UUIDs using random numbers
+// Generates RFC 4122 compliant UUIDs from `crypto.randomBytes`, a
+// CSPRNG (/dev/urandom on macOS/Linux). Earlier versions of this
+// grain pulled bytes from `random.int`, which is a Mersenne Twister
+// — fast and uniform but predictable after a few outputs, so unsafe
+// for tokens, IDs, or anywhere unguessability matters. UUID v4
+// specifically requires "true random" or "pseudorandom" per RFC 4122
+// §4.4; CSPRNG output meets that bar.
+//
 // Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-
-func hexByte() {
-    let n = random.int(0, 255)
-    let hi = n >> 4
-    let lo = n & 15
-    let chars = "0123456789abcdef"
-    return chars[hi] + chars[lo]
-}
+//   - byte 6 high nibble = 4         (version)
+//   - byte 8 high 2 bits = 10        (variant)
 
 func v4() {
-    // 8-4-4-4-12
-    let p1 = hexByte() + hexByte() + hexByte() + hexByte()
-    let p2 = hexByte() + hexByte()
-
-    // Version 4: first nibble is 4
-    let byte6 = (random.int(0, 255) & 15) | 64   // 0100xxxx
-    let hi6 = byte6 >> 4
-    let lo6 = byte6 & 15
-    let chars = "0123456789abcdef"
-    let p3 = chars[hi6] + chars[lo6] + hexByte()
-
-    // Variant 1: first two bits are 10
-    let byte8 = (random.int(0, 255) & 63) | 128  // 10xxxxxx
-    let hi8 = byte8 >> 4
-    let lo8 = byte8 & 15
-    let p4 = chars[hi8] + chars[lo8] + hexByte()
-
-    let p5 = hexByte() + hexByte() + hexByte() + hexByte() + hexByte() + hexByte()
-
-    return p1 + "-" + p2 + "-" + p3 + "-" + p4 + "-" + p5
+    // 16 random bytes from the CSPRNG, then force the version + variant
+    // bits per RFC 4122. Round-trip through an int array so the bit
+    // surgery on bytes 6 and 8 is straightforward.
+    let arr = bytes.toArray(crypto.randomBytes(16))
+    arr[6] = (arr[6] & 15)  | 64       // version 4: 0100xxxx
+    arr[8] = (arr[8] & 63)  | 128      // variant 1: 10xxxxxx
+    let h = bytes.hex(bytes.from(arr))
+    return h.slice(0, 8) + "-" +
+           h.slice(8, 12) + "-" +
+           h.slice(12, 16) + "-" +
+           h.slice(16, 20) + "-" +
+           h.slice(20, 32)
 }
 
 export { v4 }
