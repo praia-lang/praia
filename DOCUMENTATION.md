@@ -3675,6 +3675,8 @@ print("took", time.now() - start, "ms")
 
 `fs` is the canonical home for filesystem I/O.
 
+### Content & directory ops
+
 | Function | Description |
 |----------|-------------|
 | `fs.read(path)` | Read entire file as string |
@@ -3687,7 +3689,28 @@ print("took", time.now() - start, "ms")
 | `fs.readDir(path)` | Array of entry names in a directory |
 | `fs.copy(src, dst)` | Copy file or directory (recursive) |
 | `fs.move(src, dst)` | Move / rename a file or directory |
-| `fs.tempDir(prefix?)` | Race-free mkdtemp(3) under the system temp dir (mode 0700) |
+
+### Metadata, permissions, and links
+
+| Function | Description |
+|----------|-------------|
+| `fs.stat(path)` | Full metadata, follows symlinks. Returns `{type, size, mode, uid, gid, mtime, atime, ctime, nlink, ino, dev}` |
+| `fs.lstat(path)` | Same as `stat` but does NOT follow symlinks — use when you need to distinguish links from regular files |
+| `fs.chmod(path, mode)` | Set permission bits. `mode` is an int (e.g. `420` for `0o644`, `384` for `0o600`); high bits are masked off |
+| `fs.symlink(target, linkpath)` | Create a symlink at `linkpath` pointing to `target`. Target string stored verbatim; dangling links are legal |
+| `fs.readlink(path)` | Return the stored target of a symlink. Throws on a non-link |
+
+The `.type` field returned by `stat`/`lstat` is one of `"file"`, `"dir"`, `"symlink"`, `"socket"`, `"fifo"`, `"block"`, `"char"`, or `"unknown"`. Mode is masked to the low 12 bits (permission + setuid/setgid/sticky).
+
+### Atomic and temp-file primitives
+
+| Function | Description |
+|----------|-------------|
+| `fs.atomicWrite(path, content)` | Write to a sibling temp file, fsync, then `rename(2)` onto `path`. Crash-safe: readers see old-or-new, never a half-written file. Same-filesystem only |
+| `fs.tempDir(prefix?)` | Race-free `mkdtemp(3)` under the system temp dir (mode 0700) |
+| `fs.mktemp(prefix?)` | Race-free `mkstemp(3)` temp FILE under the system temp dir (mode 0600). Returns the path of an empty file you own |
+
+Use `fs.atomicWrite` for config files, lock files, and anything else where a partial write would corrupt downstream readers. The temp file goes in the target's directory (same filesystem) so the rename is genuinely atomic.
 
 The old `sys.read` / `sys.write` / etc. names still work but emit a one-shot deprecation warning on first use per process. They'll be removed at 1.0 — rename `sys.<op>` to `fs.<op>` whenever you touch the file.
 
