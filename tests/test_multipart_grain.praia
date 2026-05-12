@@ -1,0 +1,150 @@
+use "testing"
+use "multipart"
+
+// Multipart/form-data parsing: basic field+file extraction, plus
+// the Phase 4 hardening (size cap, defensive defaults).
+
+let BOUNDARY = "----testboundary12345"
+
+// Helper to construct a multipart body with the same boundary the
+// tests expect. Each part is (name, filename-or-nil, contentType, content).
+func buildBody(parts) {
+    let body = ""
+    for (p in parts) {
+        body = body + "--" + BOUNDARY + "\r\n"
+        body = body + "Content-Disposition: form-data; name=\"" + p.name + "\""
+        if (p.filename != nil) {
+            body = body + "; filename=\"" + p.filename + "\""
+        }
+        body = body + "\r\n"
+        if (p.contentType != nil) {
+            body = body + "Content-Type: " + p.contentType + "\r\n"
+        }
+        body = body + "\r\n" + p.content + "\r\n"
+    }
+    body = body + "--" + BOUNDARY + "--\r\n"
+    return body
+}
+
+func mkReq(parts) {
+    return {
+        headers: {"content-type": "multipart/form-data; boundary=" + BOUNDARY},
+        body: buildBody(parts)
+    }
+}
+
+// ── Happy paths ──────────────────────────────────────────────
+
+testing.test("parse extracts a single text field", lam{ in
+    let req = mkReq([{name: "greeting", filename: nil, contentType: nil, content: "hello"}])
+    let r = multipart.parse(req)
+    testing.assert(r != nil, nil)
+    testing.assertEqual(r.fields.greeting, "hello", nil)
+    testing.assertEqual(len(keys(r.files)), 0, "no files in this request")
+})
+
+testing.test("parse extracts a file with filename + content-type", lam{ in
+    let req = mkReq([
+        {name: "upload", filename: "hello.txt", contentType: "text/plain", content: "file content"}
+    ])
+    let r = multipart.parse(req)
+    let f = r.files.upload
+    testing.assertEqual(f.filename, "hello.txt", nil)
+    testing.assertEqual(f.contentType, "text/plain", nil)
+    testing.assertEqual(f.content, "file content", nil)
+})
+
+testing.test("parse handles mixed fields + files", lam{ in
+    let req = mkReq([
+        {name: "title", filename: nil, contentType: nil, content: "My Doc"},
+        {name: "file",  filename: "doc.pdf", contentType: "application/pdf", content: "PDF bytes here"}
+    ])
+    let r = multipart.parse(req)
+    testing.assertEqual(r.fields.title, "My Doc", nil)
+    testing.assertEqual(r.files.file.filename, "doc.pdf", nil)
+    testing.assertEqual(r.files.file.content, "PDF bytes here", nil)
+})
+
+testing.test("parse returns nil when Content-Type isn't multipart", lam{ in
+    let req = {
+        headers: {"content-type": "application/json"},
+        body: "{}"
+    }
+    testing.assertEqual(multipart.parse(req), nil, nil)
+})
+
+testing.test("parse returns nil when boundary parameter is missing", lam{ in
+    let req = {
+        headers: {"content-type": "multipart/form-data"},
+        body: "anything"
+    }
+    testing.assertEqual(multipart.parse(req), nil, nil)
+})
+
+// ── Size cap ────────────────────────────────────────────────
+
+testing.test("parse rejects body bigger than default maxSize", lam{ in
+    // Default is 32 MiB. Construct a body just over that by repeating
+    // 1 KiB content many times — done inline to avoid a 32 MiB
+    // string literal in the test source.
+    let chunk = "x".repeat(1024)         // 1 KiB
+    let parts = [{name: "f", filename: "big.bin", contentType: "application/octet-stream",
+                  content: chunk.repeat(33000)}]  // ~33 MiB
+    let req = mkReq(parts)
+    testing.assertThrows(lam{ in multipart.parse(req) }, "exceeds maxSize")
+})
+
+testing.test("parse respects a custom maxSize option", lam{ in
+    let parts = [{name: "f", filename: "med.bin", contentType: "application/octet-stream",
+                  content: "x".repeat(2048)}]  // ~2 KiB body
+    let req = mkReq(parts)
+    testing.assertThrows(
+        lam{ in multipart.parse(req, {maxSize: 1024}) },
+        "exceeds maxSize 1024")
+})
+
+testing.test("parse accepts body up to maxSize", lam{ in
+    let parts = [{name: "f", filename: "small.txt", contentType: "text/plain",
+                  content: "ok"}]
+    let req = mkReq(parts)
+    let r = multipart.parse(req, {maxSize: 10 * 1024})
+    testing.assert(r != nil, nil)
+    testing.assertEqual(r.files.f.content, "ok", nil)
+})
+
+testing.test("parse with maxSize=-1 disables the cap", lam{ in
+    let parts = [{name: "f", filename: "x", contentType: "text/plain",
+                  content: "x".repeat(5000)}]
+    let req = mkReq(parts)
+    let r = multipart.parse(req, {maxSize: -1})
+    testing.assert(r != nil, "no cap, parses regardless of size")
+    testing.assertEqual(len(r.files.f.content.bytes()), 5000, nil)
+})
+
+// ── middleware integration ──────────────────────────────────
+
+testing.test("middleware(options) propagates maxSize", lam{ in
+    let parts = [{name: "f", filename: "x", contentType: "text/plain",
+                  content: "x".repeat(2048)}]
+    let req = mkReq(parts)
+    let mw = multipart.middleware({maxSize: 1024})
+    let caught = false
+    try {
+        mw(req, lam{ r in nil })
+    } catch (e) {
+        caught = true
+    }
+    testing.assert(caught, "middleware bubbles up the size-cap throw")
+})
+
+testing.test("middleware with no options uses default maxSize", lam{ in
+    let parts = [{name: "f", filename: "x", contentType: "text/plain", content: "ok"}]
+    let req = mkReq(parts)
+    let nextCalled = false
+    let mw = multipart.middleware()
+    mw(req, lam{ r in nextCalled = true; return nil })
+    testing.assert(nextCalled, "middleware passes through to next on a small body")
+    testing.assertEqual(req.files.f.content, "ok", nil)
+})
+
+testing.done()

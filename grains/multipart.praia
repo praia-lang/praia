@@ -14,16 +14,30 @@
 //
 //   // 2. As router middleware (populates req.form and req.files):
 //   use "multipart"
-//   app.use(multipart.middleware())
+//   app.use(multipart.middleware({maxSize: 50 * 1024 * 1024}))
 //   app.post("/upload", lam{ req, params in
 //       let f = req.files.get("file")
-//       if (f) { fs.write("uploads/" + f.filename, f.content) }
+//       if (f) { fs.write("uploads/" + safeName(f.filename), f.content) }
 //   })
 //
-// parse(req) returns:
+// parse(req, options?) returns:
 //   nil                                                       (not multipart)
 //   { fields: {name: string, ...},
 //     files:  {name: {filename, contentType, content}, ...} } (parsed)
+//
+// Options:
+//   maxSize  upper bound on req.body byte length. Throws if exceeded.
+//            Defaults to 32 MiB. Set to -1 for "no cap" (NOT recommended
+//            for public endpoints — a single malicious POST can blow
+//            unbounded memory).
+//
+// **Filename sanitization is the CALLER's responsibility.** The
+// `filename` field comes straight off the wire — a malicious client
+// can send "../etc/passwd", ".../..", absolute paths, or
+// zero-length names. If you're writing files to disk, run the name
+// through path.basename + a whitelist (alphanumerics + `._-`) before
+// using it. This grain doesn't sanitize because the right policy
+// is application-specific.
 
 func _extractBoundary(contentType) {
     let idx = contentType.indexOf("boundary=")
@@ -71,7 +85,13 @@ func _parseDisposition(value) {
     return params
 }
 
-func parse(req) {
+// Default maxSize cap. 32 MiB is generous for typical form uploads
+// while still bounding what a single malicious POST can allocate.
+// Public endpoints that accept large files should pass an explicit
+// (smaller or app-tuned) limit via `parse(req, {maxSize: N})`.
+let _DEFAULT_MAX_SIZE = 32 * 1024 * 1024
+
+func parse(req, options) {
     let ct = ""
     if (req.headers && req.headers.has("content-type")) {
         ct = req.headers["content-type"]
@@ -86,6 +106,20 @@ func parse(req) {
     let files = {}
 
     let bodyLen = bytes.len(body)
+
+    // Size cap — refuse to parse if the body is bigger than the
+    // caller's policy. Default 32 MiB; pass {maxSize: N} (bytes) to
+    // override, or maxSize=-1 to disable. Throws so the framework
+    // (router middleware) surfaces it as a 413-style error.
+    let maxSize = _DEFAULT_MAX_SIZE
+    if (options && keys(options).contains("maxSize")) {
+        maxSize = options.maxSize
+    }
+    if (maxSize >= 0 && bodyLen > maxSize) {
+        throw "multipart.parse: body size " + str(bodyLen) +
+              " exceeds maxSize " + str(maxSize) +
+              " (override with parse(req, {maxSize: N}) or set maxSize=-1 to disable)"
+    }
     let pos = bytes.indexOf(body, delim)
     if (pos < 0) { return {fields: fields, files: files} }
     pos = pos + bytes.len(delim)
@@ -134,13 +168,15 @@ func parse(req) {
     return {fields: fields, files: files}
 }
 
-// Router middleware. Populates req.form (text fields) and req.files (uploads)
-// when the body is multipart/form-data. Non-multipart requests pass through
-// unchanged. Useful for request handlers that don't want to call parse()
-// themselves.
-func middleware() {
+// Router middleware. Populates req.form (text fields) and req.files
+// (uploads) when the body is multipart/form-data. Non-multipart
+// requests pass through unchanged.
+//
+// Accepts the same options map as parse() — most commonly `maxSize`
+// to set an upload cap tighter (or looser) than the 32 MiB default.
+func middleware(options) {
     return lam{ req, next in
-        let parsed = parse(req)
+        let parsed = parse(req, options)
         if (parsed) {
             req.form = parsed.fields
             req.files = parsed.files

@@ -71,6 +71,17 @@ Value doHttpRequest(const std::string& method, const std::string& url,
                     const std::string& body,
                     const std::unordered_map<std::string, std::string>& extraHeaders,
                     const HttpOptions& opts = {});
+
+// Returns a stream handle (Praia map) with .status / .headers /
+// .cookies up front, plus .read(n) / .readLine() / .readAll() /
+// .eof() / .close() methods that pull body bytes lazily. Decodes
+// Content-Length, Transfer-Encoding: chunked, and close-delimited
+// responses transparently — caller doesn't need to know the framing.
+Value httpOpenStream(const std::string& method, const std::string& url,
+                     const std::string& body,
+                     const std::unordered_map<std::string, std::string>& extraHeaders,
+                     const HttpOptions& opts = {});
+
 void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp);
 
 // ── JSON (builtins/json.cpp) ─────────────────────────────────

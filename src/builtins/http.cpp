@@ -278,13 +278,6 @@ int connectToHost(const std::string& host, int port, int timeoutMs) {
                        (lastErr.empty() ? "" : " (" + lastErr + ")"), 0);
 }
 
-// Convenience overload for the existing internal-fileStream call site
-// that doesn't care about timeouts (it's reading static files from a
-// pre-loaded list, not making outbound requests).
-int connectToHost(const std::string& host, int port) {
-    return connectToHost(host, port, -1);
-}
-
 // Apply a per-operation receive/send timeout to a connected socket.
 // Both directions get the same value so a slow peer can't stall the
 // request half indefinitely. `ms <= 0` disables the timeout.
@@ -900,6 +893,551 @@ Value doHttpRequest(const std::string& method, const std::string& url,
         }
         currentUrl = newUrl;
         ++redirectCount;
+    }
+}
+
+// ── Streaming response reader ─────────────────────────────────
+//
+// Reads the request out the door like doOneHttpRequest, but stops
+// after parsing response headers — the body comes out incrementally
+// through the returned handle's .read(n) / .readLine() / .readAll().
+//
+// Three body framings are handled transparently:
+//   - Content-Length: read exactly N bytes, then EOF.
+//   - Transfer-Encoding: chunked: parse HEXSIZE\r\n<data>\r\n
+//     repeatedly until the 0\r\n terminator + (ignored) trailers.
+//   - Neither header present: read until the server closes the
+//     connection (HTTP/1.0 style; HTTP/1.1 default with
+//     Connection: close).
+//
+// The state is held in HttpStreamState (in a shared_ptr that the
+// handle's method lambdas all capture), so multiple methods on the
+// same handle share the same socket and decode position.
+
+struct HttpStreamState {
+    std::shared_ptr<SocketConn> conn;
+    enum class Mode { ContentLength, Chunked, Close };
+    Mode mode = Mode::Close;
+    int64_t contentRemaining = -1;
+    int64_t chunkRemaining = 0;
+    bool chunkedDone = false;
+    bool eofReached = false;
+    bool closed = false;
+
+    // Bytes ready to hand to the caller (already de-chunked if
+    // applicable). bufPos is how many have been delivered.
+    std::string buf;
+    size_t bufPos = 0;
+
+    // Scratch buffer for socket bytes that haven't yet been parsed
+    // (chunk headers in particular accumulate here until a CRLF
+    // makes them complete). Distinct from `buf` because chunk
+    // headers don't get delivered to the caller as body bytes.
+    std::string scratch;
+    size_t scratchPos = 0;
+
+    // Status / headers / cookies populated once at open time; the
+    // handle map exposes these as plain fields, no lazy fetch.
+    int status = 0;
+    std::shared_ptr<PraiaMap>  headersMap;
+    std::shared_ptr<PraiaArray> cookiesArr;
+};
+
+// Pull one chunk of bytes from the socket into `out`. Returns the
+// number appended; 0 = clean EOF; -1 = EINTR (retry). Throws on
+// timeout / hard error so the caller doesn't have to special-case
+// errno.
+static ssize_t streamRecv(SocketConn& conn, std::string& out, size_t maxBytes) {
+    char tmp[8192];
+    if (maxBytes > sizeof(tmp)) maxBytes = sizeof(tmp);
+    errno = 0;
+    ssize_t n = conn.read(tmp, maxBytes);
+    if (n > 0) { out.append(tmp, n); return n; }
+    if (n == 0) return 0;
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+        throw RuntimeError("HTTP stream: read timed out", 0);
+    if (errno == EINTR) return -1;
+    throw RuntimeError("HTTP stream: read error: " +
+                       std::string(errno ? std::strerror(errno) : "connection broken"), 0);
+}
+
+// Read one CRLF-terminated line out of the scratch buffer, refilling
+// from the socket as needed. Returns the line WITHOUT the CRLF.
+// Throws if the socket closes mid-line (chunked framing requires
+// well-formed line endings).
+static std::string streamReadSocketLine(HttpStreamState& s) {
+    while (true) {
+        size_t crlf = s.scratch.find("\r\n", s.scratchPos);
+        if (crlf != std::string::npos) {
+            std::string line = s.scratch.substr(s.scratchPos, crlf - s.scratchPos);
+            s.scratchPos = crlf + 2;
+            // Compact periodically so a long-running stream doesn't
+            // pin unbounded memory in the prefix of `scratch`.
+            if (s.scratchPos > 4096) {
+                s.scratch.erase(0, s.scratchPos);
+                s.scratchPos = 0;
+            }
+            return line;
+        }
+        ssize_t n;
+        do { n = streamRecv(*s.conn, s.scratch, 4096); } while (n == -1);
+        if (n == 0)
+            throw RuntimeError("HTTP stream: unexpected EOF parsing chunk framing", 0);
+    }
+}
+
+// Read exactly `count` bytes from the wire into `out`. Used for the
+// data section of a chunk (we know its length up front from the
+// chunk header).
+static void streamReadExact(HttpStreamState& s, std::string& out, size_t count) {
+    while (count > 0) {
+        size_t avail = s.scratch.size() - s.scratchPos;
+        if (avail > 0) {
+            size_t take = std::min(avail, count);
+            out.append(s.scratch.data() + s.scratchPos, take);
+            s.scratchPos += take;
+            count -= take;
+            if (count == 0) {
+                if (s.scratchPos > 4096) {
+                    s.scratch.erase(0, s.scratchPos);
+                    s.scratchPos = 0;
+                }
+                return;
+            }
+        }
+        ssize_t n;
+        do { n = streamRecv(*s.conn, s.scratch, std::max<size_t>(4096, count)); }
+        while (n == -1);
+        if (n == 0)
+            throw RuntimeError("HTTP stream: unexpected EOF in chunk body", 0);
+    }
+}
+
+// Ensure at least one delivered byte sits in `buf` past `bufPos`,
+// or set eofReached if the body is exhausted. The framing-specific
+// logic lives here so the public read/readLine/readAll methods can
+// stay framing-agnostic.
+static void streamEnsure(HttpStreamState& s) {
+    if (s.bufPos < s.buf.size()) return;
+    s.buf.clear();
+    s.bufPos = 0;
+    if (s.eofReached) return;
+
+    if (s.mode == HttpStreamState::Mode::ContentLength) {
+        if (s.contentRemaining <= 0) { s.eofReached = true; return; }
+        size_t want = std::min<int64_t>(s.contentRemaining, 8192);
+        size_t avail = s.scratch.size() - s.scratchPos;
+        if (avail > 0) {
+            size_t take = std::min(avail, want);
+            s.buf.append(s.scratch.data() + s.scratchPos, take);
+            s.scratchPos += take;
+            s.contentRemaining -= take;
+            if (s.scratchPos > 4096) {
+                s.scratch.erase(0, s.scratchPos);
+                s.scratchPos = 0;
+            }
+            return;
+        }
+        ssize_t n;
+        do { n = streamRecv(*s.conn, s.buf, want); } while (n == -1);
+        if (n == 0) { s.eofReached = true; return; }
+        s.contentRemaining -= n;
+        if (s.contentRemaining < 0) s.contentRemaining = 0;
+        return;
+    }
+
+    if (s.mode == HttpStreamState::Mode::Chunked) {
+        while (s.buf.empty() && !s.chunkedDone) {
+            if (s.chunkRemaining == 0) {
+                std::string line = streamReadSocketLine(s);
+                // Chunk extensions follow a ';'; we ignore them per
+                // RFC 7230 §4.1.1 (they're rare and informational).
+                size_t semi = line.find(';');
+                if (semi != std::string::npos) line.resize(semi);
+                while (!line.empty() &&
+                       (line.back() == ' ' || line.back() == '\t'))
+                    line.pop_back();
+                if (line.empty())
+                    throw RuntimeError("HTTP stream: empty chunk size line", 0);
+                int64_t sz = 0;
+                for (char c : line) {
+                    int d;
+                    if      (c >= '0' && c <= '9') d = c - '0';
+                    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                    else throw RuntimeError(
+                        std::string("HTTP stream: invalid hex in chunk size: '") +
+                        c + "'", 0);
+                    sz = (sz << 4) | d;
+                    if (sz < 0)
+                        throw RuntimeError("HTTP stream: chunk size overflow", 0);
+                }
+                if (sz == 0) {
+                    // Terminator chunk: consume trailers until empty
+                    // line, then we're done. We don't expose trailers
+                    // to the caller — they're rare and roughly
+                    // headers-after-the-body semantics that callers
+                    // who care about should be using a different API.
+                    while (true) {
+                        std::string trailer = streamReadSocketLine(s);
+                        if (trailer.empty()) break;
+                    }
+                    s.chunkedDone = true;
+                    s.eofReached = true;
+                    return;
+                }
+                s.chunkRemaining = sz;
+            }
+            size_t want = std::min<int64_t>(s.chunkRemaining, 8192);
+            streamReadExact(s, s.buf, want);
+            s.chunkRemaining -= want;
+            if (s.chunkRemaining == 0) {
+                std::string trailer = streamReadSocketLine(s);
+                if (!trailer.empty())
+                    throw RuntimeError("HTTP stream: missing CRLF after chunk data", 0);
+            }
+        }
+        if (s.chunkedDone && s.buf.empty()) s.eofReached = true;
+        return;
+    }
+
+    // Mode::Close — read whatever the socket gives until it closes.
+    size_t avail = s.scratch.size() - s.scratchPos;
+    if (avail > 0) {
+        s.buf.append(s.scratch.data() + s.scratchPos, avail);
+        s.scratchPos = s.scratch.size();
+        return;
+    }
+    ssize_t n;
+    do { n = streamRecv(*s.conn, s.buf, 8192); } while (n == -1);
+    if (n == 0) s.eofReached = true;
+}
+
+// Detect the body framing from the parsed response headers. Per RFC
+// 7230 §3.3.3, Transfer-Encoding (when present) takes precedence
+// over Content-Length. Anything without either is read-until-close.
+static void detectStreamMode(HttpStreamState& s) {
+    auto& h = s.headersMap->entries;
+    auto teIt = h.find(Value(std::string("transfer-encoding")));
+    if (teIt != h.end() && teIt->second.isString()) {
+        std::string te = teIt->second.asString();
+        for (auto& c : te) c = (char)std::tolower((unsigned char)c);
+        if (te.find("chunked") != std::string::npos) {
+            s.mode = HttpStreamState::Mode::Chunked;
+            return;
+        }
+    }
+    auto clIt = h.find(Value(std::string("content-length")));
+    if (clIt != h.end() && clIt->second.isString()) {
+        try {
+            s.contentRemaining = std::stoll(clIt->second.asString());
+            if (s.contentRemaining < 0)
+                throw RuntimeError("HTTP stream: negative Content-Length", 0);
+            s.mode = HttpStreamState::Mode::ContentLength;
+            return;
+        } catch (const std::invalid_argument&) {
+            throw RuntimeError("HTTP stream: malformed Content-Length", 0);
+        } catch (const std::out_of_range&) {
+            throw RuntimeError("HTTP stream: Content-Length out of range", 0);
+        }
+    }
+    s.mode = HttpStreamState::Mode::Close;
+}
+
+// Read raw bytes from the connection until "\r\n\r\n" appears, then
+// split into header text + body prefix. Throws on EOF before the
+// terminator (header truncation).
+static void readHeadersInto(SocketConn& conn, std::string& headerText,
+                            std::string& bodyPrefix) {
+    std::string acc;
+    while (true) {
+        size_t end = acc.find("\r\n\r\n");
+        if (end != std::string::npos) {
+            headerText = acc.substr(0, end + 4);
+            bodyPrefix = acc.substr(end + 4);
+            return;
+        }
+        ssize_t n;
+        do { n = streamRecv(conn, acc, 8192); } while (n == -1);
+        if (n == 0)
+            throw RuntimeError("HTTP stream: EOF before response headers complete", 0);
+        // Defense-in-depth: a server that floods headers indefinitely
+        // would otherwise tie up memory. 1 MiB is hugely beyond any
+        // legitimate HTTP header section.
+        if (acc.size() > 1024 * 1024)
+            throw RuntimeError("HTTP stream: response headers exceed 1 MiB", 0);
+    }
+}
+
+// Drain whatever body is on the wire for a redirect response. We
+// don't want to leak it (or leave it half-consumed and trip up the
+// next connection). The bytes themselves get dropped — only the
+// 3xx + Location headers mattered.
+static void drainRedirectBody(HttpStreamState& s) {
+    while (!s.eofReached) {
+        streamEnsure(s);
+        s.bufPos = s.buf.size();
+    }
+}
+
+Value httpOpenStream(const std::string& method, const std::string& url,
+                     const std::string& body,
+                     const std::unordered_map<std::string, std::string>& extraHeaders,
+                     const HttpOptions& opts) {
+    auto deadline = (opts.totalTimeoutMs > 0)
+        ? std::chrono::steady_clock::now() +
+          std::chrono::milliseconds(opts.totalTimeoutMs)
+        : std::chrono::steady_clock::time_point::max();
+
+    std::string currentUrl     = url;
+    std::string currentMethod  = method;
+    std::string currentBody    = body;
+    auto        currentHeaders = extraHeaders;
+    int         redirectCount  = 0;
+
+    while (true) {
+        HttpOptions perReq = opts;
+        if (opts.totalTimeoutMs > 0) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0)
+                throw RuntimeError("HTTP total timeout exceeded", 0);
+            int remMs = static_cast<int>(remaining);
+            if (perReq.connectTimeoutMs <= 0 || perReq.connectTimeoutMs > remMs)
+                perReq.connectTimeoutMs = remMs;
+            if (perReq.readTimeoutMs <= 0 || perReq.readTimeoutMs > remMs)
+                perReq.readTimeoutMs = remMs;
+        }
+
+        auto p = parseUrl(currentUrl);
+        for (char c : currentMethod) if (c == '\r' || c == '\n' || c == '\0')
+            throw RuntimeError("Invalid HTTP method: contains CR/LF/NUL", 0);
+        for (char c : p.path) if (c == '\r' || c == '\n' || c == '\0')
+            throw RuntimeError("Invalid URL path: contains CR/LF/NUL", 0);
+        for (char c : p.host) if (c == '\r' || c == '\n' || c == '\0')
+            throw RuntimeError("Invalid host: contains CR/LF/NUL", 0);
+        for (auto& [k, v] : currentHeaders) {
+            if (!headerFieldSafe(k, v))
+                throw RuntimeError("Invalid request header \"" + k +
+                                   "\": contains CR/LF/NUL", 0);
+        }
+
+        auto conn = std::make_shared<SocketConn>();
+        conn->fd = connectToHost(p.host, p.port, perReq.connectTimeoutMs);
+        setSocketTimeouts(conn->fd, perReq.readTimeoutMs);
+
+#ifdef HAVE_OPENSSL
+        if (p.tls) {
+            ensureSSLInit();
+            conn->ctx = SSL_CTX_new(TLS_client_method());
+            if (!conn->ctx) {
+                conn->shutdown_close();
+                throw RuntimeError("Failed to create SSL context", 0);
+            }
+            if (!perReq.caBundle.empty()) {
+                if (SSL_CTX_load_verify_locations(conn->ctx, perReq.caBundle.c_str(), nullptr) != 1) {
+                    conn->shutdown_close();
+                    throw RuntimeError("Cannot load CA bundle: " + perReq.caBundle, 0);
+                }
+            } else {
+                SSL_CTX_set_default_verify_paths(conn->ctx);
+            }
+            SSL_CTX_set_verify(conn->ctx,
+                               perReq.insecure ? SSL_VERIFY_NONE : SSL_VERIFY_PEER,
+                               nullptr);
+            conn->ssl = SSL_new(conn->ctx);
+            SSL_set_fd(conn->ssl, conn->fd);
+            SSL_set_tlsext_host_name(conn->ssl, p.host.c_str());
+            if (!perReq.insecure) {
+                X509_VERIFY_PARAM* vp = SSL_get0_param(conn->ssl);
+                unsigned char ipbuf[16];
+                bool isIp = (inet_pton(AF_INET,  p.host.c_str(), ipbuf) == 1 ||
+                             inet_pton(AF_INET6, p.host.c_str(), ipbuf) == 1);
+                if (isIp) X509_VERIFY_PARAM_set1_ip_asc(vp, p.host.c_str());
+                else {
+                    X509_VERIFY_PARAM_set1_host(vp, p.host.c_str(), p.host.size());
+                    X509_VERIFY_PARAM_set_hostflags(vp, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+                }
+            }
+            if (SSL_connect(conn->ssl) <= 0) {
+                long vr = SSL_get_verify_result(conn->ssl);
+                conn->shutdown_close();
+                if (!perReq.insecure && vr != X509_V_OK) {
+                    throw RuntimeError("SSL certificate verification failed for " + p.host +
+                                       ": " + X509_verify_cert_error_string(vr), 0);
+                }
+                throw RuntimeError("SSL handshake failed for " + p.host, 0);
+            }
+            if (!perReq.insecure) {
+                long vr = SSL_get_verify_result(conn->ssl);
+                if (vr != X509_V_OK) {
+                    conn->shutdown_close();
+                    throw RuntimeError("SSL certificate verification failed for " + p.host +
+                                       ": " + X509_verify_cert_error_string(vr), 0);
+                }
+            }
+        }
+#endif
+
+        std::string req = currentMethod + " " + p.path + " HTTP/1.1\r\n";
+        req += "Host: " + p.hostHeader + "\r\n";
+        req += "Connection: close\r\n";
+        for (auto& [k, v] : currentHeaders) req += k + ": " + v + "\r\n";
+        if (!currentBody.empty() &&
+            currentHeaders.find("Content-Type") == currentHeaders.end())
+            req += "Content-Type: text/plain\r\n";
+        if (!currentBody.empty())
+            req += "Content-Length: " + std::to_string(currentBody.size()) + "\r\n";
+        req += "\r\n" + currentBody;
+
+        if (conn->write(req.c_str(), req.size()) < 0) {
+            conn->shutdown_close();
+            throw RuntimeError("Failed to send HTTP request", 0);
+        }
+
+        std::string headerText, bodyPrefix;
+        readHeadersInto(*conn, headerText, bodyPrefix);
+
+        Value parsed = parseHttpResponse(headerText + bodyPrefix);
+        // parseHttpResponse parses headers AND splits its `raw` into
+        // headerSection+body. We pass headers+prefix so it sees the
+        // \r\n\r\n boundary, but we re-extract status/headers/cookies
+        // here and keep the prefix as the FIRST body bytes for the
+        // stream — we don't want to slurp the full body in.
+        auto& parsedMap = parsed.asMap()->entries;
+        int status = static_cast<int>(parsedMap[Value("status")].asNumber());
+
+        // Redirect handling — fully drain the redirect's body via the
+        // streaming path so the connection state is clean before we
+        // open the next one.
+        if (opts.followRedirects) {
+            auto& respHeaders = parsedMap[Value("headers")].asMap()->entries;
+            if (status >= 300 && status < 400) {
+                auto locIt = respHeaders.find(Value("location"));
+                if (locIt != respHeaders.end() && locIt->second.isString()) {
+                    if (redirectCount >= opts.maxRedirects) {
+                        conn->shutdown_close();
+                        throw RuntimeError("HTTP redirect limit exceeded (" +
+                                           std::to_string(opts.maxRedirects) + ")", 0);
+                    }
+                    std::string newUrl = resolveLocation(currentUrl, locIt->second.asString());
+                    bool curIsTls = parseUrl(currentUrl).tls;
+                    bool newIsTls = parseUrl(newUrl).tls;
+                    if (curIsTls && !newIsTls) {
+                        conn->shutdown_close();
+                        throw RuntimeError("HTTP redirect: refusing https→http downgrade to " +
+                                           newUrl, 0);
+                    }
+
+                    // Drain whatever body this 3xx had, then close.
+                    HttpStreamState tmp;
+                    tmp.conn = conn;
+                    tmp.headersMap = parsedMap[Value("headers")].asMap();
+                    tmp.scratch = std::move(bodyPrefix);
+                    tmp.scratchPos = 0;
+                    detectStreamMode(tmp);
+                    drainRedirectBody(tmp);
+                    conn->shutdown_close();
+
+                    if (status == 303 ||
+                        ((status == 301 || status == 302) &&
+                          currentMethod != "GET" && currentMethod != "HEAD")) {
+                        currentMethod = "GET";
+                        currentBody.clear();
+                        currentHeaders.erase("Content-Length");
+                        currentHeaders.erase("Content-Type");
+                    }
+                    currentUrl = newUrl;
+                    ++redirectCount;
+                    continue;
+                }
+            }
+        }
+
+        // Final response — build the stream handle.
+        auto state = std::make_shared<HttpStreamState>();
+        state->conn       = conn;
+        state->status     = status;
+        state->headersMap = parsedMap[Value("headers")].asMap();
+        state->cookiesArr = parsedMap[Value("cookies")].asArray();
+        state->scratch    = std::move(bodyPrefix);
+        state->scratchPos = 0;
+        detectStreamMode(*state);
+
+        auto handle = gcNew<PraiaMap>();
+        handle->entries[Value("status")]  = Value(static_cast<int64_t>(state->status));
+        handle->entries[Value("headers")] = Value(state->headersMap);
+        handle->entries[Value("cookies")] = Value(state->cookiesArr);
+
+        handle->entries[Value("read")] = Value(makeNative("HttpStream.read", 1,
+            [state](const std::vector<Value>& args) -> Value {
+                if (state->closed) throw RuntimeError("HttpStream is closed", 0);
+                if (!args[0].isNumber())
+                    throw RuntimeError("HttpStream.read(n): n must be a number", 0);
+                int64_t want = args[0].toInt64ForBitwise();
+                if (want < 0) throw RuntimeError("HttpStream.read(n): n must be non-negative", 0);
+                if (want == 0) return Value(std::string(""));
+                std::string out;
+                out.reserve(static_cast<size_t>(want));
+                while (want > 0) {
+                    streamEnsure(*state);
+                    if (state->bufPos >= state->buf.size()) break;
+                    size_t avail = state->buf.size() - state->bufPos;
+                    size_t take = std::min<size_t>(avail, static_cast<size_t>(want));
+                    out.append(state->buf.data() + state->bufPos, take);
+                    state->bufPos += take;
+                    want -= take;
+                }
+                return Value(std::move(out));
+            }));
+
+        handle->entries[Value("readLine")] = Value(makeNative("HttpStream.readLine", 0,
+            [state](const std::vector<Value>&) -> Value {
+                if (state->closed) throw RuntimeError("HttpStream is closed", 0);
+                std::string out;
+                while (true) {
+                    streamEnsure(*state);
+                    if (state->bufPos >= state->buf.size()) {
+                        if (out.empty()) return Value();  // EOF
+                        return Value(std::move(out));
+                    }
+                    char c = state->buf[state->bufPos++];
+                    if (c == '\n') return Value(std::move(out));
+                    if (c != '\r') out += c;
+                }
+            }));
+
+        handle->entries[Value("readAll")] = Value(makeNative("HttpStream.readAll", 0,
+            [state](const std::vector<Value>&) -> Value {
+                if (state->closed) throw RuntimeError("HttpStream is closed", 0);
+                std::string out;
+                while (true) {
+                    streamEnsure(*state);
+                    if (state->bufPos >= state->buf.size()) break;
+                    out.append(state->buf.data() + state->bufPos,
+                               state->buf.size() - state->bufPos);
+                    state->bufPos = state->buf.size();
+                }
+                return Value(std::move(out));
+            }));
+
+        handle->entries[Value("eof")] = Value(makeNative("HttpStream.eof", 0,
+            [state](const std::vector<Value>&) -> Value {
+                if (state->closed) return Value(true);
+                if (state->bufPos < state->buf.size()) return Value(false);
+                streamEnsure(*state);
+                return Value(state->bufPos >= state->buf.size());
+            }));
+
+        handle->entries[Value("close")] = Value(makeNative("HttpStream.close", 0,
+            [state](const std::vector<Value>&) -> Value {
+                if (state->closed) return Value();
+                state->closed = true;
+                if (state->conn) state->conn->shutdown_close();
+                return Value();
+            }));
+
+        return Value(handle);
     }
 }
 

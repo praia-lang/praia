@@ -1736,6 +1736,65 @@ Interpreter::Interpreter() {
             return doHttpRequest(method, url, body, headers, httpOpts);
         }));
 
+    // http.openStream(opts) — same option surface as http.request,
+    // but returns a stream handle instead of slurping the body.
+    // Use it for downloads / NDJSON feeds / anything that doesn't
+    // fit comfortably in memory. The handle is compatible with
+    // json.parser (both expose .read(n)).
+    httpMap->entries[Value("openStream")] = Value(makeNative("http.openStream", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isMap())
+                throw RuntimeError("http.openStream() requires an options map", 0);
+            auto& opts = args[0].asMap()->entries;
+            std::string method = "GET", url, body;
+            std::unordered_map<std::string, std::string> headers;
+            if (opts.count("method")) method = opts.at("method").toString();
+            if (opts.count("url")) url = opts.at("url").toString();
+            else throw RuntimeError("http.openStream() requires a 'url' field", 0);
+            if (opts.count("body")) body = opts.at("body").toString();
+            if (opts.count("headers") && opts.at("headers").isMap()) {
+                for (auto& [k, v] : opts.at("headers").asMap()->entries)
+                    headers[k.toString()] = v.toString();
+            }
+
+            // Identical options-parsing shape to http.request so
+            // callers can copy-paste a working request and switch
+            // verbs. Kept inline rather than factored out because
+            // factoring would require Value-typed glue.
+            HttpOptions httpOpts;
+            auto secsToMs = [](const Value& v) -> int {
+                if (!v.isNumber()) return -1;
+                double secs = v.asNumber();
+                if (secs <= 0) return -1;
+                return static_cast<int>(secs * 1000.0);
+            };
+            if (opts.count("timeout")) {
+                int ms = secsToMs(opts.at("timeout"));
+                if (ms > 0) {
+                    httpOpts.connectTimeoutMs = ms;
+                    httpOpts.readTimeoutMs    = ms;
+                    httpOpts.totalTimeoutMs   = ms;
+                }
+            }
+            if (opts.count("connectTimeout"))
+                httpOpts.connectTimeoutMs = secsToMs(opts.at("connectTimeout"));
+            if (opts.count("readTimeout"))
+                httpOpts.readTimeoutMs    = secsToMs(opts.at("readTimeout"));
+            if (opts.count("totalTimeout"))
+                httpOpts.totalTimeoutMs   = secsToMs(opts.at("totalTimeout"));
+            if (opts.count("followRedirects") && opts.at("followRedirects").isBool())
+                httpOpts.followRedirects = opts.at("followRedirects").asBool();
+            if (opts.count("maxRedirects") && opts.at("maxRedirects").isNumber())
+                httpOpts.maxRedirects =
+                    static_cast<int>(opts.at("maxRedirects").asNumber());
+            if (opts.count("insecure") && opts.at("insecure").isBool())
+                httpOpts.insecure = opts.at("insecure").asBool();
+            if (opts.count("caBundle") && opts.at("caBundle").isString())
+                httpOpts.caBundle = opts.at("caBundle").asString();
+
+            return httpOpenStream(method, url, body, headers, httpOpts);
+        }));
+
     httpMap->entries[Value("createServer")] = Value(makeNative("http.createServer", 1,
         [self](const std::vector<Value>& args) -> Value {
             if (!args[0].isCallable())

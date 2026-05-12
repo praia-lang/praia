@@ -3196,6 +3196,63 @@ When `followRedirects` is `false`, the 3xx response is returned as-is with `Loca
 
 Connect against an unroutable IP throws "connect timed out after Nms" with an exact elapsed budget; read timeouts throw "HTTP read timed out".
 
+#### Streaming responses — `http.openStream`
+
+`http.request` slurps the response body into memory. `http.openStream` returns a stream handle instead — useful for downloads larger than RAM, NDJSON feeds, log tails, or anything you want to consume incrementally.
+
+```
+let s = http.openStream({url: "https://example.com/big.json"})
+print(s.status, s.headers["content-length"])
+
+while (!s.eof()) {
+    let chunk = s.read(8192)
+    process(chunk)
+}
+s.close()
+```
+
+The same options surface as `http.request` is supported: timeouts, redirect policy, TLS knobs. Redirects are followed before the handle is returned, so by the time you see `s.status` you're looking at the final response.
+
+##### Handle methods
+
+| Method | Description |
+|--------|-------------|
+| `s.status` | HTTP status code (int) |
+| `s.headers` | Response headers map (lowercase keys) |
+| `s.cookies` | Array of raw `Set-Cookie` header values |
+| `s.read(n)` | Read up to `n` bytes; returns `""` at EOF |
+| `s.readLine()` | Read one line (no trailing `\n`); returns `nil` at EOF. CRLF and LF both work |
+| `s.readAll()` | Drain everything remaining and return as a string |
+| `s.eof()` | `true` once the body is exhausted |
+| `s.close()` | Close the connection. Idempotent. Subsequent reads throw |
+
+##### Framing
+
+The stream decodes three response-body framings transparently:
+
+- **`Content-Length: N`** — reads exactly N bytes, then EOF.
+- **`Transfer-Encoding: chunked`** — parses `HEXSIZE\r\n<data>\r\n` repeatedly until the `0\r\n` terminator. Chunk extensions (`;name=val` after the size) are ignored. Trailers are dropped (no API surface for them).
+- **Neither header** — read until the server closes the connection (HTTP/1.0 style; HTTP/1.1 with `Connection: close`).
+
+##### Composing with json.parser
+
+The handle exposes `.read(n)` in the same shape `json.parser` expects, so streaming NDJSON over HTTP is one line of glue:
+
+```
+let s = http.openStream({url: feedUrl})
+let p = json.parser(s)
+while (!p.eof()) {
+    let record = p.nextValue()
+    handleRecord(record)
+}
+s.close()
+```
+
+##### Limits
+
+- Sending a streamed REQUEST body isn't supported — `body` is sent up front. For multi-GB uploads, the typical pattern is multipart-with-temp-file or a different protocol entirely.
+- The handle keeps the underlying TCP socket open for as long as it lives. Call `.close()` when you're done; the connection sticks around until then.
+
 ### HTTP Server
 
 #### Creating a server

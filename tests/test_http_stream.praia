@@ -1,0 +1,232 @@
+use "testing"
+
+// http.openStream — response-body streaming. Decodes Content-Length,
+// Transfer-Encoding: chunked, and the close-delimited fallback. Uses
+// a hand-rolled net.* mock server so we can emit exact wire bytes
+// for each framing mode and triggered failure path.
+
+let TEST_PORT = 38791
+
+// Generic-purpose server: routes based on path, returns whatever
+// canned response shape the test needs. Single accept loop, serial
+// handling (matches the Phase 2 test server's pattern).
+let _serverFuture = async lam{ in
+    let s = net.listen(TEST_PORT)
+    while (true) {
+        let c = net.accept(s)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let chunk = net.recv(c, 4096)
+            if (len(chunk) == 0) { break }
+            req = req + chunk
+        }
+        let firstSp = req.indexOf(" ")
+        let after = req.slice(firstSp + 1, len(req))
+        let path = after.slice(0, after.indexOf(" "))
+
+        let resp = ""
+        if (path == "/contentlength") {
+            let body = "Hello streaming world. ".repeat(50)
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body.bytes())) +
+                   "\r\nConnection: close\r\n\r\n" + body
+        }
+        elif (path == "/chunked") {
+            // Body split into three chunks: "Hello " + "streaming " + "world"
+            let h = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            resp = h +
+                   "6\r\nHello \r\n" +
+                   "a\r\nstreaming \r\n" +
+                   "5\r\nworld\r\n" +
+                   "0\r\n\r\n"
+        }
+        elif (path == "/chunked-with-ext") {
+            // Chunk extensions (semicolon after size) must be ignored.
+            let h = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            resp = h +
+                   "5;name=foo\r\nhello\r\n" +
+                   "0\r\n\r\n"
+        }
+        elif (path == "/close-delimited") {
+            // No Content-Length, no chunked → read until EOF.
+            resp = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nbody-by-close"
+        }
+        elif (path == "/multiline") {
+            // For readLine testing.
+            let body = "alpha\nbeta\ngamma"
+            let h = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body.bytes())) +
+                    "\r\nConnection: close\r\n\r\n"
+            resp = h + body
+        }
+        elif (path == "/large") {
+            // 100 KiB body to exercise multi-chunk reads through the
+            // 8 KiB internal buffer.
+            let body = "0123456789".repeat(10240)
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body.bytes())) +
+                   "\r\nConnection: close\r\n\r\n" + body
+        }
+        elif (path == "/empty") {
+            resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/redirect") {
+            resp = "HTTP/1.1 302 Found\r\nLocation: /contentlength\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/ndjson") {
+            let body = "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n"
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body.bytes())) +
+                   "\r\nConnection: close\r\n\r\n" + body
+        }
+        else {
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nroot"
+        }
+        net.send(c, resp)
+        net.close(c)
+    }
+}()
+time.sleep(200)
+
+let base = "http://localhost:" + str(TEST_PORT)
+
+// ── Headers + status surfaced before body is read ─────────────
+
+testing.test("openStream exposes status / headers / cookies up front", lam{ in
+    let s = http.openStream({url: base + "/contentlength"})
+    testing.assertEqual(s.status, 200, nil)
+    testing.assertEqual(s.headers["content-length"], "1150", nil)
+    testing.assertEqual(type(s.cookies), "array", "cookies is an array")
+    s.close()
+})
+
+// ── Content-Length decoding ──────────────────────────────────
+
+testing.test("Content-Length: read(n) returns up to n bytes", lam{ in
+    let s = http.openStream({url: base + "/contentlength"})
+    let first = s.read(20)
+    testing.assertEqual(first, "Hello streaming worl", nil)
+    let rest = s.readAll()
+    testing.assert(rest.startsWith("d. Hello"), nil)
+    testing.assert(s.eof(), "EOF after readAll")
+    s.close()
+})
+
+testing.test("Content-Length: readAll returns the full body", lam{ in
+    let s = http.openStream({url: base + "/contentlength"})
+    let all = s.readAll()
+    testing.assertEqual(len(all.bytes()), 1150, "23 * 50 = 1150 bytes")
+    testing.assertEqual(all.slice(0, 23), "Hello streaming world. ", nil)
+    s.close()
+})
+
+testing.test("Content-Length: zero-length body", lam{ in
+    let s = http.openStream({url: base + "/empty"})
+    testing.assertEqual(s.status, 204, nil)
+    testing.assertEqual(s.readAll(), "", nil)
+    testing.assert(s.eof(), nil)
+    s.close()
+})
+
+testing.test("Content-Length: large body streams without slurping", lam{ in
+    // 100 KiB body — read in 1 KiB chunks, count total.
+    let s = http.openStream({url: base + "/large"})
+    let total = 0
+    while (!s.eof()) {
+        let chunk = s.read(1024)
+        total = total + len(chunk.bytes())
+    }
+    testing.assertEqual(total, 102400, "100 KiB body delivered in full")
+    s.close()
+})
+
+// ── Chunked decoding ────────────────────────────────────────
+
+testing.test("Transfer-Encoding: chunked decodes correctly", lam{ in
+    let s = http.openStream({url: base + "/chunked"})
+    testing.assertEqual(s.headers["transfer-encoding"], "chunked", nil)
+    testing.assertEqual(s.readAll(), "Hello streaming world", nil)
+    s.close()
+})
+
+testing.test("Chunked: chunk extensions after ';' are ignored", lam{ in
+    let s = http.openStream({url: base + "/chunked-with-ext"})
+    testing.assertEqual(s.readAll(), "hello", nil)
+    s.close()
+})
+
+// ── Close-delimited (no framing headers) ─────────────────────
+
+testing.test("Close-delimited body reads until EOF", lam{ in
+    let s = http.openStream({url: base + "/close-delimited"})
+    testing.assertEqual(s.readAll(), "body-by-close", nil)
+    s.close()
+})
+
+// ── readLine ─────────────────────────────────────────────────
+
+testing.test("readLine returns one line at a time, nil at EOF", lam{ in
+    let s = http.openStream({url: base + "/multiline"})
+    testing.assertEqual(s.readLine(), "alpha", nil)
+    testing.assertEqual(s.readLine(), "beta", nil)
+    testing.assertEqual(s.readLine(), "gamma",
+                        "final line without trailing \\n is still returned")
+    testing.assertEqual(s.readLine(), nil, "EOF returns nil")
+    s.close()
+})
+
+// ── Composition with json.parser (NDJSON over HTTP) ──────────
+
+testing.test("json.parser consumes the stream end-to-end", lam{ in
+    // The stream handle exposes .read(n), so json.parser accepts it
+    // as a source without any glue.
+    let s = http.openStream({url: base + "/ndjson"})
+    let p = json.parser(s)
+    let sum = 0
+    while (!p.eof()) {
+        let rec = p.nextValue()
+        sum = sum + rec.n
+    }
+    testing.assertEqual(sum, 6, "1 + 2 + 3")
+    s.close()
+})
+
+// ── Redirect following ───────────────────────────────────────
+
+testing.test("openStream follows 302 to the final body by default", lam{ in
+    let s = http.openStream({url: base + "/redirect"})
+    testing.assertEqual(s.status, 200, "ended at /contentlength")
+    testing.assert(s.readAll().contains("Hello streaming world"), nil)
+    s.close()
+})
+
+testing.test("followRedirects: false returns the 3xx stream", lam{ in
+    let s = http.openStream({url: base + "/redirect", followRedirects: false})
+    testing.assertEqual(s.status, 302, nil)
+    testing.assertEqual(s.headers["location"], "/contentlength", nil)
+    s.close()
+})
+
+// ── Lifecycle ────────────────────────────────────────────────
+
+testing.test("read / readLine / readAll / eof after close throw", lam{ in
+    let s = http.openStream({url: base + "/contentlength"})
+    s.close()
+    testing.assertThrows(lam{ in s.read(1) },    "is closed")
+    testing.assertThrows(lam{ in s.readLine() }, "is closed")
+    testing.assertThrows(lam{ in s.readAll() },  "is closed")
+    testing.assertEqual(s.eof(), true, "eof() is true after close (not a throw)")
+})
+
+testing.test("close is idempotent", lam{ in
+    let s = http.openStream({url: base + "/contentlength"})
+    s.close()
+    s.close()
+    testing.assert(true, "second close did not throw")
+})
+
+testing.test("openStream requires a url", lam{ in
+    testing.assertThrows(lam{ in http.openStream({}) }, "'url'")
+})
+
+testing.test("openStream requires a map", lam{ in
+    testing.assertThrows(lam{ in http.openStream("http://x") }, "options map")
+})
+
+testing.done()
