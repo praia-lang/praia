@@ -84,3 +84,11 @@ void GcHeap::markInstance(PraiaInstance*) {}
 void GcHeap::markClass(PraiaClass*) {}
 void GcHeap::markGenerator(PraiaGenerator*) {}
 void GcHeap::markCallable(Callable*) {}
+
+// Definition for the thread-local declared in interpreter.h. NativeFunction::call
+// (inline in the header) references it via TLS, so any TU that uses a native —
+// including json.cpp through its callable bindings — needs this symbol at link
+// time. The real definition lives in src/interpreter.cpp, which fuzz binaries
+// don't link.
+class Interpreter;
+thread_local Interpreter* g_currentInterp = nullptr;

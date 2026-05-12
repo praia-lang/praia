@@ -25,6 +25,12 @@ namespace fs = std::filesystem;
 // comment at the definition for the C++ standard wart this works around.
 extern void retainInflightFuture(const std::shared_future<Value>& f);
 
+// Thread-local pointer to the Interpreter that is currently executing a
+// native on this thread. Used by concurrency natives (Lock.withLock,
+// SharedMap.update) to route user-callback invocations through the
+// caller's interpreter — critical for tree-walker async correctness.
+thread_local Interpreter* g_currentInterp = nullptr;
+
 // ── Operator overloading helpers ──
 // Call a dunder method on an instance if it exists. Returns {true, result} if found.
 //
