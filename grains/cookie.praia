@@ -1,15 +1,35 @@
-// Cookie grain — parse and build HTTP cookie headers
+// Cookie utilities: parse/build single headers, parse the
+// attributes of a Set-Cookie response, sign/encrypt cookie values
+// for tamper-detection or confidentiality, and a Jar class that
+// tracks cookies across requests like a browser does.
 //
 // Usage:
 //   use "cookie"
 //   let cookies = cookie.parse(req.headers["cookie"])
-//   let header = cookie.build("session", "abc123", {httpOnly: true, maxAge: 3600})
+//   let header  = cookie.build("session", "abc123", {httpOnly: true, maxAge: 3600})
+//
+//   // Signed: tamper-evident but plaintext-readable
+//   let signed = cookie.sign("uid=42", secretKey)
+//   let value  = cookie.verify(signed, secretKey)   // returns nil if tampered
+//
+//   // Encrypted: confidential AND tamper-evident
+//   let sealed = cookie.encrypt("uid=42", 32-byte-key)
+//   let value  = cookie.decrypt(sealed, 32-byte-key) // returns nil on failure
+//
+//   // Jar: state across requests
+//   let jar = cookie.Jar()
+//   let r1 = http.request({url: "https://api.example.com/login", method: "POST", body: ...})
+//   jar.acceptResponse("https://api.example.com/login", r1)
+//   let r2 = http.request({
+//       url: "https://api.example.com/profile",
+//       headers: {Cookie: jar.headerFor("https://api.example.com/profile")},
+//   })
 
 func hasKey(m, k) {
     return keys(m).contains(k)
 }
 
-// Parse a Cookie header string into a map
+// Parse a Cookie request header into a map.
 // "name=value; name2=value2" → {name: "value", name2: "value2"}
 func parse(header) {
     let result = {}
@@ -19,28 +39,22 @@ func parse(header) {
     for (pair in pairs) {
         let stripped = pair.strip()
         if (len(stripped) == 0) { continue }
-        let eqPos = 0
-        let found = false
-        for (i in 0..len(stripped)) {
-            if (stripped[i] == "=") {
-                eqPos = i
-                found = true
-                break
-            }
-        }
-        if (found) {
-            let name = ""
-            for (i in 0..eqPos) { name = name + stripped[i] }
-            let value = ""
-            for (i in eqPos + 1..len(stripped)) { value = value + stripped[i] }
-            result[name.strip()] = http.decodeURI(value.strip())
-        }
+        let eqPos = stripped.indexOf("=")
+        if (eqPos < 0) { continue }
+        let name = stripped.slice(0, eqPos).strip()
+        let value = stripped.slice(eqPos + 1, len(stripped)).strip()
+        result[name] = http.decodeURI(value)
     }
     return result
 }
 
-// Build a Set-Cookie header string
-// Options: httpOnly, secure, sameSite, maxAge, path, domain
+// Build a Set-Cookie response header. `options` keys (all optional):
+//   maxAge   number   delta-seconds; <=0 deletes
+//   path     string   default "/"
+//   domain   string   omitted by default (host-only cookie)
+//   httpOnly bool     default false
+//   secure   bool     default false
+//   sameSite string   default "Lax"
 func build(name, value, options) {
     let cookie = name + "=" + http.encodeURI(value)
 
@@ -74,7 +88,10 @@ func build(name, value, options) {
     return cookie
 }
 
-// Build a Set-Cookie header that expires the cookie
+// Build a Set-Cookie that expires the named cookie. Pass the same
+// path/domain you originally set it with — browsers identify
+// cookies by (name, domain, path) tuple, so a path mismatch leaves
+// the original alive.
 func clear(name, options) {
     let opts = {maxAge: 0, path: "/"}
     if (options) {
@@ -84,4 +101,300 @@ func clear(name, options) {
     return build(name, "", opts)
 }
 
-export { parse, build, clear }
+// Parse a single Set-Cookie header value into a structured map.
+// Returns a map with name/value plus the attribute fields the
+// server set; attributes the server didn't include are filled with
+// reasonable defaults (path="/", secure=false, etc.).
+//
+// Used by Jar internally but exposed for callers who want to
+// inspect a Set-Cookie without committing it to a jar.
+func parseSet(header) {
+    if (!header || len(header) == 0) { return nil }
+    let parts = header.split(";")
+    if (len(parts) == 0) { return nil }
+    let first = parts[0].strip()
+    let eq = first.indexOf("=")
+    if (eq < 0) { return nil }
+
+    let cookie = {
+        name:     first.slice(0, eq).strip(),
+        value:    http.decodeURI(first.slice(eq + 1, len(first)).strip()),
+        path:     nil,
+        domain:   nil,
+        expires:  nil,
+        maxAge:   nil,
+        secure:   false,
+        httpOnly: false,
+        sameSite: nil
+    }
+    for (i in 1..len(parts)) {
+        let attr = parts[i].strip()
+        if (len(attr) == 0) { continue }
+        let eq2 = attr.indexOf("=")
+        let k = ""
+        let v = ""
+        if (eq2 >= 0) {
+            k = attr.slice(0, eq2).strip()
+            v = attr.slice(eq2 + 1, len(attr)).strip()
+        } else {
+            k = attr
+        }
+        let lk = k.lower()
+        if (lk == "path") { cookie.path = v }
+        elif (lk == "domain") { cookie.domain = v.lower() }
+        elif (lk == "expires") { cookie.expires = v }
+        elif (lk == "max-age") { cookie.maxAge = v.toNum() }
+        elif (lk == "secure") { cookie.secure = true }
+        elif (lk == "httponly") { cookie.httpOnly = true }
+        elif (lk == "samesite") { cookie.sameSite = v }
+    }
+    return cookie
+}
+
+// ── Signed cookies — HMAC envelope ────────────────────────────
+//
+// `sign(value, key)` returns `value.signature` (dot-joined). The
+// value is in plaintext (anyone can read it) but tampering with it
+// will fail verify(). Use this for cookies whose contents aren't
+// secret but must be trustworthy (user IDs, role flags, CSRF tokens).
+//
+// `verify(signed, key)` returns the original value if the MAC checks
+// out, or `nil` if the cookie was tampered, truncated, signed with a
+// different key, or otherwise malformed.
+
+func sign(value, key) {
+    let mac = crypto.hmac(key, value, "sha256")
+    return value + "." + mac
+}
+
+func verify(signed, key) {
+    if (!signed) { return nil }
+    let dot = signed.lastIndexOf(".")
+    if (dot < 0) { return nil }
+    let value    = signed.slice(0, dot)
+    let mac      = signed.slice(dot + 1, len(signed))
+    let expected = crypto.hmac(key, value, "sha256")
+    // Constant-time compare so a slow timing oracle can't recover
+    // the MAC byte-by-byte.
+    if (secrets.compare(mac, expected)) {
+        return value
+    }
+    return nil
+}
+
+// ── Encrypted cookies — AEAD envelope ─────────────────────────
+//
+// `encrypt(value, key)` seals `value` with AES-256-GCM (via
+// crypto.seal) and base64url-encodes the result so it survives URL
+// encoding and Cookie-header parsing. The output is opaque: an
+// observer learns only the length and that the cookie exists.
+//
+// `decrypt(sealed, key)` returns the plaintext if the AEAD tag
+// verifies, or `nil` if the cookie was tampered, signed with a
+// different key, or truncated. Throws are converted to nil so the
+// caller's "valid cookie?" check is a single `!= nil`.
+//
+// `key` must be exactly 32 bytes (a 256-bit AES key). Use
+// `secrets.token(32)` to generate one, then store it in your
+// secrets manager — NOT alongside the cookies it encrypts.
+
+func encrypt(value, key) {
+    let sealed = crypto.seal(value, key)
+    return base64.encodeURL(sealed)
+}
+
+func decrypt(sealed, key) {
+    if (!sealed) { return nil }
+    let bytes = nil
+    try { bytes = base64.decodeURL(sealed) } catch (e) { return nil }
+    let out = nil
+    try { out = crypto.open(bytes, key) } catch (e) { return nil }
+    return out
+}
+
+// ── Internal helpers for Jar ──────────────────────────────────
+
+// RFC 6265 §5.1.4 default-path: directory portion of the request
+// path, or "/" if the path is empty or relative.
+func _defaultPath(reqPath) {
+    if (!reqPath || len(reqPath) == 0) { return "/" }
+    if (reqPath[0] != "/") { return "/" }
+    let lastSlash = reqPath.lastIndexOf("/")
+    if (lastSlash <= 0) { return "/" }
+    return reqPath.slice(0, lastSlash)
+}
+
+// RFC 6265 §5.1.3 domain-match. hostOnly cookies require an exact
+// host match; otherwise reqHost must equal cookieDomain OR be a
+// strict subdomain.
+func _domainMatch(reqHost, cookieDomain, hostOnly) {
+    let h = reqHost.lower()
+    let d = cookieDomain.lower()
+    if (hostOnly) { return h == d }
+    if (h == d) { return true }
+    return h.endsWith("." + d)
+}
+
+// RFC 6265 §5.1.4 path-match.
+func _pathMatch(reqPath, cookiePath) {
+    if (reqPath == cookiePath) { return true }
+    if (cookiePath.endsWith("/") && reqPath.startsWith(cookiePath)) { return true }
+    if (reqPath.startsWith(cookiePath) &&
+        len(reqPath) > len(cookiePath) &&
+        reqPath[len(cookiePath)] == "/") {
+        return true
+    }
+    return false
+}
+
+// Reject a Domain attribute that isn't reachable from the request
+// host. A response from `api.example.com` is allowed to set a
+// cookie for `example.com` but NOT for `evil.com`. Equivalent to
+// browsers' rejection of "cross-site" Domain attributes.
+func _domainAllowed(reqHost, claimedDomain) {
+    let h = reqHost.lower()
+    let d = claimedDomain.lower()
+    if (h == d) { return true }
+    return h.endsWith("." + d)
+}
+
+// ── Jar — multi-request cookie state ──────────────────────────
+//
+// A browser-style cookie jar: accept Set-Cookie response headers,
+// emit a Cookie request header for subsequent requests against the
+// matching scope.
+//
+// Limits versus a full browser:
+//   - SameSite is recorded but not enforced (there's no "site"
+//     concept at the HTTP-client level).
+//   - HttpOnly is recorded but not enforced (only meaningful for JS
+//     access, not relevant to us).
+//   - Public-suffix-list checks aren't done; a server CAN claim
+//     Domain=".com" and we wouldn't reject. Cosmetically that's an
+//     issue for browsers, not so much for a programmatic client.
+//   - IP-literal hosts are treated as hostnames (no subdomain math).
+class Jar {
+    func init() {
+        // Each entry: {name, value, domain, path, hostOnly, secure,
+        //              httpOnly, sameSite, expiresAt}
+        // expiresAt is unix seconds (time.epoch()) or nil for session.
+        this._cookies = []
+    }
+
+    // Consume Set-Cookie headers out of an http.* response. `reqUrl`
+    // is the URL the request was made against — needed to set the
+    // default Domain (host-only) and Path (request-path directory).
+    func acceptResponse(reqUrl, response) {
+        if (!response) { return }
+        let raws = response.cookies
+        if (!raws || len(raws) == 0) { return }
+        let u = url.parse(reqUrl)
+        for (raw in raws) {
+            this._acceptOne(u, raw)
+        }
+    }
+
+    func _acceptOne(parsedUrl, raw) {
+        let c = parseSet(raw)
+        if (!c) { return }
+        // Domain handling: explicit Domain attribute means the cookie
+        // is shared across subdomains; no Domain means host-only.
+        if (c.domain == nil || c.domain == "") {
+            c.domain = parsedUrl.host.lower()
+            c.hostOnly = true
+        } else {
+            // RFC 6265: a leading "." in the Domain attribute is
+            // historic; browsers ignore it. Strip if present.
+            if (c.domain.startsWith(".")) {
+                c.domain = c.domain.slice(1, len(c.domain))
+            }
+            c.hostOnly = false
+            if (!_domainAllowed(parsedUrl.host, c.domain)) {
+                // Reject cookies for unrelated domains.
+                return
+            }
+        }
+        // Path: explicit path wins; otherwise default to the directory
+        // of the request path.
+        if (c.path == nil || c.path == "" || c.path[0] != "/") {
+            c.path = _defaultPath(parsedUrl.path)
+        }
+        // Compute expiry. Max-Age takes precedence over Expires per
+        // RFC 6265 §5.3. Max-Age <= 0 deletes the matching cookie.
+        c.expiresAt = nil
+        if (c.maxAge != nil) {
+            if (c.maxAge <= 0) {
+                this._remove(c.domain, c.path, c.name)
+                return
+            }
+            c.expiresAt = time.epoch() + c.maxAge
+        }
+        // We don't parse the legacy Expires header into a timestamp —
+        // it's a free-form HTTP-date that requires a date parser.
+        // Cookies with only Expires (no Max-Age) act as session
+        // cookies in this implementation, which is the safer default.
+
+        // Replace any prior cookie with the same (name, domain, path)
+        // tuple (browsers do this; matches RFC 6265 §5.3 step 11).
+        this._remove(c.domain, c.path, c.name)
+        push(this._cookies, c)
+    }
+
+    // Build the Cookie request header for the given URL. Returns ""
+    // when no cookies match (caller can skip the Cookie header
+    // entirely without special-casing).
+    func headerFor(reqUrl) {
+        let u = url.parse(reqUrl)
+        let now = time.epoch()
+        let matches = []
+        for (c in this._cookies) {
+            if (c.expiresAt != nil && c.expiresAt <= now) { continue }
+            if (!_domainMatch(u.host, c.domain, c.hostOnly)) { continue }
+            if (!_pathMatch(u.path == "" ? "/" : u.path, c.path)) { continue }
+            if (c.secure && u.scheme != "https") { continue }
+            push(matches, c)
+        }
+        // RFC 6265 §5.4: cookies with longer paths sort first, then
+        // earlier-creation cookies (we approximate the second tie-
+        // breaker by insertion order, which is stable enough for
+        // the realistic case of one cookie per (name, path)).
+        let sorted = sort(matches, lam{ a, b in len(b.path) - len(a.path) })
+        let parts = []
+        for (c in sorted) {
+            push(parts, c.name + "=" + http.encodeURI(c.value))
+        }
+        return parts.join("; ")
+    }
+
+    // Inspect every cookie currently in the jar (defensive copy so
+    // callers can't mutate internal state).
+    func cookies() {
+        let copy = []
+        for (c in this._cookies) { push(copy, c) }
+        return copy
+    }
+
+    // Number of live cookies (expired entries are still counted —
+    // they get filtered on the next headerFor call). For an exact
+    // live count, call headerFor first and read .cookies() length.
+    func size() {
+        return len(this._cookies)
+    }
+
+    func clear() {
+        this._cookies = []
+    }
+
+    func _remove(domain, path, name) {
+        let filtered = []
+        for (c in this._cookies) {
+            if (c.domain == domain && c.path == path && c.name == name) {
+                continue
+            }
+            push(filtered, c)
+        }
+        this._cookies = filtered
+    }
+}
+
+export { parse, build, clear, parseSet, sign, verify, encrypt, decrypt, Jar }

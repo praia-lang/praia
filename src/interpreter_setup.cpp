@@ -1689,7 +1689,51 @@ Interpreter::Interpreter() {
                 for (auto& [k, v] : opts.at("headers").asMap()->entries)
                     headers[k.toString()] = v.toString();
             }
-            return doHttpRequest(method, url, body, headers);
+
+            // Build the HttpOptions from the same options map. All
+            // fields are optional with sensible defaults; numeric
+            // timeouts are in seconds at the user-facing API (matches
+            // how every HTTP client in the wild documents them) and
+            // converted to ms here.
+            HttpOptions httpOpts;
+            auto secsToMs = [](const Value& v) -> int {
+                if (!v.isNumber()) return -1;
+                double secs = v.asNumber();
+                if (secs <= 0) return -1;
+                return static_cast<int>(secs * 1000.0);
+            };
+            if (opts.count("timeout")) {
+                // `timeout: N` is shorthand for "use N seconds for
+                // everything" — connect, read, AND total budget all
+                // get the same value. Matches Python requests' simple
+                // `timeout=10` form.
+                int ms = secsToMs(opts.at("timeout"));
+                if (ms > 0) {
+                    httpOpts.connectTimeoutMs = ms;
+                    httpOpts.readTimeoutMs    = ms;
+                    httpOpts.totalTimeoutMs   = ms;
+                }
+            }
+            // Per-axis overrides win over the shorthand.
+            if (opts.count("connectTimeout"))
+                httpOpts.connectTimeoutMs = secsToMs(opts.at("connectTimeout"));
+            if (opts.count("readTimeout"))
+                httpOpts.readTimeoutMs    = secsToMs(opts.at("readTimeout"));
+            if (opts.count("totalTimeout"))
+                httpOpts.totalTimeoutMs   = secsToMs(opts.at("totalTimeout"));
+
+            if (opts.count("followRedirects") && opts.at("followRedirects").isBool())
+                httpOpts.followRedirects = opts.at("followRedirects").asBool();
+            if (opts.count("maxRedirects") && opts.at("maxRedirects").isNumber())
+                httpOpts.maxRedirects =
+                    static_cast<int>(opts.at("maxRedirects").asNumber());
+
+            if (opts.count("insecure") && opts.at("insecure").isBool())
+                httpOpts.insecure = opts.at("insecure").asBool();
+            if (opts.count("caBundle") && opts.at("caBundle").isString())
+                httpOpts.caBundle = opts.at("caBundle").asString();
+
+            return doHttpRequest(method, url, body, headers, httpOpts);
         }));
 
     httpMap->entries[Value("createServer")] = Value(makeNative("http.createServer", 1,
@@ -2577,6 +2621,320 @@ Interpreter::Interpreter() {
             result->entries[Value("query")]    = Value(u.query);
             result->entries[Value("fragment")] = Value(u.fragment);
             return Value(result);
+        }));
+
+    // Internal helpers for the builders. Duplicated from http.encodeURI
+    // logic so url.* doesn't reach into the http namespace. Cheap (<10
+    // lines) and lets the two implementations diverge cleanly later if
+    // we ever need component-specific encoding rules (e.g. query allows
+    // some bytes path doesn't).
+    auto percentEncode = [](const std::string& s) -> std::string {
+        std::string out;
+        out.reserve(s.size() * 3);
+        for (unsigned char c : s) {
+            if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                out += static_cast<char>(c);
+            } else {
+                char hex[4];
+                std::snprintf(hex, sizeof(hex), "%%%02X", c);
+                out += hex;
+            }
+        }
+        return out;
+    };
+    auto percentDecode = [](const std::string& s) -> std::string {
+        auto hexVal = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        std::string out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i) {
+            // '+' decodes to space — form-urlencoded compatibility.
+            // RFC 3986 doesn't require this but every real-world
+            // query string mixes the two encodings, and decoding
+            // '+' as '+' instead of ' ' loses data on form submits.
+            if (s[i] == '+') { out += ' '; continue; }
+            if (s[i] == '%' && i + 2 < s.size()) {
+                int hi = hexVal(s[i + 1]);
+                int lo = hexVal(s[i + 2]);
+                if (hi >= 0 && lo >= 0) {
+                    out += static_cast<char>((hi << 4) | lo);
+                    i += 2;
+                    continue;
+                }
+            }
+            out += s[i];
+        }
+        return out;
+    };
+
+    // url.encode / url.decode — RFC 3986 percent-encoding for the
+    // "unreserved" character class. Same byte-level behavior as
+    // http.encodeURI/decodeURI; offered under the url namespace so
+    // callers building URLs don't have to mix namespaces.
+    urlMap->entries[Value("encode")] = Value(makeNative("url.encode", 1,
+        [percentEncode](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("url.encode() requires a string", 0);
+            return Value(percentEncode(args[0].asString()));
+        }));
+    urlMap->entries[Value("decode")] = Value(makeNative("url.decode", 1,
+        [percentDecode](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("url.decode() requires a string", 0);
+            return Value(percentDecode(args[0].asString()));
+        }));
+
+    // url.buildQuery(map) — serialize a map to "k=v&k=v" form-style.
+    //
+    // Per-value handling:
+    //   string         → percent-encode
+    //   number/bool    → toString → percent-encode
+    //   nil            → SKIP the entry (treat as "no value supplied")
+    //   array          → emit one k=v pair per element
+    //                    ({tags: ["a","b"]} → "tags=a&tags=b")
+    //   nested map     → throw (no canonical wire form for this)
+    //
+    // Keys are always percent-encoded. Map iteration order is
+    // unspecified (Praia's primitive map is unordered), so callers
+    // who need stable output should use an OrderedMap-style flow
+    // and build an array of pairs instead.
+    auto buildQueryPair = [percentEncode](std::string& out,
+                                          const std::string& key,
+                                          const Value& v) {
+        auto append = [&](const std::string& strVal) {
+            if (!out.empty()) out += '&';
+            out += percentEncode(key);
+            out += '=';
+            out += percentEncode(strVal);
+        };
+        if (v.isNil()) return;  // skip nil values
+        if (v.isString())        append(v.asString());
+        else if (v.isBool())     append(v.asBool() ? "true" : "false");
+        else if (v.isInt())      append(std::to_string(v.asInt()));
+        else if (v.isDouble())   append(v.toString());
+        else if (v.isArray()) {
+            for (const auto& e : v.asArray()->elements) {
+                if (e.isNil()) continue;
+                if (e.isMap() || e.isArray())
+                    throw RuntimeError("url.buildQuery: nested array/map values aren't supported", 0);
+                std::string s = e.isString() ? e.asString() : e.toString();
+                if (!out.empty()) out += '&';
+                out += percentEncode(key);
+                out += '=';
+                out += percentEncode(s);
+            }
+        }
+        else if (v.isMap())
+            throw RuntimeError("url.buildQuery: nested map values aren't supported", 0);
+        else
+            throw RuntimeError("url.buildQuery: unsupported value type for key \"" + key + "\"", 0);
+    };
+
+    urlMap->entries[Value("buildQuery")] = Value(makeNative("url.buildQuery", 1,
+        [buildQueryPair](const std::vector<Value>& args) -> Value {
+            if (!args[0].isMap())
+                throw RuntimeError("url.buildQuery() requires a map", 0);
+            std::string out;
+            for (const auto& [k, v] : args[0].asMap()->entries) {
+                if (!k.isString())
+                    throw RuntimeError("url.buildQuery: keys must be strings", 0);
+                buildQueryPair(out, k.asString(), v);
+            }
+            return Value(std::move(out));
+        }));
+
+    // url.parseQuery(s) — inverse of buildQuery.
+    //
+    // Returns a map. Keys appearing multiple times collapse to an
+    // array of values; single-occurrence keys are plain strings.
+    // (Python's parse_qs always returns arrays; we auto-flatten for
+    // the common single-value case. Use parseQueryAll for the
+    // always-array form when you need predictable shape.)
+    auto parseQueryToPairs = [percentDecode](const std::string& s) {
+        std::vector<std::pair<std::string, std::string>> pairs;
+        if (s.empty()) return pairs;
+        size_t i = 0;
+        while (i <= s.size()) {
+            size_t amp = s.find('&', i);
+            size_t end = (amp == std::string::npos) ? s.size() : amp;
+            if (end > i) {
+                size_t eq = s.find('=', i);
+                std::string k, v;
+                if (eq == std::string::npos || eq > end) {
+                    k = s.substr(i, end - i);
+                } else {
+                    k = s.substr(i, eq - i);
+                    v = s.substr(eq + 1, end - eq - 1);
+                }
+                pairs.emplace_back(percentDecode(k), percentDecode(v));
+            }
+            if (amp == std::string::npos) break;
+            i = amp + 1;
+        }
+        return pairs;
+    };
+
+    urlMap->entries[Value("parseQuery")] = Value(makeNative("url.parseQuery", 1,
+        [parseQueryToPairs](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("url.parseQuery() requires a string", 0);
+            auto pairs = parseQueryToPairs(args[0].asString());
+            auto m = gcNew<PraiaMap>();
+            for (auto& [k, v] : pairs) {
+                Value key(k);
+                auto it = m->entries.find(key);
+                if (it == m->entries.end()) {
+                    m->entries[key] = Value(v);
+                } else if (it->second.isArray()) {
+                    it->second.asArray()->elements.push_back(Value(v));
+                } else {
+                    // Promote single-string to array on second occurrence.
+                    auto arr = gcNew<PraiaArray>();
+                    arr->elements.push_back(it->second);
+                    arr->elements.push_back(Value(v));
+                    it->second = Value(arr);
+                }
+            }
+            return Value(m);
+        }));
+
+    // url.parseQueryAll — same input handling but ALWAYS returns
+    // values as arrays. Use when downstream code wants a predictable
+    // shape regardless of how many times each key appears.
+    urlMap->entries[Value("parseQueryAll")] = Value(makeNative("url.parseQueryAll", 1,
+        [parseQueryToPairs](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("url.parseQueryAll() requires a string", 0);
+            auto pairs = parseQueryToPairs(args[0].asString());
+            auto m = gcNew<PraiaMap>();
+            for (auto& [k, v] : pairs) {
+                Value key(k);
+                auto it = m->entries.find(key);
+                if (it == m->entries.end()) {
+                    auto arr = gcNew<PraiaArray>();
+                    arr->elements.push_back(Value(v));
+                    m->entries[key] = Value(arr);
+                } else {
+                    it->second.asArray()->elements.push_back(Value(v));
+                }
+            }
+            return Value(m);
+        }));
+
+    // url.build(parts) — compose a URL string from a component map.
+    //
+    // Accepted fields (all optional):
+    //   scheme    "https" — lowercased on emit
+    //   userinfo  "user:pass" — emitted verbatim (caller pre-encodes)
+    //   host      "example.com" or "::1" — IPv6 auto-bracketed
+    //   port      8080 — omitted if it matches the scheme default
+    //   path      "/v1/items" — leading '/' added if scheme+host present
+    //   query     either a string ("a=1&b=2", emitted verbatim) or a
+    //             map (passed through buildQuery)
+    //   fragment  "section"
+    //
+    // No field is required. With nothing, returns "". This makes it
+    // easy to build relative URLs (just path + query) or full URLs.
+    urlMap->entries[Value("build")] = Value(makeNative("url.build", 1,
+        [percentEncode, buildQueryPair](const std::vector<Value>& args) -> Value {
+            if (!args[0].isMap())
+                throw RuntimeError("url.build() requires a component map", 0);
+            auto& m = args[0].asMap()->entries;
+            auto get = [&](const std::string& k) -> const Value* {
+                auto it = m.find(Value(k));
+                return it == m.end() ? nullptr : &it->second;
+            };
+
+            std::string out;
+
+            const Value* scheme = get("scheme");
+            std::string schemeStr;
+            if (scheme && scheme->isString() && !scheme->asString().empty()) {
+                schemeStr = scheme->asString();
+                for (auto& c : schemeStr)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+
+            const Value* host = get("host");
+            std::string hostStr = (host && host->isString()) ? host->asString() : "";
+
+            // scheme + authority block only when both are present, OR
+            // for the special opaque-URI case (scheme but no host:
+            // emit "scheme:path" — covers mailto, tel, etc.).
+            if (!schemeStr.empty() && !hostStr.empty()) {
+                out += schemeStr;
+                out += "://";
+                const Value* userinfo = get("userinfo");
+                if (userinfo && userinfo->isString() && !userinfo->asString().empty()) {
+                    out += userinfo->asString();
+                    out += '@';
+                }
+                // IPv6 literals (any host containing ':' that isn't a
+                // bracketed form) need wrapping. If the user pre-
+                // wrapped, don't double-wrap.
+                if (!hostStr.empty() && hostStr.find(':') != std::string::npos &&
+                    hostStr.front() != '[') {
+                    out += '[';
+                    out += hostStr;
+                    out += ']';
+                } else {
+                    out += hostStr;
+                }
+                const Value* port = get("port");
+                if (port && !port->isNil() && port->isNumber()) {
+                    int64_t p = port->toInt64ForBitwise();
+                    bool isDefault = (schemeStr == "http"  && p == 80) ||
+                                      (schemeStr == "https" && p == 443);
+                    if (!isDefault && p > 0) {
+                        out += ':';
+                        out += std::to_string(p);
+                    }
+                }
+            } else if (!schemeStr.empty()) {
+                // Opaque URI form: "scheme:path"
+                out += schemeStr;
+                out += ':';
+            }
+
+            const Value* path = get("path");
+            if (path && path->isString()) {
+                const auto& p = path->asString();
+                if (!schemeStr.empty() && !hostStr.empty() && !p.empty() && p.front() != '/')
+                    out += '/';
+                out += p;
+            }
+
+            const Value* query = get("query");
+            if (query && !query->isNil()) {
+                std::string qstr;
+                if (query->isString()) {
+                    qstr = query->asString();
+                } else if (query->isMap()) {
+                    for (const auto& [k, v] : query->asMap()->entries) {
+                        if (!k.isString())
+                            throw RuntimeError("url.build: query map keys must be strings", 0);
+                        buildQueryPair(qstr, k.asString(), v);
+                    }
+                } else {
+                    throw RuntimeError("url.build: 'query' must be a string or map", 0);
+                }
+                if (!qstr.empty()) {
+                    out += '?';
+                    out += qstr;
+                }
+            }
+
+            const Value* frag = get("fragment");
+            if (frag && frag->isString() && !frag->asString().empty()) {
+                out += '#';
+                out += percentEncode(frag->asString());
+            }
+
+            return Value(std::move(out));
         }));
 
     globals->define("url", Value(urlMap));
@@ -3611,7 +3969,7 @@ Interpreter::Interpreter() {
             }
 
             // dlsym for the entry point. If this fails or returns null, no
-            // plugin code has run yet — safe to dlclose so the handle doesn't
+            // plugin code has run yet - safe to dlclose so the handle doesn't
             // leak. Once we call registerFn we MUST keep the handle alive
             // forever: the plugin's callables (and even the plugin-built
             // std::function deleters in their destructors) hold pointers
@@ -3637,7 +3995,7 @@ Interpreter::Interpreter() {
             try {
                 registerFn(moduleMap.get());
             } catch (const std::exception& e) {
-                // Don't dlclose here — plugin code may still be referenced
+                // Don't dlclose here - plugin code may still be referenced
                 // by std::function deleters in the partially-populated
                 // moduleMap. Just wrap and re-throw with context.
                 throw RuntimeError(

@@ -1,0 +1,236 @@
+use "testing"
+
+// Phase 2 HTTP client knobs: timeouts, redirect policy, TLS options.
+//
+// Uses a hand-rolled net.*-based test server rather than
+// http.createServer + listen — the latter blocks indefinitely from
+// inside an async task, and the way it interacts with try/catch
+// scope on the tree-walker engine is fragile. The net.* approach
+// also gives us full control over response bytes (canned status
+// codes, exact Location headers, deliberate delays), which is what
+// we need to exercise redirects + timeouts deterministically.
+
+let TEST_PORT = 38765
+
+// One server thread that serves canned responses based on request
+// path. Loops forever, accepting one connection at a time (the
+// existing http client uses Connection: close, so each request is
+// a fresh TCP session).
+let _serverFuture = async lam{ in
+    let s = net.listen(TEST_PORT)
+    while (true) {
+        let c = net.accept(s)
+        // Read one HTTP request — recv enough to get the request line.
+        // We don't care about the body for any of these test routes.
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let chunk = net.recv(c, 4096)
+            if (len(chunk) == 0) { break }
+            req = req + chunk
+        }
+        // Parse the request line: "METHOD /path HTTP/1.1"
+        let firstSp = req.indexOf(" ")
+        let method = req.slice(0, firstSp)
+        let after = req.slice(firstSp + 1, len(req))
+        let secondSp = after.indexOf(" ")
+        let path = after.slice(0, secondSp)
+        // Extract body length so /echo-body can return what was sent.
+        // Simple-minded: scan for "Content-Length:" header. Returns
+        // 0 if absent.
+        let bodyLen = 0
+        let clIdx = req.indexOf("Content-Length: ")
+        if (clIdx >= 0) {
+            let valStart = clIdx + 16
+            let lineEnd = req.indexOf("\r\n", valStart)
+            bodyLen = req.slice(valStart, lineEnd).toNum()
+        }
+        // Praia strings index by grapheme cluster; \r\n is ONE
+        // cluster, so "\r\n\r\n" is TWO graphemes (not four bytes).
+        // We use bytes.len for the size comparison too, since
+        // Content-Length is byte-counted on the wire.
+        let bodyStart = req.indexOf("\r\n\r\n") + 2
+        let body = req.slice(bodyStart, len(req))
+        while (bytes.len(body) < bodyLen) {
+            let more = net.recv(c, 4096)
+            if (len(more) == 0) { break }
+            body = body + more
+        }
+
+        let resp = ""
+        if (path == "/redirect-once") {
+            resp = "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/redirect-chain") {
+            resp = "HTTP/1.1 302 Found\r\nLocation: /redirect-once\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/redirect-loop") {
+            resp = "HTTP/1.1 302 Found\r\nLocation: /redirect-loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/redirect-no-location") {
+            resp = "HTTP/1.1 302 Found\r\nContent-Length: 11\r\nConnection: close\r\n\r\nno location"
+        }
+        elif (path == "/redirect-303") {
+            resp = "HTTP/1.1 303 See Other\r\nLocation: /echo-method-body\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/redirect-307") {
+            resp = "HTTP/1.1 307 Temporary Redirect\r\nLocation: /echo-method-body\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/redirect-absolute") {
+            let abs = "http://localhost:" + str(TEST_PORT) + "/final"
+            resp = "HTTP/1.1 302 Found\r\nLocation: " + abs + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/echo-method-body") {
+            let payload = method + ":" + body
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(payload)) + "\r\nConnection: close\r\n\r\n" + payload
+        }
+        elif (path == "/slow") {
+            // Sleep BEFORE sending the response — the client will see
+            // a hung connection and fire its read timeout.
+            time.sleep(3000)
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow"
+        }
+        elif (path == "/final") {
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\ndestination"
+        }
+        else {
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nroot"
+        }
+        net.send(c, resp)
+        net.close(c)
+    }
+}()
+
+// Wait for server to bind.
+time.sleep(200)
+
+let base = "http://localhost:" + str(TEST_PORT)
+
+// ── Redirect following ────────────────────────────────────────
+
+testing.test("follows a single redirect by default", lam{ in
+    let r = http.get(base + "/redirect-once")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "destination", "ended at /final")
+})
+
+testing.test("follows a chain of redirects", lam{ in
+    let r = http.get(base + "/redirect-chain")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "destination", "two-hop chain landed at /final")
+})
+
+testing.test("followRedirects: false returns the 3xx as-is", lam{ in
+    let r = http.request({url: base + "/redirect-once", followRedirects: false})
+    testing.assertEqual(r.status, 302, nil)
+    testing.assertEqual(r.headers.location, "/final", "Location preserved")
+})
+
+testing.test("maxRedirects: 3 caps a loop", lam{ in
+    testing.assertThrows(
+        lam{ in http.request({url: base + "/redirect-loop", maxRedirects: 3}) },
+        "redirect limit exceeded")
+})
+
+testing.test("3xx without Location is returned as-is", lam{ in
+    let r = http.get(base + "/redirect-no-location")
+    testing.assertEqual(r.status, 302, "no Location → not a redirect")
+    testing.assertEqual(r.body, "no location", nil)
+})
+
+testing.test("absolute-URL Location follows correctly", lam{ in
+    let r = http.get(base + "/redirect-absolute")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "destination", nil)
+})
+
+testing.test("303 switches method to GET and drops the body", lam{ in
+    let r = http.request({method: "POST",
+                          url: base + "/redirect-303",
+                          body: "stuff"})
+    // /echo-method-body returns "METHOD:BODY"; after 303 the follow-up
+    // request is a GET with no body, so we expect "GET:".
+    testing.assertEqual(r.body, "GET:", nil)
+})
+
+testing.test("307 preserves both method and body", lam{ in
+    let r = http.request({method: "POST",
+                          url: base + "/redirect-307",
+                          body: "carry-me",
+                          headers: {"Content-Type": "text/plain"}})
+    testing.assertEqual(r.body, "POST:carry-me", nil)
+})
+
+// ── Timeouts ─────────────────────────────────────────────────
+
+testing.test("connectTimeout fires on an unroutable IP", lam{ in
+    // 10.255.255.1 is in RFC 1918 reserved space and almost always
+    // drops SYN packets on CI / dev networks. The 1-second timeout
+    // is well under the 30s default so we get a deterministic, fast
+    // failure.
+    let t0 = time.now()
+    testing.assertThrows(
+        lam{ in http.request({url: "http://10.255.255.1/", connectTimeout: 1}) },
+        "timed out")
+    let elapsed = time.now() - t0
+    testing.assert(elapsed < 2000,
+        "should have given up after ~1s, took " + str(elapsed) + "ms")
+})
+
+testing.test("totalTimeout caps a redirect loop", lam{ in
+    let t0 = time.now()
+    testing.assertThrows(
+        lam{ in http.request({url: base + "/redirect-loop", totalTimeout: 1}) },
+        "timeout")
+    let elapsed = time.now() - t0
+    testing.assert(elapsed < 2500, "fired in " + str(elapsed) + "ms")
+})
+
+testing.test("shorthand timeout sets all three", lam{ in
+    // `timeout` is the convenience form — same number applied to
+    // connect/read/total. Verify by triggering the connect path
+    // with the shorthand.
+    testing.assertThrows(
+        lam{ in http.request({url: "http://10.255.255.1/", timeout: 1}) },
+        "timed out")
+})
+
+// ── TLS options (parsing surface) ────────────────────────────
+// The actual TLS verification path can't be exercised without a
+// self-signed TLS server, which is more setup than this test file
+// can justify. We at least confirm the option fields are accepted
+// and that obviously-bad values fail clean.
+
+testing.test("insecure: true is accepted without error on a plain HTTP request", lam{ in
+    // insecure is a no-op when the request scheme is http; the flag
+    // only affects TLS verification. Should still produce a normal
+    // response.
+    let r = http.request({url: base + "/", insecure: true})
+    testing.assertEqual(r.status, 200, nil)
+})
+
+testing.test("caBundle: missing file rejected for HTTPS request", lam{ in
+    // The bad bundle path only matters for TLS; pointing at a
+    // nonexistent file with an https URL should fail at load time.
+    testing.assertThrows(
+        lam{ in http.request({
+            url: "https://example.invalid/",
+            caBundle: "/nonexistent/ca.pem",
+            connectTimeout: 1
+        }) },
+        "Cannot load CA bundle")
+})
+
+// ── Slow-server test — kept LAST because /slow blocks the test ──
+// server for 3s, starving any test that runs after it.
+
+testing.test("readTimeout fires on a deliberately slow server", lam{ in
+    let t0 = time.now()
+    testing.assertThrows(
+        lam{ in http.request({url: base + "/slow", readTimeout: 1}) },
+        "timed out")
+    let elapsed = time.now() - t0
+    testing.assert(elapsed < 2500,
+        "should have fired around 1s, took " + str(elapsed) + "ms")
+})
+
+testing.done()

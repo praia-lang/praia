@@ -2682,6 +2682,14 @@ path.resolve("src")               // "/full/path/to/src"
 | Function | Description |
 |----------|-------------|
 | `url.parse(str)` | Parse a URL into RFC 3986 components |
+| `url.build(parts)` | Compose a URL string from a component map (inverse of `parse`) |
+| `url.buildQuery(map)` | Serialize a map to `k=v&k=v` form, percent-encoded |
+| `url.parseQuery(str)` | Parse a query string; repeated keys auto-collapse to an array |
+| `url.parseQueryAll(str)` | Same input handling; always returns arrays for predictable shape |
+| `url.encode(str)` | RFC 3986 percent-encode the unreserved character class |
+| `url.decode(str)` | Inverse of `encode`. Also decodes `+` to space (form-urlencoded compat) |
+
+### url.parse
 
 `url.parse` returns a map with seven fields: `scheme`, `userinfo`,
 `host`, `port`, `path`, `query`, `fragment`. The scheme is lowercased.
@@ -2707,6 +2715,69 @@ print(v.port)      // 8080
 Malformed input throws — non-numeric ports, unterminated `[..]`
 literals, bare IPv6 without brackets (ambiguous), or CR/LF/NUL
 anywhere in the input.
+
+### url.build
+
+Composes a URL string from any combination of `scheme`, `userinfo`, `host`, `port`, `path`, `query`, `fragment`. Every field is optional — pass only what you have, get back the assembled URL.
+
+```
+url.build({scheme: "https", host: "api.example.com", path: "/v1/items"})
+// "https://api.example.com/v1/items"
+
+url.build({
+    scheme: "https",
+    host:   "api.example.com",
+    port:   8443,
+    path:   "/v1/items",
+    query:  {limit: 50, tag: "blue"},
+    fragment: "section-1"
+})
+// "https://api.example.com:8443/v1/items?limit=50&tag=blue#section-1"
+
+// IPv6 hosts get auto-bracketed
+url.build({scheme: "http", host: "::1", port: 8080, path: "/"})
+// "http://[::1]:8080/"
+
+// Default ports for http/https are dropped
+url.build({scheme: "https", host: "x", port: 443, path: "/"})
+// "https://x/"
+
+// Relative URLs (no scheme/host)
+url.build({path: "/items", query: {limit: 10}})
+// "/items?limit=10"
+
+// Opaque URIs (scheme without authority)
+url.build({scheme: "mailto", path: "ada@example.com"})
+// "mailto:ada@example.com"
+```
+
+`query` can be either a string (passed through verbatim) or a map (run through `buildQuery`). `fragment` is percent-encoded; `userinfo` is emitted verbatim, so caller is responsible for pre-encoding if needed.
+
+### url.buildQuery / parseQuery / parseQueryAll
+
+```
+url.buildQuery({a: 1, b: "hello world", c: true})
+// "a=1&b=hello%20world&c=true"  (map order isn't guaranteed)
+
+url.buildQuery({tags: ["red", "blue"]})
+// "tags=red&tags=blue"          (array values → repeated keys)
+
+url.buildQuery({a: "kept", b: nil})
+// "a=kept"                      (nil values skipped)
+
+url.parseQuery("a=1&b=hello%20world")
+// {a: "1", b: "hello world"}
+
+url.parseQuery("tags=red&tags=blue")
+// {tags: ["red", "blue"]}        (repeated keys → array)
+
+url.parseQueryAll("a=1&b=2&a=3")
+// {a: ["1", "3"], b: ["2"]}      (always arrays)
+```
+
+`parseQuery` is convenience-shaped (single-occurrence keys are strings, repeated keys are arrays). When downstream code needs a predictable shape regardless of how many times each key appears, use `parseQueryAll`. Both decode `+` as space (form-urlencoded compat).
+
+`buildQuery` rejects nested maps or arrays inside values — there's no canonical wire form for those. Use JSON-encoded values if you need structured data in a query parameter.
 
 ---
 
@@ -3069,6 +3140,61 @@ All client methods return a map:
 ```
 
 Header names are lowercased for consistent access.
+
+#### Request options
+
+`http.request({...})` accepts these option fields beyond `method`/`url`/`body`/`headers`:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `timeout` | — | Shorthand: same value applied to connect, read, AND total. Seconds (float ok) |
+| `connectTimeout` | 30 | TCP/TLS handshake budget, in seconds |
+| `readTimeout` | 30 | Per recv() / SSL_read() budget, in seconds — a slow peer can't stall half-indefinitely |
+| `totalTimeout` | none | Overall request budget INCLUDING redirects, in seconds. -1 / omitted = no overall cap |
+| `followRedirects` | `true` | Follow 3xx responses with Location headers |
+| `maxRedirects` | 10 | Throw if a chain exceeds this |
+| `insecure` | `false` | **Skip TLS certificate verification.** Testing/dev only; equivalent to `curl -k` |
+| `caBundle` | system trust store | Path to a custom CA PEM bundle for trust-store override |
+
+```
+// Strict timeouts on a flaky upstream.
+let r = http.request({
+    url: "https://api.flaky.example.com/data",
+    connectTimeout: 3,
+    readTimeout: 5,
+    totalTimeout: 10,
+})
+
+// Don't follow redirects — inspect the 3xx ourselves.
+let r = http.request({url: probableRedirect, followRedirects: false})
+if (r.status == 301) { ... }
+
+// Test against a self-signed dev environment.
+let r = http.request({url: "https://localhost:8443/", insecure: true})
+
+// Internal CA for mTLS / private PKI.
+let r = http.request({url: "https://internal.corp/", caBundle: "/etc/ssl/corp-root.pem"})
+```
+
+#### Redirects
+
+The client follows 3xx responses with a Location header by default, up to `maxRedirects` hops. Method/body handling:
+
+- **303 See Other**: always switches to GET, drops the request body. This is the explicit "make a fresh GET" status.
+- **301 Moved Permanently / 302 Found**: switches POST (or any non-GET/HEAD method) to GET and drops the body. Strict RFC 7231 says preserve the method, but every browser and HTTP library since 1995 switches; matching that behavior is what callers expect.
+- **307 Temporary Redirect / 308 Permanent Redirect**: preserves both method AND body. These codes exist precisely to disambiguate from the 301/302 method-switch convention.
+
+**Security**: an `https://` → `http://` Location is refused outright. Open-redirect attacks that try to leak cookies or auth headers over plaintext don't get to. (Matches `curl --proto-redir` behavior.) Relative-path Locations like `?foo=bar` are not supported — emit an absolute path or absolute URL. Absolute paths like `/foo` and protocol-relative `//host/foo` are both supported.
+
+When `followRedirects` is `false`, the 3xx response is returned as-is with `Location` in `headers.location`.
+
+#### Timeouts
+
+- **`connectTimeout`** is enforced via non-blocking connect + poll, so we don't block the calling task during a slow handshake.
+- **`readTimeout`** is enforced via `SO_RCVTIMEO`/`SO_SNDTIMEO` on the socket; each individual recv/send can wait at most this long.
+- **`totalTimeout`** bounds the entire request including all redirect hops. Once exceeded, the per-request timeouts are capped at the remaining budget so a mid-redirect server can't outlast the deadline.
+
+Connect against an unroutable IP throws "connect timed out after Nms" with an exact elapsed budget; read timeouts throw "HTTP read timed out".
 
 ### HTTP Server
 
@@ -3540,6 +3666,103 @@ If no options are passed, `cookie.build` uses safe defaults:
 - `HttpOnly` — not accessible from JavaScript
 - `SameSite=Lax` — prevents CSRF
 - `Path=/` — available on all paths
+
+### Parsing Set-Cookie response headers
+
+`cookie.parseSet(header)` parses a single `Set-Cookie` value into a structured map:
+
+```
+cookie.parseSet("session=abc123; Path=/api; Max-Age=3600; HttpOnly; Secure; SameSite=Strict")
+// {name: "session", value: "abc123", path: "/api", domain: nil,
+//  maxAge: 3600, expires: nil, secure: true, httpOnly: true,
+//  sameSite: "Strict"}
+```
+
+Attribute names are case-insensitive; unknown attributes are ignored. Returns `nil` on malformed input (no `=`, empty header).
+
+### Signed cookies
+
+`cookie.sign(value, key)` returns `value.signature` (dot-joined). The plaintext is readable to anyone with the cookie, but tampering with it makes `verify` return `nil`. Use it for cookies whose contents aren't secret but must be trustworthy — user IDs, role flags, CSRF tokens.
+
+```
+let signed = cookie.sign("uid=42", serverSecret)
+// "uid=42.bbfdf361250fd1f46b7331923300449d4b039190a37fe428ba6f2bd8d170aaac"
+
+let userId = cookie.verify(signed, serverSecret)
+// "uid=42"  — or nil if the cookie was tampered, truncated, or signed
+//             with a different key
+```
+
+`verify` uses `secrets.compare` for constant-time MAC comparison so timing-side-channel attacks can't recover the right signature byte-by-byte.
+
+### Encrypted cookies
+
+`cookie.encrypt(value, key)` wraps `value` in an AES-256-GCM AEAD envelope and base64url-encodes the result. The output is opaque — an observer learns only the length and that the cookie exists. `decrypt` returns the plaintext if the AEAD tag verifies, or `nil` on tamper / wrong key / garbage.
+
+```
+let key = secrets.token(32)   // generate ONCE, store in your secrets manager
+let sealed = cookie.encrypt("uid=42; role=admin", key)
+// "Xef3LdScPGbaWYxnPNqRPXCterJX8OdTh6JMI9bkikF433R9zrG3v8zFStt6jw"
+
+let plain = cookie.decrypt(sealed, key)
+// "uid=42; role=admin"  — or nil
+```
+
+The key must be exactly 32 bytes (a 256-bit AES key). Two `encrypt` calls with the same plaintext produce different outputs (fresh nonce per call), so an observer can't tell whether two cookies hold the same value.
+
+### Cookie jar
+
+`cookie.Jar()` is browser-style cookie state: feed it `Set-Cookie` response headers, get back the right `Cookie` request header for any subsequent URL.
+
+```
+let jar = cookie.Jar()
+
+// Login — server sends Set-Cookie. The jar parses every Set-Cookie
+// in response.cookies, applies domain/path/expiry defaults, and
+// stores it.
+let r1 = http.request({
+    url:    "https://api.example.com/login",
+    method: "POST",
+    body:   "...",
+})
+jar.acceptResponse("https://api.example.com/login", r1)
+
+// Subsequent request — pull the Cookie header for the target URL.
+let r2 = http.request({
+    url: "https://api.example.com/profile",
+    headers: {Cookie: jar.headerFor("https://api.example.com/profile")},
+})
+jar.acceptResponse("https://api.example.com/profile", r2)
+```
+
+The jar enforces:
+
+- **Host-only vs subdomain**: a `Set-Cookie` without a `Domain` attribute is host-only — only the exact host gets it. With a `Domain` attribute, the cookie matches `Domain` and all of its subdomains.
+- **Cross-origin Domain rejection**: a response from `evil.com` that tries to `Set-Cookie ...; Domain=bank.example.com` is dropped at acceptance time, not at retrieval.
+- **Path matching**: RFC 6265 §5.1.4. `Path=/api` matches `/api`, `/api/`, `/api/v1/x`, but not `/apix`.
+- **`Secure` cookies**: only emitted on `https://` URLs.
+- **Expiry**: `Max-Age` cookies disappear once expired; `Max-Age=0` deletes immediately.
+
+What the jar does NOT enforce:
+
+- **`HttpOnly`** is recorded but not enforced — it only matters when JS reads cookies, which doesn't apply to our HTTP client.
+- **`SameSite`** is recorded but not enforced — there's no "site" concept at the HTTP-client level.
+- **Public Suffix List**: a server can technically set `Domain=.com`. Cosmetic issue for browsers; rare to hit in programmatic clients. Open an issue if it bites.
+- **`Expires` (legacy format)**: only `Max-Age` is honored for expiry. Cookies with `Expires` but no `Max-Age` act as session cookies (safer default).
+
+#### Jar methods
+
+| Method | Description |
+|--------|-------------|
+| `jar.acceptResponse(reqUrl, response)` | Read every `Set-Cookie` in `response.cookies` and store with computed defaults |
+| `jar.headerFor(reqUrl)` | Return the `Cookie` header value for a request to `reqUrl` (or `""` if none match) |
+| `jar.cookies()` | Defensive copy of all stored cookies (useful for inspection / persistence) |
+| `jar.size()` | Total count (does not filter expired entries) |
+| `jar.clear()` | Empty the jar |
+
+#### Response `cookies` array
+
+`http.request` / `http.get` / `http.post` responses now expose `response.cookies`, an array of raw `Set-Cookie` header values in arrival order. The map at `response.headers["set-cookie"]` still works (and holds the last value) for back-compat, but real responses commonly emit several `Set-Cookie` headers — only the array preserves all of them.
 
 ---
 

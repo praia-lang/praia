@@ -3,11 +3,14 @@
 #include "../url.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <iostream>
 #include <mutex>
+#include <poll.h>
 #include <sstream>
 #include <string>
+#include <sys/time.h>
 #include <unordered_map>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -177,25 +180,140 @@ ParsedUrl parseUrl(const std::string& url) {
     return r;
 }
 
-int connectToHost(const std::string& host, int port) {
+// Non-blocking connect with poll-based timeout. Tries each address
+// returned by getaddrinfo in order until one connects (matches what
+// libcurl/Python/Go do for happy-eyeballs-lite handling of multi-A
+// records and IPv4/IPv6 dual-stack hosts).
+//
+// timeoutMs of -1 means no timeout (block forever); 0 is effectively
+// "give up immediately on EINPROGRESS" which is mostly useful for
+// testing.
+int connectToHost(const std::string& host, int port, int timeoutMs) {
     struct addrinfo hints = {};
-    hints.ai_family = AF_INET;
+    // AF_UNSPEC lets the resolver return both IPv4 and IPv6 records;
+    // pre-Phase-2 this was hard-coded to AF_INET, which made IPv6-only
+    // hosts unreachable.
+    hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     praia::AddrGuard ag;
     if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &ag.res) != 0)
         throw RuntimeError("Cannot resolve host: " + host, 0);
-    praia::FdGuard sock(socket(ag->ai_family, ag->ai_socktype, ag->ai_protocol));
-    if (!sock || connect(sock.get(), ag->ai_addr, ag->ai_addrlen) < 0)
-        throw RuntimeError("Cannot connect to " + host + ":" + std::to_string(port), 0);
-    return sock.release();
+
+    std::string lastErr;
+    for (struct addrinfo* ai = ag.res; ai != nullptr; ai = ai->ai_next) {
+        praia::FdGuard sock(socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
+        if (!sock) { lastErr = std::strerror(errno); continue; }
+
+        // Flip to non-blocking so connect() returns immediately with
+        // EINPROGRESS; poll() then handles the actual timeout. We
+        // flip back to blocking before returning so reads/writes use
+        // the standard blocking-with-SO_RCVTIMEO model.
+        int flags = fcntl(sock.get(), F_GETFL, 0);
+        if (flags < 0 ||
+            fcntl(sock.get(), F_SETFL, flags | O_NONBLOCK) < 0) {
+            lastErr = std::strerror(errno);
+            continue;
+        }
+
+        int r = connect(sock.get(), ai->ai_addr, ai->ai_addrlen);
+        if (r == 0) {
+            // Connected immediately (e.g. localhost) — restore blocking.
+            if (fcntl(sock.get(), F_SETFL, flags) < 0) {
+                lastErr = std::strerror(errno);
+                continue;
+            }
+            return sock.release();
+        }
+        if (errno != EINPROGRESS) {
+            lastErr = std::strerror(errno);
+            continue;
+        }
+
+        // Wait for writability (= connect completed). poll's -1
+        // means "no timeout" which matches our convention.
+        struct pollfd pfd;
+        pfd.fd = sock.get();
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        int polled;
+        do {
+            polled = poll(&pfd, 1, timeoutMs);
+        } while (polled < 0 && errno == EINTR);
+
+        if (polled == 0) {
+            // Timed out on THIS address — try the next one rather
+            // than giving up. Real-world: A and AAAA records often
+            // both exist; one may be unreachable due to NAT64 or
+            // missing v6 transit.
+            lastErr = "connect timed out after " + std::to_string(timeoutMs) + "ms";
+            continue;
+        }
+        if (polled < 0) {
+            lastErr = std::strerror(errno);
+            continue;
+        }
+
+        // poll fired — check SO_ERROR to learn whether connect
+        // actually succeeded or hit a refusal/unreachable.
+        int soerr = 0;
+        socklen_t slen = sizeof(soerr);
+        if (getsockopt(sock.get(), SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0) {
+            lastErr = std::strerror(errno);
+            continue;
+        }
+        if (soerr != 0) {
+            lastErr = std::strerror(soerr);
+            continue;
+        }
+
+        // Connected. Restore the original (blocking) file-status flags.
+        if (fcntl(sock.get(), F_SETFL, flags) < 0) {
+            lastErr = std::strerror(errno);
+            continue;
+        }
+        return sock.release();
+    }
+
+    throw RuntimeError("Cannot connect to " + host + ":" + std::to_string(port) +
+                       (lastErr.empty() ? "" : " (" + lastErr + ")"), 0);
+}
+
+// Convenience overload for the existing internal-fileStream call site
+// that doesn't care about timeouts (it's reading static files from a
+// pre-loaded list, not making outbound requests).
+int connectToHost(const std::string& host, int port) {
+    return connectToHost(host, port, -1);
+}
+
+// Apply a per-operation receive/send timeout to a connected socket.
+// Both directions get the same value so a slow peer can't stall the
+// request half indefinitely. `ms <= 0` disables the timeout.
+void setSocketTimeouts(int fd, int ms) {
+    if (ms <= 0) return;
+    struct timeval tv;
+    tv.tv_sec  = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
 std::string readAll(SocketConn& conn) {
     std::string data;
     char buf[8192];
-    ssize_t n;
-    while ((n = conn.read(buf, sizeof(buf))) > 0)
-        data.append(buf, n);
+    while (true) {
+        errno = 0;
+        ssize_t n = conn.read(buf, sizeof(buf));
+        if (n > 0) { data.append(buf, n); continue; }
+        if (n == 0) break;  // clean EOF (server closed)
+        // n < 0 — distinguish timeout (SO_RCVTIMEO fired) from other
+        // error. EAGAIN/EWOULDBLOCK is what SO_RCVTIMEO surfaces on
+        // Linux/macOS; SSL_read inherits the underlying recv errno.
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            throw RuntimeError("HTTP read timed out", 0);
+        if (errno == EINTR) continue;
+        throw RuntimeError("HTTP read error: " +
+                           std::string(errno ? std::strerror(errno) : "connection broken"), 0);
+    }
     return data;
 }
 
@@ -215,6 +333,13 @@ Value parseHttpResponse(const std::string& raw) {
     }
 
     auto hdrs = gcNew<PraiaMap>();
+    // Set-Cookie is the one header that legitimately repeats — every
+    // cookie a server sets in one response is a separate Set-Cookie
+    // line. The headers map can only hold one value per key, so we
+    // expose the full list as a dedicated `cookies` array (in arrival
+    // order). For back-compat the headers map still carries the
+    // last value at "set-cookie" too.
+    auto cookies = gcNew<PraiaArray>();
     std::istringstream hs(headerSection);
     std::string line;
     std::getline(hs, line);
@@ -224,14 +349,18 @@ Value parseHttpResponse(const std::string& raw) {
         if (c != std::string::npos) {
             std::string key = line.substr(0, c);
             std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-            hdrs->entries[Value(key)] = Value(line.substr(c + 2));
+            std::string val = line.substr(c + 2);
+            if (key == "set-cookie")
+                cookies->elements.push_back(Value(val));
+            hdrs->entries[Value(key)] = Value(val);
         }
     }
 
     auto result = gcNew<PraiaMap>();
-    result->entries[Value("status")] = Value(static_cast<double>(status));
-    result->entries[Value("body")] = Value(body);
+    result->entries[Value("status")]  = Value(static_cast<double>(status));
+    result->entries[Value("body")]    = Value(body);
     result->entries[Value("headers")] = Value(hdrs);
+    result->entries[Value("cookies")] = Value(cookies);
     return Value(result);
 }
 
@@ -484,9 +613,81 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
 
 // ── Public API ───────────────────────────────────────────────
 
-Value doHttpRequest(const std::string& method, const std::string& url,
-                    const std::string& body,
-                    const std::unordered_map<std::string, std::string>& extraHeaders) {
+// Resolve a redirect Location header against the base URL.
+//   - absolute URL (has scheme)            → use as-is
+//   - protocol-relative (//host/path)      → prepend base scheme
+//   - absolute path (/foo)                 → keep base scheme/host/port
+//   - empty or anything else               → throw (rare in real
+//                                                   redirects, and supporting
+//                                                   it pulls in full RFC 3986
+//                                                   §5.2 path resolution which
+//                                                   is more code than payoff)
+static std::string resolveLocation(const std::string& baseUrl,
+                                   const std::string& location) {
+    if (location.empty())
+        throw RuntimeError("HTTP redirect: empty Location header", 0);
+
+    praia::url::ParsedUrl loc;
+    try {
+        loc = praia::url::parse(location);
+    } catch (const praia::url::UrlParseError& e) {
+        throw RuntimeError(std::string("HTTP redirect: invalid Location: ") + e.what(), 0);
+    }
+    if (!loc.scheme.empty()) {
+        return location;  // already absolute
+    }
+
+    praia::url::ParsedUrl base;
+    try {
+        base = praia::url::parse(baseUrl);
+    } catch (const praia::url::UrlParseError& e) {
+        throw RuntimeError(std::string("HTTP redirect: invalid base URL: ") + e.what(), 0);
+    }
+
+    // Protocol-relative — //host[:port]/path
+    if (!loc.host.empty()) {
+        std::string out = base.scheme + "://";
+        if (loc.hostIsIPv6) out += "[" + loc.host + "]";
+        else                out += loc.host;
+        if (loc.hasPort) out += ":" + std::to_string(loc.port);
+        out += loc.path.empty() ? "/" : loc.path;
+        if (!loc.query.empty())    out += "?" + loc.query;
+        if (!loc.fragment.empty()) out += "#" + loc.fragment;
+        return out;
+    }
+
+    // Same-authority: build base authority + new path.
+    if (loc.path.empty() || loc.path[0] != '/') {
+        // Real-world: 0.3% of redirects use relative paths. The
+        // RFC 3986 §5.2 path-merge algorithm is ~30 lines; deferred
+        // until someone needs it.
+        throw RuntimeError("HTTP redirect: relative Location \"" + location +
+                           "\" not supported (use an absolute URL or absolute path)", 0);
+    }
+
+    std::string out = base.scheme + "://";
+    if (base.hostIsIPv6) out += "[" + base.host + "]";
+    else                 out += base.host;
+    if (base.hasPort) {
+        bool isDefault = (base.scheme == "http"  && base.port == 80) ||
+                         (base.scheme == "https" && base.port == 443);
+        if (!isDefault) out += ":" + std::to_string(base.port);
+    }
+    out += loc.path;
+    if (!loc.query.empty())    out += "?" + loc.query;
+    if (!loc.fragment.empty()) out += "#" + loc.fragment;
+    return out;
+}
+
+// Single HTTP request — one connect, one send, one parse. No redirect
+// handling; that's the caller's loop. `remainingTotalMs` is the
+// per-request cap derived from the overall budget (or the user's
+// readTimeoutMs if no overall budget was set); it's passed through
+// SO_RCVTIMEO/SO_SNDTIMEO so a slow server doesn't outlast the budget.
+static Value doOneHttpRequest(const std::string& method, const std::string& url,
+                              const std::string& body,
+                              const std::unordered_map<std::string, std::string>& extraHeaders,
+                              const HttpOptions& opts) {
     auto p = parseUrl(url);
     // Reject method/path/host/header CR/LF/NUL BEFORE any network I/O.
     // Failing fast saves a DNS lookup + TCP/TLS handshake on garbage
@@ -504,15 +705,39 @@ Value doHttpRequest(const std::string& method, const std::string& url,
     }
 
     SocketConn conn;
-    conn.fd = connectToHost(p.host, p.port);
+    conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs);
+    // After connect, apply the read/write timeout to the socket so
+    // subsequent recv()/send() calls (and the SSL_read/SSL_write
+    // wrappers around them) bound their wait.
+    setSocketTimeouts(conn.fd, opts.readTimeoutMs);
 
 #ifdef HAVE_OPENSSL
     if (p.tls) {
         ensureSSLInit();
         conn.ctx = SSL_CTX_new(TLS_client_method());
         if (!conn.ctx) { conn.shutdown_close(); throw RuntimeError("Failed to create SSL context", 0); }
-        SSL_CTX_set_default_verify_paths(conn.ctx);
-        SSL_CTX_set_verify(conn.ctx, SSL_VERIFY_PEER, nullptr);
+
+        // Trust store: custom CA bundle path takes priority over
+        // system defaults. Both can be loaded simultaneously without
+        // harm (OpenSSL accumulates trust anchors).
+        if (!opts.caBundle.empty()) {
+            if (SSL_CTX_load_verify_locations(conn.ctx, opts.caBundle.c_str(), nullptr) != 1) {
+                conn.shutdown_close();
+                throw RuntimeError("Cannot load CA bundle: " + opts.caBundle, 0);
+            }
+        } else {
+            SSL_CTX_set_default_verify_paths(conn.ctx);
+        }
+
+        // Verification flag — `insecure` is the testing/dev escape
+        // hatch. We still go through the handshake and learn the
+        // peer's identity; we just don't reject on cert problems.
+        // This is the SAME knob curl -k / Python verify=False expose
+        // and carries the same warnings.
+        SSL_CTX_set_verify(conn.ctx,
+                           opts.insecure ? SSL_VERIFY_NONE : SSL_VERIFY_PEER,
+                           nullptr);
+
         conn.ssl = SSL_new(conn.ctx);
         SSL_set_fd(conn.ssl, conn.fd);
 
@@ -526,7 +751,10 @@ Value doHttpRequest(const std::string& method, const std::string& url,
         // runs as part of SSL_connect's verification; a mismatch surfaces
         // as X509_V_ERR_HOSTNAME_MISMATCH / X509_V_ERR_IP_ADDRESS_MISMATCH
         // in SSL_get_verify_result.
-        {
+        //
+        // Skip this when insecure — pointless to do hostname matching
+        // if we're not verifying the cert chain anyway.
+        if (!opts.insecure) {
             X509_VERIFY_PARAM* vp = SSL_get0_param(conn.ssl);
             // IP literals (IPv4 or IPv6) take the IP-match path; everything
             // else is treated as a DNS name. inet_pton returns 1 on success.
@@ -549,17 +777,19 @@ Value doHttpRequest(const std::string& method, const std::string& url,
             // if it explains the failure; otherwise generic message.
             long vr = SSL_get_verify_result(conn.ssl);
             conn.shutdown_close();
-            if (vr != X509_V_OK) {
+            if (!opts.insecure && vr != X509_V_OK) {
                 throw RuntimeError("SSL certificate verification failed for " + p.host +
                                    ": " + X509_verify_cert_error_string(vr), 0);
             }
             throw RuntimeError("SSL handshake failed for " + p.host, 0);
         }
-        long vr = SSL_get_verify_result(conn.ssl);
-        if (vr != X509_V_OK) {
-            conn.shutdown_close();
-            throw RuntimeError("SSL certificate verification failed for " + p.host +
-                               ": " + X509_verify_cert_error_string(vr), 0);
+        if (!opts.insecure) {
+            long vr = SSL_get_verify_result(conn.ssl);
+            if (vr != X509_V_OK) {
+                conn.shutdown_close();
+                throw RuntimeError("SSL certificate verification failed for " + p.host +
+                                   ": " + X509_verify_cert_error_string(vr), 0);
+            }
         }
     }
 #endif
@@ -583,6 +813,94 @@ Value doHttpRequest(const std::string& method, const std::string& url,
     std::string raw = readAll(conn);
     conn.shutdown_close();
     return parseHttpResponse(raw);
+}
+
+Value doHttpRequest(const std::string& method, const std::string& url,
+                    const std::string& body,
+                    const std::unordered_map<std::string, std::string>& extraHeaders,
+                    const HttpOptions& opts) {
+    auto deadline = (opts.totalTimeoutMs > 0)
+        ? std::chrono::steady_clock::now() +
+          std::chrono::milliseconds(opts.totalTimeoutMs)
+        : std::chrono::steady_clock::time_point::max();
+
+    std::string currentUrl     = url;
+    std::string currentMethod  = method;
+    std::string currentBody    = body;
+    auto        currentHeaders = extraHeaders;
+    int         redirectCount  = 0;
+
+    while (true) {
+        // Cap per-request timeouts at the remaining total budget so a
+        // pathological mid-redirect server can't outlast the deadline.
+        HttpOptions perReq = opts;
+        if (opts.totalTimeoutMs > 0) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0)
+                throw RuntimeError("HTTP total timeout exceeded", 0);
+            int remMs = static_cast<int>(remaining);
+            if (perReq.connectTimeoutMs <= 0 || perReq.connectTimeoutMs > remMs)
+                perReq.connectTimeoutMs = remMs;
+            if (perReq.readTimeoutMs    <= 0 || perReq.readTimeoutMs    > remMs)
+                perReq.readTimeoutMs    = remMs;
+        }
+
+        Value response = doOneHttpRequest(currentMethod, currentUrl,
+                                          currentBody, currentHeaders, perReq);
+
+        if (!opts.followRedirects) return response;
+
+        // Status check — only 3xx with a Location triggers a follow.
+        // The response shape is {status: number, headers: map, body: string}.
+        auto& respMap = response.asMap()->entries;
+        auto statusIt = respMap.find(Value("status"));
+        if (statusIt == respMap.end() || !statusIt->second.isNumber()) return response;
+        int status = static_cast<int>(statusIt->second.asNumber());
+        if (status < 300 || status >= 400) return response;
+
+        auto headersIt = respMap.find(Value("headers"));
+        if (headersIt == respMap.end() || !headersIt->second.isMap()) return response;
+        auto& respHeaders = headersIt->second.asMap()->entries;
+        auto locIt = respHeaders.find(Value("location"));
+        if (locIt == respHeaders.end() || !locIt->second.isString()) return response;
+        std::string location = locIt->second.asString();
+
+        if (redirectCount >= opts.maxRedirects)
+            throw RuntimeError("HTTP redirect limit exceeded (" +
+                               std::to_string(opts.maxRedirects) + ")", 0);
+
+        std::string newUrl = resolveLocation(currentUrl, location);
+
+        // Security: refuse a downgrade from https to http. Catches
+        // open-redirect attacks that try to leak credentials/cookies
+        // over plaintext, and matches curl --proto-redir behavior.
+        bool curIsTls = parseUrl(currentUrl).tls;
+        bool newIsTls = parseUrl(newUrl).tls;
+        if (curIsTls && !newIsTls)
+            throw RuntimeError("HTTP redirect: refusing https→http downgrade to " + newUrl, 0);
+
+        // Method/body transformation per RFC 7231:
+        //   303 → always GET (this is the explicit "make a GET" code)
+        //   301/302 → de-facto "switch to GET if it was a POST" per
+        //             every browser and HTTP library since ~1995.
+        //             Strict RFC 7231 says preserve, but the world
+        //             didn't read that.
+        //   307/308 → preserve method AND body (these codes exist
+        //             precisely to fix the 301/302 ambiguity)
+        if (status == 303 ||
+            ((status == 301 || status == 302) &&
+              currentMethod != "GET" && currentMethod != "HEAD")) {
+            currentMethod = "GET";
+            currentBody.clear();
+            currentHeaders.erase("Content-Length");
+            currentHeaders.erase("Content-Type");
+            // (Transfer-Encoding would also need clearing for chunked
+            //  bodies, but we don't currently emit chunked.)
+        }
+        currentUrl = newUrl;
+        ++redirectCount;
+    }
 }
 
 void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp) {
