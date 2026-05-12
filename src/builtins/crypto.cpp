@@ -15,6 +15,9 @@
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
 #include <openssl/ec.h>
+#include <openssl/kdf.h>
+#include <openssl/core_names.h>
+#include <openssl/params.h>
 #endif
 
 // ── Helpers ──
@@ -374,6 +377,100 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
                 throw RuntimeError("crypto.hmac() algorithm must be 'sha256', 'sha1', 'sha512', or 'md5'", 0);
             return Value(hmac_compute(args[0].asString(), args[1].asString(), algo));
         }));
+
+    // crypto.hkdf(key, salt, info, length, hash?) — RFC 5869 HKDF.
+    //
+    // Extract-then-expand key derivation: turn one high-entropy
+    // secret + a salt + a context label into one or more derived
+    // keys of arbitrary length. The `info` arg binds the output to a
+    // context, so a leak of e.g. the "session-encryption-key" output
+    // doesn't compromise other keys derived from the same master
+    // with different info strings. Salt can be empty; info can be
+    // empty; key (the IKM) cannot.
+    //
+    // Output is at most 255 * digest_output_size bytes (8160 for
+    // SHA-256, 16320 for SHA-512). Larger requests throw.
+    //
+    // OpenSSL 3+ only; uses the EVP_KDF interface.
+    cryptoMap->entries[Value("hkdf")] = Value(makeNative("crypto.hkdf", -1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 4)
+                throw RuntimeError("crypto.hkdf(key, salt, info, length, hash?) requires 4-5 arguments", 0);
+            if (!args[0].isString())
+                throw RuntimeError("crypto.hkdf: key must be a string (bytes)", 0);
+            if (!args[1].isString())
+                throw RuntimeError("crypto.hkdf: salt must be a string (use \"\" for no salt)", 0);
+            if (!args[2].isString())
+                throw RuntimeError("crypto.hkdf: info must be a string (use \"\" for no info)", 0);
+            if (!args[3].isNumber())
+                throw RuntimeError("crypto.hkdf: length must be a number", 0);
+
+            const auto& key  = args[0].asString();
+            const auto& salt = args[1].asString();
+            const auto& info = args[2].asString();
+            int64_t length   = args[3].toInt64ForBitwise();
+            if (length <= 0)
+                throw RuntimeError("crypto.hkdf: length must be positive", 0);
+
+            std::string hashName = "sha256";
+            if (args.size() >= 5) {
+                if (!args[4].isString())
+                    throw RuntimeError("crypto.hkdf: hash must be a string name", 0);
+                hashName = args[4].asString();
+            }
+            // Choose digest + per-hash output cap.
+            int hashLen = 0;
+            if      (hashName == "sha256") hashLen = 32;
+            else if (hashName == "sha512") hashLen = 64;
+            else if (hashName == "sha384") hashLen = 48;
+            else if (hashName == "sha1")   hashLen = 20;
+            else throw RuntimeError("crypto.hkdf: hash must be 'sha256', 'sha384', 'sha512', or 'sha1'", 0);
+            if (length > 255 * hashLen)
+                throw RuntimeError("crypto.hkdf: requested length " + std::to_string(length) +
+                                   " exceeds RFC 5869 max " + std::to_string(255 * hashLen) +
+                                   " for " + hashName, 0);
+
+            EVP_KDF* kdf = EVP_KDF_fetch(nullptr, "HKDF", nullptr);
+            if (!kdf)
+                throw RuntimeError("crypto.hkdf: EVP_KDF_fetch(HKDF) failed (OpenSSL 3+ required)", 0);
+            EVP_KDF_CTX* ctx = EVP_KDF_CTX_new(kdf);
+            EVP_KDF_free(kdf);
+            if (!ctx)
+                throw RuntimeError("crypto.hkdf: EVP_KDF_CTX_new failed", 0);
+
+            // Note: cast away const for OSSL_PARAM_construct_*_string —
+            // the API takes non-const pointers for legacy reasons but
+            // doesn't write through them.
+            OSSL_PARAM params[5];
+            int i = 0;
+            params[i++] = OSSL_PARAM_construct_utf8_string(
+                OSSL_KDF_PARAM_DIGEST, const_cast<char*>(hashName.c_str()), 0);
+            params[i++] = OSSL_PARAM_construct_octet_string(
+                OSSL_KDF_PARAM_KEY,
+                const_cast<void*>(static_cast<const void*>(key.data())), key.size());
+            params[i++] = OSSL_PARAM_construct_octet_string(
+                OSSL_KDF_PARAM_SALT,
+                const_cast<void*>(static_cast<const void*>(salt.data())), salt.size());
+            params[i++] = OSSL_PARAM_construct_octet_string(
+                OSSL_KDF_PARAM_INFO,
+                const_cast<void*>(static_cast<const void*>(info.data())), info.size());
+            params[i] = OSSL_PARAM_construct_end();
+
+            std::string out(static_cast<size_t>(length), '\0');
+            int rc = EVP_KDF_derive(ctx, reinterpret_cast<unsigned char*>(&out[0]),
+                                    out.size(), params);
+            EVP_KDF_CTX_free(ctx);
+            if (rc != 1)
+                throw RuntimeError("crypto.hkdf: EVP_KDF_derive failed", 0);
+            return Value(std::move(out));
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.hkdf requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
 
     // Random bytes — returns raw binary string
     cryptoMap->entries[Value("randomBytes")] = Value(makeNative("crypto.randomBytes", 1,

@@ -4120,6 +4120,33 @@ let iv = crypto.randomBytes(16)      // 16 random bytes (128-bit IV)
 let token = bytes.hex(crypto.randomBytes(16))  // hex string token
 ```
 
+For user-facing token generation, prefer the higher-level [`secrets` namespace](#secrets) below — it ships pre-encoded variants and a constant-time comparator so you don't have to assemble them by hand.
+
+### Key derivation — `crypto.hkdf` (requires OpenSSL 3+)
+
+`crypto.hkdf(key, salt, info, length, hash?)` implements RFC 5869 HKDF. Use it to turn one high-entropy master secret into multiple independent derived keys, or to bind a key to a context label so a leak of one derived key doesn't compromise siblings.
+
+| Arg | Description |
+|-----|-------------|
+| `key`  | Input keying material (IKM); typically a master secret |
+| `salt` | Salt bytes. Empty string is allowed when you have no per-deployment salt to mix in |
+| `info` | Context label that binds the output to a use case (`"encryption-key-v1"`, `"session-key:user-42"`, …); empty is allowed |
+| `length` | Output bytes. Capped at `255 × hash_output_size` (8160 for SHA-256, 16320 for SHA-512) |
+| `hash` (optional) | One of `"sha256"` (default), `"sha384"`, `"sha512"`, `"sha1"` |
+
+```
+// Derive distinct subkeys from a single master.
+let master = secrets.token(32)
+let salt   = secrets.token(16)
+
+let encKey = crypto.hkdf(master, salt, "encryption-key-v1", 32)
+let macKey = crypto.hkdf(master, salt, "mac-key-v1",        32)
+let cookieKey = crypto.hkdf(master, salt, "cookie-key-v1",  32)
+
+// Same master + same context → same key (deterministic).
+// Different context → unrelated key, even with all other inputs the same.
+```
+
 ### Authenticated encryption — `seal` / `open` (requires OpenSSL)
 
 `crypto.seal` and `crypto.open` are the recommended symmetric encryption API. They use AES-256-GCM, an authenticated (AEAD) cipher: a successful `open` proves both that the ciphertext was produced by someone holding the key AND that no bit of it has been altered. Use this for anything new — cookies, file encryption, request payloads, transport over an untrusted channel.
@@ -4205,6 +4232,37 @@ let ecKeys = crypto.generateKeyPair("ec")
 let ecSig = crypto.sign("data", ecKeys.privateKey, "sha256")
 crypto.verify("data", ecSig, ecKeys.publicKey, "sha256")  // true
 ```
+
+---
+
+## Secrets
+
+`secrets` is the canonical namespace for generating tokens and comparing them safely. It exists for the same reason Python's `secrets` module does: when callers reach for the general-purpose `random.*` family to build a session ID, they get a Mersenne Twister output and ship a vulnerability. Every function here pulls from the OS CSPRNG (via OpenSSL `RAND_bytes`, which reads `/dev/urandom` or its equivalent).
+
+| Function | Description |
+|----------|-------------|
+| `secrets.token(n)` | `n` raw bytes, as a Praia bytes-string |
+| `secrets.tokenHex(n)` | `n` random bytes as a 2n-character lower-case hex string. Database-friendly |
+| `secrets.tokenUrlSafe(n)` | `n` random bytes as URL-safe base64, no padding (RFC 4648 §5). Use for password-reset URLs, unsubscribe links |
+| `secrets.compare(a, b)` | Constant-time string equality. Use this to compare HMAC tags / session IDs / API keys |
+| `secrets.choice(seq)` | Uniformly random element from a non-empty array or string. Uses rejection sampling to avoid modulo bias. For strings, returns one grapheme |
+
+```
+// Tokens — typical sizes
+let sessionId = secrets.tokenHex(32)             // 64-char hex, ~256 bits
+let resetLink = "/reset/" + secrets.tokenUrlSafe(24)  // URL-safe, ~192 bits
+
+// Constant-time tag verification
+let expectedTag = crypto.hmac(serverKey, body, "sha256")
+if (!secrets.compare(expectedTag, request.tag)) {
+    throw "tag mismatch"
+}
+
+// Pick a random element without modulo bias
+let admin = secrets.choice(adminList)
+```
+
+**Why `secrets.compare` rather than `==`**: when you compare two secrets byte-by-byte and short-circuit on the first mismatch, the time the comparison takes leaks how many leading bytes were correct. An attacker can iterate one byte at a time and watch the response timing to recover the secret. Constant-time compare walks the full buffer regardless, so timing reveals nothing.
 
 ---
 
