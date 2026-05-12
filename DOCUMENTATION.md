@@ -4195,21 +4195,67 @@ If you must use CBC, also compute an HMAC over `iv || ciphertext` with a separat
 
 ### Password hashing (requires OpenSSL)
 
-PBKDF2-SHA256 for secure password storage. Generates a random salt automatically.
+Three password-hashing schemes are available, in order of preference for new code:
+
+1. **`crypto.argon2id`** — memory-hard, the OWASP first-choice recommendation as of 2024. Requires OpenSSL 3.2+.
+2. **`crypto.scrypt`** — also memory-hard, broadly compatible. Available in all OpenSSL 3.x.
+3. **`crypto.hashPassword`** — PBKDF2-SHA256. Not memory-hard; kept for back-compat with existing databases. Don't use for new applications.
+
+Both `argon2id` and `scrypt` return self-describing **PHC strings** that carry algorithm + cost parameters in the hash itself, so a stored hash can be verified without any side-table metadata. The format round-trips with Python's `passlib`, libsodium, and the argon2 reference CLI.
+
+#### `crypto.argon2id(password, params?)` — recommended for new code
 
 ```
-// Hash a password
+let h = crypto.argon2id("hunter2")
+// $argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>
+
+crypto.verifyArgon2id("hunter2", h)   // true
+crypto.verifyArgon2id("wrong", h)     // false
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `t` | `3` | Iterations / time cost (≥1) |
+| `m` | `65536` | Memory in KiB (must be ≥ `8 * p`) |
+| `p` | `4` | Parallelism / lanes (≥1) |
+| `salt` | random 16 bytes | Salt bytes (must be ≥ 8 bytes) |
+| `length` | `32` | Output bytes |
+
+```
+let h = crypto.argon2id("pw", {t: 4, m: 131072, p: 2, length: 32})
+```
+
+Defaults follow RFC 9106 §4's "second recommended option" — tuned to take roughly 250 ms on a modest server.
+
+Throws on OpenSSL < 3.2 with a message pointing at the version requirement (`ARGON2ID` was added to OpenSSL's KDF table in 3.2).
+
+#### `crypto.scrypt(password, params?)` — RFC 7914
+
+```
+let h = crypto.scrypt("hunter2")
+// $scrypt$ln=15,r=8,p=1$<salt>$<hash>
+
+crypto.verifyScrypt("hunter2", h)     // true
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `ln` | `15` | `log2(N)` — CPU/memory cost. `ln=15` gives N=32768, ~32 MiB |
+| `r` | `8` | Block size |
+| `p` | `1` | Parallelism |
+| `salt` | random 16 bytes | Salt bytes (≥ 8) |
+| `length` | `32` | Output bytes |
+
+#### `crypto.hashPassword(password, salt?, iterations?)` — legacy PBKDF2
+
+Map-style return for back-compat with existing call sites. Not recommended for new code.
+
+```
 let result = crypto.hashPassword("mypassword")
-print(result.hash)        // hex hash
-print(result.salt)        // hex salt
-print(result.iterations)  // 100000
+// {hash, salt, iterations}
 
-// Verify a password
 crypto.verifyPassword("mypassword", result.hash, result.salt)  // true
-crypto.verifyPassword("wrong", result.hash, result.salt)        // false
 ```
-
-Custom iterations: `crypto.hashPassword("pass", nil, 200000)`
 
 ### Digital signatures
 

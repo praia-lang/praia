@@ -276,6 +276,293 @@ static std::string generateRandomBytes(int count) {
     return result;
 }
 
+// ── PHC string format (Argon2 / scrypt) ──────────────────────
+//
+// PHC encoding lets us return a single self-describing string
+// rather than a structured map, so a stored hash carries its own
+// algorithm + parameters. Format:
+//
+//   $<algo>$<param1=val1,param2=val2,...>$<base64(salt)>$<base64(hash)>
+//
+// Argon2 has an extra version segment between algo and params:
+//
+//   $argon2id$v=19$m=65536,t=3,p=4$<base64(salt)>$<base64(hash)>
+//
+// Base64 here is the standard alphabet (A-Za-z0-9+/) with no
+// padding — the same form the argon2 reference and Python's passlib
+// emit, so hashes round-trip with other tools' outputs.
+
+#ifdef HAVE_OPENSSL
+
+static std::string phcB64Encode(const std::string& bytes) {
+    static const char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    int val = 0, valb = -6;
+    for (unsigned char c : bytes) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            out += table[(val >> valb) & 0x3F];
+            valb -= 6;
+        }
+    }
+    if (valb > -6) out += table[((val << 8) >> (valb + 8)) & 0x3F];
+    return out;
+}
+
+static std::string phcB64Decode(const std::string& in) {
+    auto dec = [](unsigned char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::string out;
+    int val = 0, valb = -8;
+    for (unsigned char c : in) {
+        if (c == '=') break;
+        int d = dec(c);
+        if (d < 0)
+            throw RuntimeError("PHC: invalid base64 character in salt or hash", 0);
+        val = (val << 6) + d;
+        valb += 6;
+        if (valb >= 0) {
+            out += static_cast<char>((val >> valb) & 0xFF);
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
+// Split "k=v,k=v,..." into ordered name/value pairs. Order matters
+// for some downstream consumers, so we keep a vector rather than a
+// map. Throws on malformed (missing '=', empty key, etc.).
+static std::vector<std::pair<std::string, std::string>>
+phcParseKvSegment(const std::string& s) {
+    std::vector<std::pair<std::string, std::string>> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t comma = s.find(',', i);
+        size_t end = (comma == std::string::npos) ? s.size() : comma;
+        size_t eq = s.find('=', i);
+        if (eq == std::string::npos || eq >= end || eq == i)
+            throw RuntimeError("PHC: malformed param segment near \"" +
+                               s.substr(i, end - i) + "\"", 0);
+        out.emplace_back(s.substr(i, eq - i), s.substr(eq + 1, end - eq - 1));
+        i = (comma == std::string::npos) ? s.size() : comma + 1;
+    }
+    return out;
+}
+
+static uint64_t phcParseUint(const std::string& name,
+                             const std::vector<std::pair<std::string, std::string>>& kvs,
+                             uint64_t deflt, bool required = true) {
+    for (auto& [k, v] : kvs) {
+        if (k == name) {
+            try {
+                return std::stoull(v);
+            } catch (...) {
+                throw RuntimeError("PHC: parameter '" + name + "' is not a number: \"" +
+                                   v + "\"", 0);
+            }
+        }
+    }
+    if (required)
+        throw RuntimeError("PHC: missing required parameter '" + name + "'", 0);
+    return deflt;
+}
+
+// Parse a PHC string into its components. The result keeps params as
+// a kv-vector so the caller can pull out cost factors by name. Salt
+// and hash come back decoded as bytes. Argon2's "v=19" segment is
+// folded into the kv list under key "v" for uniformity.
+struct PhcParts {
+    std::string algo;
+    std::vector<std::pair<std::string, std::string>> params;
+    std::string salt;
+    std::string hash;
+};
+
+static PhcParts phcParse(const std::string& s) {
+    // Split on '$'. Argon2 has 5 non-empty segments, scrypt has 4.
+    std::vector<std::string> parts;
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = s.find('$', i);
+        if (j == std::string::npos) {
+            parts.push_back(s.substr(i));
+            break;
+        }
+        parts.push_back(s.substr(i, j - i));
+        i = j + 1;
+    }
+    // The leading '$' produces an empty first element.
+    if (parts.empty() || !parts[0].empty())
+        throw RuntimeError("PHC: must start with '$'", 0);
+    parts.erase(parts.begin());
+
+    if (parts.size() < 4)
+        throw RuntimeError("PHC: too few segments (expected algo / [v=...] / params / salt / hash)", 0);
+
+    PhcParts out;
+    out.algo = parts[0];
+
+    // Argon2 family inserts a $v=19$ between algo and params. Detect
+    // by sniffing for the lone "v=N" segment.
+    size_t paramIdx = 1;
+    if (parts.size() == 5) {
+        // Treat parts[1] as version segment.
+        auto kv = phcParseKvSegment(parts[1]);
+        if (kv.size() != 1 || kv[0].first != "v")
+            throw RuntimeError("PHC: expected version segment 'v=NN' between algo and params", 0);
+        out.params.emplace_back("v", kv[0].second);
+        paramIdx = 2;
+    }
+    auto kvParams = phcParseKvSegment(parts[paramIdx]);
+    for (auto& kv : kvParams) out.params.push_back(std::move(kv));
+    out.salt = phcB64Decode(parts[paramIdx + 1]);
+    out.hash = phcB64Decode(parts[paramIdx + 2]);
+    return out;
+}
+
+// Drive EVP_KDF with the assembled OSSL_PARAM array, returning
+// `outLen` derived bytes. Centralizing this keeps the scrypt and
+// argon2id paths from drifting on resource cleanup.
+static std::string evpKdfDerive(const char* kdfName,
+                                OSSL_PARAM* params, size_t outLen,
+                                const char* fnNameForErr) {
+    EVP_KDF* kdf = EVP_KDF_fetch(nullptr, kdfName, nullptr);
+    if (!kdf) {
+        // The Argon2 case is the practical reason this path exists:
+        // OpenSSL < 3.2 doesn't ship ARGON2ID. Make the error point
+        // at the version requirement so the user knows what to fix.
+        std::string msg = fnNameForErr;
+        msg += ": ";
+        msg += kdfName;
+        msg += " not available in this OpenSSL build";
+        if (std::string(kdfName) == "ARGON2ID")
+            msg += " (requires OpenSSL 3.2 or later)";
+        throw RuntimeError(msg, 0);
+    }
+    EVP_KDF_CTX* ctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!ctx)
+        throw RuntimeError(std::string(fnNameForErr) + ": EVP_KDF_CTX_new failed", 0);
+    std::string out(outLen, '\0');
+    int rc = EVP_KDF_derive(ctx, reinterpret_cast<unsigned char*>(&out[0]),
+                            outLen, params);
+    EVP_KDF_CTX_free(ctx);
+    if (rc != 1)
+        throw RuntimeError(std::string(fnNameForErr) +
+                           ": EVP_KDF_derive failed (check parameter ranges)", 0);
+    return out;
+}
+
+// Constant-time bytes equality. Identical pattern to the secrets
+// namespace — duplicated rather than refactored to keep this file
+// self-contained. Used to verify a fresh derivation against a stored
+// hash without leaking partial-match information via timing.
+static bool ctEqual(const std::string& a, const std::string& b) {
+    size_t la = a.size(), lb = b.size();
+    size_t n = la > lb ? la : lb;
+    unsigned int diff = (la == lb) ? 0u : 1u;
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char ca = i < la ? static_cast<unsigned char>(a[i]) : 0;
+        unsigned char cb = i < lb ? static_cast<unsigned char>(b[i]) : 0;
+        diff |= static_cast<unsigned int>(ca ^ cb);
+    }
+    return diff == 0;
+}
+
+// Derive `outLen` bytes via scrypt with the given cost parameters.
+// N must be a power of 2 ≥ 2; r and p ≥ 1. OpenSSL validates further
+// (e.g. r*p < 2^30 per RFC 7914) and fails with a derive error.
+static std::string scryptDerive(const std::string& pw, const std::string& salt,
+                                uint64_t N, uint64_t r, uint64_t p, size_t outLen) {
+    OSSL_PARAM params[7];
+    int i = 0;
+    params[i++] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_PASSWORD,
+        const_cast<void*>(static_cast<const void*>(pw.data())), pw.size());
+    params[i++] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_SALT,
+        const_cast<void*>(static_cast<const void*>(salt.data())), salt.size());
+    params[i++] = OSSL_PARAM_construct_uint64(OSSL_KDF_PARAM_SCRYPT_N, &N);
+    params[i++] = OSSL_PARAM_construct_uint64(OSSL_KDF_PARAM_SCRYPT_R, &r);
+    params[i++] = OSSL_PARAM_construct_uint64(OSSL_KDF_PARAM_SCRYPT_P, &p);
+    // OpenSSL caps scrypt's memory at ~32 MiB by default; raise it
+    // so users can pick larger N without hitting an opaque internal
+    // limit. The cap is a safety net against accidental DoS; 4 GiB
+    // is plenty for any reasonable use.
+    uint64_t maxMem = 4ULL << 30;  // 4 GiB
+    params[i++] = OSSL_PARAM_construct_uint64("maxmem_bytes", &maxMem);
+    params[i] = OSSL_PARAM_construct_end();
+    return evpKdfDerive("SCRYPT", params, outLen, "crypto.scrypt");
+}
+
+// Derive `outLen` bytes via Argon2id. t = iterations (≥1), m = memory
+// in KiB (must be ≥ 8 * lanes), p = lanes (≥1). OpenSSL throws a
+// derive failure on out-of-range combinations.
+static std::string argon2idDerive(const std::string& pw, const std::string& salt,
+                                  uint32_t t, uint32_t m, uint32_t p, size_t outLen) {
+    OSSL_PARAM params[6];
+    int i = 0;
+    params[i++] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_PASSWORD,
+        const_cast<void*>(static_cast<const void*>(pw.data())), pw.size());
+    params[i++] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_SALT,
+        const_cast<void*>(static_cast<const void*>(salt.data())), salt.size());
+    params[i++] = OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ITER, &t);
+    params[i++] = OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &m);
+    params[i++] = OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &p);
+    params[i] = OSSL_PARAM_construct_end();
+    return evpKdfDerive("ARGON2ID", params, outLen, "crypto.argon2id");
+}
+
+// Optional-map helper — pulls an integer parameter out of an optional
+// {...} map argument, with default + range check. Reused by both
+// scrypt and argon2id entry points.
+static uint64_t mapUintParam(const Value& maybeMap, const char* key,
+                             uint64_t deflt, uint64_t minVal, uint64_t maxVal,
+                             const char* fnName) {
+    if (!maybeMap.isMap()) return deflt;
+    auto& m = maybeMap.asMap()->entries;
+    auto it = m.find(Value(std::string(key)));
+    if (it == m.end()) return deflt;
+    if (!it->second.isNumber())
+        throw RuntimeError(std::string(fnName) + ": param '" + key +
+                           "' must be a number", 0);
+    int64_t v = it->second.toInt64ForBitwise();
+    if (v < 0)
+        throw RuntimeError(std::string(fnName) + ": param '" + key +
+                           "' must be non-negative", 0);
+    uint64_t u = static_cast<uint64_t>(v);
+    if (u < minVal || u > maxVal)
+        throw RuntimeError(std::string(fnName) + ": param '" + key +
+                           "' must be in [" + std::to_string(minVal) + ", " +
+                           std::to_string(maxVal) + "] (got " +
+                           std::to_string(u) + ")", 0);
+    return u;
+}
+
+static std::string mapStringParam(const Value& maybeMap, const char* key,
+                                  const char* fnName) {
+    if (!maybeMap.isMap()) return "";
+    auto& m = maybeMap.asMap()->entries;
+    auto it = m.find(Value(std::string(key)));
+    if (it == m.end()) return "";
+    if (!it->second.isString())
+        throw RuntimeError(std::string(fnName) + ": param '" + key +
+                           "' must be a string", 0);
+    return it->second.asString();
+}
+
+#endif  // HAVE_OPENSSL
+
 // ── Registration ──
 
 void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
@@ -799,6 +1086,165 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
                 diff |= actualHex[i] ^ expectedHex[i];
             return Value(diff == 0);
         }));
+
+    // ── Modern password KDFs (scrypt + argon2id) ─────────────
+    //
+    // Both functions return self-describing PHC strings rather than
+    // a structured map. The hash carries its own algorithm + cost
+    // parameters, so verifiers don't need to know how the password
+    // was originally hashed beyond "it's a PHC string". This format
+    // round-trips with Python's passlib, libsodium, and the argon2
+    // reference CLI, so hashes can be migrated in either direction.
+    //
+    // For new code, prefer argon2id (memory-hard, the OWASP first
+    // choice as of 2024). scrypt remains useful when interop with
+    // existing scrypt-hashed databases matters; PBKDF2 (the older
+    // hashPassword/verifyPassword) is left in place for back-compat
+    // but isn't recommended for new applications.
+
+    // crypto.scrypt(password, params?) — RFC 7914 scrypt.
+    //   params: optional map; supported keys:
+    //     ln      log2(N), default 15 (N = 32768, ~32 MiB)
+    //     r       block size, default 8
+    //     p       parallelism, default 1
+    //     salt    pre-generated salt bytes; default 16 random
+    //     length  output bytes, default 32
+    cryptoMap->entries[Value("scrypt")] = Value(makeNative("crypto.scrypt", -1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("crypto.scrypt(password, params?) requires a password string", 0);
+            const std::string& password = args[0].asString();
+            Value params = args.size() > 1 ? args[1] : Value();
+            uint64_t ln = mapUintParam(params, "ln", 15, 1, 30, "crypto.scrypt");
+            uint64_t r  = mapUintParam(params, "r",  8,  1, 1u << 20, "crypto.scrypt");
+            uint64_t p  = mapUintParam(params, "p",  1,  1, 1u << 16, "crypto.scrypt");
+            uint64_t length = mapUintParam(params, "length", 32, 16, 1024, "crypto.scrypt");
+            std::string salt = mapStringParam(params, "salt", "crypto.scrypt");
+            if (salt.empty()) salt = generateRandomBytes(16);
+            if (salt.size() < 8)
+                throw RuntimeError("crypto.scrypt: salt must be at least 8 bytes", 0);
+            uint64_t N = 1ULL << ln;
+            std::string h = scryptDerive(password, salt, N, r, p, length);
+            // PHC: $scrypt$ln=<ln>,r=<r>,p=<p>$<b64 salt>$<b64 hash>
+            std::string out = "$scrypt$ln=" + std::to_string(ln) +
+                              ",r=" + std::to_string(r) +
+                              ",p=" + std::to_string(p) +
+                              "$" + phcB64Encode(salt) +
+                              "$" + phcB64Encode(h);
+            return Value(out);
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.scrypt requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    cryptoMap->entries[Value("verifyScrypt")] = Value(makeNative("crypto.verifyScrypt", 2,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("crypto.verifyScrypt(password, phc) requires two strings", 0);
+            const std::string& password = args[0].asString();
+            PhcParts p = phcParse(args[1].asString());
+            if (p.algo != "scrypt")
+                throw RuntimeError("crypto.verifyScrypt: PHC algorithm is '" + p.algo +
+                                   "', expected 'scrypt'", 0);
+            uint64_t ln = phcParseUint("ln", p.params, 0);
+            uint64_t r  = phcParseUint("r",  p.params, 0);
+            uint64_t pp = phcParseUint("p",  p.params, 0);
+            if (ln < 1 || ln > 30)
+                throw RuntimeError("crypto.verifyScrypt: ln out of range", 0);
+            std::string derived = scryptDerive(password, p.salt, 1ULL << ln, r, pp, p.hash.size());
+            return Value(ctEqual(derived, p.hash));
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.verifyScrypt requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    // crypto.argon2id(password, params?) — RFC 9106 Argon2id.
+    //   params: optional map; supported keys:
+    //     t       iterations / time cost, default 3
+    //     m       memory in KiB, default 65536 (64 MiB)
+    //     p       parallelism (lanes), default 4
+    //     salt    pre-generated salt bytes; default 16 random
+    //     length  output bytes, default 32
+    //
+    // Defaults follow RFC 9106 §4 "second recommended option" — fits
+    // a modest server budget. For higher-security contexts bump t/m
+    // until verification takes ~250 ms on the verifier hardware.
+    //
+    // Throws on OpenSSL < 3.2 with a clear error message.
+    cryptoMap->entries[Value("argon2id")] = Value(makeNative("crypto.argon2id", -1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("crypto.argon2id(password, params?) requires a password string", 0);
+            const std::string& password = args[0].asString();
+            Value params = args.size() > 1 ? args[1] : Value();
+            uint64_t t = mapUintParam(params, "t", 3, 1, 1u << 20, "crypto.argon2id");
+            uint64_t m = mapUintParam(params, "m", 65536, 8, 1u << 22, "crypto.argon2id");
+            uint64_t p = mapUintParam(params, "p", 4, 1, 1u << 16, "crypto.argon2id");
+            uint64_t length = mapUintParam(params, "length", 32, 4, 1024, "crypto.argon2id");
+            if (m < 8 * p)
+                throw RuntimeError("crypto.argon2id: m (memory KiB) must be >= 8 * p (lanes)", 0);
+            std::string salt = mapStringParam(params, "salt", "crypto.argon2id");
+            if (salt.empty()) salt = generateRandomBytes(16);
+            if (salt.size() < 8)
+                throw RuntimeError("crypto.argon2id: salt must be at least 8 bytes", 0);
+            std::string h = argon2idDerive(password, salt,
+                                           static_cast<uint32_t>(t),
+                                           static_cast<uint32_t>(m),
+                                           static_cast<uint32_t>(p),
+                                           static_cast<size_t>(length));
+            // PHC with the Argon2 version segment (v=19, current).
+            std::string out = "$argon2id$v=19$m=" + std::to_string(m) +
+                              ",t=" + std::to_string(t) +
+                              ",p=" + std::to_string(p) +
+                              "$" + phcB64Encode(salt) +
+                              "$" + phcB64Encode(h);
+            return Value(out);
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.argon2id requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    cryptoMap->entries[Value("verifyArgon2id")] = Value(makeNative("crypto.verifyArgon2id", 2,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("crypto.verifyArgon2id(password, phc) requires two strings", 0);
+            const std::string& password = args[0].asString();
+            PhcParts p = phcParse(args[1].asString());
+            if (p.algo != "argon2id")
+                throw RuntimeError("crypto.verifyArgon2id: PHC algorithm is '" + p.algo +
+                                   "', expected 'argon2id'", 0);
+            // We don't pin v=19 strictly — if a future v=20 shows up,
+            // OpenSSL will reject it at derive time. For now nothing
+            // else exists.
+            uint64_t t = phcParseUint("t", p.params, 0);
+            uint64_t m = phcParseUint("m", p.params, 0);
+            uint64_t pp = phcParseUint("p", p.params, 0);
+            std::string derived = argon2idDerive(password, p.salt,
+                                                 static_cast<uint32_t>(t),
+                                                 static_cast<uint32_t>(m),
+                                                 static_cast<uint32_t>(pp),
+                                                 p.hash.size());
+            return Value(ctEqual(derived, p.hash));
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.verifyArgon2id requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
 
     // ── Asymmetric crypto ──
 
