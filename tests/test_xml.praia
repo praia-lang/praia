@@ -1,0 +1,190 @@
+use "testing"
+
+// DOM-style XML parser + serializer for the practical subset:
+// elements with attributes, mixed content, entities, CDATA. Comments,
+// PIs, and DOCTYPE are skipped on parse; namespace resolution is NOT
+// performed (qualified names round-trip as strings).
+
+// ── parse: structure ──────────────────────────────────────────
+
+testing.test("parse a simple element", lam{ in
+    let d = xml.parse("<root/>")
+    testing.assertEqual(d.tag, "root", nil)
+    testing.assertEqual(len(d.children), 0, "self-closing → no children")
+    testing.assertEqual(len(keys(d.attrs)), 0, "no attrs")
+})
+
+testing.test("parse with text content", lam{ in
+    let d = xml.parse("<p>hello</p>")
+    testing.assertEqual(d.children[0], "hello", "text node is a string")
+})
+
+testing.test("parse with attributes (both quote styles)", lam{ in
+    let d = xml.parse("<a href=\"/x\" id='main'>click</a>")
+    testing.assertEqual(d.attrs.href, "/x", nil)
+    testing.assertEqual(d.attrs.id, "main", nil)
+})
+
+testing.test("parse nested elements", lam{ in
+    let d = xml.parse("<root><child>one</child><child>two</child></root>")
+    testing.assertEqual(len(d.children), 2, nil)
+    testing.assertEqual(d.children[0].tag, "child", nil)
+    testing.assertEqual(d.children[1].children[0], "two", nil)
+})
+
+testing.test("parse mixed content (text + elements)", lam{ in
+    let d = xml.parse("<p>before <b>bold</b> after</p>")
+    testing.assertEqual(len(d.children), 3, "text + element + text")
+    testing.assertEqual(d.children[0], "before ", nil)
+    testing.assertEqual(d.children[1].tag, "b", nil)
+    testing.assertEqual(d.children[1].children[0], "bold", nil)
+    testing.assertEqual(d.children[2], " after", nil)
+})
+
+// ── Entities and character references ─────────────────────────
+
+testing.test("five standard entities decode", lam{ in
+    let d = xml.parse("<p>&lt;&gt;&amp;&quot;&apos;</p>")
+    testing.assertEqual(d.children[0], "<>&\"'", nil)
+})
+
+testing.test("decimal character references decode", lam{ in
+    let d = xml.parse("<p>&#65;&#8211;</p>")
+    testing.assertEqual(d.children[0], "A\u{2013}", "A + en-dash")
+})
+
+testing.test("hex character references decode", lam{ in
+    let d = xml.parse("<p>&#x41;&#x1F600;</p>")
+    testing.assertEqual(d.children[0], "A\u{1F600}", "A + grinning emoji")
+})
+
+testing.test("entity inside attribute value", lam{ in
+    let d = xml.parse("<a title=\"a &amp; b\"/>")
+    testing.assertEqual(d.attrs.title, "a & b", nil)
+})
+
+testing.test("unknown entity throws", lam{ in
+    testing.assertThrows(lam{ in xml.parse("<p>&bogus;</p>") },
+                         "unknown entity")
+})
+
+testing.test("numeric ref out of range throws", lam{ in
+    testing.assertThrows(lam{ in xml.parse("<p>&#x110000;</p>") },
+                         "out of range")
+})
+
+// ── CDATA and comments ────────────────────────────────────────
+
+testing.test("CDATA passes content verbatim", lam{ in
+    let d = xml.parse("<x><![CDATA[<not a tag> & raw]]></x>")
+    testing.assertEqual(d.children[0], "<not a tag> & raw", nil)
+})
+
+testing.test("comments are skipped", lam{ in
+    let d = xml.parse("<x>before<!-- skip me -->after</x>")
+    // The text on either side of the comment becomes two separate
+    // text nodes (we don't bother merging them).
+    testing.assertEqual(d.children[0], "before", nil)
+    testing.assertEqual(d.children[1], "after", nil)
+})
+
+testing.test("processing instructions are skipped", lam{ in
+    let d = xml.parse("<?xml version=\"1.0\"?><root/>")
+    testing.assertEqual(d.tag, "root", "PI in prolog is ignored")
+})
+
+testing.test("DOCTYPE is skipped", lam{ in
+    let d = xml.parse("<!DOCTYPE x SYSTEM \"x.dtd\"><x/>")
+    testing.assertEqual(d.tag, "x", nil)
+})
+
+// ── Error cases ───────────────────────────────────────────────
+
+testing.test("mismatched close tag throws", lam{ in
+    testing.assertThrows(lam{ in xml.parse("<a></b>") }, "mismatched")
+})
+
+testing.test("unterminated element throws", lam{ in
+    testing.assertThrows(lam{ in xml.parse("<a>") }, "unterminated")
+})
+
+testing.test("multiple roots throw", lam{ in
+    testing.assertThrows(lam{ in xml.parse("<a/><b/>") },
+                         "unexpected content after root")
+})
+
+testing.test("empty document throws", lam{ in
+    testing.assertThrows(lam{ in xml.parse("") }, "empty document")
+})
+
+testing.test("attribute without quotes throws", lam{ in
+    testing.assertThrows(lam{ in xml.parse("<a x=1/>") },
+                         "must be quoted")
+})
+
+testing.test("depth cap blocks pathological nesting", lam{ in
+    let mut = "<x>".repeat(201) + "</x>".repeat(201)
+    testing.assertThrows(lam{ in xml.parse(mut) }, "nesting too deep")
+})
+
+// ── Stringify ─────────────────────────────────────────────────
+
+testing.test("stringify a simple element", lam{ in
+    let d = xml.parse("<p>hello</p>")
+    testing.assertEqual(xml.stringify(d), "<p>hello</p>", nil)
+})
+
+testing.test("stringify self-closes empty elements", lam{ in
+    let d = xml.parse("<br/>")
+    testing.assertEqual(xml.stringify(d), "<br/>", nil)
+})
+
+testing.test("stringify escapes text content", lam{ in
+    // Build via parse so we know the in-memory shape is correct.
+    let d = xml.parse("<p>a &amp; b &lt;c&gt;</p>")
+    let s = xml.stringify(d)
+    testing.assert(s.contains("a &amp; b"), nil)
+    testing.assert(s.contains("&lt;c&gt;"), nil)
+})
+
+testing.test("stringify roundtrips nested structure", lam{ in
+    let src = "<root><a>1</a><b>2</b></root>"
+    testing.assertEqual(xml.stringify(xml.parse(src)), src, nil)
+})
+
+testing.test("stringify with indent pretty-prints (elements-only children)", lam{ in
+    let d = xml.parse("<root><a/><b/></root>")
+    let s = xml.stringify(d, 2)
+    testing.assert(s.contains("\n  <a/>\n"), "indented")
+    testing.assert(s.contains("\n  <b/>\n"), nil)
+})
+
+testing.test("stringify keeps mixed content inline (no indent)", lam{ in
+    // If any child is text, we'd corrupt whitespace by pretty-printing,
+    // so the indent option is ignored at that level.
+    let d = xml.parse("<p>before <b>bold</b> after</p>")
+    let s = xml.stringify(d, 2)
+    testing.assertEqual(s, "<p>before <b>bold</b> after</p>", nil)
+})
+
+testing.test("stringify rejects cyclic graphs", lam{ in
+    let m = {tag: "x", attrs: {}, children: []}
+    push(m.children, m)
+    testing.assertThrows(lam{ in xml.stringify(m) }, "cyclic")
+})
+
+// ── escape / unescape ─────────────────────────────────────────
+
+testing.test("xml.escape / xml.unescape roundtrip", lam{ in
+    let s = "<a href=\"x\">b's & 'c'</a>"
+    let e = xml.escape(s)
+    testing.assert(!e.contains("<"), "no raw <")
+    testing.assertEqual(xml.unescape(e), s, nil)
+})
+
+testing.test("xml.unescape on unknown entity throws", lam{ in
+    testing.assertThrows(lam{ in xml.unescape("&bogus;") },
+                         "unknown entity")
+})
+
+testing.done()

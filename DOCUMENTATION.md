@@ -2544,6 +2544,92 @@ print("Listening on port %{config.server.port}")
 
 ---
 
+## XML
+
+The `xml` namespace is a DOM-style parser plus serializer for the practical XML subset: elements with attributes, mixed content, the 5 standard entities, numeric character references, and CDATA. Comments, processing instructions, and DOCTYPE are skipped on parse. Namespace resolution is NOT performed — qualified names like `xmlns:foo` and `foo:bar` round-trip as plain strings.
+
+### Data model
+
+Each element is a Praia map:
+
+```
+{
+    tag: "div",
+    attrs: {class: "box", id: "main"},
+    children: [
+        "Hello ",                              // text node = plain string
+        {tag: "b", attrs: {}, children: ["world"]},
+        "!"
+    ]
+}
+```
+
+A `children` array can contain a mix of element maps and text-node strings (for mixed content like `<p>before <b>bold</b> after</p>`).
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `xml.parse(str)` | Parse an XML document; returns the root element map |
+| `xml.stringify(tree, indent?)` | Serialize an element tree. With `indent > 0`, elements-only children are pretty-printed; mixed-content elements stay inline so whitespace isn't corrupted |
+| `xml.escape(str)` | Replace `< > & " '` with their entity references |
+| `xml.unescape(str)` | Decode the 5 standard entities and numeric refs |
+
+```
+let doc = xml.parse("<book id=\"42\"><title>Praia</title></book>")
+print(doc.tag)                  // "book"
+print(doc.attrs.id)             // "42"
+print(doc.children[0].tag)      // "title"
+print(doc.children[0].children[0])  // "Praia"
+
+print(xml.stringify(doc))
+// <book id="42"><title>Praia</title></book>
+```
+
+### Out of scope
+
+Custom entity declarations / DTDs, XPath, XSLT, schema validation, namespace resolution. The depth cap on nesting is 200; deeper inputs throw.
+
+---
+
+## Property Lists (plist)
+
+Apple-flavored XML property lists, layered on top of `xml.parse`. The supported schema is the modern XML 1.0 plist variant.
+
+| plist element | Praia type |
+|---------------|------------|
+| `<dict>` (alternating `<key>` + value) | map |
+| `<array>` | array |
+| `<string>` | string |
+| `<integer>` | int |
+| `<real>` | float |
+| `<true/>` / `<false/>` | bool |
+| `<data>` | string (base64-decoded into raw bytes) |
+| `<date>` | string (ISO 8601, verbatim — not parsed into a time value) |
+
+| Function | Description |
+|----------|-------------|
+| `plist.parse(str)` | Parse an XML plist into the typed Praia value |
+| `plist.stringify(value, indent?)` | Serialize a Praia value as an XML plist with the canonical Apple DOCTYPE |
+
+```
+let cfg = plist.parse(fs.read("Info.plist"))
+print(cfg.CFBundleIdentifier)
+print(cfg.CFBundleVersion)
+
+let out = plist.stringify({name: "Ada", version: 1, tags: ["alpha", "beta"]}, 2)
+fs.write("out.plist", out)
+```
+
+### Limits
+
+- **Binary plists** (`bplist00` magic) are NOT supported. The parser throws a clear error pointing at `plutil -convert xml1 file.plist` (the standard macOS converter).
+- **Dates** round-trip as ISO 8601 strings; the parser doesn't convert them into `time.*` epoch seconds because Praia's time API is Unix-seconds and date-string arithmetic is not in core. Call `time.parseIso(s)` on the result if needed.
+- **`<data>` on output**: Praia strings double as byte sequences, so `plist.stringify` always emits `<string>` even for binary payloads. If you specifically need `<data>` output, build the XML by hand with `xml.stringify`.
+- **`nil` has no plist representation**; emitting it throws.
+
+---
+
 ## Base64
 
 | Function | Description |

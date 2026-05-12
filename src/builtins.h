@@ -60,6 +60,14 @@ Value jsonParse(const std::string& src);
 std::string jsonStringify(const Value& val, int indent = 0, int depth = 0);
 Value jsonParserCreate(const Value& input);
 
+// ── XML / plist (builtins/xml.cpp, builtins/plist.cpp) ───────
+Value xmlParse(const std::string& src);
+std::string xmlStringify(const Value& tree, int indent = 0);
+std::string xmlEscape(const std::string& s);
+std::string xmlUnescape(const std::string& s);
+void registerXmlBuiltins(std::shared_ptr<PraiaMap> xmlMap);
+void registerPlistBuiltins(std::shared_ptr<PraiaMap> plistMap);
+
 // ── YAML (builtins/yaml.cpp) ─────────────────────────────────
 Value yamlParse(const std::string& src);
 std::string yamlStringify(const Value& val, int depth = 0);

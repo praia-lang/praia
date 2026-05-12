@@ -2738,6 +2738,14 @@ Interpreter::Interpreter() {
     registerZlibBuiltins(zlibMap);
     globals->define("zlib", Value(zlibMap));
 
+    auto xmlMap = gcNew<PraiaMap>();
+    registerXmlBuiltins(xmlMap);
+    globals->define("xml", Value(xmlMap));
+
+    auto plistMap = gcNew<PraiaMap>();
+    registerPlistBuiltins(plistMap);
+    globals->define("plist", Value(plistMap));
+
     // ── random namespace ──
     //
     // Mersenne Twister, seeded from std::random_device. Fast and
