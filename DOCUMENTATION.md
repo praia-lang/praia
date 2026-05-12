@@ -3141,6 +3141,61 @@ All client methods return a map:
 
 Header names are lowercased for consistent access.
 
+#### Request options
+
+`http.request({...})` accepts these option fields beyond `method`/`url`/`body`/`headers`:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `timeout` | — | Shorthand: same value applied to connect, read, AND total. Seconds (float ok) |
+| `connectTimeout` | 30 | TCP/TLS handshake budget, in seconds |
+| `readTimeout` | 30 | Per recv() / SSL_read() budget, in seconds — a slow peer can't stall half-indefinitely |
+| `totalTimeout` | none | Overall request budget INCLUDING redirects, in seconds. -1 / omitted = no overall cap |
+| `followRedirects` | `true` | Follow 3xx responses with Location headers |
+| `maxRedirects` | 10 | Throw if a chain exceeds this |
+| `insecure` | `false` | **Skip TLS certificate verification.** Testing/dev only; equivalent to `curl -k` |
+| `caBundle` | system trust store | Path to a custom CA PEM bundle for trust-store override |
+
+```
+// Strict timeouts on a flaky upstream.
+let r = http.request({
+    url: "https://api.flaky.example.com/data",
+    connectTimeout: 3,
+    readTimeout: 5,
+    totalTimeout: 10,
+})
+
+// Don't follow redirects — inspect the 3xx ourselves.
+let r = http.request({url: probableRedirect, followRedirects: false})
+if (r.status == 301) { ... }
+
+// Test against a self-signed dev environment.
+let r = http.request({url: "https://localhost:8443/", insecure: true})
+
+// Internal CA for mTLS / private PKI.
+let r = http.request({url: "https://internal.corp/", caBundle: "/etc/ssl/corp-root.pem"})
+```
+
+#### Redirects
+
+The client follows 3xx responses with a Location header by default, up to `maxRedirects` hops. Method/body handling:
+
+- **303 See Other**: always switches to GET, drops the request body. This is the explicit "make a fresh GET" status.
+- **301 Moved Permanently / 302 Found**: switches POST (or any non-GET/HEAD method) to GET and drops the body. Strict RFC 7231 says preserve the method, but every browser and HTTP library since 1995 switches; matching that behavior is what callers expect.
+- **307 Temporary Redirect / 308 Permanent Redirect**: preserves both method AND body. These codes exist precisely to disambiguate from the 301/302 method-switch convention.
+
+**Security**: an `https://` → `http://` Location is refused outright. Open-redirect attacks that try to leak cookies or auth headers over plaintext don't get to. (Matches `curl --proto-redir` behavior.) Relative-path Locations like `?foo=bar` are not supported — emit an absolute path or absolute URL. Absolute paths like `/foo` and protocol-relative `//host/foo` are both supported.
+
+When `followRedirects` is `false`, the 3xx response is returned as-is with `Location` in `headers.location`.
+
+#### Timeouts
+
+- **`connectTimeout`** is enforced via non-blocking connect + poll, so we don't block the calling task during a slow handshake.
+- **`readTimeout`** is enforced via `SO_RCVTIMEO`/`SO_SNDTIMEO` on the socket; each individual recv/send can wait at most this long.
+- **`totalTimeout`** bounds the entire request including all redirect hops. Once exceeded, the per-request timeouts are capped at the remaining budget so a mid-redirect server can't outlast the deadline.
+
+Connect against an unroutable IP throws "connect timed out after Nms" with an exact elapsed budget; read timeouts throw "HTTP read timed out".
+
 ### HTTP Server
 
 #### Creating a server

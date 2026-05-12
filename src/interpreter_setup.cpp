@@ -1689,7 +1689,51 @@ Interpreter::Interpreter() {
                 for (auto& [k, v] : opts.at("headers").asMap()->entries)
                     headers[k.toString()] = v.toString();
             }
-            return doHttpRequest(method, url, body, headers);
+
+            // Build the HttpOptions from the same options map. All
+            // fields are optional with sensible defaults; numeric
+            // timeouts are in seconds at the user-facing API (matches
+            // how every HTTP client in the wild documents them) and
+            // converted to ms here.
+            HttpOptions httpOpts;
+            auto secsToMs = [](const Value& v) -> int {
+                if (!v.isNumber()) return -1;
+                double secs = v.asNumber();
+                if (secs <= 0) return -1;
+                return static_cast<int>(secs * 1000.0);
+            };
+            if (opts.count("timeout")) {
+                // `timeout: N` is shorthand for "use N seconds for
+                // everything" — connect, read, AND total budget all
+                // get the same value. Matches Python requests' simple
+                // `timeout=10` form.
+                int ms = secsToMs(opts.at("timeout"));
+                if (ms > 0) {
+                    httpOpts.connectTimeoutMs = ms;
+                    httpOpts.readTimeoutMs    = ms;
+                    httpOpts.totalTimeoutMs   = ms;
+                }
+            }
+            // Per-axis overrides win over the shorthand.
+            if (opts.count("connectTimeout"))
+                httpOpts.connectTimeoutMs = secsToMs(opts.at("connectTimeout"));
+            if (opts.count("readTimeout"))
+                httpOpts.readTimeoutMs    = secsToMs(opts.at("readTimeout"));
+            if (opts.count("totalTimeout"))
+                httpOpts.totalTimeoutMs   = secsToMs(opts.at("totalTimeout"));
+
+            if (opts.count("followRedirects") && opts.at("followRedirects").isBool())
+                httpOpts.followRedirects = opts.at("followRedirects").asBool();
+            if (opts.count("maxRedirects") && opts.at("maxRedirects").isNumber())
+                httpOpts.maxRedirects =
+                    static_cast<int>(opts.at("maxRedirects").asNumber());
+
+            if (opts.count("insecure") && opts.at("insecure").isBool())
+                httpOpts.insecure = opts.at("insecure").asBool();
+            if (opts.count("caBundle") && opts.at("caBundle").isString())
+                httpOpts.caBundle = opts.at("caBundle").asString();
+
+            return doHttpRequest(method, url, body, headers, httpOpts);
         }));
 
     httpMap->entries[Value("createServer")] = Value(makeNative("http.createServer", 1,
@@ -3925,7 +3969,7 @@ Interpreter::Interpreter() {
             }
 
             // dlsym for the entry point. If this fails or returns null, no
-            // plugin code has run yet — safe to dlclose so the handle doesn't
+            // plugin code has run yet - safe to dlclose so the handle doesn't
             // leak. Once we call registerFn we MUST keep the handle alive
             // forever: the plugin's callables (and even the plugin-built
             // std::function deleters in their destructors) hold pointers
@@ -3951,7 +3995,7 @@ Interpreter::Interpreter() {
             try {
                 registerFn(moduleMap.get());
             } catch (const std::exception& e) {
-                // Don't dlclose here — plugin code may still be referenced
+                // Don't dlclose here - plugin code may still be referenced
                 // by std::function deleters in the partially-populated
                 // moduleMap. Just wrap and re-throw with context.
                 throw RuntimeError(

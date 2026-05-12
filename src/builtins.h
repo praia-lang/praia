@@ -51,9 +51,26 @@ void registerZlibBuiltins(std::shared_ptr<PraiaMap> zlibMap);
 void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment> globals);
 
 // ── HTTP (builtins/http.cpp) ─────────────────────────────────
+
+// Per-request knobs for outbound HTTP. All fields have safe defaults
+// so callers that don't care can pass {}; the http.get / http.post
+// wrappers do exactly that. Timeouts are milliseconds; -1 means "no
+// limit" (use carefully — a hung peer with no timeout blocks the
+// caller forever).
+struct HttpOptions {
+    int connectTimeoutMs = 30000;   // TCP/TLS handshake budget
+    int readTimeoutMs    = 30000;   // single recv() / SSL_read() budget
+    int totalTimeoutMs   = -1;      // overall request budget (incl. redirects)
+    bool followRedirects = true;
+    int maxRedirects     = 10;
+    bool insecure        = false;   // skip TLS cert verification (testing only!)
+    std::string caBundle;           // path to custom CA bundle PEM (empty = system defaults)
+};
+
 Value doHttpRequest(const std::string& method, const std::string& url,
                     const std::string& body,
-                    const std::unordered_map<std::string, std::string>& extraHeaders);
+                    const std::unordered_map<std::string, std::string>& extraHeaders,
+                    const HttpOptions& opts = {});
 void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp);
 
 // ── JSON (builtins/json.cpp) ─────────────────────────────────
