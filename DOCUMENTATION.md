@@ -850,7 +850,7 @@ Wrap code that might fail in a `try` block. If an error occurs — either from `
 
 ```
 try {
-    let data = sys.read("config.txt")
+    let data = fs.read("config.txt")
     print(data)
 } catch (err) {
     print("failed to read config:", err)
@@ -862,7 +862,7 @@ try {
 Add a `finally` block for cleanup that always runs — whether the try succeeds, the catch runs, or an exception is re-thrown.
 
 ```
-let file = sys.read("data.txt")
+let file = fs.read("data.txt")
 try {
     process(file)
 } catch (err) {
@@ -2012,29 +2012,32 @@ arr.reverse()                   // [3, 2, 1]
 
 ### File I/O
 
+Filesystem operations live on the `fs` namespace. (They used to live on `sys`; the old `sys.read` / `sys.write` / etc. still work but print a one-shot deprecation warning to stderr. Rename to `fs.*` at your convenience — the aliases will be removed at 1.0.)
+
 ```
 // Write a file
-sys.write("output.txt", "hello from praia")
+fs.write("output.txt", "hello from praia")
 
 // Read a file
-let content = sys.read("output.txt")
+let content = fs.read("output.txt")
 print(content)          // hello from praia
 
 // Append to a file
-sys.append("output.txt", "\nmore text")
+fs.append("output.txt", "\nmore text")
 ```
 
 ### File System
 
 ```
-sys.mkdir("my/nested/dir")          // creates all parent dirs
-print(sys.exists("output.txt"))     // true
-sys.remove("output.txt")            // delete a file
-sys.remove("my/nested/dir")         // delete a directory (recursive)
-sys.copy("src.txt", "dst.txt")      // copy a file
-sys.copy("srcdir", "dstdir")        // copy a directory (recursive)
-sys.move("old.txt", "new.txt")      // move / rename a file or directory
-let files = sys.readDir("my/dir")   // returns array of filenames in directory
+fs.mkdir("my/nested/dir")          // creates all parent dirs
+print(fs.exists("output.txt"))     // true
+fs.remove("output.txt")            // delete a file
+fs.remove("my/nested/dir")         // delete a directory (recursive)
+fs.copy("src.txt", "dst.txt")      // copy a file
+fs.copy("srcdir", "dstdir")        // copy a directory (recursive)
+fs.move("old.txt", "new.txt")      // move / rename a file or directory
+let files = fs.readDir("my/dir")   // returns array of filenames in directory
+let tmp = fs.tempDir("myapp")      // race-free mkdtemp under the system tmp
 ```
 
 ### Running Commands
@@ -2318,7 +2321,7 @@ try { r2 = expr } catch (e) { r2 = handler(e) }
 ### Data processing pipeline
 
 ```
-let adults = sys.read("users.json")
+let adults = fs.read("users.json")
     |> json.parse
     |> filter(lam{ it.age >= 18 })
     |> map(lam{ it.name })
@@ -2476,7 +2479,7 @@ print(yaml.stringify(obj))
 ### Practical: reading config files
 
 ```
-let config = yaml.parse(sys.read("config.yaml"))
+let config = yaml.parse(fs.read("config.yaml"))
 print("Listening on port %{config.server.port}")
 ```
 
@@ -3668,20 +3671,99 @@ print("took", time.now() - start, "ms")
 
 ---
 
+## Filesystem (fs)
+
+`fs` is the canonical home for filesystem I/O.
+
+### Content & directory ops
+
+| Function | Description |
+|----------|-------------|
+| `fs.read(path)` | Read entire file as string |
+| `fs.write(path, str)` | Write string to file (creates/truncates) |
+| `fs.append(path, str)` | Append string to file |
+| `fs.readLines(path)` | Read file as array of lines (no trailing newlines) |
+| `fs.exists(path)` | `true` if the path exists |
+| `fs.mkdir(path)` | Create directory, including parents |
+| `fs.remove(path)` | Delete file or directory (recursive) |
+| `fs.readDir(path)` | Array of entry names in a directory |
+| `fs.copy(src, dst)` | Copy file or directory (recursive) |
+| `fs.move(src, dst)` | Move / rename a file or directory |
+
+### Metadata, permissions, and links
+
+| Function | Description |
+|----------|-------------|
+| `fs.stat(path)` | Full metadata, follows symlinks. Returns `{type, size, mode, uid, gid, mtime, atime, ctime, nlink, ino, dev}` |
+| `fs.lstat(path)` | Same as `stat` but does NOT follow symlinks — use when you need to distinguish links from regular files |
+| `fs.chmod(path, mode)` | Set permission bits. `mode` is an int (e.g. `420` for `0o644`, `384` for `0o600`); high bits are masked off |
+| `fs.symlink(target, linkpath)` | Create a symlink at `linkpath` pointing to `target`. Target string stored verbatim; dangling links are legal |
+| `fs.readlink(path)` | Return the stored target of a symlink. Throws on a non-link |
+
+The `.type` field returned by `stat`/`lstat` is one of `"file"`, `"dir"`, `"symlink"`, `"socket"`, `"fifo"`, `"block"`, `"char"`, or `"unknown"`. Mode is masked to the low 12 bits (permission + setuid/setgid/sticky).
+
+### Atomic and temp-file primitives
+
+| Function | Description |
+|----------|-------------|
+| `fs.atomicWrite(path, content)` | Write to a sibling temp file, fsync, then `rename(2)` onto `path`. Crash-safe: readers see old-or-new, never a half-written file. Same-filesystem only |
+| `fs.tempDir(prefix?)` | Race-free `mkdtemp(3)` under the system temp dir (mode 0700) |
+| `fs.mktemp(prefix?)` | Race-free `mkstemp(3)` temp FILE under the system temp dir (mode 0600). Returns the path of an empty file you own |
+
+Use `fs.atomicWrite` for config files, lock files, and anything else where a partial write would corrupt downstream readers. The temp file goes in the target's directory (same filesystem) so the rename is genuinely atomic.
+
+### File handles (streaming I/O)
+
+`fs.open(path, mode)` returns a file handle for streaming reads and writes — preferred over `fs.read`/`fs.write` when the file is large enough that loading it whole would be wasteful, or when you need random access via `seek`.
+
+| Mode | Behavior |
+|------|----------|
+| `"r"`  | Read only; file must exist |
+| `"w"`  | Write only; truncates or creates (mode 0644) |
+| `"a"`  | Write only, append; creates if missing |
+| `"r+"` | Read + write; file must exist |
+| `"w+"` | Read + write; truncates or creates |
+| `"a+"` | Read + write; writes always append |
+
+| Method | Description |
+|--------|-------------|
+| `h.read(n)` | Read up to `n` bytes; returns `""` at EOF |
+| `h.readLine()` | Read one line (without trailing `\n`); returns `nil` at EOF |
+| `h.write(data)` | Write string/bytes; returns the number of bytes written |
+| `h.seek(offset, whence?)` | Reposition. `whence` is `"start"` (default), `"current"`, or `"end"` |
+| `h.tell()` | Current logical position (accounts for read-buffered bytes) |
+| `h.flush()` | `fsync(2)` — push the kernel page cache to disk |
+| `h.close()` | Close the fd. Idempotent. Subsequent reads/writes throw |
+| `h.path` | The path the handle was opened on |
+| `h.mode` | The mode string the handle was opened with |
+
+Streaming pattern — line-by-line processing of an arbitrarily large file:
+
+```
+let h = fs.open("big.log", "r")
+defer h.close()
+let line = h.readLine()
+while (line != nil) {
+    process(line)
+    line = h.readLine()
+}
+```
+
+Read and `readLine` can be mixed on the same handle. Writes on `r+`/`w+` handles correctly land at the user's logical position even after intervening reads — the handle resyncs the kernel position before writing.
+
+The old `sys.read` / `sys.write` / etc. names still work but emit a one-shot deprecation warning on first use per process. They'll be removed at 1.0 — rename `sys.<op>` to `fs.<op>` whenever you touch the file.
+
 ## OS extras (sys)
 
-In addition to file/directory operations, `sys` provides:
+`sys` covers process-level concerns: environment, working directory, process metadata, signals, exec, terminal control.
 
 | Field/Function | Description |
 |----------------|-------------|
-| `sys.copy(src, dst)` | Copy a file or directory (recursive) |
-| `sys.move(src, dst)` | Move / rename a file or directory |
 | `sys.env(name)` | Read environment variable (returns nil if not set) |
 | `sys.envAll()` | Returns all environment variables as a map |
 | `sys.setenv(name, value)` | Set an environment variable |
 | `sys.cwd()` | Current working directory |
 | `sys.chdir(path)` | Change working directory |
-| `sys.readLines(path)` | Read file as array of lines (no trailing newlines) |
 | `sys.uid()` | Effective user ID (`geteuid()`) |
 | `sys.isRoot()` | `true` if running as root (uid 0) |
 | `sys.getpid()` | Current process ID |

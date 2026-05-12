@@ -2,7 +2,7 @@
 //
 // Usage:
 //   use "toml"
-//   let config = toml.parse(sys.read("config.toml"))
+//   let config = toml.parse(fs.read("config.toml"))
 //   print(config.database.host)
 //
 //   let str = toml.stringify(config)

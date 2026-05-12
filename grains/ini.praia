@@ -2,11 +2,11 @@
 //
 // Usage:
 //   use "ini"
-//   let config = ini.parse(sys.read("config.ini"))
+//   let config = ini.parse(fs.read("config.ini"))
 //   print(config["database"]["host"])
 //
 //   let str = ini.stringify(config)
-//   sys.write("config.ini", str)
+//   fs.write("config.ini", str)
 
 func parse(text) {
     let result = {}

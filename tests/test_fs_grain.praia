@@ -1,0 +1,122 @@
+use "testing"
+
+// fs.* is the canonical filesystem namespace. The sys.* aliases for
+// these ops still work but print a one-shot deprecation warning;
+// these tests live on the fs.* side.
+//
+// Each test gets its own tempDir so they don't tread on each other
+// when run in parallel (or in a flaky-order suite). tempDir() uses
+// mkdtemp(3) so a stale name from a crashed previous run never
+// collides.
+
+testing.test("fs.tempDir creates a unique directory", lam{ in
+    let a = fs.tempDir("praia-test")
+    let b = fs.tempDir("praia-test")
+    testing.assert(a != b, "two tempDirs must differ")
+    testing.assert(fs.exists(a), "first tempDir exists")
+    testing.assert(fs.exists(b), "second tempDir exists")
+    fs.remove(a)
+    fs.remove(b)
+})
+
+testing.test("fs.write then fs.read roundtrip", lam{ in
+    let d = fs.tempDir("praia-write")
+    let p = d + "/note.txt"
+    fs.write(p, "hello\nworld\n")
+    testing.assertEqual(fs.read(p), "hello\nworld\n", nil)
+    fs.remove(d)
+})
+
+testing.test("fs.append accumulates", lam{ in
+    let d = fs.tempDir("praia-append")
+    let p = d + "/log.txt"
+    fs.write(p, "one\n")
+    fs.append(p, "two\n")
+    fs.append(p, "three\n")
+    testing.assertEqual(fs.read(p), "one\ntwo\nthree\n", nil)
+    fs.remove(d)
+})
+
+testing.test("fs.readLines returns array of lines (no trailing newline)", lam{ in
+    let d = fs.tempDir("praia-lines")
+    let p = d + "/lines.txt"
+    fs.write(p, "alpha\nbeta\ngamma\n")
+    let lines = fs.readLines(p)
+    testing.assertEqual(lines, ["alpha", "beta", "gamma"], nil)
+    fs.remove(d)
+})
+
+testing.test("fs.exists reports true/false", lam{ in
+    let d = fs.tempDir("praia-exists")
+    let p = d + "/file.txt"
+    testing.assertEqual(fs.exists(p), false, "missing file → false")
+    fs.write(p, "x")
+    testing.assertEqual(fs.exists(p), true, "present file → true")
+    testing.assertEqual(fs.exists(d), true, "directory → true")
+    fs.remove(d)
+})
+
+testing.test("fs.mkdir creates nested dirs", lam{ in
+    let d = fs.tempDir("praia-mkdir")
+    let nested = d + "/a/b/c"
+    fs.mkdir(nested)
+    testing.assert(fs.exists(nested), "nested dir created")
+    fs.remove(d)
+})
+
+testing.test("fs.readDir lists entries", lam{ in
+    let d = fs.tempDir("praia-readdir")
+    fs.write(d + "/one.txt", "x")
+    fs.write(d + "/two.txt", "y")
+    fs.mkdir(d + "/sub")
+    let entries = fs.readDir(d)
+    // Order isn't specified by the filesystem; check membership.
+    testing.assertEqual(len(entries), 3, "3 entries")
+    testing.assert(entries.contains("one.txt"), nil)
+    testing.assert(entries.contains("two.txt"), nil)
+    testing.assert(entries.contains("sub"), nil)
+    fs.remove(d)
+})
+
+testing.test("fs.copy duplicates files", lam{ in
+    let d = fs.tempDir("praia-copy")
+    fs.write(d + "/src.txt", "payload")
+    fs.copy(d + "/src.txt", d + "/dst.txt")
+    testing.assertEqual(fs.read(d + "/dst.txt"), "payload", nil)
+    // Source still exists after copy.
+    testing.assert(fs.exists(d + "/src.txt"), nil)
+    fs.remove(d)
+})
+
+testing.test("fs.move renames", lam{ in
+    let d = fs.tempDir("praia-move")
+    fs.write(d + "/src.txt", "payload")
+    fs.move(d + "/src.txt", d + "/dst.txt")
+    testing.assertEqual(fs.read(d + "/dst.txt"), "payload", nil)
+    testing.assertEqual(fs.exists(d + "/src.txt"), false, "src is gone after move")
+    fs.remove(d)
+})
+
+testing.test("fs.remove recurses on directories", lam{ in
+    let d = fs.tempDir("praia-remove")
+    fs.write(d + "/file", "x")
+    fs.mkdir(d + "/sub")
+    fs.write(d + "/sub/nested", "y")
+    fs.remove(d)
+    testing.assertEqual(fs.exists(d), false, "dir + contents are gone")
+})
+
+// ── Back-compat: sys.* aliases still work ────────────────────────
+// We don't assert on stderr output; the bare goal here is "old code
+// that still calls sys.read et al keeps working until 1.0."
+
+testing.test("sys.* aliases still function (back-compat)", lam{ in
+    let d = fs.tempDir("praia-syscompat")
+    sys.write(d + "/a.txt", "via sys")
+    testing.assertEqual(sys.read(d + "/a.txt"), "via sys", nil)
+    testing.assertEqual(sys.exists(d + "/a.txt"), true, nil)
+    sys.remove(d)
+    testing.assertEqual(fs.exists(d), false, nil)
+})
+
+testing.done()

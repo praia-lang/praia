@@ -37,6 +37,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <poll.h>
@@ -619,127 +620,656 @@ Interpreter::Interpreter() {
 
     sysMap = gcNew<PraiaMap>();
 
-    sysMap->entries[Value("read")] = Value(makeNative("sys.read", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.read() requires a string path", 0);
-            std::ifstream f(args[0].asString());
-            if (!f.is_open())
-                throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
-            std::stringstream ss;
-            ss << f.rdbuf();
-            return Value(ss.str());
-        }));
+    // ── fs namespace ──
+    //
+    // The canonical home for filesystem I/O. sys.* used to absorb
+    // these (read/write/append/exists/mkdir/tempDir/remove/readDir/
+    // copy/move/readLines) but sys had become the kitchen sink of
+    // unrelated concerns — process control, env vars, signals,
+    // execvp, AND filesystem ops. fs.* is the new canonical name;
+    // the sys.* aliases below stay as one-shot-deprecation forwarders
+    // so existing callers keep working. Remove the aliases at 1.0.
+    auto fsMap = gcNew<PraiaMap>();
 
-    sysMap->entries[Value("write")] = Value(makeNative("sys.write", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.write() requires a string path", 0);
-            std::ofstream f(args[0].asString());
-            if (!f.is_open())
-                throw RuntimeError("Cannot write file: " + args[0].asString(), 0);
-            f << args[1].toString();
-            return Value();
-        }));
+    // Each impl is captured as a std::function so the same body
+    // serves both fs.<name> (canonical) and the sys.<name> deprecated
+    // forwarder. Error messages name the canonical fs.<name> form —
+    // when a sys.<name> call fails the user sees the deprecation
+    // banner first and the rename guidance in the error second.
+    using FsImpl = std::function<Value(const std::vector<Value>&)>;
 
-    sysMap->entries[Value("append")] = Value(makeNative("sys.append", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.append() requires a string path", 0);
-            std::ofstream f(args[0].asString(), std::ios::app);
-            if (!f.is_open())
-                throw RuntimeError("Cannot open file: " + args[0].asString(), 0);
-            f << args[1].toString();
-            return Value();
-        }));
+    FsImpl fsRead = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.read() requires a string path", 0);
+        std::ifstream f(args[0].asString());
+        if (!f.is_open())
+            throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        return Value(ss.str());
+    };
 
-    sysMap->entries[Value("exists")] = Value(makeNative("sys.exists", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.exists() requires a string path", 0);
-            return Value(fs::exists(args[0].asString()));
-        }));
+    FsImpl fsWrite = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.write() requires a string path", 0);
+        std::ofstream f(args[0].asString());
+        if (!f.is_open())
+            throw RuntimeError("Cannot write file: " + args[0].asString(), 0);
+        f << args[1].toString();
+        return Value();
+    };
 
-    sysMap->entries[Value("mkdir")] = Value(makeNative("sys.mkdir", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.mkdir() requires a string path", 0);
-            fs::create_directories(args[0].asString());
-            return Value();
-        }));
+    FsImpl fsAppend = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.append() requires a string path", 0);
+        std::ofstream f(args[0].asString(), std::ios::app);
+        if (!f.is_open())
+            throw RuntimeError("Cannot open file: " + args[0].asString(), 0);
+        f << args[1].toString();
+        return Value();
+    };
 
-    // sys.tempDir(prefix?) — create a unique temp directory under the system
-    // temp dir and return its absolute path. Uses mkdtemp(3) for atomic
-    // creation with mode 0700. Caller is responsible for removing it.
-    sysMap->entries[Value("tempDir")] = Value(makeNative("sys.tempDir", -1,
-        [](const std::vector<Value>& args) -> Value {
-            std::string prefix = "praia";
-            if (!args.empty()) {
-                if (!args[0].isString())
-                    throw RuntimeError("sys.tempDir() prefix must be a string", 0);
-                prefix = args[0].asString();
+    FsImpl fsExists = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.exists() requires a string path", 0);
+        return Value(fs::exists(args[0].asString()));
+    };
+
+    FsImpl fsMkdir = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.mkdir() requires a string path", 0);
+        fs::create_directories(args[0].asString());
+        return Value();
+    };
+
+    // fs.tempDir(prefix?) — atomic mkdtemp(3) under the system temp
+    // dir, mode 0700. Caller is responsible for removal.
+    FsImpl fsTempDir = [](const std::vector<Value>& args) -> Value {
+        std::string prefix = "praia";
+        if (!args.empty()) {
+            if (!args[0].isString())
+                throw RuntimeError("fs.tempDir() prefix must be a string", 0);
+            prefix = args[0].asString();
+        }
+        std::error_code ec;
+        auto tmpPath = fs::temp_directory_path(ec);
+        if (ec)
+            throw RuntimeError("fs.tempDir(): " + ec.message(), 0);
+        std::string tmpl = tmpPath.string() + "/" + prefix + ".XXXXXX";
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        if (!mkdtemp(buf.data()))
+            throw RuntimeError("fs.tempDir(): " + std::string(std::strerror(errno)), 0);
+        return Value(std::string(buf.data()));
+    };
+
+    FsImpl fsRemove = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.remove() requires a string path", 0);
+        auto& p = args[0].asString();
+        if (!fs::exists(p))
+            throw RuntimeError("Cannot remove: " + p + " (not found)", 0);
+        fs::remove_all(p);
+        return Value();
+    };
+
+    FsImpl fsReadDir = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.readDir() requires a string path", 0);
+        auto& p = args[0].asString();
+        if (!fs::is_directory(p))
+            throw RuntimeError("fs.readDir(): not a directory: " + p, 0);
+        auto arr = gcNew<PraiaArray>();
+        for (auto& entry : fs::directory_iterator(p))
+            arr->elements.push_back(Value(entry.path().filename().string()));
+        return Value(arr);
+    };
+
+    FsImpl fsCopy = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString() || !args[1].isString())
+            throw RuntimeError("fs.copy() requires two string paths", 0);
+        auto& src = args[0].asString();
+        auto& dst = args[1].asString();
+        if (!fs::exists(src))
+            throw RuntimeError("Cannot copy: " + src + " (not found)", 0);
+        fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+        return Value();
+    };
+
+    FsImpl fsMove = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString() || !args[1].isString())
+            throw RuntimeError("fs.move() requires two string paths", 0);
+        auto& src = args[0].asString();
+        auto& dst = args[1].asString();
+        if (!fs::exists(src))
+            throw RuntimeError("Cannot move: " + src + " (not found)", 0);
+        fs::rename(src, dst);
+        return Value();
+    };
+
+    // ── Phase 2: stat, lstat, chmod, symlink, readlink, atomicWrite, mktemp ──
+    //
+    // These hit raw POSIX rather than std::filesystem because we want the
+    // full stat(2) shape (uid/gid/atime/ctime/nlink/ino/dev) and the
+    // atomicity guarantees that std::filesystem's higher-level wrappers
+    // either hide or implement on a best-effort basis.
+
+    // Convert a struct stat into the Praia map shape exposed to user
+    // code. The type string covers all POSIX file types so callers can
+    // dispatch without having to know the bit layout of st_mode. mode
+    // is masked to 0o7777 (low 12 bits = permission + setuid/setgid/
+    // sticky) — the file-type bits live in `.type` instead so callers
+    // don't have to do their own bit-twiddling.
+    auto statToMap = [](const struct stat& st) -> Value {
+        auto m = gcNew<PraiaMap>();
+        std::string typeStr;
+        if      (S_ISREG(st.st_mode))  typeStr = "file";
+        else if (S_ISDIR(st.st_mode))  typeStr = "dir";
+        else if (S_ISLNK(st.st_mode))  typeStr = "symlink";
+        else if (S_ISSOCK(st.st_mode)) typeStr = "socket";
+        else if (S_ISFIFO(st.st_mode)) typeStr = "fifo";
+        else if (S_ISBLK(st.st_mode))  typeStr = "block";
+        else if (S_ISCHR(st.st_mode))  typeStr = "char";
+        else                           typeStr = "unknown";
+        m->entries[Value("type")]  = Value(typeStr);
+        m->entries[Value("size")]  = Value(static_cast<int64_t>(st.st_size));
+        m->entries[Value("mode")]  = Value(static_cast<int64_t>(st.st_mode & 07777));
+        m->entries[Value("uid")]   = Value(static_cast<int64_t>(st.st_uid));
+        m->entries[Value("gid")]   = Value(static_cast<int64_t>(st.st_gid));
+        m->entries[Value("mtime")] = Value(static_cast<int64_t>(st.st_mtime));
+        m->entries[Value("atime")] = Value(static_cast<int64_t>(st.st_atime));
+        m->entries[Value("ctime")] = Value(static_cast<int64_t>(st.st_ctime));
+        m->entries[Value("nlink")] = Value(static_cast<int64_t>(st.st_nlink));
+        m->entries[Value("ino")]   = Value(static_cast<int64_t>(st.st_ino));
+        m->entries[Value("dev")]   = Value(static_cast<int64_t>(st.st_dev));
+        return Value(m);
+    };
+
+    FsImpl fsStat = [statToMap](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.stat() requires a string path", 0);
+        auto& p = args[0].asString();
+        struct stat st;
+        if (::stat(p.c_str(), &st) != 0)
+            throw RuntimeError("fs.stat(): " + p + ": " + std::strerror(errno), 0);
+        return statToMap(st);
+    };
+
+    // lstat differs from stat only in symlink handling: it returns
+    // metadata for the link itself rather than its target. Use this
+    // when "type" should distinguish symlinks from regular files.
+    FsImpl fsLstat = [statToMap](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.lstat() requires a string path", 0);
+        auto& p = args[0].asString();
+        struct stat st;
+        if (::lstat(p.c_str(), &st) != 0)
+            throw RuntimeError("fs.lstat(): " + p + ": " + std::strerror(errno), 0);
+        return statToMap(st);
+    };
+
+    // chmod(2). Mode is an integer; Praia doesn't have octal literals
+    // yet so users will write either decimal (420 == 0o644) or hex
+    // (0x1A4). Mask the user-supplied bits so we can't accidentally
+    // pass through stat-style file-type bits (chmod ignores them but
+    // it's a sharper API).
+    FsImpl fsChmod = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.chmod() requires a string path", 0);
+        if (!args[1].isNumber())
+            throw RuntimeError("fs.chmod() requires a numeric mode", 0);
+        auto& p = args[0].asString();
+        mode_t mode = static_cast<mode_t>(args[1].toInt64ForBitwise()) & 07777;
+        if (::chmod(p.c_str(), mode) != 0)
+            throw RuntimeError("fs.chmod(): " + p + ": " + std::strerror(errno), 0);
+        return Value();
+    };
+
+    // symlink(2). Note POSIX argument order: (target, linkpath) — the
+    // target string is stored verbatim and isn't checked for validity
+    // (dangling symlinks are legal). linkpath is the filesystem
+    // location to create.
+    FsImpl fsSymlink = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString() || !args[1].isString())
+            throw RuntimeError("fs.symlink(target, linkpath) requires two string paths", 0);
+        auto& target   = args[0].asString();
+        auto& linkpath = args[1].asString();
+        if (::symlink(target.c_str(), linkpath.c_str()) != 0)
+            throw RuntimeError("fs.symlink(): " + linkpath + ": " + std::strerror(errno), 0);
+        return Value();
+    };
+
+    // readlink(2). The returned string is whatever the symlink stores
+    // — relative or absolute, possibly dangling. Throws on a non-link.
+    FsImpl fsReadlink = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.readlink() requires a string path", 0);
+        auto& p = args[0].asString();
+        // PATH_MAX-sized scratch then grow if the link is longer (rare
+        // but possible — Linux allows symlink contents up to ~4096
+        // bytes; macOS allows somewhat less but still over PATH_MAX
+        // for our purposes).
+        std::vector<char> buf(1024);
+        while (true) {
+            ssize_t n = ::readlink(p.c_str(), buf.data(), buf.size());
+            if (n < 0)
+                throw RuntimeError("fs.readlink(): " + p + ": " + std::strerror(errno), 0);
+            if (static_cast<size_t>(n) < buf.size())
+                return Value(std::string(buf.data(), n));
+            // Buffer was exactly filled — symlink may have been
+            // truncated. Double the buffer and retry.
+            buf.resize(buf.size() * 2);
+        }
+    };
+
+    // fs.atomicWrite(path, content) — write content to a sibling temp
+    // file, fsync, then rename(2) onto path. POSIX rename is atomic on
+    // the same filesystem: readers see either the old contents or the
+    // new ones, never a half-written file. Closes the "config
+    // truncated by Ctrl-C / power loss" hole.
+    //
+    // On failure anywhere, unlink the temp file so we don't leave
+    // .tmp.XXXXXX droppings behind.
+    FsImpl fsAtomicWrite = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.atomicWrite() requires a string path", 0);
+        auto& targetPath = args[0].asString();
+        // Allow strings or bytes for content. toString() copes with both;
+        // for bytes we want raw payload not a stringified representation,
+        // but Praia's bytes Value stringifies to its raw bytes already.
+        std::string content = args[1].toString();
+
+        // Sibling temp file — must be on the same filesystem as the
+        // target so rename(2) stays atomic. Derive a template from
+        // the target's parent directory + basename.
+        fs::path tgt(targetPath);
+        fs::path dir = tgt.parent_path();
+        if (dir.empty()) dir = ".";
+        std::string tmpl = (dir / ("." + tgt.filename().string() + ".XXXXXX")).string();
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+
+        int fd = ::mkstemp(buf.data());
+        if (fd < 0)
+            throw RuntimeError("fs.atomicWrite(): mkstemp failed for " + targetPath +
+                               ": " + std::strerror(errno), 0);
+        std::string tmpPath(buf.data());
+
+        // Lambda to unlink the temp on any error path before
+        // re-throwing.
+        auto bail = [&](const std::string& msg) {
+            ::close(fd);
+            ::unlink(tmpPath.c_str());
+            throw RuntimeError("fs.atomicWrite(): " + msg, 0);
+        };
+
+        // mkstemp creates with mode 0600; loosen to 0644 so the
+        // renamed file matches what `fs.write` produces. Users who
+        // want stricter perms can chmod afterwards.
+        if (::fchmod(fd, 0644) != 0)
+            bail("fchmod failed: " + std::string(std::strerror(errno)));
+
+        // Write the full content. write(2) can return short; loop
+        // until done or error.
+        const char* p = content.data();
+        size_t remaining = content.size();
+        while (remaining > 0) {
+            ssize_t n = ::write(fd, p, remaining);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                bail("write failed: " + std::string(std::strerror(errno)));
             }
-            std::string base;
-            std::error_code ec;
-            auto tmpPath = fs::temp_directory_path(ec);
-            if (ec)
-                throw RuntimeError("sys.tempDir(): " + ec.message(), 0);
-            base = tmpPath.string();
-            std::string tmpl = base + "/" + prefix + ".XXXXXX";
-            std::vector<char> buf(tmpl.begin(), tmpl.end());
-            buf.push_back('\0');
-            if (!mkdtemp(buf.data()))
-                throw RuntimeError("sys.tempDir(): " + std::string(std::strerror(errno)), 0);
-            return Value(std::string(buf.data()));
-        }));
+            p += n;
+            remaining -= static_cast<size_t>(n);
+        }
 
-    sysMap->entries[Value("remove")] = Value(makeNative("sys.remove", 1,
-        [](const std::vector<Value>& args) -> Value {
+        // fsync the data before the rename. Without this the rename
+        // happens in cache but the new contents may not be on disk
+        // when the rename's metadata commit lands — a crash window
+        // where readers see an empty file. fsync closes that window.
+        if (::fsync(fd) != 0)
+            bail("fsync failed: " + std::string(std::strerror(errno)));
+        if (::close(fd) != 0) {
+            ::unlink(tmpPath.c_str());
+            throw RuntimeError("fs.atomicWrite(): close failed: " +
+                               std::string(std::strerror(errno)), 0);
+        }
+
+        // The atomic step. On the same filesystem this is one
+        // metadata commit; readers see old-or-new, nothing in
+        // between.
+        if (::rename(tmpPath.c_str(), targetPath.c_str()) != 0) {
+            std::string err = std::strerror(errno);
+            ::unlink(tmpPath.c_str());
+            throw RuntimeError("fs.atomicWrite(): rename to " + targetPath +
+                               " failed: " + err, 0);
+        }
+        return Value();
+    };
+
+    // ── Phase 3: fs.open + FileHandle (streaming I/O) ──
+    //
+    // FileHandle wraps a POSIX fd plus a small read buffer so methods
+    // like readLine() don't pay a syscall per byte. Shared mutable
+    // state lives in std::shared_ptr<FileHandle>; each method is a
+    // native callable that captures the shared_ptr, so mutations
+    // (readBufPos advancing, closed flipping) are visible across
+    // calls on the same handle. The destructor closes any still-open
+    // fd as a GC safety net — `defer h.close()` is the polite form
+    // but a forgotten close won't leak.
+    struct FileHandle {
+        int fd = -1;
+        bool closed = false;
+        std::string path;
+        std::string mode;
+        // 4 KiB read-ahead buffer. Empty until first read/readLine.
+        std::vector<char> readBuf;
+        size_t readBufPos = 0;
+        size_t readBufEnd = 0;
+        bool atEOF = false;
+
+        ~FileHandle() {
+            if (!closed && fd >= 0) ::close(fd);
+        }
+    };
+
+    // Pull one chunk into readBuf. Returns true if at least one byte
+    // landed. Sets atEOF when read(2) returns 0.
+    auto refillReadBuf = [](FileHandle& h) -> bool {
+        if (h.atEOF) return false;
+        if (h.readBuf.empty()) h.readBuf.resize(4096);
+        ssize_t n;
+        do { n = ::read(h.fd, h.readBuf.data(), h.readBuf.size()); }
+        while (n < 0 && errno == EINTR);
+        if (n < 0)
+            throw RuntimeError("FileHandle.read: " + std::string(std::strerror(errno)), 0);
+        if (n == 0) { h.atEOF = true; return false; }
+        h.readBufPos = 0;
+        h.readBufEnd = static_cast<size_t>(n);
+        return true;
+    };
+
+    // Before a write on a handle that has read-buffered bytes, seek
+    // the kernel position back to our logical position so the write
+    // lands where the user expects. (POSIX requires a seek between
+    // read→write transitions on stdio streams; with raw fds we have
+    // to mimic that ourselves on r+/w+ handles.)
+    auto syncBeforeWrite = [](FileHandle& h) {
+        if (h.readBufPos < h.readBufEnd) {
+            int64_t buffered = static_cast<int64_t>(h.readBufEnd - h.readBufPos);
+            if (::lseek(h.fd, -buffered, SEEK_CUR) < 0)
+                throw RuntimeError("FileHandle.write: seek correction failed: " +
+                                   std::string(std::strerror(errno)), 0);
+        }
+        h.readBufPos = h.readBufEnd = 0;
+        h.atEOF = false;
+    };
+
+    FsImpl fsOpen = [refillReadBuf, syncBeforeWrite](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.open() requires a string path", 0);
+        if (!args[1].isString())
+            throw RuntimeError("fs.open() requires a mode string ('r','w','a','r+','w+','a+')", 0);
+        auto& p = args[0].asString();
+        auto& m = args[1].asString();
+
+        int flags;
+        if      (m == "r")  flags = O_RDONLY;
+        else if (m == "w")  flags = O_WRONLY | O_CREAT | O_TRUNC;
+        else if (m == "a")  flags = O_WRONLY | O_CREAT | O_APPEND;
+        else if (m == "r+") flags = O_RDWR;
+        else if (m == "w+") flags = O_RDWR   | O_CREAT | O_TRUNC;
+        else if (m == "a+") flags = O_RDWR   | O_CREAT | O_APPEND;
+        else
+            throw RuntimeError("fs.open(): invalid mode \"" + m +
+                               "\" (use 'r','w','a','r+','w+','a+')", 0);
+
+        int fd = ::open(p.c_str(), flags, 0644);
+        if (fd < 0)
+            throw RuntimeError("fs.open(): " + p + ": " + std::strerror(errno), 0);
+
+        auto h = std::make_shared<FileHandle>();
+        h->fd = fd;
+        h->path = p;
+        h->mode = m;
+
+        auto handleMap = gcNew<PraiaMap>();
+
+        handleMap->entries[Value("read")] = Value(makeNative("FileHandle.read", 1,
+            [h](const std::vector<Value>& args) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                if (!args[0].isNumber())
+                    throw RuntimeError("FileHandle.read(n) requires a numeric byte count", 0);
+                int64_t wantSigned = args[0].toInt64ForBitwise();
+                if (wantSigned < 0)
+                    throw RuntimeError("FileHandle.read(n): n must be non-negative", 0);
+                size_t want = static_cast<size_t>(wantSigned);
+                if (want == 0) return Value(std::string(""));
+                std::string out;
+                out.reserve(want);
+                // Drain any leftover from readBuf first so .read() and
+                // .readLine() can be mixed on the same handle without
+                // dropping bytes (or duplicating them).
+                if (h->readBufPos < h->readBufEnd) {
+                    size_t avail = h->readBufEnd - h->readBufPos;
+                    size_t take = std::min(want, avail);
+                    out.append(h->readBuf.data() + h->readBufPos, take);
+                    h->readBufPos += take;
+                    want -= take;
+                }
+                while (want > 0 && !h->atEOF) {
+                    char tmp[4096];
+                    size_t chunk = std::min(want, sizeof(tmp));
+                    ssize_t n;
+                    do { n = ::read(h->fd, tmp, chunk); }
+                    while (n < 0 && errno == EINTR);
+                    if (n < 0)
+                        throw RuntimeError("FileHandle.read: " +
+                                           std::string(std::strerror(errno)), 0);
+                    if (n == 0) { h->atEOF = true; break; }
+                    out.append(tmp, n);
+                    want -= static_cast<size_t>(n);
+                }
+                return Value(std::move(out));
+            }));
+
+        handleMap->entries[Value("readLine")] = Value(makeNative("FileHandle.readLine", 0,
+            [h, refillReadBuf](const std::vector<Value>&) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                std::string line;
+                while (true) {
+                    // Scan current buffer for '\n'.
+                    while (h->readBufPos < h->readBufEnd) {
+                        char c = h->readBuf[h->readBufPos++];
+                        if (c == '\n') return Value(std::move(line));
+                        line.push_back(c);
+                    }
+                    // Buffer exhausted; pull the next chunk.
+                    if (!refillReadBuf(*h)) {
+                        // EOF. Return trailing line if any, else nil to
+                        // signal end-of-stream to the caller's loop.
+                        if (line.empty()) return Value();
+                        return Value(std::move(line));
+                    }
+                }
+            }));
+
+        handleMap->entries[Value("write")] = Value(makeNative("FileHandle.write", 1,
+            [h, syncBeforeWrite](const std::vector<Value>& args) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                std::string data = args[0].toString();
+                syncBeforeWrite(*h);
+                const char* p = data.data();
+                size_t remaining = data.size();
+                while (remaining > 0) {
+                    ssize_t n;
+                    do { n = ::write(h->fd, p, remaining); }
+                    while (n < 0 && errno == EINTR);
+                    if (n < 0)
+                        throw RuntimeError("FileHandle.write: " +
+                                           std::string(std::strerror(errno)), 0);
+                    p += n;
+                    remaining -= static_cast<size_t>(n);
+                }
+                return Value(static_cast<int64_t>(data.size()));
+            }));
+
+        handleMap->entries[Value("seek")] = Value(makeNative("FileHandle.seek", -1,
+            [h](const std::vector<Value>& args) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                if (args.empty() || !args[0].isNumber())
+                    throw RuntimeError("FileHandle.seek(offset, whence='start') requires a numeric offset", 0);
+                int64_t offset = args[0].toInt64ForBitwise();
+                int whence = SEEK_SET;
+                if (args.size() >= 2 && !args[1].isNil()) {
+                    if (args[1].isString()) {
+                        auto& w = args[1].asString();
+                        if      (w == "start")   whence = SEEK_SET;
+                        else if (w == "current") whence = SEEK_CUR;
+                        else if (w == "end")     whence = SEEK_END;
+                        else throw RuntimeError(
+                            "FileHandle.seek: whence must be 'start'/'current'/'end' (got '" + w + "')", 0);
+                    } else if (args[1].isNumber()) {
+                        int w = static_cast<int>(args[1].toInt64ForBitwise());
+                        if (w != SEEK_SET && w != SEEK_CUR && w != SEEK_END)
+                            throw RuntimeError(
+                                "FileHandle.seek: numeric whence must be 0 (start), 1 (current), or 2 (end)", 0);
+                        whence = w;
+                    } else {
+                        throw RuntimeError(
+                            "FileHandle.seek: whence must be a string or number", 0);
+                    }
+                }
+                // Drop the read buffer — its contents no longer reflect
+                // the new file offset.
+                h->readBufPos = h->readBufEnd = 0;
+                h->atEOF = false;
+                off_t r = ::lseek(h->fd, offset, whence);
+                if (r < 0)
+                    throw RuntimeError("FileHandle.seek: " +
+                                       std::string(std::strerror(errno)), 0);
+                return Value(static_cast<int64_t>(r));
+            }));
+
+        handleMap->entries[Value("tell")] = Value(makeNative("FileHandle.tell", 0,
+            [h](const std::vector<Value>&) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                off_t r = ::lseek(h->fd, 0, SEEK_CUR);
+                if (r < 0)
+                    throw RuntimeError("FileHandle.tell: " +
+                                       std::string(std::strerror(errno)), 0);
+                // Kernel position is past readBufEnd; the user's
+                // logical position is readBufPos. Subtract the
+                // unconsumed buffered bytes.
+                int64_t buffered = static_cast<int64_t>(h->readBufEnd - h->readBufPos);
+                return Value(static_cast<int64_t>(r) - buffered);
+            }));
+
+        // flush() is fsync. We never buffer writes (each write() syscall
+        // hits the kernel immediately), so the name is really about
+        // pushing kernel page cache to durable storage. Cheap on success.
+        handleMap->entries[Value("flush")] = Value(makeNative("FileHandle.flush", 0,
+            [h](const std::vector<Value>&) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                if (::fsync(h->fd) != 0)
+                    throw RuntimeError("FileHandle.flush: " +
+                                       std::string(std::strerror(errno)), 0);
+                return Value();
+            }));
+
+        // close() is idempotent — calling twice (or via `defer` after a
+        // manual close) is a no-op. The handle is unusable after the
+        // first close; subsequent reads/writes throw.
+        handleMap->entries[Value("close")] = Value(makeNative("FileHandle.close", 0,
+            [h](const std::vector<Value>&) -> Value {
+                if (h->closed) return Value();
+                h->closed = true;
+                ::close(h->fd);
+                h->fd = -1;
+                return Value();
+            }));
+
+        // Read-only metadata. `closed` would need to be a callable to
+        // stay in sync; users can rely on read/write throwing instead.
+        handleMap->entries[Value("path")] = Value(p);
+        handleMap->entries[Value("mode")] = Value(m);
+
+        return Value(handleMap);
+    };
+
+    // fs.mktemp(prefix?) — race-free temp FILE creation. mkstemp(3)
+    // creates the file with mode 0600 in one syscall; there's no
+    // window between "pick a name" and "create it" where a different
+    // process could race us. Returns the path; the file already
+    // exists empty. (Phase 3 will add a handle-returning variant so
+    // callers don't have to open() it again.)
+    FsImpl fsMktemp = [](const std::vector<Value>& args) -> Value {
+        std::string prefix = "praia";
+        if (!args.empty()) {
             if (!args[0].isString())
-                throw RuntimeError("sys.remove() requires a string path", 0);
-            auto& p = args[0].asString();
-            if (!fs::exists(p))
-                throw RuntimeError("Cannot remove: " + p + " (not found)", 0);
-            fs::remove_all(p);
-            return Value();
-        }));
+                throw RuntimeError("fs.mktemp() prefix must be a string", 0);
+            prefix = args[0].asString();
+        }
+        std::error_code ec;
+        auto tmpPath = fs::temp_directory_path(ec);
+        if (ec)
+            throw RuntimeError("fs.mktemp(): " + ec.message(), 0);
+        std::string tmpl = tmpPath.string() + "/" + prefix + ".XXXXXX";
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        int fd = ::mkstemp(buf.data());
+        if (fd < 0)
+            throw RuntimeError("fs.mktemp(): " + std::string(std::strerror(errno)), 0);
+        ::close(fd);  // Phase 3: return a handle instead.
+        return Value(std::string(buf.data()));
+    };
 
-    sysMap->entries[Value("readDir")] = Value(makeNative("sys.readDir", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.readDir() requires a string path", 0);
-            auto& p = args[0].asString();
-            if (!fs::is_directory(p))
-                throw RuntimeError("sys.readDir(): not a directory: " + p, 0);
-            auto arr = gcNew<PraiaArray>();
-            for (auto& entry : fs::directory_iterator(p))
-                arr->elements.push_back(Value(entry.path().filename().string()));
-            return Value(arr);
-        }));
+    // Register canonical fs.* entries.
+    fsMap->entries[Value("read")]        = Value(makeNative("fs.read",        1,  fsRead));
+    fsMap->entries[Value("write")]       = Value(makeNative("fs.write",       2,  fsWrite));
+    fsMap->entries[Value("append")]      = Value(makeNative("fs.append",      2,  fsAppend));
+    fsMap->entries[Value("exists")]      = Value(makeNative("fs.exists",      1,  fsExists));
+    fsMap->entries[Value("mkdir")]       = Value(makeNative("fs.mkdir",       1,  fsMkdir));
+    fsMap->entries[Value("tempDir")]     = Value(makeNative("fs.tempDir",     -1, fsTempDir));
+    fsMap->entries[Value("remove")]      = Value(makeNative("fs.remove",      1,  fsRemove));
+    fsMap->entries[Value("readDir")]     = Value(makeNative("fs.readDir",     1,  fsReadDir));
+    fsMap->entries[Value("copy")]        = Value(makeNative("fs.copy",        2,  fsCopy));
+    fsMap->entries[Value("move")]        = Value(makeNative("fs.move",        2,  fsMove));
+    fsMap->entries[Value("stat")]        = Value(makeNative("fs.stat",        1,  fsStat));
+    fsMap->entries[Value("lstat")]       = Value(makeNative("fs.lstat",       1,  fsLstat));
+    fsMap->entries[Value("chmod")]       = Value(makeNative("fs.chmod",       2,  fsChmod));
+    fsMap->entries[Value("symlink")]     = Value(makeNative("fs.symlink",     2,  fsSymlink));
+    fsMap->entries[Value("readlink")]    = Value(makeNative("fs.readlink",    1,  fsReadlink));
+    fsMap->entries[Value("atomicWrite")] = Value(makeNative("fs.atomicWrite", 2,  fsAtomicWrite));
+    fsMap->entries[Value("mktemp")]      = Value(makeNative("fs.mktemp",      -1, fsMktemp));
+    fsMap->entries[Value("open")]        = Value(makeNative("fs.open",        2,  fsOpen));
 
-    sysMap->entries[Value("copy")] = Value(makeNative("sys.copy", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString() || !args[1].isString())
-                throw RuntimeError("sys.copy() requires two string paths", 0);
-            auto& src = args[0].asString();
-            auto& dst = args[1].asString();
-            if (!fs::exists(src))
-                throw RuntimeError("Cannot copy: " + src + " (not found)", 0);
-            fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
-            return Value();
-        }));
+    // Helper: register a deprecated sys.<name> forwarder that calls
+    // through to the canonical fs.<name> implementation, emitting a
+    // one-shot stderr warning on the first call per process. Each
+    // forwarder gets its own warned-flag (shared_ptr-wrapped so it
+    // can sit in a captured lambda without being moved).
+    auto registerDeprecatedSys = [&](const std::string& fnName, int arity, FsImpl impl) {
+        auto warned = std::make_shared<std::atomic<bool>>(false);
+        sysMap->entries[Value(fnName)] = Value(makeNative("sys." + fnName, arity,
+            [warned, fnName, impl](const std::vector<Value>& args) -> Value {
+                if (!warned->exchange(true))
+                    std::cerr << "[deprecated] sys." << fnName << "() is now fs."
+                              << fnName << "(); update callers\n";
+                return impl(args);
+            }));
+    };
 
-    sysMap->entries[Value("move")] = Value(makeNative("sys.move", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString() || !args[1].isString())
-                throw RuntimeError("sys.move() requires two string paths", 0);
-            auto& src = args[0].asString();
-            auto& dst = args[1].asString();
-            if (!fs::exists(src))
-                throw RuntimeError("Cannot move: " + src + " (not found)", 0);
-            fs::rename(src, dst);
-            return Value();
-        }));
+    registerDeprecatedSys("read",    1,  fsRead);
+    registerDeprecatedSys("write",   2,  fsWrite);
+    registerDeprecatedSys("append",  2,  fsAppend);
+    registerDeprecatedSys("exists",  1,  fsExists);
+    registerDeprecatedSys("mkdir",   1,  fsMkdir);
+    registerDeprecatedSys("tempDir", -1, fsTempDir);
+    registerDeprecatedSys("remove",  1,  fsRemove);
+    registerDeprecatedSys("readDir", 1,  fsReadDir);
+    registerDeprecatedSys("copy",    2,  fsCopy);
+    registerDeprecatedSys("move",    2,  fsMove);
 
     auto execImpl = makeNative("sys.exec", -1,
         [](const std::vector<Value>& args) -> Value {
@@ -1107,6 +1637,9 @@ Interpreter::Interpreter() {
     sysMap->entries[Value("args")] = Value(emptyArgs);
 
     globals->define("sys", Value(sysMap));
+    // fsMap is the same shared_ptr after additional entries (readLines)
+    // get tacked on below, so registering it here is fine.
+    globals->define("fs", Value(fsMap));
 
     // ── http namespace ──
 
@@ -2477,19 +3010,30 @@ Interpreter::Interpreter() {
             return Value();
         }));
 
-    sysMap->entries[Value("readLines")] = Value(makeNative("sys.readLines", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("sys.readLines() requires a string path", 0);
-            std::ifstream f(args[0].asString());
-            if (!f.is_open())
-                throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
-            auto result = gcNew<PraiaArray>();
-            std::string line;
-            while (std::getline(f, line))
-                result->elements.push_back(Value(std::move(line)));
-            return Value(result);
-        }));
+    // fs.readLines (canonical) + sys.readLines deprecated forwarder.
+    FsImpl fsReadLines = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.readLines() requires a string path", 0);
+        std::ifstream f(args[0].asString());
+        if (!f.is_open())
+            throw RuntimeError("Cannot read file: " + args[0].asString(), 0);
+        auto result = gcNew<PraiaArray>();
+        std::string line;
+        while (std::getline(f, line))
+            result->elements.push_back(Value(std::move(line)));
+        return Value(result);
+    };
+    fsMap->entries[Value("readLines")] = Value(makeNative("fs.readLines", 1, fsReadLines));
+    {
+        auto warned = std::make_shared<std::atomic<bool>>(false);
+        sysMap->entries[Value("readLines")] = Value(makeNative("sys.readLines", 1,
+            [warned, fsReadLines](const std::vector<Value>& args) -> Value {
+                if (!warned->exchange(true))
+                    std::cerr << "[deprecated] sys.readLines() is now fs.readLines(); "
+                                 "update callers\n";
+                return fsReadLines(args);
+            }));
+    }
 
     sysMap->entries[Value("cwd")] = Value(makeNative("sys.cwd", 0,
         [](const std::vector<Value>&) -> Value {

@@ -86,7 +86,7 @@ try { processAge("old") } catch (e) { print(e) }
 // ── safe file reading with try/catch ──
 func readFile(path) {
     try {
-        return sys.read(path)
+        return fs.read(path)
     } catch (err) {
         return nil
     }

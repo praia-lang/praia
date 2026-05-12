@@ -24,19 +24,19 @@ for (i in 0..3) { print(results.recv()) }
 
 
 print("--- 3. Use an external resource (a file) for key-lookup state ---")
-sys.mkdir("_share_demo")
+fs.mkdir("_share_demo")
 func bumpFile(key) {
     let path = "_share_demo/" + key + ".n"
     let n = 0
-    if (sys.exists(path)) { n = sys.read(path).strip().toNum() }
-    sys.write(path, (n + 1).toString())
+    if (fs.exists(path)) { n = fs.read(path).strip().toNum() }
+    fs.write(path, (n + 1).toString())
 }
 let fA = async bumpFile("a")
 let fB = async bumpFile("a")
 await fA
 await fB
-print("file says:", sys.read("_share_demo/a.n").strip())   // 2 (both tasks saw the file)
-sys.remove("_share_demo")
+print("file says:", fs.read("_share_demo/a.n").strip())   // 2 (both tasks saw the file)
+fs.remove("_share_demo")
 
 
 print("--- 4. Lock coordinates concurrent access to an external resource ---")

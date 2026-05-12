@@ -17,7 +17,7 @@
 //   app.use(multipart.middleware())
 //   app.post("/upload", lam{ req, params in
 //       let f = req.files.get("file")
-//       if (f) { sys.write("uploads/" + f.filename, f.content) }
+//       if (f) { fs.write("uploads/" + f.filename, f.content) }
 //   })
 //
 // parse(req) returns:
