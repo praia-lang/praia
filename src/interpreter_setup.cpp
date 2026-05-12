@@ -3737,7 +3737,7 @@ Interpreter::Interpreter() {
     // sys.checkSignals() — process any pending signals by calling registered handlers.
     // Call this in long-running loops to allow signal callbacks to run.
     sysMap->entries[Value("checkSignals")] = Value(makeNative("sys.checkSignals", 0,
-        [self](const std::vector<Value>&) -> Value {
+        [](const std::vector<Value>&) -> Value {
             uint32_t pending = g_pendingSignals.exchange(0);
             if (pending == 0) return Value(false);
 
@@ -3758,7 +3758,7 @@ Interpreter::Interpreter() {
             }
             for (auto& [sig, handler] : toCall) {
                 std::string name = signalNumToName(sig);
-                callSafe(*self, handler, {Value(name)});
+                callSafe(*g_currentInterp, handler, {Value(name)});
             }
             return Value(true);
         }));

@@ -8,9 +8,12 @@
 #include <vector>
 #include "../gc_heap.h"
 
-void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment> globals) {
+void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environment> globals) {
+    // self is no longer needed: native callbacks resolve the calling
+    // Interpreter at invocation time via g_currentInterp (set by
+    // NativeFunction::call). Parameter kept for API stability.
     globals->define("Lock", Value(makeNative("Lock", 0,
-        [self](const std::vector<Value>&) -> Value {
+        [](const std::vector<Value>&) -> Value {
             auto mtx = std::make_shared<std::recursive_mutex>();
             auto lock = gcNew<PraiaMap>();
 
@@ -32,12 +35,17 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
             // back any state fn mutated before throwing — Lock has no idea
             // what user state is being guarded. Document the "build new
             // state locally, commit on the last line" pattern for users.
+            //
+            // Use g_currentInterp (set by NativeFunction::call) rather than
+            // the registration-time captured `self`. An async task's user
+            // callback would otherwise run on the parent Interpreter and
+            // race with its env field — see the comment on g_currentInterp.
             lock->entries[Value("withLock")] = Value(makeNative("withLock", 1,
-                [mtx, self](const std::vector<Value>& args) -> Value {
+                [mtx](const std::vector<Value>& args) -> Value {
                     if (!args[0].isCallable())
                         throw RuntimeError("withLock() requires a function", 0);
                     std::lock_guard<std::recursive_mutex> guard(*mtx);
-                    return callSafe(*self, args[0].asCallable(), {});
+                    return callSafe(*g_currentInterp, args[0].asCallable(), {});
                 }));
 
             return Value(lock);
@@ -214,7 +222,7 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
     };
 
     globals->define("SharedMap", Value(makeNative("SharedMap", 0,
-        [self](const std::vector<Value>&) -> Value {
+        [](const std::vector<Value>&) -> Value {
             auto state = std::make_shared<SharedMapState>();
             auto m = gcNew<PraiaMap>();
 
@@ -262,15 +270,19 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
             // though the slot wasn't reassigned. Document that gotcha for
             // users; we don't snapshot here (deep-copy would change the
             // semantics of the existing in-place mutation pattern).
+            // Use g_currentInterp (set by NativeFunction::call) so that
+            // an async task running m.update invokes the user callback on
+            // the *task's* Interpreter, not the parent's — see comment on
+            // g_currentInterp.
             m->entries[Value("update")] = Value(makeNative("update", 2,
-                [state, self](const std::vector<Value>& args) -> Value {
+                [state](const std::vector<Value>& args) -> Value {
                     if (!args[1].isCallable())
                         throw RuntimeError("SharedMap.update() requires a function", 0);
                     std::lock_guard<std::recursive_mutex> g(state->mtx);
                     Value current;
                     auto it = state->entries.find(args[0]);
                     if (it != state->entries.end()) current = it->second;
-                    Value next = callSafe(*self, args[1].asCallable(), {current});
+                    Value next = callSafe(*g_currentInterp, args[1].asCallable(), {current});
                     state->entries[args[0]] = next;
                     return next;
                 }));

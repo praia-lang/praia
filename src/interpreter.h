@@ -12,6 +12,18 @@
 #include <vector>
 
 class GcHeap;
+class Interpreter;
+
+// Thread-local pointer to the Interpreter that is currently executing a
+// native function on this thread. Set by NativeFunction::call before the
+// native body runs; natives that need to invoke a user-supplied callable
+// (Lock.withLock, SharedMap.update, etc.) must call back through this
+// interpreter rather than a registration-time captured pointer — otherwise
+// a native called from an `async` task thread would mutate the *parent*
+// Interpreter's env field while the parent is running, causing
+// "Undefined variable" failures and worse. Mirrors VM::current() for the
+// bytecode engine.
+extern thread_local Interpreter* g_currentInterp;
 
 // Thrown by return statements to unwind back to the enclosing function call
 struct ReturnSignal {
@@ -95,7 +107,7 @@ struct NativeFunction : Callable {
     int numArgs;  // -1 = variadic
     std::function<Value(const std::vector<Value>&)> fn;
 
-    Value call(Interpreter&, const std::vector<Value>& args) override {
+    Value call(Interpreter& interp, const std::vector<Value>& args) override {
         // Defense-in-depth: any C++ stdlib exception that escapes the
         // native (e.g. std::invalid_argument from std::stoi on bad input,
         // std::bad_alloc, std::regex_error, fs::filesystem_error) becomes
@@ -103,12 +115,27 @@ struct NativeFunction : Callable {
         // this, those exceptions propagate to main() and terminate the
         // process. RuntimeError is rethrown unchanged so its line/column
         // info is preserved.
+        //
+        // Track the calling Interpreter in a thread-local so natives that
+        // need to invoke user callbacks (Lock.withLock, SharedMap.update)
+        // route them through the *caller's* interpreter rather than a
+        // registration-time captured pointer. Nested native calls chain
+        // via save/restore.
+        Interpreter* prev = g_currentInterp;
+        g_currentInterp = &interp;
         try {
-            return fn(args);
+            Value result = fn(args);
+            g_currentInterp = prev;
+            return result;
         } catch (const RuntimeError&) {
+            g_currentInterp = prev;
             throw;
         } catch (const std::exception& e) {
+            g_currentInterp = prev;
             throw RuntimeError(funcName + "(): " + e.what(), 0);
+        } catch (...) {
+            g_currentInterp = prev;
+            throw;
         }
     }
     int arity() const override { return numArgs; }
