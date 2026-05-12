@@ -2533,16 +2533,32 @@ path.resolve("src")               // "/full/path/to/src"
 
 | Function | Description |
 |----------|-------------|
-| `url.parse(str)` | Parse URL into components |
+| `url.parse(str)` | Parse a URL into RFC 3986 components |
+
+`url.parse` returns a map with seven fields: `scheme`, `userinfo`,
+`host`, `port`, `path`, `query`, `fragment`. The scheme is lowercased.
+`port` is `nil` when the URL omits a port (so it doesn't collide with
+an explicit `0`). IPv6 literals are accepted in the bracketed form
+`[..]` and `host` returns the address unbracketed.
 
 ```
-let u = url.parse("https://example.com:8080/api?key=val")
+let u = url.parse("https://user:pass@example.com:8080/api?key=val#section")
 print(u.scheme)    // "https"
+print(u.userinfo)  // "user:pass"
 print(u.host)      // "example.com"
 print(u.port)      // 8080
 print(u.path)      // "/api"
 print(u.query)     // "key=val"
+print(u.fragment)  // "section"
+
+let v = url.parse("http://[::1]:8080/")
+print(v.host)      // "::1"     (brackets stripped)
+print(v.port)      // 8080
 ```
+
+Malformed input throws — non-numeric ports, unterminated `[..]`
+literals, bare IPv6 without brackets (ambiguous), or CR/LF/NUL
+anywhere in the input.
 
 ---
 

@@ -1,5 +1,6 @@
 #include "../builtins.h"
 #include "../interpreter.h"
+#include "../url.h"
 #include <algorithm>
 #include <atomic>
 #include <csignal>
@@ -127,49 +128,52 @@ std::shared_ptr<PraiaMap> parseQueryString(const std::string& query) {
     return qmap;
 }
 
+// Local view of a parsed URL — preserves the fields the HTTP client
+// cares about (host for socket/TLS, hostHeader for the Host: line,
+// resolved port + tls flag from scheme defaults, path with the leading
+// '/' substituted when the input had none). Everything else
+// (userinfo / query / fragment) is currently ignored by this builtin.
 struct ParsedUrl {
-    std::string host;
+    std::string host;        // unbracketed (suitable for getaddrinfo/SNI/inet_pton)
+    std::string hostHeader;  // bracketed when IPv6 (suitable for Host:)
     int port = 80;
     std::string path = "/";
     bool tls = false;
 };
 
 ParsedUrl parseUrl(const std::string& url) {
+    praia::url::ParsedUrl u;
+    try {
+        u = praia::url::parse(url);
+    } catch (const praia::url::UrlParseError& e) {
+        throw RuntimeError(std::string("Invalid URL: ") + e.what(), 0);
+    }
+
     ParsedUrl r;
-    std::string rest = url;
-    auto scheme = rest.find("://");
-    if (scheme != std::string::npos) {
-        if (rest.substr(0, scheme) == "https") {
+    if (u.scheme == "https") {
 #ifdef HAVE_OPENSSL
-            r.tls = true;
-            r.port = 443;
+        r.tls = true;
+        r.port = 443;
 #else
-            throw RuntimeError("HTTPS not supported (build with OpenSSL for TLS)", 0);
+        throw RuntimeError("HTTPS not supported (build with OpenSSL for TLS)", 0);
 #endif
-        }
-        rest = rest.substr(scheme + 3);
-    }
-    auto slash = rest.find('/');
-    std::string hostPort = (slash != std::string::npos) ? rest.substr(0, slash) : rest;
-    auto colon = hostPort.find(':');
-    if (colon != std::string::npos) {
-        r.host = hostPort.substr(0, colon);
-        const std::string portStr = hostPort.substr(colon + 1);
-        if (portStr.empty())
-            throw RuntimeError("Invalid URL: empty port in \"" + url + "\"", 0);
-        size_t pos = 0;
-        int port;
-        try { port = std::stoi(portStr, &pos); }
-        catch (...) {
-            throw RuntimeError("Invalid URL: bad port \"" + portStr + "\" in \"" + url + "\"", 0);
-        }
-        if (pos != portStr.size() || port < 0 || port > 65535)
-            throw RuntimeError("Invalid URL: bad port \"" + portStr + "\" in \"" + url + "\"", 0);
-        r.port = port;
+    } else if (u.scheme.empty() || u.scheme == "http") {
+        // Default — treat unspecified scheme as http for back-compat.
     } else {
-        r.host = hostPort;
+        throw RuntimeError("Unsupported URL scheme \"" + u.scheme + "\" in \"" + url + "\"", 0);
     }
-    if (slash != std::string::npos) r.path = rest.substr(slash);
+
+    if (u.hasPort) r.port = u.port;
+
+    r.host = u.host;
+    r.hostHeader = praia::url::hostHeader(u);
+    // path-abempty is allowed to be empty in RFC 3986; HTTP/1.1 needs
+    // an origin-form with at least "/" on the request line.
+    r.path = u.path.empty() ? "/" : u.path;
+    // Re-attach query (raw, not decoded) so the request line carries
+    // it. Fragment is intentionally dropped — clients MUST NOT send it
+    // per RFC 3986 §3.5.
+    if (!u.query.empty()) r.path += "?" + u.query;
     return r;
 }
 
@@ -563,7 +567,7 @@ Value doHttpRequest(const std::string& method, const std::string& url,
     // CR/LF/NUL validation already happened above before connect — trust
     // these inputs here. Serialize straight to the wire.
     std::string req = method + " " + p.path + " HTTP/1.1\r\n";
-    req += "Host: " + p.host + "\r\n";
+    req += "Host: " + p.hostHeader + "\r\n";
     req += "Connection: close\r\n";
     for (auto& [k, v] : extraHeaders) req += k + ": " + v + "\r\n";
     if (!body.empty() && extraHeaders.find("Content-Type") == extraHeaders.end())

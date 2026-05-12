@@ -4,6 +4,7 @@
 #include "grain_resolve.h"
 #include "interpreter.h"
 #include "unicode.h"
+#include "url.h"
 #include "vm/vm.h"
 #include <algorithm>
 #include <chrono>
@@ -2001,44 +2002,35 @@ Interpreter::Interpreter() {
 
     auto urlMap = gcNew<PraiaMap>();
 
+    // url.parse delegates to the shared RFC 3986-shaped parser in
+    // src/url.cpp so http.* and this builtin can't drift from each
+    // other on IPv6 brackets, userinfo, fragments, or port handling.
+    // Returns a map with the seven canonical components:
+    //   scheme, userinfo, host, port (nil when absent), path, query,
+    //   fragment.
+    // `port` is intentionally nil rather than 0 when omitted — a real
+    // 0 is a valid (if pathological) port value and we don't want
+    // "absent" and "explicit 0" to collide.
     urlMap->entries[Value("parse")] = Value(makeNative("url.parse", 1,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isString()) throw RuntimeError("url.parse() requires a string", 0);
             auto& input = args[0].asString();
+            praia::url::ParsedUrl u;
+            try {
+                u = praia::url::parse(input);
+            } catch (const praia::url::UrlParseError& e) {
+                throw RuntimeError(std::string("url.parse: ") + e.what(), 0);
+            }
             auto result = gcNew<PraiaMap>();
-            std::string rest = input;
-
-            auto schemeEnd = rest.find("://");
-            if (schemeEnd != std::string::npos) {
-                result->entries[Value("scheme")] = Value(rest.substr(0, schemeEnd));
-                rest = rest.substr(schemeEnd + 3);
-            } else {
-                result->entries[Value("scheme")] = Value(std::string(""));
-            }
-
-            auto slashPos = rest.find('/');
-            std::string hostPort = (slashPos != std::string::npos) ? rest.substr(0, slashPos) : rest;
-            std::string pathAndQuery = (slashPos != std::string::npos) ? rest.substr(slashPos) : "/";
-
-            auto colonPos = hostPort.find(':');
-            if (colonPos != std::string::npos) {
-                result->entries[Value("host")] = Value(hostPort.substr(0, colonPos));
-                try { result->entries[Value("port")] = Value(static_cast<double>(std::stoi(hostPort.substr(colonPos + 1)))); }
-                catch (...) { result->entries[Value("port")] = Value(0.0); }
-            } else {
-                result->entries[Value("host")] = Value(hostPort);
-                result->entries[Value("port")] = Value(0.0);
-            }
-
-            auto queryPos = pathAndQuery.find('?');
-            if (queryPos != std::string::npos) {
-                result->entries[Value("path")] = Value(pathAndQuery.substr(0, queryPos));
-                result->entries[Value("query")] = Value(pathAndQuery.substr(queryPos + 1));
-            } else {
-                result->entries[Value("path")] = Value(pathAndQuery);
-                result->entries[Value("query")] = Value(std::string(""));
-            }
-
+            result->entries[Value("scheme")]   = Value(u.scheme);
+            result->entries[Value("userinfo")] = Value(u.userinfo);
+            result->entries[Value("host")]     = Value(u.host);
+            result->entries[Value("port")] = u.hasPort
+                ? Value(static_cast<int64_t>(u.port))
+                : Value();  // nil
+            result->entries[Value("path")]     = Value(u.path);
+            result->entries[Value("query")]    = Value(u.query);
+            result->entries[Value("fragment")] = Value(u.fragment);
             return Value(result);
         }));
 
