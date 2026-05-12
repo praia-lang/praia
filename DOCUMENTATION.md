@@ -3712,6 +3712,45 @@ The `.type` field returned by `stat`/`lstat` is one of `"file"`, `"dir"`, `"syml
 
 Use `fs.atomicWrite` for config files, lock files, and anything else where a partial write would corrupt downstream readers. The temp file goes in the target's directory (same filesystem) so the rename is genuinely atomic.
 
+### File handles (streaming I/O)
+
+`fs.open(path, mode)` returns a file handle for streaming reads and writes — preferred over `fs.read`/`fs.write` when the file is large enough that loading it whole would be wasteful, or when you need random access via `seek`.
+
+| Mode | Behavior |
+|------|----------|
+| `"r"`  | Read only; file must exist |
+| `"w"`  | Write only; truncates or creates (mode 0644) |
+| `"a"`  | Write only, append; creates if missing |
+| `"r+"` | Read + write; file must exist |
+| `"w+"` | Read + write; truncates or creates |
+| `"a+"` | Read + write; writes always append |
+
+| Method | Description |
+|--------|-------------|
+| `h.read(n)` | Read up to `n` bytes; returns `""` at EOF |
+| `h.readLine()` | Read one line (without trailing `\n`); returns `nil` at EOF |
+| `h.write(data)` | Write string/bytes; returns the number of bytes written |
+| `h.seek(offset, whence?)` | Reposition. `whence` is `"start"` (default), `"current"`, or `"end"` |
+| `h.tell()` | Current logical position (accounts for read-buffered bytes) |
+| `h.flush()` | `fsync(2)` — push the kernel page cache to disk |
+| `h.close()` | Close the fd. Idempotent. Subsequent reads/writes throw |
+| `h.path` | The path the handle was opened on |
+| `h.mode` | The mode string the handle was opened with |
+
+Streaming pattern — line-by-line processing of an arbitrarily large file:
+
+```
+let h = fs.open("big.log", "r")
+defer h.close()
+let line = h.readLine()
+while (line != nil) {
+    process(line)
+    line = h.readLine()
+}
+```
+
+Read and `readLine` can be mixed on the same handle. Writes on `r+`/`w+` handles correctly land at the user's logical position even after intervening reads — the handle resyncs the kernel position before writing.
+
 The old `sys.read` / `sys.write` / etc. names still work but emit a one-shot deprecation warning on first use per process. They'll be removed at 1.0 — rename `sys.<op>` to `fs.<op>` whenever you touch the file.
 
 ## OS extras (sys)

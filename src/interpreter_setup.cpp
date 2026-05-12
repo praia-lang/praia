@@ -947,6 +947,256 @@ Interpreter::Interpreter() {
         return Value();
     };
 
+    // ── Phase 3: fs.open + FileHandle (streaming I/O) ──
+    //
+    // FileHandle wraps a POSIX fd plus a small read buffer so methods
+    // like readLine() don't pay a syscall per byte. Shared mutable
+    // state lives in std::shared_ptr<FileHandle>; each method is a
+    // native callable that captures the shared_ptr, so mutations
+    // (readBufPos advancing, closed flipping) are visible across
+    // calls on the same handle. The destructor closes any still-open
+    // fd as a GC safety net — `defer h.close()` is the polite form
+    // but a forgotten close won't leak.
+    struct FileHandle {
+        int fd = -1;
+        bool closed = false;
+        std::string path;
+        std::string mode;
+        // 4 KiB read-ahead buffer. Empty until first read/readLine.
+        std::vector<char> readBuf;
+        size_t readBufPos = 0;
+        size_t readBufEnd = 0;
+        bool atEOF = false;
+
+        ~FileHandle() {
+            if (!closed && fd >= 0) ::close(fd);
+        }
+    };
+
+    // Pull one chunk into readBuf. Returns true if at least one byte
+    // landed. Sets atEOF when read(2) returns 0.
+    auto refillReadBuf = [](FileHandle& h) -> bool {
+        if (h.atEOF) return false;
+        if (h.readBuf.empty()) h.readBuf.resize(4096);
+        ssize_t n;
+        do { n = ::read(h.fd, h.readBuf.data(), h.readBuf.size()); }
+        while (n < 0 && errno == EINTR);
+        if (n < 0)
+            throw RuntimeError("FileHandle.read: " + std::string(std::strerror(errno)), 0);
+        if (n == 0) { h.atEOF = true; return false; }
+        h.readBufPos = 0;
+        h.readBufEnd = static_cast<size_t>(n);
+        return true;
+    };
+
+    // Before a write on a handle that has read-buffered bytes, seek
+    // the kernel position back to our logical position so the write
+    // lands where the user expects. (POSIX requires a seek between
+    // read→write transitions on stdio streams; with raw fds we have
+    // to mimic that ourselves on r+/w+ handles.)
+    auto syncBeforeWrite = [](FileHandle& h) {
+        if (h.readBufPos < h.readBufEnd) {
+            int64_t buffered = static_cast<int64_t>(h.readBufEnd - h.readBufPos);
+            if (::lseek(h.fd, -buffered, SEEK_CUR) < 0)
+                throw RuntimeError("FileHandle.write: seek correction failed: " +
+                                   std::string(std::strerror(errno)), 0);
+        }
+        h.readBufPos = h.readBufEnd = 0;
+        h.atEOF = false;
+    };
+
+    FsImpl fsOpen = [refillReadBuf, syncBeforeWrite](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.open() requires a string path", 0);
+        if (!args[1].isString())
+            throw RuntimeError("fs.open() requires a mode string ('r','w','a','r+','w+','a+')", 0);
+        auto& p = args[0].asString();
+        auto& m = args[1].asString();
+
+        int flags;
+        if      (m == "r")  flags = O_RDONLY;
+        else if (m == "w")  flags = O_WRONLY | O_CREAT | O_TRUNC;
+        else if (m == "a")  flags = O_WRONLY | O_CREAT | O_APPEND;
+        else if (m == "r+") flags = O_RDWR;
+        else if (m == "w+") flags = O_RDWR   | O_CREAT | O_TRUNC;
+        else if (m == "a+") flags = O_RDWR   | O_CREAT | O_APPEND;
+        else
+            throw RuntimeError("fs.open(): invalid mode \"" + m +
+                               "\" (use 'r','w','a','r+','w+','a+')", 0);
+
+        int fd = ::open(p.c_str(), flags, 0644);
+        if (fd < 0)
+            throw RuntimeError("fs.open(): " + p + ": " + std::strerror(errno), 0);
+
+        auto h = std::make_shared<FileHandle>();
+        h->fd = fd;
+        h->path = p;
+        h->mode = m;
+
+        auto handleMap = gcNew<PraiaMap>();
+
+        handleMap->entries[Value("read")] = Value(makeNative("FileHandle.read", 1,
+            [h](const std::vector<Value>& args) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                if (!args[0].isNumber())
+                    throw RuntimeError("FileHandle.read(n) requires a numeric byte count", 0);
+                int64_t wantSigned = args[0].toInt64ForBitwise();
+                if (wantSigned < 0)
+                    throw RuntimeError("FileHandle.read(n): n must be non-negative", 0);
+                size_t want = static_cast<size_t>(wantSigned);
+                if (want == 0) return Value(std::string(""));
+                std::string out;
+                out.reserve(want);
+                // Drain any leftover from readBuf first so .read() and
+                // .readLine() can be mixed on the same handle without
+                // dropping bytes (or duplicating them).
+                if (h->readBufPos < h->readBufEnd) {
+                    size_t avail = h->readBufEnd - h->readBufPos;
+                    size_t take = std::min(want, avail);
+                    out.append(h->readBuf.data() + h->readBufPos, take);
+                    h->readBufPos += take;
+                    want -= take;
+                }
+                while (want > 0 && !h->atEOF) {
+                    char tmp[4096];
+                    size_t chunk = std::min(want, sizeof(tmp));
+                    ssize_t n;
+                    do { n = ::read(h->fd, tmp, chunk); }
+                    while (n < 0 && errno == EINTR);
+                    if (n < 0)
+                        throw RuntimeError("FileHandle.read: " +
+                                           std::string(std::strerror(errno)), 0);
+                    if (n == 0) { h->atEOF = true; break; }
+                    out.append(tmp, n);
+                    want -= static_cast<size_t>(n);
+                }
+                return Value(std::move(out));
+            }));
+
+        handleMap->entries[Value("readLine")] = Value(makeNative("FileHandle.readLine", 0,
+            [h, refillReadBuf](const std::vector<Value>&) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                std::string line;
+                while (true) {
+                    // Scan current buffer for '\n'.
+                    while (h->readBufPos < h->readBufEnd) {
+                        char c = h->readBuf[h->readBufPos++];
+                        if (c == '\n') return Value(std::move(line));
+                        line.push_back(c);
+                    }
+                    // Buffer exhausted; pull the next chunk.
+                    if (!refillReadBuf(*h)) {
+                        // EOF. Return trailing line if any, else nil to
+                        // signal end-of-stream to the caller's loop.
+                        if (line.empty()) return Value();
+                        return Value(std::move(line));
+                    }
+                }
+            }));
+
+        handleMap->entries[Value("write")] = Value(makeNative("FileHandle.write", 1,
+            [h, syncBeforeWrite](const std::vector<Value>& args) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                std::string data = args[0].toString();
+                syncBeforeWrite(*h);
+                const char* p = data.data();
+                size_t remaining = data.size();
+                while (remaining > 0) {
+                    ssize_t n;
+                    do { n = ::write(h->fd, p, remaining); }
+                    while (n < 0 && errno == EINTR);
+                    if (n < 0)
+                        throw RuntimeError("FileHandle.write: " +
+                                           std::string(std::strerror(errno)), 0);
+                    p += n;
+                    remaining -= static_cast<size_t>(n);
+                }
+                return Value(static_cast<int64_t>(data.size()));
+            }));
+
+        handleMap->entries[Value("seek")] = Value(makeNative("FileHandle.seek", -1,
+            [h](const std::vector<Value>& args) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                if (args.empty() || !args[0].isNumber())
+                    throw RuntimeError("FileHandle.seek(offset, whence='start') requires a numeric offset", 0);
+                int64_t offset = args[0].toInt64ForBitwise();
+                int whence = SEEK_SET;
+                if (args.size() >= 2 && !args[1].isNil()) {
+                    if (args[1].isString()) {
+                        auto& w = args[1].asString();
+                        if      (w == "start")   whence = SEEK_SET;
+                        else if (w == "current") whence = SEEK_CUR;
+                        else if (w == "end")     whence = SEEK_END;
+                        else throw RuntimeError(
+                            "FileHandle.seek: whence must be 'start'/'current'/'end' (got '" + w + "')", 0);
+                    } else if (args[1].isNumber()) {
+                        int w = static_cast<int>(args[1].toInt64ForBitwise());
+                        if (w != SEEK_SET && w != SEEK_CUR && w != SEEK_END)
+                            throw RuntimeError(
+                                "FileHandle.seek: numeric whence must be 0 (start), 1 (current), or 2 (end)", 0);
+                        whence = w;
+                    } else {
+                        throw RuntimeError(
+                            "FileHandle.seek: whence must be a string or number", 0);
+                    }
+                }
+                // Drop the read buffer — its contents no longer reflect
+                // the new file offset.
+                h->readBufPos = h->readBufEnd = 0;
+                h->atEOF = false;
+                off_t r = ::lseek(h->fd, offset, whence);
+                if (r < 0)
+                    throw RuntimeError("FileHandle.seek: " +
+                                       std::string(std::strerror(errno)), 0);
+                return Value(static_cast<int64_t>(r));
+            }));
+
+        handleMap->entries[Value("tell")] = Value(makeNative("FileHandle.tell", 0,
+            [h](const std::vector<Value>&) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                off_t r = ::lseek(h->fd, 0, SEEK_CUR);
+                if (r < 0)
+                    throw RuntimeError("FileHandle.tell: " +
+                                       std::string(std::strerror(errno)), 0);
+                // Kernel position is past readBufEnd; the user's
+                // logical position is readBufPos. Subtract the
+                // unconsumed buffered bytes.
+                int64_t buffered = static_cast<int64_t>(h->readBufEnd - h->readBufPos);
+                return Value(static_cast<int64_t>(r) - buffered);
+            }));
+
+        // flush() is fsync. We never buffer writes (each write() syscall
+        // hits the kernel immediately), so the name is really about
+        // pushing kernel page cache to durable storage. Cheap on success.
+        handleMap->entries[Value("flush")] = Value(makeNative("FileHandle.flush", 0,
+            [h](const std::vector<Value>&) -> Value {
+                if (h->closed) throw RuntimeError("FileHandle is closed", 0);
+                if (::fsync(h->fd) != 0)
+                    throw RuntimeError("FileHandle.flush: " +
+                                       std::string(std::strerror(errno)), 0);
+                return Value();
+            }));
+
+        // close() is idempotent — calling twice (or via `defer` after a
+        // manual close) is a no-op. The handle is unusable after the
+        // first close; subsequent reads/writes throw.
+        handleMap->entries[Value("close")] = Value(makeNative("FileHandle.close", 0,
+            [h](const std::vector<Value>&) -> Value {
+                if (h->closed) return Value();
+                h->closed = true;
+                ::close(h->fd);
+                h->fd = -1;
+                return Value();
+            }));
+
+        // Read-only metadata. `closed` would need to be a callable to
+        // stay in sync; users can rely on read/write throwing instead.
+        handleMap->entries[Value("path")] = Value(p);
+        handleMap->entries[Value("mode")] = Value(m);
+
+        return Value(handleMap);
+    };
+
     // fs.mktemp(prefix?) — race-free temp FILE creation. mkstemp(3)
     // creates the file with mode 0600 in one syscall; there's no
     // window between "pick a name" and "create it" where a different
@@ -992,6 +1242,7 @@ Interpreter::Interpreter() {
     fsMap->entries[Value("readlink")]    = Value(makeNative("fs.readlink",    1,  fsReadlink));
     fsMap->entries[Value("atomicWrite")] = Value(makeNative("fs.atomicWrite", 2,  fsAtomicWrite));
     fsMap->entries[Value("mktemp")]      = Value(makeNative("fs.mktemp",      -1, fsMktemp));
+    fsMap->entries[Value("open")]        = Value(makeNative("fs.open",        2,  fsOpen));
 
     // Helper: register a deprecated sys.<name> forwarder that calls
     // through to the canonical fs.<name> implementation, emitting a
