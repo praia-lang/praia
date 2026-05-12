@@ -2682,6 +2682,14 @@ path.resolve("src")               // "/full/path/to/src"
 | Function | Description |
 |----------|-------------|
 | `url.parse(str)` | Parse a URL into RFC 3986 components |
+| `url.build(parts)` | Compose a URL string from a component map (inverse of `parse`) |
+| `url.buildQuery(map)` | Serialize a map to `k=v&k=v` form, percent-encoded |
+| `url.parseQuery(str)` | Parse a query string; repeated keys auto-collapse to an array |
+| `url.parseQueryAll(str)` | Same input handling; always returns arrays for predictable shape |
+| `url.encode(str)` | RFC 3986 percent-encode the unreserved character class |
+| `url.decode(str)` | Inverse of `encode`. Also decodes `+` to space (form-urlencoded compat) |
+
+### url.parse
 
 `url.parse` returns a map with seven fields: `scheme`, `userinfo`,
 `host`, `port`, `path`, `query`, `fragment`. The scheme is lowercased.
@@ -2707,6 +2715,69 @@ print(v.port)      // 8080
 Malformed input throws — non-numeric ports, unterminated `[..]`
 literals, bare IPv6 without brackets (ambiguous), or CR/LF/NUL
 anywhere in the input.
+
+### url.build
+
+Composes a URL string from any combination of `scheme`, `userinfo`, `host`, `port`, `path`, `query`, `fragment`. Every field is optional — pass only what you have, get back the assembled URL.
+
+```
+url.build({scheme: "https", host: "api.example.com", path: "/v1/items"})
+// "https://api.example.com/v1/items"
+
+url.build({
+    scheme: "https",
+    host:   "api.example.com",
+    port:   8443,
+    path:   "/v1/items",
+    query:  {limit: 50, tag: "blue"},
+    fragment: "section-1"
+})
+// "https://api.example.com:8443/v1/items?limit=50&tag=blue#section-1"
+
+// IPv6 hosts get auto-bracketed
+url.build({scheme: "http", host: "::1", port: 8080, path: "/"})
+// "http://[::1]:8080/"
+
+// Default ports for http/https are dropped
+url.build({scheme: "https", host: "x", port: 443, path: "/"})
+// "https://x/"
+
+// Relative URLs (no scheme/host)
+url.build({path: "/items", query: {limit: 10}})
+// "/items?limit=10"
+
+// Opaque URIs (scheme without authority)
+url.build({scheme: "mailto", path: "ada@example.com"})
+// "mailto:ada@example.com"
+```
+
+`query` can be either a string (passed through verbatim) or a map (run through `buildQuery`). `fragment` is percent-encoded; `userinfo` is emitted verbatim, so caller is responsible for pre-encoding if needed.
+
+### url.buildQuery / parseQuery / parseQueryAll
+
+```
+url.buildQuery({a: 1, b: "hello world", c: true})
+// "a=1&b=hello%20world&c=true"  (map order isn't guaranteed)
+
+url.buildQuery({tags: ["red", "blue"]})
+// "tags=red&tags=blue"          (array values → repeated keys)
+
+url.buildQuery({a: "kept", b: nil})
+// "a=kept"                      (nil values skipped)
+
+url.parseQuery("a=1&b=hello%20world")
+// {a: "1", b: "hello world"}
+
+url.parseQuery("tags=red&tags=blue")
+// {tags: ["red", "blue"]}        (repeated keys → array)
+
+url.parseQueryAll("a=1&b=2&a=3")
+// {a: ["1", "3"], b: ["2"]}      (always arrays)
+```
+
+`parseQuery` is convenience-shaped (single-occurrence keys are strings, repeated keys are arrays). When downstream code needs a predictable shape regardless of how many times each key appears, use `parseQueryAll`. Both decode `+` as space (form-urlencoded compat).
+
+`buildQuery` rejects nested maps or arrays inside values — there's no canonical wire form for those. Use JSON-encoded values if you need structured data in a query parameter.
 
 ---
 

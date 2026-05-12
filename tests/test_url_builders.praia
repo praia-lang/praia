@@ -1,0 +1,235 @@
+use "testing"
+
+// url.build / url.buildQuery / url.parseQuery / url.parseQueryAll /
+// url.encode / url.decode. The builders are the inverse side of
+// url.parse — composition rather than decomposition — and a query
+// (de)serialization layer that matches form-urlencoded conventions
+// (RFC 3986 percent encoding plus '+' = space on decode).
+
+// ── build ─────────────────────────────────────────────────────
+
+testing.test("build: minimal scheme + host + path", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "https", host: "api.example.com", path: "/v1"}),
+        "https://api.example.com/v1", nil)
+})
+
+testing.test("build: adds leading '/' to path when authority is present", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "https", host: "x", path: "p"}),
+        "https://x/p", "missing leading slash on path is fixed")
+})
+
+testing.test("build: omits the default port for http/https", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "https", host: "x", port: 443, path: "/"}),
+        "https://x/", "443 omitted for https")
+    testing.assertEqual(
+        url.build({scheme: "http", host: "x", port: 80, path: "/"}),
+        "http://x/", "80 omitted for http")
+    testing.assertEqual(
+        url.build({scheme: "https", host: "x", port: 8080, path: "/"}),
+        "https://x:8080/", "non-default port kept")
+})
+
+testing.test("build: wraps IPv6 hosts in brackets", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "http", host: "::1", port: 8080, path: "/"}),
+        "http://[::1]:8080/", nil)
+    // Already-bracketed host isn't double-wrapped.
+    testing.assertEqual(
+        url.build({scheme: "http", host: "[::1]", port: 8080, path: "/"}),
+        "http://[::1]:8080/", nil)
+})
+
+testing.test("build: userinfo appears before host", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "https", userinfo: "user:pass", host: "x", path: "/"}),
+        "https://user:pass@x/", nil)
+})
+
+testing.test("build: query as a string is emitted verbatim", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "https", host: "x", path: "/", query: "a=1&b=2"}),
+        "https://x/?a=1&b=2", nil)
+})
+
+testing.test("build: query as a map gets serialized + percent-encoded", lam{ in
+    // Map iteration order isn't specified, so we don't pin a specific
+    // string. Instead roundtrip back through parseQuery and compare.
+    let q = {a: 1, b: "hello world"}
+    let s = url.build({scheme: "https", host: "x", path: "/", query: q})
+    testing.assert(s.startsWith("https://x/?"), nil)
+    let parsed = url.parseQuery(s.split("?")[1])
+    testing.assertEqual(parsed.a, "1", nil)
+    testing.assertEqual(parsed.b, "hello world", "space round-trips")
+})
+
+testing.test("build: fragment is percent-encoded", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "https", host: "x", path: "/", fragment: "section 1"}),
+        "https://x/#section%201", nil)
+})
+
+testing.test("build: opaque URI (scheme without host)", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "mailto", path: "ada@example.com"}),
+        "mailto:ada@example.com", nil)
+    testing.assertEqual(
+        url.build({scheme: "tel", path: "+1-800-555-0100"}),
+        "tel:+1-800-555-0100", nil)
+})
+
+testing.test("build: relative URL (just path)", lam{ in
+    testing.assertEqual(
+        url.build({path: "/items", query: {limit: 10}}),
+        "/items?limit=10", "no scheme/host means no authority emitted")
+})
+
+testing.test("build: lowercases the scheme", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "HTTPS", host: "x", path: "/"}),
+        "https://x/", nil)
+})
+
+testing.test("build: requires a map", lam{ in
+    testing.assertThrows(lam{ in url.build("not a map") }, "component map")
+})
+
+// ── buildQuery ────────────────────────────────────────────────
+
+testing.test("buildQuery: simple map", lam{ in
+    // Order isn't guaranteed; roundtrip via parseQuery for the check.
+    let s = url.buildQuery({a: 1, b: "x"})
+    let r = url.parseQuery(s)
+    testing.assertEqual(r.a, "1", nil)
+    testing.assertEqual(r.b, "x", nil)
+})
+
+testing.test("buildQuery: percent-encodes special characters", lam{ in
+    let s = url.buildQuery({q: "hello world & foo"})
+    testing.assertEqual(s, "q=hello%20world%20%26%20foo", nil)
+})
+
+testing.test("buildQuery: array value → repeated key", lam{ in
+    let s = url.buildQuery({tags: ["red", "blue", "green"]})
+    // Should contain three "tags=" entries; order within array is preserved.
+    let parsed = url.parseQueryAll(s)
+    testing.assertEqual(parsed.tags, ["red", "blue", "green"], nil)
+})
+
+testing.test("buildQuery: nil values are skipped", lam{ in
+    let s = url.buildQuery({a: "kept", b: nil, c: "alsoKept"})
+    let parsed = url.parseQuery(s)
+    testing.assert(parsed.a == "kept" && parsed.c == "alsoKept", nil)
+    // 'b' should not appear at all.
+    testing.assert(!keys(parsed).contains("b"), "nil-valued key was skipped entirely")
+})
+
+testing.test("buildQuery: bool / number values stringify", lam{ in
+    let s = url.buildQuery({flag: true, count: 42})
+    let r = url.parseQuery(s)
+    testing.assertEqual(r.flag, "true", nil)
+    testing.assertEqual(r.count, "42", nil)
+})
+
+testing.test("buildQuery: rejects nested map values", lam{ in
+    testing.assertThrows(
+        lam{ in url.buildQuery({a: {b: 1}}) },
+        "nested map")
+})
+
+testing.test("buildQuery: requires a map", lam{ in
+    testing.assertThrows(lam{ in url.buildQuery("a=1") }, "requires a map")
+})
+
+// ── parseQuery / parseQueryAll ────────────────────────────────
+
+testing.test("parseQuery: basic pairs", lam{ in
+    let r = url.parseQuery("a=1&b=2")
+    testing.assertEqual(r.a, "1", nil)
+    testing.assertEqual(r.b, "2", nil)
+})
+
+testing.test("parseQuery: percent-decoding on both keys and values", lam{ in
+    let r = url.parseQuery("name=Ada%20Lovelace&q=%26special")
+    testing.assertEqual(r.name, "Ada Lovelace", nil)
+    testing.assertEqual(r.q, "&special", nil)
+})
+
+testing.test("parseQuery: '+' decodes to space (form-urlencoded compat)", lam{ in
+    let r = url.parseQuery("q=hello+world")
+    testing.assertEqual(r.q, "hello world", nil)
+})
+
+testing.test("parseQuery: repeated key auto-arrays", lam{ in
+    let r = url.parseQuery("tags=red&tags=blue&tags=green")
+    testing.assertEqual(r.tags, ["red", "blue", "green"], nil)
+})
+
+testing.test("parseQuery: empty input → empty map", lam{ in
+    let r = url.parseQuery("")
+    testing.assertEqual(len(keys(r)), 0, nil)
+})
+
+testing.test("parseQuery: key without '=' is treated as empty value", lam{ in
+    let r = url.parseQuery("standalone&a=1")
+    testing.assertEqual(r.standalone, "", nil)
+    testing.assertEqual(r.a, "1", nil)
+})
+
+testing.test("parseQueryAll: always returns arrays", lam{ in
+    let r = url.parseQueryAll("a=1&b=2&a=3")
+    testing.assertEqual(r.a, ["1", "3"], nil)
+    testing.assertEqual(r.b, ["2"], "single occurrence still an array")
+})
+
+// ── encode / decode ──────────────────────────────────────────
+
+testing.test("encode: RFC 3986 unreserved chars pass through", lam{ in
+    testing.assertEqual(url.encode("ABC-_.~0123abc"), "ABC-_.~0123abc", nil)
+})
+
+testing.test("encode: everything else is %HH", lam{ in
+    testing.assertEqual(url.encode(" /?&="), "%20%2F%3F%26%3D", nil)
+})
+
+testing.test("decode: inverse of encode for ASCII", lam{ in
+    let s = "a b/c?d&e=f"
+    testing.assertEqual(url.decode(url.encode(s)), s, nil)
+})
+
+testing.test("decode: tolerates uppercase + lowercase hex", lam{ in
+    testing.assertEqual(url.decode("%2A%2a"), "**", nil)
+})
+
+testing.test("decode: stray '%' without 2 hex digits passes through", lam{ in
+    testing.assertEqual(url.decode("100%cost"), "100%cost", "no valid escape → keep %")
+    testing.assertEqual(url.decode("end%"), "end%", nil)
+})
+
+// ── Integration: build + parse + roundtrip ───────────────────
+
+testing.test("integration: build → parse roundtrip", lam{ in
+    let s = url.build({
+        scheme: "https",
+        userinfo: "u:p",
+        host: "api.example.com",
+        port: 8443,
+        path: "/v1/items",
+        query: {limit: 50, tag: "blue"},
+        fragment: "top"
+    })
+    let p = url.parse(s)
+    testing.assertEqual(p.scheme, "https", nil)
+    testing.assertEqual(p.userinfo, "u:p", nil)
+    testing.assertEqual(p.host, "api.example.com", nil)
+    testing.assertEqual(p.port, 8443, nil)
+    testing.assertEqual(p.path, "/v1/items", nil)
+    testing.assertEqual(p.fragment, "top", nil)
+    let q = url.parseQuery(p.query)
+    testing.assertEqual(q.limit, "50", nil)
+    testing.assertEqual(q.tag, "blue", nil)
+})
+
+testing.done()
