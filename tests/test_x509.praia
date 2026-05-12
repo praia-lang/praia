@@ -1,0 +1,156 @@
+use "testing"
+
+// crypto.parseCertificate + parseCertificateChain. Tests use a
+// checked-in self-signed test cert at tests/fixtures/test-cert.pem
+// (plus the same content as DER bytes for the binary-input path).
+//
+// The fixture has known values:
+//   subject = /CN=test.praia.dev/O=Praia Test Corp/C=US/ST=CA/L=SF
+//   issuer  = (same; self-signed)
+//   notBefore = 2026-05-12T12:27:46Z
+//   notAfter  = 2027-05-12T12:27:46Z
+//   sigAlg    = sha256WithRSAEncryption
+//   isCA      = true (basicConstraints CA:TRUE)
+//   SANs      = DNS:test.praia.dev, DNS:api.test.praia.dev,
+//               IP:127.0.0.1, email:admin@test.praia.dev
+//   key       = RSA 2048
+
+let pem = fs.read("tests/fixtures/test-cert.pem")
+let der = fs.read("tests/fixtures/test-cert.der")
+
+// ── Basic structure ───────────────────────────────────────────
+
+testing.test("parse PEM returns a structured map", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assertEqual(c.version, 3, "X.509 v3")
+    testing.assert(c.serial.contains("502dc32297"),
+                   "serial is the lowercase hex of the ASN.1 INTEGER")
+    testing.assertEqual(c.sigAlg, "sha256WithRSAEncryption", nil)
+    testing.assertEqual(c.isCA, true, nil)
+})
+
+testing.test("parse DER produces the same fields as parse PEM", lam{ in
+    let fromPem = crypto.parseCertificate(pem)
+    let fromDer = crypto.parseCertificate(der)
+    // Public key PEM and SAN array reference identity differs, but
+    // the scalar fields should match exactly. Spot-check the ones
+    // most likely to drift.
+    testing.assertEqual(fromPem.serial,             fromDer.serial, nil)
+    testing.assertEqual(fromPem.fingerprintSha256,  fromDer.fingerprintSha256, nil)
+    testing.assertEqual(fromPem.notBefore,          fromDer.notBefore, nil)
+    testing.assertEqual(fromPem.subject.CN,         fromDer.subject.CN, nil)
+})
+
+// ── Subject and issuer DN ────────────────────────────────────
+
+testing.test("subject DN is a map keyed by short name", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assertEqual(c.subject.CN, "test.praia.dev", nil)
+    testing.assertEqual(c.subject.O,  "Praia Test Corp", nil)
+    testing.assertEqual(c.subject.C,  "US", nil)
+    testing.assertEqual(c.subject.ST, "CA", nil)
+    testing.assertEqual(c.subject.L,  "SF", nil)
+})
+
+testing.test("subjectString is the OpenSSL oneline form", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assertEqual(c.subjectString,
+        "/CN=test.praia.dev/O=Praia Test Corp/C=US/ST=CA/L=SF", nil)
+})
+
+testing.test("self-signed cert: issuer equals subject", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assertEqual(c.issuer.CN, c.subject.CN, nil)
+    testing.assertEqual(c.issuerString, c.subjectString, nil)
+})
+
+// ── Validity window ──────────────────────────────────────────
+
+testing.test("notBefore / notAfter are ISO 8601 strings", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assertEqual(c.notBefore, "2026-05-12T12:27:46Z", nil)
+    testing.assertEqual(c.notAfter,  "2027-05-12T12:27:46Z", nil)
+})
+
+// ── SANs ─────────────────────────────────────────────────────
+
+testing.test("SubjectAltNames are typed by kind", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assertEqual(len(c.sans), 4, "four SAN entries")
+
+    // Collect into a map by type → values so order doesn't matter.
+    let byType = {}
+    for (s in c.sans) {
+        if (!keys(byType).contains(s.type)) { byType[s.type] = [] }
+        push(byType[s.type], s.value)
+    }
+    testing.assertEqual(len(byType.DNS), 2, "two DNS SANs")
+    testing.assert(byType.DNS.contains("test.praia.dev"), nil)
+    testing.assert(byType.DNS.contains("api.test.praia.dev"), nil)
+    testing.assertEqual(byType.IP[0], "127.0.0.1", nil)
+    testing.assertEqual(byType.email[0], "admin@test.praia.dev", nil)
+})
+
+// ── Fingerprint + public key ─────────────────────────────────
+
+testing.test("SHA-256 fingerprint is 64 lowercase hex chars", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assertEqual(len(c.fingerprintSha256), 64, nil)
+    for (i in 0..len(c.fingerprintSha256)) {
+        let ch = c.fingerprintSha256[i]
+        testing.assert("0123456789abcdef".contains(ch),
+                       "non-hex char at " + i + ": " + ch)
+    }
+})
+
+testing.test("publicKey is exported as a PEM SubjectPublicKeyInfo", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assert(c.publicKey.startsWith("-----BEGIN PUBLIC KEY-----"), nil)
+    testing.assert(c.publicKey.contains("-----END PUBLIC KEY-----"), nil)
+})
+
+testing.test("publicKeyInfo reports RSA 2048", lam{ in
+    let c = crypto.parseCertificate(pem)
+    testing.assertEqual(c.publicKeyInfo.type, "rsaEncryption", nil)
+    testing.assertEqual(c.publicKeyInfo.bits, 2048, nil)
+})
+
+// ── Chain parsing ────────────────────────────────────────────
+
+testing.test("parseCertificateChain returns each cert in order", lam{ in
+    // Duplicate the same cert PEM twice to fake a multi-cert bundle.
+    let chain = crypto.parseCertificateChain(pem + pem)
+    testing.assertEqual(len(chain), 2, nil)
+    testing.assertEqual(chain[0].subject.CN, "test.praia.dev", nil)
+    testing.assertEqual(chain[1].subject.CN, "test.praia.dev", nil)
+})
+
+testing.test("parseCertificateChain throws on input with no certs", lam{ in
+    testing.assertThrows(
+        lam{ in crypto.parseCertificateChain("nothing here") },
+        "no certificates found")
+})
+
+// ── Error paths ──────────────────────────────────────────────
+
+testing.test("parseCertificate rejects empty input", lam{ in
+    testing.assertThrows(lam{ in crypto.parseCertificate("") }, "empty input")
+})
+
+testing.test("parseCertificate rejects garbled PEM", lam{ in
+    testing.assertThrows(
+        lam{ in crypto.parseCertificate("-----BEGIN CERTIFICATE-----\nNOT BASE64\n-----END CERTIFICATE-----") },
+        "failed to parse PEM")
+})
+
+testing.test("parseCertificate rejects garbled DER", lam{ in
+    testing.assertThrows(
+        lam{ in crypto.parseCertificate(bytes.fromHex("3082000130820001")) },
+        "failed to parse DER")
+})
+
+testing.test("parseCertificate requires a string argument", lam{ in
+    testing.assertThrows(lam{ in crypto.parseCertificate(42) }, "requires a string")
+})
+
+testing.done()

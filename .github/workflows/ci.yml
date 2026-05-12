@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# Ubuntu 24.04 ships OpenSSL 3.0, but Praia uses Argon2id (added in
+# OpenSSL 3.2). Pin a known-good 3.x version, build it once per cache
+# key, and reuse the install prefix on subsequent runs. To bump:
+# update OPENSSL_VERSION below — the matching .tar.gz.sha256 file on
+# openssl.org is fetched alongside the tarball so we don't need to
+# hand-pin the digest.
+env:
+  OPENSSL_VERSION: "3.4.0"
+
 jobs:
   test:
     strategy:
@@ -21,13 +30,76 @@ jobs:
 
       - name: Install dependencies (macOS)
         if: startsWith(matrix.os, 'macos')
+        # Homebrew's openssl@3 is currently 3.6.x — already covers the
+        # Argon2id requirement, so no source build needed on macOS.
         run: brew install openssl@3 readline sqlite utf8proc re2
 
-      - name: Install dependencies (Linux)
+      - name: Cache OpenSSL ${{ env.OPENSSL_VERSION }} (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/openssl-install
+          # Key on version + OS + arch so a bump (or a runner image
+          # update that changes the toolchain) cleanly invalidates.
+          key: openssl-${{ env.OPENSSL_VERSION }}-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Build OpenSSL ${{ env.OPENSSL_VERSION }} from source (Linux, cache miss only)
+        if: startsWith(matrix.os, 'ubuntu') && steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cd /tmp
+          URL="https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"
+          curl -fsSL "$URL" -o openssl.tar.gz
+          curl -fsSL "$URL.sha256" -o openssl.tar.gz.sha256
+          # openssl.org publishes a `.sha256` file with the digest on
+          # the first whitespace-delimited field. Verify before
+          # unpacking so a corrupted/MITM'd download fails loud.
+          EXPECTED=$(awk '{print $1}' openssl.tar.gz.sha256)
+          ACTUAL=$(sha256sum openssl.tar.gz | awk '{print $1}')
+          echo "expected: $EXPECTED"
+          echo "actual:   $ACTUAL"
+          test "$EXPECTED" = "$ACTUAL"
+          tar xf openssl.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          # `no-tests no-docs` cuts the build by ~half. `shared`
+          # builds the dynamic libs (matches what the Makefile's
+          # plain `-lssl -lcrypto` expects to link against).
+          ./Configure linux-x86_64 \
+              --prefix=$HOME/openssl-install \
+              --openssldir=$HOME/openssl-install/ssl \
+              no-tests no-docs shared
+          make -j$(nproc)
+          # install_sw skips the manpages, which we already disabled
+          # at configure time; this is the "just the libraries and
+          # headers" install target.
+          make install_sw
+
+      - name: Configure environment for custom OpenSSL (Linux)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
+          PREFIX=$HOME/openssl-install
+          # OpenSSL installs to lib64 on x86_64; older configurations
+          # use plain lib. Include both so the discovery works on any
+          # build layout.
+          echo "CPATH=$PREFIX/include:${CPATH:-}" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          # Sanity check — emit the version the build will pick up.
+          # $GITHUB_ENV writes only apply to LATER steps, so we have
+          # to also export LD_LIBRARY_PATH inline here for the openssl
+          # binary to find its sibling libs at runtime.
+          export LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}
+          $PREFIX/bin/openssl version
+
+      - name: Install other dependencies (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        # Note: libssl-dev intentionally omitted — we use the custom
+        # build above. The others (readline/sqlite/utf8proc/re2) come
+        # from apt as before.
+        run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev
+          sudo apt-get install -y libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev
 
       - name: Build
         run: make

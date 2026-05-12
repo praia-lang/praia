@@ -2730,6 +2730,10 @@ Interpreter::Interpreter() {
     registerCryptoBuiltins(cryptoMap);
     globals->define("crypto", Value(cryptoMap));
 
+    auto secretsMap = gcNew<PraiaMap>();
+    registerSecretsBuiltins(secretsMap);
+    globals->define("secrets", Value(secretsMap));
+
     auto fmtMap = gcNew<PraiaMap>();
     registerFmtBuiltins(fmtMap);
     globals->define("fmt", Value(fmtMap));

@@ -4120,6 +4120,33 @@ let iv = crypto.randomBytes(16)      // 16 random bytes (128-bit IV)
 let token = bytes.hex(crypto.randomBytes(16))  // hex string token
 ```
 
+For user-facing token generation, prefer the higher-level [`secrets` namespace](#secrets) below — it ships pre-encoded variants and a constant-time comparator so you don't have to assemble them by hand.
+
+### Key derivation — `crypto.hkdf` (requires OpenSSL 3+)
+
+`crypto.hkdf(key, salt, info, length, hash?)` implements RFC 5869 HKDF. Use it to turn one high-entropy master secret into multiple independent derived keys, or to bind a key to a context label so a leak of one derived key doesn't compromise siblings.
+
+| Arg | Description |
+|-----|-------------|
+| `key`  | Input keying material (IKM); typically a master secret |
+| `salt` | Salt bytes. Empty string is allowed when you have no per-deployment salt to mix in |
+| `info` | Context label that binds the output to a use case (`"encryption-key-v1"`, `"session-key:user-42"`, …); empty is allowed |
+| `length` | Output bytes. Capped at `255 × hash_output_size` (8160 for SHA-256, 16320 for SHA-512) |
+| `hash` (optional) | One of `"sha256"` (default), `"sha384"`, `"sha512"`, `"sha1"` |
+
+```
+// Derive distinct subkeys from a single master.
+let master = secrets.token(32)
+let salt   = secrets.token(16)
+
+let encKey = crypto.hkdf(master, salt, "encryption-key-v1", 32)
+let macKey = crypto.hkdf(master, salt, "mac-key-v1",        32)
+let cookieKey = crypto.hkdf(master, salt, "cookie-key-v1",  32)
+
+// Same master + same context → same key (deterministic).
+// Different context → unrelated key, even with all other inputs the same.
+```
+
 ### Authenticated encryption — `seal` / `open` (requires OpenSSL)
 
 `crypto.seal` and `crypto.open` are the recommended symmetric encryption API. They use AES-256-GCM, an authenticated (AEAD) cipher: a successful `open` proves both that the ciphertext was produced by someone holding the key AND that no bit of it has been altered. Use this for anything new — cookies, file encryption, request payloads, transport over an untrusted channel.
@@ -4168,21 +4195,67 @@ If you must use CBC, also compute an HMAC over `iv || ciphertext` with a separat
 
 ### Password hashing (requires OpenSSL)
 
-PBKDF2-SHA256 for secure password storage. Generates a random salt automatically.
+Three password-hashing schemes are available, in order of preference for new code:
+
+1. **`crypto.argon2id`** — memory-hard, the OWASP first-choice recommendation as of 2024. Requires OpenSSL 3.2+.
+2. **`crypto.scrypt`** — also memory-hard, broadly compatible. Available in all OpenSSL 3.x.
+3. **`crypto.hashPassword`** — PBKDF2-SHA256. Not memory-hard; kept for back-compat with existing databases. Don't use for new applications.
+
+Both `argon2id` and `scrypt` return self-describing **PHC strings** that carry algorithm + cost parameters in the hash itself, so a stored hash can be verified without any side-table metadata. The format round-trips with Python's `passlib`, libsodium, and the argon2 reference CLI.
+
+#### `crypto.argon2id(password, params?)` — recommended for new code
 
 ```
-// Hash a password
+let h = crypto.argon2id("hunter2")
+// $argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>
+
+crypto.verifyArgon2id("hunter2", h)   // true
+crypto.verifyArgon2id("wrong", h)     // false
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `t` | `3` | Iterations / time cost (≥1) |
+| `m` | `65536` | Memory in KiB (must be ≥ `8 * p`) |
+| `p` | `4` | Parallelism / lanes (≥1) |
+| `salt` | random 16 bytes | Salt bytes (must be ≥ 8 bytes) |
+| `length` | `32` | Output bytes |
+
+```
+let h = crypto.argon2id("pw", {t: 4, m: 131072, p: 2, length: 32})
+```
+
+Defaults follow RFC 9106 §4's "second recommended option" — tuned to take roughly 250 ms on a modest server.
+
+Throws on OpenSSL < 3.2 with a message pointing at the version requirement (`ARGON2ID` was added to OpenSSL's KDF table in 3.2).
+
+#### `crypto.scrypt(password, params?)` — RFC 7914
+
+```
+let h = crypto.scrypt("hunter2")
+// $scrypt$ln=15,r=8,p=1$<salt>$<hash>
+
+crypto.verifyScrypt("hunter2", h)     // true
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `ln` | `15` | `log2(N)` — CPU/memory cost. `ln=15` gives N=32768, ~32 MiB |
+| `r` | `8` | Block size |
+| `p` | `1` | Parallelism |
+| `salt` | random 16 bytes | Salt bytes (≥ 8) |
+| `length` | `32` | Output bytes |
+
+#### `crypto.hashPassword(password, salt?, iterations?)` — legacy PBKDF2
+
+Map-style return for back-compat with existing call sites. Not recommended for new code.
+
+```
 let result = crypto.hashPassword("mypassword")
-print(result.hash)        // hex hash
-print(result.salt)        // hex salt
-print(result.iterations)  // 100000
+// {hash, salt, iterations}
 
-// Verify a password
 crypto.verifyPassword("mypassword", result.hash, result.salt)  // true
-crypto.verifyPassword("wrong", result.hash, result.salt)        // false
 ```
-
-Custom iterations: `crypto.hashPassword("pass", nil, 200000)`
 
 ### Digital signatures
 
@@ -4205,6 +4278,80 @@ let ecKeys = crypto.generateKeyPair("ec")
 let ecSig = crypto.sign("data", ecKeys.privateKey, "sha256")
 crypto.verify("data", ecSig, ecKeys.publicKey, "sha256")  // true
 ```
+
+### X.509 certificate parsing
+
+| Function | Description |
+|----------|-------------|
+| `crypto.parseCertificate(pemOrDer)` | Parse a single certificate; accepts PEM text or DER bytes. Returns the field map below |
+| `crypto.parseCertificateChain(pem)` | Parse all PEM certificates in the input (server + intermediates). Returns an array |
+
+Returned field map:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `version` | int | X.509 version (typically 3) |
+| `serial` | string | Serial number as lowercase hex (real serials are 128+ bits, don't fit in int64) |
+| `subject` | map | DN keyed by short name: `CN`, `O`, `OU`, `C`, `ST`, `L`, ... |
+| `subjectString` | string | OpenSSL `/CN=foo/O=bar` one-liner form of the DN |
+| `issuer` / `issuerString` | map / string | Same shape as subject, for the certificate's issuer |
+| `notBefore` / `notAfter` | string | Validity bounds as ISO 8601 (`"2026-05-12T12:27:46Z"`) |
+| `sigAlg` | string | Signature algorithm long name (e.g. `"sha256WithRSAEncryption"`) |
+| `sans` | array | SubjectAltName entries: `[{type: "DNS"\|"IP"\|"email"\|"URI", value: ...}, ...]` |
+| `fingerprintSha256` | string | 64-char lowercase hex SHA-256 of the DER form; the standard cert identifier |
+| `isCA` | bool | True iff basicConstraints flags this as a CA cert |
+| `publicKey` | string | The certificate's public key, exported as a PEM SubjectPublicKeyInfo block |
+| `publicKeyInfo` | map | `{type, bits}` — algorithm short name (`"rsaEncryption"`, `"id-ecPublicKey"`, ...) and key size |
+
+```
+let pem = fs.read("server.crt")
+let c = crypto.parseCertificate(pem)
+
+print(c.subject.CN)             // "example.com"
+print(c.notAfter)               // "2026-08-15T00:00:00Z"
+print(c.fingerprintSha256)      // a3:e1:... (no colons; 64 hex chars)
+for (s in c.sans) {
+    print(s.type + ": " + s.value)
+}
+
+// Parse a bundle (server cert + intermediates).
+let bundle = fs.read("fullchain.pem")
+let chain = crypto.parseCertificateChain(bundle)
+print("chain depth:", len(chain))
+```
+
+What's deliberately NOT exposed: the full extension table, AuthorityInfoAccess, CRL distribution points, Certificate Transparency SCTs. Adding any specific extension is mechanical — open an issue if you have a concrete use case.
+
+---
+
+## Secrets
+
+`secrets` is the canonical namespace for generating tokens and comparing them safely. It exists for the same reason Python's `secrets` module does: when callers reach for the general-purpose `random.*` family to build a session ID, they get a Mersenne Twister output and ship a vulnerability. Every function here pulls from the OS CSPRNG (via OpenSSL `RAND_bytes`, which reads `/dev/urandom` or its equivalent).
+
+| Function | Description |
+|----------|-------------|
+| `secrets.token(n)` | `n` raw bytes, as a Praia bytes-string |
+| `secrets.tokenHex(n)` | `n` random bytes as a 2n-character lower-case hex string. Database-friendly |
+| `secrets.tokenUrlSafe(n)` | `n` random bytes as URL-safe base64, no padding (RFC 4648 §5). Use for password-reset URLs, unsubscribe links |
+| `secrets.compare(a, b)` | Constant-time string equality. Use this to compare HMAC tags / session IDs / API keys |
+| `secrets.choice(seq)` | Uniformly random element from a non-empty array or string. Uses rejection sampling to avoid modulo bias. For strings, returns one grapheme |
+
+```
+// Tokens — typical sizes
+let sessionId = secrets.tokenHex(32)             // 64-char hex, ~256 bits
+let resetLink = "/reset/" + secrets.tokenUrlSafe(24)  // URL-safe, ~192 bits
+
+// Constant-time tag verification
+let expectedTag = crypto.hmac(serverKey, body, "sha256")
+if (!secrets.compare(expectedTag, request.tag)) {
+    throw "tag mismatch"
+}
+
+// Pick a random element without modulo bias
+let admin = secrets.choice(adminList)
+```
+
+**Why `secrets.compare` rather than `==`**: when you compare two secrets byte-by-byte and short-circuit on the first mismatch, the time the comparison takes leaks how many leading bytes were correct. An attacker can iterate one byte at a time and watch the response timing to recover the secret. Constant-time compare walks the full buffer regardless, so timing reveals nothing.
 
 ---
 

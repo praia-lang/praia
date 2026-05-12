@@ -45,6 +45,7 @@ inline Value callSafe(Interpreter& interp, std::shared_ptr<Callable> callable,
 void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap);
 void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap);
 void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap);
+void registerSecretsBuiltins(std::shared_ptr<PraiaMap> secretsMap);
 void registerFmtBuiltins(std::shared_ptr<PraiaMap> fmtMap);
 void registerZlibBuiltins(std::shared_ptr<PraiaMap> zlibMap);
 void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment> globals);

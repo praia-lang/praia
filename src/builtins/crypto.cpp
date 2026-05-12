@@ -15,6 +15,13 @@
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
 #include <openssl/ec.h>
+#include <openssl/kdf.h>
+#include <openssl/core_names.h>
+#include <openssl/params.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/bn.h>
+#include <arpa/inet.h>
 #endif
 
 // ── Helpers ──
@@ -273,6 +280,569 @@ static std::string generateRandomBytes(int count) {
     return result;
 }
 
+// ── PHC string format (Argon2 / scrypt) ──────────────────────
+//
+// PHC encoding lets us return a single self-describing string
+// rather than a structured map, so a stored hash carries its own
+// algorithm + parameters. Format:
+//
+//   $<algo>$<param1=val1,param2=val2,...>$<base64(salt)>$<base64(hash)>
+//
+// Argon2 has an extra version segment between algo and params:
+//
+//   $argon2id$v=19$m=65536,t=3,p=4$<base64(salt)>$<base64(hash)>
+//
+// Base64 here is the standard alphabet (A-Za-z0-9+/) with no
+// padding — the same form the argon2 reference and Python's passlib
+// emit, so hashes round-trip with other tools' outputs.
+
+#ifdef HAVE_OPENSSL
+
+static std::string phcB64Encode(const std::string& bytes) {
+    static const char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    int val = 0, valb = -6;
+    for (unsigned char c : bytes) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            out += table[(val >> valb) & 0x3F];
+            valb -= 6;
+        }
+    }
+    if (valb > -6) out += table[((val << 8) >> (valb + 8)) & 0x3F];
+    return out;
+}
+
+static std::string phcB64Decode(const std::string& in) {
+    auto dec = [](unsigned char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::string out;
+    int val = 0, valb = -8;
+    for (unsigned char c : in) {
+        if (c == '=') break;
+        int d = dec(c);
+        if (d < 0)
+            throw RuntimeError("PHC: invalid base64 character in salt or hash", 0);
+        val = (val << 6) + d;
+        valb += 6;
+        if (valb >= 0) {
+            out += static_cast<char>((val >> valb) & 0xFF);
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
+// Split "k=v,k=v,..." into ordered name/value pairs. Order matters
+// for some downstream consumers, so we keep a vector rather than a
+// map. Throws on malformed (missing '=', empty key, etc.).
+static std::vector<std::pair<std::string, std::string>>
+phcParseKvSegment(const std::string& s) {
+    std::vector<std::pair<std::string, std::string>> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t comma = s.find(',', i);
+        size_t end = (comma == std::string::npos) ? s.size() : comma;
+        size_t eq = s.find('=', i);
+        if (eq == std::string::npos || eq >= end || eq == i)
+            throw RuntimeError("PHC: malformed param segment near \"" +
+                               s.substr(i, end - i) + "\"", 0);
+        out.emplace_back(s.substr(i, eq - i), s.substr(eq + 1, end - eq - 1));
+        i = (comma == std::string::npos) ? s.size() : comma + 1;
+    }
+    return out;
+}
+
+static uint64_t phcParseUint(const std::string& name,
+                             const std::vector<std::pair<std::string, std::string>>& kvs,
+                             uint64_t deflt, bool required = true) {
+    for (auto& [k, v] : kvs) {
+        if (k == name) {
+            try {
+                return std::stoull(v);
+            } catch (...) {
+                throw RuntimeError("PHC: parameter '" + name + "' is not a number: \"" +
+                                   v + "\"", 0);
+            }
+        }
+    }
+    if (required)
+        throw RuntimeError("PHC: missing required parameter '" + name + "'", 0);
+    return deflt;
+}
+
+// Parse a PHC string into its components. The result keeps params as
+// a kv-vector so the caller can pull out cost factors by name. Salt
+// and hash come back decoded as bytes. Argon2's "v=19" segment is
+// folded into the kv list under key "v" for uniformity.
+struct PhcParts {
+    std::string algo;
+    std::vector<std::pair<std::string, std::string>> params;
+    std::string salt;
+    std::string hash;
+};
+
+static PhcParts phcParse(const std::string& s) {
+    // Split on '$'. Argon2 has 5 non-empty segments, scrypt has 4.
+    std::vector<std::string> parts;
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = s.find('$', i);
+        if (j == std::string::npos) {
+            parts.push_back(s.substr(i));
+            break;
+        }
+        parts.push_back(s.substr(i, j - i));
+        i = j + 1;
+    }
+    // The leading '$' produces an empty first element.
+    if (parts.empty() || !parts[0].empty())
+        throw RuntimeError("PHC: must start with '$'", 0);
+    parts.erase(parts.begin());
+
+    if (parts.size() < 4)
+        throw RuntimeError("PHC: too few segments (expected algo / [v=...] / params / salt / hash)", 0);
+
+    PhcParts out;
+    out.algo = parts[0];
+
+    // Argon2 family inserts a $v=19$ between algo and params. Detect
+    // by sniffing for the lone "v=N" segment.
+    size_t paramIdx = 1;
+    if (parts.size() == 5) {
+        // Treat parts[1] as version segment.
+        auto kv = phcParseKvSegment(parts[1]);
+        if (kv.size() != 1 || kv[0].first != "v")
+            throw RuntimeError("PHC: expected version segment 'v=NN' between algo and params", 0);
+        out.params.emplace_back("v", kv[0].second);
+        paramIdx = 2;
+    }
+    auto kvParams = phcParseKvSegment(parts[paramIdx]);
+    for (auto& kv : kvParams) out.params.push_back(std::move(kv));
+    out.salt = phcB64Decode(parts[paramIdx + 1]);
+    out.hash = phcB64Decode(parts[paramIdx + 2]);
+    return out;
+}
+
+// Drive EVP_KDF with the assembled OSSL_PARAM array, returning
+// `outLen` derived bytes. Centralizing this keeps the scrypt and
+// argon2id paths from drifting on resource cleanup.
+static std::string evpKdfDerive(const char* kdfName,
+                                OSSL_PARAM* params, size_t outLen,
+                                const char* fnNameForErr) {
+    EVP_KDF* kdf = EVP_KDF_fetch(nullptr, kdfName, nullptr);
+    if (!kdf) {
+        // The Argon2 case is the practical reason this path exists:
+        // OpenSSL < 3.2 doesn't ship ARGON2ID. Make the error point
+        // at the version requirement so the user knows what to fix.
+        std::string msg = fnNameForErr;
+        msg += ": ";
+        msg += kdfName;
+        msg += " not available in this OpenSSL build";
+        if (std::string(kdfName) == "ARGON2ID")
+            msg += " (requires OpenSSL 3.2 or later)";
+        throw RuntimeError(msg, 0);
+    }
+    EVP_KDF_CTX* ctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!ctx)
+        throw RuntimeError(std::string(fnNameForErr) + ": EVP_KDF_CTX_new failed", 0);
+    std::string out(outLen, '\0');
+    int rc = EVP_KDF_derive(ctx, reinterpret_cast<unsigned char*>(&out[0]),
+                            outLen, params);
+    EVP_KDF_CTX_free(ctx);
+    if (rc != 1)
+        throw RuntimeError(std::string(fnNameForErr) +
+                           ": EVP_KDF_derive failed (check parameter ranges)", 0);
+    return out;
+}
+
+// Constant-time bytes equality. Identical pattern to the secrets
+// namespace — duplicated rather than refactored to keep this file
+// self-contained. Used to verify a fresh derivation against a stored
+// hash without leaking partial-match information via timing.
+static bool ctEqual(const std::string& a, const std::string& b) {
+    size_t la = a.size(), lb = b.size();
+    size_t n = la > lb ? la : lb;
+    unsigned int diff = (la == lb) ? 0u : 1u;
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char ca = i < la ? static_cast<unsigned char>(a[i]) : 0;
+        unsigned char cb = i < lb ? static_cast<unsigned char>(b[i]) : 0;
+        diff |= static_cast<unsigned int>(ca ^ cb);
+    }
+    return diff == 0;
+}
+
+// Derive `outLen` bytes via scrypt with the given cost parameters.
+// N must be a power of 2 ≥ 2; r and p ≥ 1. OpenSSL validates further
+// (e.g. r*p < 2^30 per RFC 7914) and fails with a derive error.
+static std::string scryptDerive(const std::string& pw, const std::string& salt,
+                                uint64_t N, uint64_t r, uint64_t p, size_t outLen) {
+    OSSL_PARAM params[7];
+    int i = 0;
+    params[i++] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_PASSWORD,
+        const_cast<void*>(static_cast<const void*>(pw.data())), pw.size());
+    params[i++] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_SALT,
+        const_cast<void*>(static_cast<const void*>(salt.data())), salt.size());
+    params[i++] = OSSL_PARAM_construct_uint64(OSSL_KDF_PARAM_SCRYPT_N, &N);
+    params[i++] = OSSL_PARAM_construct_uint64(OSSL_KDF_PARAM_SCRYPT_R, &r);
+    params[i++] = OSSL_PARAM_construct_uint64(OSSL_KDF_PARAM_SCRYPT_P, &p);
+    // OpenSSL caps scrypt's memory at ~32 MiB by default; raise it
+    // so users can pick larger N without hitting an opaque internal
+    // limit. The cap is a safety net against accidental DoS; 4 GiB
+    // is plenty for any reasonable use.
+    uint64_t maxMem = 4ULL << 30;  // 4 GiB
+    params[i++] = OSSL_PARAM_construct_uint64("maxmem_bytes", &maxMem);
+    params[i] = OSSL_PARAM_construct_end();
+    return evpKdfDerive("SCRYPT", params, outLen, "crypto.scrypt");
+}
+
+// Derive `outLen` bytes via Argon2id. t = iterations (≥1), m = memory
+// in KiB (must be ≥ 8 * lanes), p = lanes (≥1). OpenSSL throws a
+// derive failure on out-of-range combinations.
+static std::string argon2idDerive(const std::string& pw, const std::string& salt,
+                                  uint32_t t, uint32_t m, uint32_t p, size_t outLen) {
+    OSSL_PARAM params[6];
+    int i = 0;
+    params[i++] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_PASSWORD,
+        const_cast<void*>(static_cast<const void*>(pw.data())), pw.size());
+    params[i++] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_SALT,
+        const_cast<void*>(static_cast<const void*>(salt.data())), salt.size());
+    params[i++] = OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ITER, &t);
+    params[i++] = OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &m);
+    params[i++] = OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &p);
+    params[i] = OSSL_PARAM_construct_end();
+    return evpKdfDerive("ARGON2ID", params, outLen, "crypto.argon2id");
+}
+
+// Optional-map helper — pulls an integer parameter out of an optional
+// {...} map argument, with default + range check. Reused by both
+// scrypt and argon2id entry points.
+static uint64_t mapUintParam(const Value& maybeMap, const char* key,
+                             uint64_t deflt, uint64_t minVal, uint64_t maxVal,
+                             const char* fnName) {
+    if (!maybeMap.isMap()) return deflt;
+    auto& m = maybeMap.asMap()->entries;
+    auto it = m.find(Value(std::string(key)));
+    if (it == m.end()) return deflt;
+    if (!it->second.isNumber())
+        throw RuntimeError(std::string(fnName) + ": param '" + key +
+                           "' must be a number", 0);
+    int64_t v = it->second.toInt64ForBitwise();
+    if (v < 0)
+        throw RuntimeError(std::string(fnName) + ": param '" + key +
+                           "' must be non-negative", 0);
+    uint64_t u = static_cast<uint64_t>(v);
+    if (u < minVal || u > maxVal)
+        throw RuntimeError(std::string(fnName) + ": param '" + key +
+                           "' must be in [" + std::to_string(minVal) + ", " +
+                           std::to_string(maxVal) + "] (got " +
+                           std::to_string(u) + ")", 0);
+    return u;
+}
+
+static std::string mapStringParam(const Value& maybeMap, const char* key,
+                                  const char* fnName) {
+    if (!maybeMap.isMap()) return "";
+    auto& m = maybeMap.asMap()->entries;
+    auto it = m.find(Value(std::string(key)));
+    if (it == m.end()) return "";
+    if (!it->second.isString())
+        throw RuntimeError(std::string(fnName) + ": param '" + key +
+                           "' must be a string", 0);
+    return it->second.asString();
+}
+
+// ── X509 certificate parsing ──────────────────────────────────
+//
+// Returns a Praia map with all the fields a non-crypto-expert
+// caller usually wants: subject + issuer DNs (both as a structured
+// map and OpenSSL's `/CN=foo/O=bar` one-liner), validity range as
+// ISO 8601 strings, SubjectAltNames typed by kind (DNS/IP/email/URI),
+// SHA-256 fingerprint, signature algorithm short name, CA flag,
+// and the public key (PEM + algo type + bit count).
+//
+// Intentionally NOT exposed: full extension dump, AuthorityInfoAccess,
+// CRL distribution points, CT SCTs. Adding any of these is mechanical
+// once we have a request; the v1 surface targets the questions
+// users actually ask of a cert (who, when, fingerprint, hosts).
+
+static Value x509NameToMap(X509_NAME* name) {
+    auto out = gcNew<PraiaMap>();
+    int n = X509_NAME_entry_count(name);
+    for (int i = 0; i < n; ++i) {
+        X509_NAME_ENTRY* entry = X509_NAME_get_entry(name, i);
+        ASN1_OBJECT* obj = X509_NAME_ENTRY_get_object(entry);
+        int nid = OBJ_obj2nid(obj);
+        std::string keyName;
+        // Short name (CN/O/OU/...) when OpenSSL knows it; OID text
+        // otherwise so unusual fields don't disappear.
+        const char* sn = (nid != NID_undef) ? OBJ_nid2sn(nid) : nullptr;
+        if (sn) {
+            keyName = sn;
+        } else {
+            char buf[128];
+            OBJ_obj2txt(buf, sizeof(buf), obj, 1);
+            keyName = buf;
+        }
+        ASN1_STRING* str = X509_NAME_ENTRY_get_data(entry);
+        unsigned char* utf8 = nullptr;
+        int len = ASN1_STRING_to_UTF8(&utf8, str);
+        std::string val;
+        if (len > 0 && utf8) val.assign(reinterpret_cast<char*>(utf8), len);
+        if (utf8) OPENSSL_free(utf8);
+        // Multi-valued RDNs (rare but legal): collapse to a
+        // comma-separated string so each key still maps to a single
+        // value. Most callers iterate keys() and treat the result as
+        // a flat string lookup.
+        Value k(keyName);
+        auto it = out->entries.find(k);
+        if (it != out->entries.end() && it->second.isString())
+            it->second = Value(it->second.asString() + "," + val);
+        else
+            out->entries[k] = Value(val);
+    }
+    return Value(out);
+}
+
+static std::string x509NameToOneline(X509_NAME* name) {
+    // X509_NAME_oneline with NULL buf returns a newly-allocated
+    // string sized exactly to the content — no risk of truncation
+    // for unusually-long subject DNs.
+    char* line = X509_NAME_oneline(name, nullptr, 0);
+    if (!line) return "";
+    std::string out(line);
+    OPENSSL_free(line);
+    return out;
+}
+
+static std::string asn1TimeToIso(const ASN1_TIME* t) {
+    if (!t) return "";
+    struct tm tm;
+    if (ASN1_TIME_to_tm(t, &tm) != 1) return "";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return buf;
+}
+
+static Value parseSans(X509* cert) {
+    auto arr = gcNew<PraiaArray>();
+    GENERAL_NAMES* gens = static_cast<GENERAL_NAMES*>(
+        X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+    if (!gens) return Value(arr);
+
+    int n = sk_GENERAL_NAME_num(gens);
+    for (int i = 0; i < n; ++i) {
+        GENERAL_NAME* gen = sk_GENERAL_NAME_value(gens, i);
+        std::string type, value;
+        switch (gen->type) {
+            case GEN_DNS: {
+                type = "DNS";
+                int len = ASN1_STRING_length(gen->d.dNSName);
+                const unsigned char* data = ASN1_STRING_get0_data(gen->d.dNSName);
+                if (data && len > 0) value.assign(reinterpret_cast<const char*>(data), len);
+                break;
+            }
+            case GEN_EMAIL: {
+                type = "email";
+                int len = ASN1_STRING_length(gen->d.rfc822Name);
+                const unsigned char* data = ASN1_STRING_get0_data(gen->d.rfc822Name);
+                if (data && len > 0) value.assign(reinterpret_cast<const char*>(data), len);
+                break;
+            }
+            case GEN_URI: {
+                type = "URI";
+                int len = ASN1_STRING_length(gen->d.uniformResourceIdentifier);
+                const unsigned char* data = ASN1_STRING_get0_data(gen->d.uniformResourceIdentifier);
+                if (data && len > 0) value.assign(reinterpret_cast<const char*>(data), len);
+                break;
+            }
+            case GEN_IPADD: {
+                type = "IP";
+                int len = ASN1_STRING_length(gen->d.iPAddress);
+                const unsigned char* data = ASN1_STRING_get0_data(gen->d.iPAddress);
+                if (len == 4 && data) {
+                    char buf[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, data, buf, sizeof(buf));
+                    value = buf;
+                } else if (len == 16 && data) {
+                    char buf[INET6_ADDRSTRLEN];
+                    inet_ntop(AF_INET6, data, buf, sizeof(buf));
+                    value = buf;
+                }
+                break;
+            }
+            default:
+                // directoryName, x400Address, ediPartyName, registeredID,
+                // otherName — uncommon in real-world certs, skip.
+                continue;
+        }
+        auto entry = gcNew<PraiaMap>();
+        entry->entries[Value("type")]  = Value(type);
+        entry->entries[Value("value")] = Value(value);
+        arr->elements.push_back(Value(entry));
+    }
+    GENERAL_NAMES_free(gens);
+    return Value(arr);
+}
+
+// Turn an X509* into the Praia map shape exposed to user code.
+// Shared by parseCertificate (single) and parseCertificateChain.
+// The X509* is borrowed — caller still owns it.
+static Value x509ToValue(X509* cert) {
+    auto out = gcNew<PraiaMap>();
+
+    // version — internally 0-indexed (X.509 v3 is stored as 2).
+    out->entries[Value("version")] = Value(
+        static_cast<int64_t>(X509_get_version(cert) + 1));
+
+    // serial — emitted as a hex string because real certs use
+    // 128-bit serials that don't fit in int64.
+    ASN1_INTEGER* serial = X509_get_serialNumber(cert);
+    BIGNUM* bn = ASN1_INTEGER_to_BN(serial, nullptr);
+    char* hex = BN_bn2hex(bn);
+    if (hex) {
+        // BN_bn2hex uppercases; lowercase for consistency with the
+        // rest of the bytes.hex output in this stdlib.
+        std::string s(hex);
+        for (auto& c : s) if (c >= 'A' && c <= 'F') c = c - 'A' + 'a';
+        out->entries[Value("serial")] = Value(s);
+        OPENSSL_free(hex);
+    } else {
+        out->entries[Value("serial")] = Value(std::string(""));
+    }
+    BN_free(bn);
+
+    out->entries[Value("subject")]       = x509NameToMap(X509_get_subject_name(cert));
+    out->entries[Value("subjectString")] = Value(x509NameToOneline(X509_get_subject_name(cert)));
+    out->entries[Value("issuer")]        = x509NameToMap(X509_get_issuer_name(cert));
+    out->entries[Value("issuerString")]  = Value(x509NameToOneline(X509_get_issuer_name(cert)));
+
+    out->entries[Value("notBefore")] = Value(asn1TimeToIso(X509_get0_notBefore(cert)));
+    out->entries[Value("notAfter")]  = Value(asn1TimeToIso(X509_get0_notAfter(cert)));
+
+    int sigNid = X509_get_signature_nid(cert);
+    const char* sigName = OBJ_nid2ln(sigNid);
+    out->entries[Value("sigAlg")] = Value(std::string(sigName ? sigName : "unknown"));
+
+    out->entries[Value("sans")] = parseSans(cert);
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digestLen = 0;
+    if (X509_digest(cert, EVP_sha256(), digest, &digestLen) == 1) {
+        out->entries[Value("fingerprintSha256")] = Value(toHexString(digest, digestLen));
+    } else {
+        out->entries[Value("fingerprintSha256")] = Value(std::string(""));
+    }
+
+    // X509_check_ca returns 0 = not CA, >0 = CA (various subtypes).
+    out->entries[Value("isCA")] = Value(X509_check_ca(cert) > 0);
+
+    // Public key — both as PEM (for re-use) and as a small info map
+    // (so callers don't need to re-parse the PEM to learn the alg).
+    EVP_PKEY* pk = X509_get0_pubkey(cert);
+    if (pk) {
+        BIO* bio = BIO_new(BIO_s_mem());
+        if (bio) {
+            PEM_write_bio_PUBKEY(bio, pk);
+            BUF_MEM* mb = nullptr;
+            BIO_get_mem_ptr(bio, &mb);
+            if (mb && mb->data && mb->length > 0)
+                out->entries[Value("publicKey")] =
+                    Value(std::string(mb->data, mb->length));
+            BIO_free(bio);
+        }
+        auto pkInfo = gcNew<PraiaMap>();
+        int pkType = EVP_PKEY_id(pk);
+        const char* typeName = OBJ_nid2sn(pkType);
+        pkInfo->entries[Value("type")] = Value(std::string(typeName ? typeName : "unknown"));
+        pkInfo->entries[Value("bits")] = Value(static_cast<int64_t>(EVP_PKEY_bits(pk)));
+        out->entries[Value("publicKeyInfo")] = Value(pkInfo);
+    }
+
+    return Value(out);
+}
+
+// Sniff: PEM if we see "-----BEGIN" anywhere in the first 32 bytes,
+// DER otherwise. A real ASN.1 SEQUENCE starts with 0x30, so a smarter
+// sniffer could test that explicitly, but the PEM marker check is
+// more discriminating since DER bytes can sometimes start with the
+// same 0x30 in a PEM line.
+static bool looksLikePem(const std::string& s) {
+    size_t scanEnd = std::min(s.size(), static_cast<size_t>(64));
+    return s.compare(0, scanEnd, "-----BEGIN", 0,
+                     std::min(scanEnd, static_cast<size_t>(10))) == 0 ||
+           s.find("-----BEGIN CERTIFICATE-----") != std::string::npos;
+}
+
+static Value parseCertificateImpl(const std::string& data) {
+    if (data.empty())
+        throw RuntimeError("crypto.parseCertificate: empty input", 0);
+
+    X509* cert = nullptr;
+    if (looksLikePem(data)) {
+        BIO* bio = BIO_new_mem_buf(data.data(), static_cast<int>(data.size()));
+        if (!bio)
+            throw RuntimeError("crypto.parseCertificate: BIO_new_mem_buf failed", 0);
+        cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+        BIO_free(bio);
+        if (!cert)
+            throw RuntimeError("crypto.parseCertificate: failed to parse PEM "
+                               "(check the BEGIN/END markers and base64 body)", 0);
+    } else {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(data.data());
+        cert = d2i_X509(nullptr, &p, static_cast<long>(data.size()));
+        if (!cert)
+            throw RuntimeError("crypto.parseCertificate: failed to parse DER", 0);
+    }
+    Value out = x509ToValue(cert);
+    X509_free(cert);
+    return out;
+}
+
+static Value parseCertificateChainImpl(const std::string& pem) {
+    auto arr = gcNew<PraiaArray>();
+    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+    if (!bio)
+        throw RuntimeError("crypto.parseCertificateChain: BIO_new_mem_buf failed", 0);
+    while (true) {
+        X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+        if (!cert) {
+            // Distinguish "no more certs" (success) from "garbage at
+            // the end" (failure). PEM_R_NO_START_LINE is the clean-
+            // EOF signal.
+            unsigned long err = ERR_peek_last_error();
+            ERR_clear_error();
+            if (arr->elements.empty()) {
+                BIO_free(bio);
+                throw RuntimeError("crypto.parseCertificateChain: no certificates found", 0);
+            }
+            (void)err;
+            break;
+        }
+        arr->elements.push_back(x509ToValue(cert));
+        X509_free(cert);
+    }
+    BIO_free(bio);
+    return Value(arr);
+}
+
+#endif  // HAVE_OPENSSL
+
 // ── Registration ──
 
 void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
@@ -374,6 +944,100 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
                 throw RuntimeError("crypto.hmac() algorithm must be 'sha256', 'sha1', 'sha512', or 'md5'", 0);
             return Value(hmac_compute(args[0].asString(), args[1].asString(), algo));
         }));
+
+    // crypto.hkdf(key, salt, info, length, hash?) — RFC 5869 HKDF.
+    //
+    // Extract-then-expand key derivation: turn one high-entropy
+    // secret + a salt + a context label into one or more derived
+    // keys of arbitrary length. The `info` arg binds the output to a
+    // context, so a leak of e.g. the "session-encryption-key" output
+    // doesn't compromise other keys derived from the same master
+    // with different info strings. Salt can be empty; info can be
+    // empty; key (the IKM) cannot.
+    //
+    // Output is at most 255 * digest_output_size bytes (8160 for
+    // SHA-256, 16320 for SHA-512). Larger requests throw.
+    //
+    // OpenSSL 3+ only; uses the EVP_KDF interface.
+    cryptoMap->entries[Value("hkdf")] = Value(makeNative("crypto.hkdf", -1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 4)
+                throw RuntimeError("crypto.hkdf(key, salt, info, length, hash?) requires 4-5 arguments", 0);
+            if (!args[0].isString())
+                throw RuntimeError("crypto.hkdf: key must be a string (bytes)", 0);
+            if (!args[1].isString())
+                throw RuntimeError("crypto.hkdf: salt must be a string (use \"\" for no salt)", 0);
+            if (!args[2].isString())
+                throw RuntimeError("crypto.hkdf: info must be a string (use \"\" for no info)", 0);
+            if (!args[3].isNumber())
+                throw RuntimeError("crypto.hkdf: length must be a number", 0);
+
+            const auto& key  = args[0].asString();
+            const auto& salt = args[1].asString();
+            const auto& info = args[2].asString();
+            int64_t length   = args[3].toInt64ForBitwise();
+            if (length <= 0)
+                throw RuntimeError("crypto.hkdf: length must be positive", 0);
+
+            std::string hashName = "sha256";
+            if (args.size() >= 5) {
+                if (!args[4].isString())
+                    throw RuntimeError("crypto.hkdf: hash must be a string name", 0);
+                hashName = args[4].asString();
+            }
+            // Choose digest + per-hash output cap.
+            int hashLen = 0;
+            if      (hashName == "sha256") hashLen = 32;
+            else if (hashName == "sha512") hashLen = 64;
+            else if (hashName == "sha384") hashLen = 48;
+            else if (hashName == "sha1")   hashLen = 20;
+            else throw RuntimeError("crypto.hkdf: hash must be 'sha256', 'sha384', 'sha512', or 'sha1'", 0);
+            if (length > 255 * hashLen)
+                throw RuntimeError("crypto.hkdf: requested length " + std::to_string(length) +
+                                   " exceeds RFC 5869 max " + std::to_string(255 * hashLen) +
+                                   " for " + hashName, 0);
+
+            EVP_KDF* kdf = EVP_KDF_fetch(nullptr, "HKDF", nullptr);
+            if (!kdf)
+                throw RuntimeError("crypto.hkdf: EVP_KDF_fetch(HKDF) failed (OpenSSL 3+ required)", 0);
+            EVP_KDF_CTX* ctx = EVP_KDF_CTX_new(kdf);
+            EVP_KDF_free(kdf);
+            if (!ctx)
+                throw RuntimeError("crypto.hkdf: EVP_KDF_CTX_new failed", 0);
+
+            // Note: cast away const for OSSL_PARAM_construct_*_string —
+            // the API takes non-const pointers for legacy reasons but
+            // doesn't write through them.
+            OSSL_PARAM params[5];
+            int i = 0;
+            params[i++] = OSSL_PARAM_construct_utf8_string(
+                OSSL_KDF_PARAM_DIGEST, const_cast<char*>(hashName.c_str()), 0);
+            params[i++] = OSSL_PARAM_construct_octet_string(
+                OSSL_KDF_PARAM_KEY,
+                const_cast<void*>(static_cast<const void*>(key.data())), key.size());
+            params[i++] = OSSL_PARAM_construct_octet_string(
+                OSSL_KDF_PARAM_SALT,
+                const_cast<void*>(static_cast<const void*>(salt.data())), salt.size());
+            params[i++] = OSSL_PARAM_construct_octet_string(
+                OSSL_KDF_PARAM_INFO,
+                const_cast<void*>(static_cast<const void*>(info.data())), info.size());
+            params[i] = OSSL_PARAM_construct_end();
+
+            std::string out(static_cast<size_t>(length), '\0');
+            int rc = EVP_KDF_derive(ctx, reinterpret_cast<unsigned char*>(&out[0]),
+                                    out.size(), params);
+            EVP_KDF_CTX_free(ctx);
+            if (rc != 1)
+                throw RuntimeError("crypto.hkdf: EVP_KDF_derive failed", 0);
+            return Value(std::move(out));
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.hkdf requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
 
     // Random bytes — returns raw binary string
     cryptoMap->entries[Value("randomBytes")] = Value(makeNative("crypto.randomBytes", 1,
@@ -702,6 +1366,208 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
                 diff |= actualHex[i] ^ expectedHex[i];
             return Value(diff == 0);
         }));
+
+    // ── Modern password KDFs (scrypt + argon2id) ─────────────
+    //
+    // Both functions return self-describing PHC strings rather than
+    // a structured map. The hash carries its own algorithm + cost
+    // parameters, so verifiers don't need to know how the password
+    // was originally hashed beyond "it's a PHC string". This format
+    // round-trips with Python's passlib, libsodium, and the argon2
+    // reference CLI, so hashes can be migrated in either direction.
+    //
+    // For new code, prefer argon2id (memory-hard, the OWASP first
+    // choice as of 2024). scrypt remains useful when interop with
+    // existing scrypt-hashed databases matters; PBKDF2 (the older
+    // hashPassword/verifyPassword) is left in place for back-compat
+    // but isn't recommended for new applications.
+
+    // crypto.scrypt(password, params?) — RFC 7914 scrypt.
+    //   params: optional map; supported keys:
+    //     ln      log2(N), default 15 (N = 32768, ~32 MiB)
+    //     r       block size, default 8
+    //     p       parallelism, default 1
+    //     salt    pre-generated salt bytes; default 16 random
+    //     length  output bytes, default 32
+    cryptoMap->entries[Value("scrypt")] = Value(makeNative("crypto.scrypt", -1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("crypto.scrypt(password, params?) requires a password string", 0);
+            const std::string& password = args[0].asString();
+            Value params = args.size() > 1 ? args[1] : Value();
+            uint64_t ln = mapUintParam(params, "ln", 15, 1, 30, "crypto.scrypt");
+            uint64_t r  = mapUintParam(params, "r",  8,  1, 1u << 20, "crypto.scrypt");
+            uint64_t p  = mapUintParam(params, "p",  1,  1, 1u << 16, "crypto.scrypt");
+            uint64_t length = mapUintParam(params, "length", 32, 16, 1024, "crypto.scrypt");
+            std::string salt = mapStringParam(params, "salt", "crypto.scrypt");
+            if (salt.empty()) salt = generateRandomBytes(16);
+            if (salt.size() < 8)
+                throw RuntimeError("crypto.scrypt: salt must be at least 8 bytes", 0);
+            uint64_t N = 1ULL << ln;
+            std::string h = scryptDerive(password, salt, N, r, p, length);
+            // PHC: $scrypt$ln=<ln>,r=<r>,p=<p>$<b64 salt>$<b64 hash>
+            std::string out = "$scrypt$ln=" + std::to_string(ln) +
+                              ",r=" + std::to_string(r) +
+                              ",p=" + std::to_string(p) +
+                              "$" + phcB64Encode(salt) +
+                              "$" + phcB64Encode(h);
+            return Value(out);
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.scrypt requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    cryptoMap->entries[Value("verifyScrypt")] = Value(makeNative("crypto.verifyScrypt", 2,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("crypto.verifyScrypt(password, phc) requires two strings", 0);
+            const std::string& password = args[0].asString();
+            PhcParts p = phcParse(args[1].asString());
+            if (p.algo != "scrypt")
+                throw RuntimeError("crypto.verifyScrypt: PHC algorithm is '" + p.algo +
+                                   "', expected 'scrypt'", 0);
+            uint64_t ln = phcParseUint("ln", p.params, 0);
+            uint64_t r  = phcParseUint("r",  p.params, 0);
+            uint64_t pp = phcParseUint("p",  p.params, 0);
+            if (ln < 1 || ln > 30)
+                throw RuntimeError("crypto.verifyScrypt: ln out of range", 0);
+            std::string derived = scryptDerive(password, p.salt, 1ULL << ln, r, pp, p.hash.size());
+            return Value(ctEqual(derived, p.hash));
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.verifyScrypt requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    // crypto.argon2id(password, params?) — RFC 9106 Argon2id.
+    //   params: optional map; supported keys:
+    //     t       iterations / time cost, default 3
+    //     m       memory in KiB, default 65536 (64 MiB)
+    //     p       parallelism (lanes), default 4
+    //     salt    pre-generated salt bytes; default 16 random
+    //     length  output bytes, default 32
+    //
+    // Defaults follow RFC 9106 §4 "second recommended option" — fits
+    // a modest server budget. For higher-security contexts bump t/m
+    // until verification takes ~250 ms on the verifier hardware.
+    //
+    // Throws on OpenSSL < 3.2 with a clear error message.
+    cryptoMap->entries[Value("argon2id")] = Value(makeNative("crypto.argon2id", -1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("crypto.argon2id(password, params?) requires a password string", 0);
+            const std::string& password = args[0].asString();
+            Value params = args.size() > 1 ? args[1] : Value();
+            uint64_t t = mapUintParam(params, "t", 3, 1, 1u << 20, "crypto.argon2id");
+            uint64_t m = mapUintParam(params, "m", 65536, 8, 1u << 22, "crypto.argon2id");
+            uint64_t p = mapUintParam(params, "p", 4, 1, 1u << 16, "crypto.argon2id");
+            uint64_t length = mapUintParam(params, "length", 32, 4, 1024, "crypto.argon2id");
+            if (m < 8 * p)
+                throw RuntimeError("crypto.argon2id: m (memory KiB) must be >= 8 * p (lanes)", 0);
+            std::string salt = mapStringParam(params, "salt", "crypto.argon2id");
+            if (salt.empty()) salt = generateRandomBytes(16);
+            if (salt.size() < 8)
+                throw RuntimeError("crypto.argon2id: salt must be at least 8 bytes", 0);
+            std::string h = argon2idDerive(password, salt,
+                                           static_cast<uint32_t>(t),
+                                           static_cast<uint32_t>(m),
+                                           static_cast<uint32_t>(p),
+                                           static_cast<size_t>(length));
+            // PHC with the Argon2 version segment (v=19, current).
+            std::string out = "$argon2id$v=19$m=" + std::to_string(m) +
+                              ",t=" + std::to_string(t) +
+                              ",p=" + std::to_string(p) +
+                              "$" + phcB64Encode(salt) +
+                              "$" + phcB64Encode(h);
+            return Value(out);
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.argon2id requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    cryptoMap->entries[Value("verifyArgon2id")] = Value(makeNative("crypto.verifyArgon2id", 2,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("crypto.verifyArgon2id(password, phc) requires two strings", 0);
+            const std::string& password = args[0].asString();
+            PhcParts p = phcParse(args[1].asString());
+            if (p.algo != "argon2id")
+                throw RuntimeError("crypto.verifyArgon2id: PHC algorithm is '" + p.algo +
+                                   "', expected 'argon2id'", 0);
+            // We don't pin v=19 strictly — if a future v=20 shows up,
+            // OpenSSL will reject it at derive time. For now nothing
+            // else exists.
+            uint64_t t = phcParseUint("t", p.params, 0);
+            uint64_t m = phcParseUint("m", p.params, 0);
+            uint64_t pp = phcParseUint("p", p.params, 0);
+            std::string derived = argon2idDerive(password, p.salt,
+                                                 static_cast<uint32_t>(t),
+                                                 static_cast<uint32_t>(m),
+                                                 static_cast<uint32_t>(pp),
+                                                 p.hash.size());
+            return Value(ctEqual(derived, p.hash));
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.verifyArgon2id requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    // ── X509 certificate parsing ─────────────────────────────
+
+    // crypto.parseCertificate(pemOrDer)
+    //   Accepts either a PEM string (containing -----BEGIN CERTIFICATE-----)
+    //   or raw DER bytes. Returns a map describing the certificate's
+    //   key fields — subject/issuer DNs, validity window, SANs,
+    //   public key, SHA-256 fingerprint, CA flag, sig algorithm.
+    //
+    //   When the input contains multiple PEM-encoded certs, only the
+    //   first is parsed. Use parseCertificateChain for multi-cert
+    //   bundles (server cert + intermediates).
+    cryptoMap->entries[Value("parseCertificate")] = Value(makeNative("crypto.parseCertificate", 1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("crypto.parseCertificate(data) requires a string (PEM or DER bytes)", 0);
+            return parseCertificateImpl(args[0].asString());
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.parseCertificate requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    // crypto.parseCertificateChain(pem)
+    //   Parses all PEM-encoded certs in the input and returns them
+    //   as an array (in file order). Throws if the input contains
+    //   no PEM certificates at all.
+    cryptoMap->entries[Value("parseCertificateChain")] = Value(makeNative("crypto.parseCertificateChain", 1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("crypto.parseCertificateChain(pem) requires a string", 0);
+            return parseCertificateChainImpl(args[0].asString());
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.parseCertificateChain requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
 
     // ── Asymmetric crypto ──
 
