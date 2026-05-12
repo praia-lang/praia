@@ -37,6 +37,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <poll.h>
@@ -746,17 +747,251 @@ Interpreter::Interpreter() {
         return Value();
     };
 
+    // ── Phase 2: stat, lstat, chmod, symlink, readlink, atomicWrite, mktemp ──
+    //
+    // These hit raw POSIX rather than std::filesystem because we want the
+    // full stat(2) shape (uid/gid/atime/ctime/nlink/ino/dev) and the
+    // atomicity guarantees that std::filesystem's higher-level wrappers
+    // either hide or implement on a best-effort basis.
+
+    // Convert a struct stat into the Praia map shape exposed to user
+    // code. The type string covers all POSIX file types so callers can
+    // dispatch without having to know the bit layout of st_mode. mode
+    // is masked to 0o7777 (low 12 bits = permission + setuid/setgid/
+    // sticky) — the file-type bits live in `.type` instead so callers
+    // don't have to do their own bit-twiddling.
+    auto statToMap = [](const struct stat& st) -> Value {
+        auto m = gcNew<PraiaMap>();
+        std::string typeStr;
+        if      (S_ISREG(st.st_mode))  typeStr = "file";
+        else if (S_ISDIR(st.st_mode))  typeStr = "dir";
+        else if (S_ISLNK(st.st_mode))  typeStr = "symlink";
+        else if (S_ISSOCK(st.st_mode)) typeStr = "socket";
+        else if (S_ISFIFO(st.st_mode)) typeStr = "fifo";
+        else if (S_ISBLK(st.st_mode))  typeStr = "block";
+        else if (S_ISCHR(st.st_mode))  typeStr = "char";
+        else                           typeStr = "unknown";
+        m->entries[Value("type")]  = Value(typeStr);
+        m->entries[Value("size")]  = Value(static_cast<int64_t>(st.st_size));
+        m->entries[Value("mode")]  = Value(static_cast<int64_t>(st.st_mode & 07777));
+        m->entries[Value("uid")]   = Value(static_cast<int64_t>(st.st_uid));
+        m->entries[Value("gid")]   = Value(static_cast<int64_t>(st.st_gid));
+        m->entries[Value("mtime")] = Value(static_cast<int64_t>(st.st_mtime));
+        m->entries[Value("atime")] = Value(static_cast<int64_t>(st.st_atime));
+        m->entries[Value("ctime")] = Value(static_cast<int64_t>(st.st_ctime));
+        m->entries[Value("nlink")] = Value(static_cast<int64_t>(st.st_nlink));
+        m->entries[Value("ino")]   = Value(static_cast<int64_t>(st.st_ino));
+        m->entries[Value("dev")]   = Value(static_cast<int64_t>(st.st_dev));
+        return Value(m);
+    };
+
+    FsImpl fsStat = [statToMap](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.stat() requires a string path", 0);
+        auto& p = args[0].asString();
+        struct stat st;
+        if (::stat(p.c_str(), &st) != 0)
+            throw RuntimeError("fs.stat(): " + p + ": " + std::strerror(errno), 0);
+        return statToMap(st);
+    };
+
+    // lstat differs from stat only in symlink handling: it returns
+    // metadata for the link itself rather than its target. Use this
+    // when "type" should distinguish symlinks from regular files.
+    FsImpl fsLstat = [statToMap](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.lstat() requires a string path", 0);
+        auto& p = args[0].asString();
+        struct stat st;
+        if (::lstat(p.c_str(), &st) != 0)
+            throw RuntimeError("fs.lstat(): " + p + ": " + std::strerror(errno), 0);
+        return statToMap(st);
+    };
+
+    // chmod(2). Mode is an integer; Praia doesn't have octal literals
+    // yet so users will write either decimal (420 == 0o644) or hex
+    // (0x1A4). Mask the user-supplied bits so we can't accidentally
+    // pass through stat-style file-type bits (chmod ignores them but
+    // it's a sharper API).
+    FsImpl fsChmod = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.chmod() requires a string path", 0);
+        if (!args[1].isNumber())
+            throw RuntimeError("fs.chmod() requires a numeric mode", 0);
+        auto& p = args[0].asString();
+        mode_t mode = static_cast<mode_t>(args[1].toInt64ForBitwise()) & 07777;
+        if (::chmod(p.c_str(), mode) != 0)
+            throw RuntimeError("fs.chmod(): " + p + ": " + std::strerror(errno), 0);
+        return Value();
+    };
+
+    // symlink(2). Note POSIX argument order: (target, linkpath) — the
+    // target string is stored verbatim and isn't checked for validity
+    // (dangling symlinks are legal). linkpath is the filesystem
+    // location to create.
+    FsImpl fsSymlink = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString() || !args[1].isString())
+            throw RuntimeError("fs.symlink(target, linkpath) requires two string paths", 0);
+        auto& target   = args[0].asString();
+        auto& linkpath = args[1].asString();
+        if (::symlink(target.c_str(), linkpath.c_str()) != 0)
+            throw RuntimeError("fs.symlink(): " + linkpath + ": " + std::strerror(errno), 0);
+        return Value();
+    };
+
+    // readlink(2). The returned string is whatever the symlink stores
+    // — relative or absolute, possibly dangling. Throws on a non-link.
+    FsImpl fsReadlink = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.readlink() requires a string path", 0);
+        auto& p = args[0].asString();
+        // PATH_MAX-sized scratch then grow if the link is longer (rare
+        // but possible — Linux allows symlink contents up to ~4096
+        // bytes; macOS allows somewhat less but still over PATH_MAX
+        // for our purposes).
+        std::vector<char> buf(1024);
+        while (true) {
+            ssize_t n = ::readlink(p.c_str(), buf.data(), buf.size());
+            if (n < 0)
+                throw RuntimeError("fs.readlink(): " + p + ": " + std::strerror(errno), 0);
+            if (static_cast<size_t>(n) < buf.size())
+                return Value(std::string(buf.data(), n));
+            // Buffer was exactly filled — symlink may have been
+            // truncated. Double the buffer and retry.
+            buf.resize(buf.size() * 2);
+        }
+    };
+
+    // fs.atomicWrite(path, content) — write content to a sibling temp
+    // file, fsync, then rename(2) onto path. POSIX rename is atomic on
+    // the same filesystem: readers see either the old contents or the
+    // new ones, never a half-written file. Closes the "config
+    // truncated by Ctrl-C / power loss" hole.
+    //
+    // On failure anywhere, unlink the temp file so we don't leave
+    // .tmp.XXXXXX droppings behind.
+    FsImpl fsAtomicWrite = [](const std::vector<Value>& args) -> Value {
+        if (!args[0].isString())
+            throw RuntimeError("fs.atomicWrite() requires a string path", 0);
+        auto& targetPath = args[0].asString();
+        // Allow strings or bytes for content. toString() copes with both;
+        // for bytes we want raw payload not a stringified representation,
+        // but Praia's bytes Value stringifies to its raw bytes already.
+        std::string content = args[1].toString();
+
+        // Sibling temp file — must be on the same filesystem as the
+        // target so rename(2) stays atomic. Derive a template from
+        // the target's parent directory + basename.
+        fs::path tgt(targetPath);
+        fs::path dir = tgt.parent_path();
+        if (dir.empty()) dir = ".";
+        std::string tmpl = (dir / ("." + tgt.filename().string() + ".XXXXXX")).string();
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+
+        int fd = ::mkstemp(buf.data());
+        if (fd < 0)
+            throw RuntimeError("fs.atomicWrite(): mkstemp failed for " + targetPath +
+                               ": " + std::strerror(errno), 0);
+        std::string tmpPath(buf.data());
+
+        // Lambda to unlink the temp on any error path before
+        // re-throwing.
+        auto bail = [&](const std::string& msg) {
+            ::close(fd);
+            ::unlink(tmpPath.c_str());
+            throw RuntimeError("fs.atomicWrite(): " + msg, 0);
+        };
+
+        // mkstemp creates with mode 0600; loosen to 0644 so the
+        // renamed file matches what `fs.write` produces. Users who
+        // want stricter perms can chmod afterwards.
+        if (::fchmod(fd, 0644) != 0)
+            bail("fchmod failed: " + std::string(std::strerror(errno)));
+
+        // Write the full content. write(2) can return short; loop
+        // until done or error.
+        const char* p = content.data();
+        size_t remaining = content.size();
+        while (remaining > 0) {
+            ssize_t n = ::write(fd, p, remaining);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                bail("write failed: " + std::string(std::strerror(errno)));
+            }
+            p += n;
+            remaining -= static_cast<size_t>(n);
+        }
+
+        // fsync the data before the rename. Without this the rename
+        // happens in cache but the new contents may not be on disk
+        // when the rename's metadata commit lands — a crash window
+        // where readers see an empty file. fsync closes that window.
+        if (::fsync(fd) != 0)
+            bail("fsync failed: " + std::string(std::strerror(errno)));
+        if (::close(fd) != 0) {
+            ::unlink(tmpPath.c_str());
+            throw RuntimeError("fs.atomicWrite(): close failed: " +
+                               std::string(std::strerror(errno)), 0);
+        }
+
+        // The atomic step. On the same filesystem this is one
+        // metadata commit; readers see old-or-new, nothing in
+        // between.
+        if (::rename(tmpPath.c_str(), targetPath.c_str()) != 0) {
+            std::string err = std::strerror(errno);
+            ::unlink(tmpPath.c_str());
+            throw RuntimeError("fs.atomicWrite(): rename to " + targetPath +
+                               " failed: " + err, 0);
+        }
+        return Value();
+    };
+
+    // fs.mktemp(prefix?) — race-free temp FILE creation. mkstemp(3)
+    // creates the file with mode 0600 in one syscall; there's no
+    // window between "pick a name" and "create it" where a different
+    // process could race us. Returns the path; the file already
+    // exists empty. (Phase 3 will add a handle-returning variant so
+    // callers don't have to open() it again.)
+    FsImpl fsMktemp = [](const std::vector<Value>& args) -> Value {
+        std::string prefix = "praia";
+        if (!args.empty()) {
+            if (!args[0].isString())
+                throw RuntimeError("fs.mktemp() prefix must be a string", 0);
+            prefix = args[0].asString();
+        }
+        std::error_code ec;
+        auto tmpPath = fs::temp_directory_path(ec);
+        if (ec)
+            throw RuntimeError("fs.mktemp(): " + ec.message(), 0);
+        std::string tmpl = tmpPath.string() + "/" + prefix + ".XXXXXX";
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        int fd = ::mkstemp(buf.data());
+        if (fd < 0)
+            throw RuntimeError("fs.mktemp(): " + std::string(std::strerror(errno)), 0);
+        ::close(fd);  // Phase 3: return a handle instead.
+        return Value(std::string(buf.data()));
+    };
+
     // Register canonical fs.* entries.
-    fsMap->entries[Value("read")]    = Value(makeNative("fs.read",    1,  fsRead));
-    fsMap->entries[Value("write")]   = Value(makeNative("fs.write",   2,  fsWrite));
-    fsMap->entries[Value("append")]  = Value(makeNative("fs.append",  2,  fsAppend));
-    fsMap->entries[Value("exists")]  = Value(makeNative("fs.exists",  1,  fsExists));
-    fsMap->entries[Value("mkdir")]   = Value(makeNative("fs.mkdir",   1,  fsMkdir));
-    fsMap->entries[Value("tempDir")] = Value(makeNative("fs.tempDir", -1, fsTempDir));
-    fsMap->entries[Value("remove")]  = Value(makeNative("fs.remove",  1,  fsRemove));
-    fsMap->entries[Value("readDir")] = Value(makeNative("fs.readDir", 1,  fsReadDir));
-    fsMap->entries[Value("copy")]    = Value(makeNative("fs.copy",    2,  fsCopy));
-    fsMap->entries[Value("move")]    = Value(makeNative("fs.move",    2,  fsMove));
+    fsMap->entries[Value("read")]        = Value(makeNative("fs.read",        1,  fsRead));
+    fsMap->entries[Value("write")]       = Value(makeNative("fs.write",       2,  fsWrite));
+    fsMap->entries[Value("append")]      = Value(makeNative("fs.append",      2,  fsAppend));
+    fsMap->entries[Value("exists")]      = Value(makeNative("fs.exists",      1,  fsExists));
+    fsMap->entries[Value("mkdir")]       = Value(makeNative("fs.mkdir",       1,  fsMkdir));
+    fsMap->entries[Value("tempDir")]     = Value(makeNative("fs.tempDir",     -1, fsTempDir));
+    fsMap->entries[Value("remove")]      = Value(makeNative("fs.remove",      1,  fsRemove));
+    fsMap->entries[Value("readDir")]     = Value(makeNative("fs.readDir",     1,  fsReadDir));
+    fsMap->entries[Value("copy")]        = Value(makeNative("fs.copy",        2,  fsCopy));
+    fsMap->entries[Value("move")]        = Value(makeNative("fs.move",        2,  fsMove));
+    fsMap->entries[Value("stat")]        = Value(makeNative("fs.stat",        1,  fsStat));
+    fsMap->entries[Value("lstat")]       = Value(makeNative("fs.lstat",       1,  fsLstat));
+    fsMap->entries[Value("chmod")]       = Value(makeNative("fs.chmod",       2,  fsChmod));
+    fsMap->entries[Value("symlink")]     = Value(makeNative("fs.symlink",     2,  fsSymlink));
+    fsMap->entries[Value("readlink")]    = Value(makeNative("fs.readlink",    1,  fsReadlink));
+    fsMap->entries[Value("atomicWrite")] = Value(makeNative("fs.atomicWrite", 2,  fsAtomicWrite));
+    fsMap->entries[Value("mktemp")]      = Value(makeNative("fs.mktemp",      -1, fsMktemp));
 
     // Helper: register a deprecated sys.<name> forwarder that calls
     // through to the canonical fs.<name> implementation, emitting a
