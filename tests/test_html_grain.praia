@@ -43,4 +43,56 @@ testing.test("img helper", lam{ in
     testing.assert(image.contains("alt=\"Logo\""), nil)
 })
 
+// ── XSS hardening (Medium audit finding) ────────────────────────
+// element() used to emit content verbatim and accepted any tag/attr
+// name. text(), raw(), and name validation close that gap.
+
+testing.test("text() is an alias for escape with str coercion", lam{ in
+    testing.assertEqual(html.text("a & b"), html.escape("a & b"), nil)
+    // Non-string input is stringified first instead of throwing.
+    testing.assertEqual(html.text(42), "42", nil)
+})
+
+testing.test("element escapes content by default", lam{ in
+    let r = html.element("p", {}, "<script>alert(1)</script>")
+    testing.assert(!r.contains("<script>"), "raw <script> must not appear")
+    testing.assert(r.contains("&lt;script&gt;"), "content must be escaped")
+})
+
+testing.test("element emits raw() verbatim", lam{ in
+    let r = html.element("div", {}, html.raw("<b>trusted</b>"))
+    testing.assertEqual(r, "<div><b>trusted</b></div>", nil)
+})
+
+testing.test("element composes mixed array content", lam{ in
+    let r = html.element("p", {}, [html.text("hi "), html.raw("<em>x</em>"), " & y"])
+    testing.assertEqual(r, "<p>hi <em>x</em> &amp; y</p>", nil)
+})
+
+testing.test("element rejects bad tag names", lam{ in
+    testing.assertThrows(lam{ in html.element("scr ipt", {}, "x") }, "invalid tag name")
+    testing.assertThrows(lam{ in html.element("a><b", {}, "x") }, "invalid tag name")
+    testing.assertThrows(lam{ in html.element("1bad", {}, "x") }, "must start with a letter")
+    testing.assertThrows(lam{ in html.element("", {}, "x") }, "non-empty")
+})
+
+testing.test("element rejects bad attribute names", lam{ in
+    testing.assertThrows(lam{ in html.element("a", {"on click": "x"}, "y") },
+                         "invalid attribute name")
+    testing.assertThrows(lam{ in html.element("a", {"x=y onerror": "z"}, "y") },
+                         "invalid attribute name")
+})
+
+testing.test("element still escapes attribute values", lam{ in
+    let r = html.element("a", {href: "\" onerror=\"alert(1)"}, "x")
+    testing.assert(!r.contains("\" onerror=\"alert(1)"), "raw quote must not leak")
+    testing.assert(r.contains("&quot;"), "quote must be entity-encoded")
+})
+
+testing.test("void elements self-close when content is nil", lam{ in
+    testing.assertEqual(html.element("br", nil, nil), "<br />", nil)
+    let img = html.element("img", {src: "/x.png", alt: "x"}, nil)
+    testing.assert(img.endsWith(" />"), "img must self-close")
+})
+
 testing.done()

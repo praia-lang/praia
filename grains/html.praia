@@ -1,15 +1,29 @@
-// HTML utilities — escaping, unescaping, stripping, and basic element builder
+// HTML utilities — escaping, unescaping, stripping, and a safe element
+// builder.
 //
 // Usage:
 //   use "html"
+//
 //   html.escape("<script>alert('xss')</script>")
 //   // "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
 //
-//   html.stripTags("<p>Hello <b>world</b></p>")
-//   // "Hello world"
+//   html.text("Hello & <world>")
+//   // "Hello &amp; &lt;world&gt;"   — same as escape(); the spelling
+//   //                                  expresses intent ("render as text").
 //
-//   html.element("a", {href: "/about", class: "link"}, "About")
-//   // '<a href="/about" class="link">About</a>'
+//   html.element("a", {href: "/about", class: "link"}, "<About>")
+//   // '<a href="/about" class="link">&lt;About&gt;</a>'
+//   //  ^ content escaped by default — caller-controlled strings are
+//   //    treated as text, not markup.
+//
+//   html.element("div", {}, html.raw("<b>pre-rendered</b>"))
+//   // '<div><b>pre-rendered</b></div>'  — opt-in unescaped content for
+//   //                                    output you already trust
+//   //                                    (e.g. a markdown renderer).
+//
+// Security: element() validates tag and attribute names against
+// `[A-Za-z][A-Za-z0-9_-]*` and refuses anything else, so callers can't
+// inject angle brackets or whitespace via dynamic names.
 
 func escape(s) {
     return s.replace("&", "&amp;")
@@ -29,31 +43,92 @@ func unescape(s) {
         .replace("&#x2F;", "/")
 }
 
+// `text(s)` is the explicit "this is text, escape it for HTML"
+// helper. Identical to escape() but reads more naturally at call
+// sites — `html.text(comment.body)` says "render the comment body as
+// HTML-safe text" without making the reader pause on what escape()
+// escapes from/to.
+func text(s) {
+    return escape(str(s))
+}
+
 func stripTags(s) {
     return s.replacePattern("<[^>]*>", "")
 }
 
-// Build an HTML element string
+// Mark a string as pre-trusted HTML so element() emits it verbatim.
+// Use this only for output produced by a renderer you trust (markdown,
+// a templating engine that already escaped its inputs, etc.). Never
+// pass user input directly — that's the XSS vector this whole module
+// is designed to close.
+func raw(s) {
+    return RawHtml(str(s))
+}
+
+func _isRaw(v) {
+    return (v is "tagged") && v.tag == "RawHtml"
+}
+
+// Validate an identifier-shaped name (tag or attribute). Allowed:
+// ASCII letter to start, then letters/digits/hyphens/underscores.
+// This is intentionally stricter than the HTML spec — the spec is too
+// permissive to be safe when names come from data.
+func _validName(s, kind) {
+    if (type(s) != "string" || len(s) == 0) {
+        throw "html.element: " + kind + " must be a non-empty string"
+    }
+    let first = s[0]
+    let alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    let rest = alpha + "0123456789-_"
+    if (!alpha.contains(first)) {
+        throw "html.element: invalid " + kind + " \"" + s + "\" (must start with a letter)"
+    }
+    for (i in 1..len(s)) {
+        if (!rest.contains(s[i])) {
+            throw "html.element: invalid " + kind + " \"" + s + "\" (bad char at " + i + ")"
+        }
+    }
+}
+
+// Render content for placement inside an element. Strings are
+// escaped. Raw-marked values are emitted verbatim. Arrays recurse so
+// mixed content like `[text(name), " says: ", raw(rendered)]` works.
+// Anything else gets stringified and escaped.
+func _renderContent(v) {
+    if (v == nil) { return "" }
+    if (_isRaw(v)) { return v.values[0] }
+    if (v is "array") {
+        let out = ""
+        for (i in 0..len(v)) {
+            out = out + _renderContent(v[i])
+        }
+        return out
+    }
+    return escape(str(v))
+}
+
+// Build an HTML element string. Tag and attribute names are validated.
+// Attribute values are stringified and escaped (always). Content is
+// escaped by default; pass `html.raw(s)` to opt out for trusted
+// strings, or an array to compose mixed pieces.
 func element(tag, attrs, content) {
+    _validName(tag, "tag name")
     let result = "<" + tag
     if (attrs) {
         let ks = keys(attrs)
         for (k in ks) {
+            _validName(k, "attribute name")
             result = result + " " + k + "=\"" + escape(str(attrs[k])) + "\""
         }
     }
 
     // Self-closing tags
     let voidTags = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]
-    if (!content && voidTags.contains(tag)) {
+    if ((content == nil) && voidTags.contains(tag)) {
         return result + " />"
     }
 
-    result = result + ">"
-    if (content) {
-        result = result + str(content)
-    }
-    return result + "</" + tag + ">"
+    return result + ">" + _renderContent(content) + "</" + tag + ">"
 }
 
 // Convenience builders
@@ -76,4 +151,4 @@ func img(src, alt, attrs) {
     return element("img", allAttrs, nil)
 }
 
-export { escape, unescape, stripTags, element, a, img }
+export { escape, unescape, text, stripTags, raw, element, a, img }
