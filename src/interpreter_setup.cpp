@@ -2292,7 +2292,12 @@ Interpreter::Interpreter() {
 
     globals->define("time", Value(timeMap));
 
-    // ── math namespace (built-in, replaces grains/math.praia for C++ math) ──
+    // ── math namespace ──
+    // Builtin globally, so users never need `use "math"`. (An earlier
+    // grains/math.praia tried to "extend" this namespace with square
+    // and cube, but the grain mechanism shadows rather than merges,
+    // so the grain quietly wiped out PI/E/sqrt/.. for users who tried
+    // it. square and cube live here now and the grain is gone.)
 
     auto mathMap = gcNew<PraiaMap>();
 
@@ -2397,6 +2402,22 @@ Interpreter::Interpreter() {
             double a = args[0].asNumber(), b = args[1].asNumber();
             double epsilon = (args.size() >= 3 && args[2].isNumber()) ? args[2].asNumber() : 1e-9;
             return Value(std::fabs(a - b) < epsilon);
+        }));
+
+    mathMap->entries[Value("square")] = Value(makeNative("math.square", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isNumber())
+                throw RuntimeError("math.square() requires a number", 0);
+            double x = args[0].asNumber();
+            return Value(x * x);
+        }));
+
+    mathMap->entries[Value("cube")] = Value(makeNative("math.cube", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isNumber())
+                throw RuntimeError("math.cube() requires a number", 0);
+            double x = args[0].asNumber();
+            return Value(x * x * x);
         }));
 
     globals->define("math", Value(mathMap));

@@ -1,17 +1,14 @@
-// ── Built-in math namespace ──
+// ── Built-in math namespace (no `use` needed) ──
 print("PI =", math.PI)
 print("E =", math.E)
 print("sqrt(144) =", math.sqrt(144))
 print("abs(-42) =", math.abs(-42))
 print("clamp(150, 0, 100) =", math.clamp(150, 0, 100))
-
-// ── Import grains from the grains/ directory ──
-use "math"
-use "strings"
-
-// ── Use math grain (extends built-in with square/cube) ──
 print("square(7) =", math.square(7))
 print("cube(3) =", math.cube(3))
+
+// ── Import grains from the grains/ directory ──
+use "strings"
 
 // ── Use strings grain ──
 print(strings.repeat("ha", 3))

@@ -1,7 +1,0 @@
-// This grain re-exports the built-in math namespace
-// plus any extra utility functions
-
-func square(x) { return x * x }
-func cube(x) { return x * x * x }
-
-export { square, cube }
