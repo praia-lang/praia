@@ -1,4 +1,5 @@
 #include "../builtins.h"
+#include "../encoding.h"
 #include "../unicode.h"
 #include "../value.h"
 #include "../vm/vm.h"
@@ -488,6 +489,22 @@ Value getStringMethod(const std::string& strRef,
             size_t end = str.find_last_not_of(" \t\n\r");
             if (end == std::string::npos) return Value(std::string(""));
             return Value(str.substr(0, end + 1));
+        }));
+    }
+    if (name == "encode") {
+        // Encode this UTF-8 string into bytes in the named encoding.
+        // The returned value is a Praia bytes value (just a string at
+        // the C++ level) — pass it to bytes.* helpers or write it to
+        // a file. Throws on unencodable codepoints (e.g. emoji into
+        // latin-1) or unknown encoding names.
+        return Value(makeNative("encode", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("encode() requires an encoding name (e.g. 'utf-8', 'latin-1', 'utf-16le')", 0);
+            try {
+                return Value(praia::encoding::encode(str, args[0].asString()));
+            } catch (const praia::encoding::EncodingError& e) {
+                throw RuntimeError(std::string("encode(): ") + e.what(), 0);
+            }
         }));
     }
     if (name == "reverse") {

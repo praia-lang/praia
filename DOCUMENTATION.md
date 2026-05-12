@@ -5031,6 +5031,34 @@ if (unicode.foldKey(query) == unicode.foldKey(candidate)) {
 
 `collateKey` is good enough for case-insensitive alphabetical sort of user-visible names but is not a UCA-grade locale collator. It uses Unicode-default ordering: accented variants of a letter sort to the END of that letter's section rather than interleaving with un-accented variants (real UCA would put "élan" right after "elan"). Applications that need real locale-specific tailoring — Spanish "ll", Swedish ä-after-z, Turkish dotless-i — should link ICU and call `ucol_*` directly.
 
+### Encoding conversions
+
+`s.encode(encoding)` converts a UTF-8 string into bytes in the named encoding; `bytes.decode(b, encoding)` is the inverse.
+
+| Encoding | Notes |
+|----------|-------|
+| `"utf-8"` | Identity with validation — invalid UTF-8 throws rather than passing through |
+| `"utf-16le"` / `"utf-16be"` | Surrogate pairs for codepoints ≥ U+10000; odd byte counts and lone surrogates rejected on decode |
+| `"latin-1"` (alias `"iso-8859-1"`) | Single-byte per codepoint; codepoints > U+00FF throw on encode |
+| `"ascii"` | Codepoints/bytes must be < U+0080 / < 0x80 |
+
+Encoding names are case-insensitive and ignore `-` / `_`, so `"UTF-8"`, `"utf8"`, and `"Utf_8"` all resolve to the same encoder.
+
+```
+"café".encode("latin-1")           // bytes 63 61 66 e9 (4 bytes, "é" as a single byte 0xE9)
+"café".encode("utf-8")             // bytes 63 61 66 c3 a9 (5 bytes, "é" as two)
+"\u{1F600}".encode("utf-16le")     // bytes 3d d8 00 de (surrogate pair, little-endian units)
+
+let raw = fs.read("legacy.txt")    // unknown — treat as bytes
+let text = bytes.decode(raw, "latin-1")  // most "binary safe" interpretation
+
+// Unencodable codepoints throw rather than silently corrupting:
+"\u{1F600}".encode("latin-1")      // throws: "codepoint U+01F600 is not encodable in latin-1"
+"\u{E9}".encode("ascii")           // throws: "codepoint U+00E9 is not encodable in ASCII"
+```
+
+Asian legacy encodings (Shift-JIS, GBK, EUC-KR, Big5, Windows-125x) are out of scope and not bundled — they need either table-based decoders or libiconv. Open an issue if you have a concrete interop need.
+
 ### Grapheme-aware reverse
 
 `.reverse()` on strings reverses grapheme clusters, not bytes or codepoints. This is the only sane choice for visually correct reversal — naive byte-reverse would place combining marks before their base letter and shred emoji ZWJ sequences.
