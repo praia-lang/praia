@@ -4279,6 +4279,49 @@ let ecSig = crypto.sign("data", ecKeys.privateKey, "sha256")
 crypto.verify("data", ecSig, ecKeys.publicKey, "sha256")  // true
 ```
 
+### X.509 certificate parsing
+
+| Function | Description |
+|----------|-------------|
+| `crypto.parseCertificate(pemOrDer)` | Parse a single certificate; accepts PEM text or DER bytes. Returns the field map below |
+| `crypto.parseCertificateChain(pem)` | Parse all PEM certificates in the input (server + intermediates). Returns an array |
+
+Returned field map:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `version` | int | X.509 version (typically 3) |
+| `serial` | string | Serial number as lowercase hex (real serials are 128+ bits, don't fit in int64) |
+| `subject` | map | DN keyed by short name: `CN`, `O`, `OU`, `C`, `ST`, `L`, ... |
+| `subjectString` | string | OpenSSL `/CN=foo/O=bar` one-liner form of the DN |
+| `issuer` / `issuerString` | map / string | Same shape as subject, for the certificate's issuer |
+| `notBefore` / `notAfter` | string | Validity bounds as ISO 8601 (`"2026-05-12T12:27:46Z"`) |
+| `sigAlg` | string | Signature algorithm long name (e.g. `"sha256WithRSAEncryption"`) |
+| `sans` | array | SubjectAltName entries: `[{type: "DNS"\|"IP"\|"email"\|"URI", value: ...}, ...]` |
+| `fingerprintSha256` | string | 64-char lowercase hex SHA-256 of the DER form; the standard cert identifier |
+| `isCA` | bool | True iff basicConstraints flags this as a CA cert |
+| `publicKey` | string | The certificate's public key, exported as a PEM SubjectPublicKeyInfo block |
+| `publicKeyInfo` | map | `{type, bits}` — algorithm short name (`"rsaEncryption"`, `"id-ecPublicKey"`, ...) and key size |
+
+```
+let pem = fs.read("server.crt")
+let c = crypto.parseCertificate(pem)
+
+print(c.subject.CN)             // "example.com"
+print(c.notAfter)               // "2026-08-15T00:00:00Z"
+print(c.fingerprintSha256)      // a3:e1:... (no colons; 64 hex chars)
+for (s in c.sans) {
+    print(s.type + ": " + s.value)
+}
+
+// Parse a bundle (server cert + intermediates).
+let bundle = fs.read("fullchain.pem")
+let chain = crypto.parseCertificateChain(bundle)
+print("chain depth:", len(chain))
+```
+
+What's deliberately NOT exposed: the full extension table, AuthorityInfoAccess, CRL distribution points, Certificate Transparency SCTs. Adding any specific extension is mechanical — open an issue if you have a concrete use case.
+
 ---
 
 ## Secrets

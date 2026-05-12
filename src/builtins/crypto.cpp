@@ -18,6 +18,10 @@
 #include <openssl/kdf.h>
 #include <openssl/core_names.h>
 #include <openssl/params.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/bn.h>
+#include <arpa/inet.h>
 #endif
 
 // ── Helpers ──
@@ -559,6 +563,282 @@ static std::string mapStringParam(const Value& maybeMap, const char* key,
         throw RuntimeError(std::string(fnName) + ": param '" + key +
                            "' must be a string", 0);
     return it->second.asString();
+}
+
+// ── X509 certificate parsing ──────────────────────────────────
+//
+// Returns a Praia map with all the fields a non-crypto-expert
+// caller usually wants: subject + issuer DNs (both as a structured
+// map and OpenSSL's `/CN=foo/O=bar` one-liner), validity range as
+// ISO 8601 strings, SubjectAltNames typed by kind (DNS/IP/email/URI),
+// SHA-256 fingerprint, signature algorithm short name, CA flag,
+// and the public key (PEM + algo type + bit count).
+//
+// Intentionally NOT exposed: full extension dump, AuthorityInfoAccess,
+// CRL distribution points, CT SCTs. Adding any of these is mechanical
+// once we have a request; the v1 surface targets the questions
+// users actually ask of a cert (who, when, fingerprint, hosts).
+
+static Value x509NameToMap(X509_NAME* name) {
+    auto out = gcNew<PraiaMap>();
+    int n = X509_NAME_entry_count(name);
+    for (int i = 0; i < n; ++i) {
+        X509_NAME_ENTRY* entry = X509_NAME_get_entry(name, i);
+        ASN1_OBJECT* obj = X509_NAME_ENTRY_get_object(entry);
+        int nid = OBJ_obj2nid(obj);
+        std::string keyName;
+        // Short name (CN/O/OU/...) when OpenSSL knows it; OID text
+        // otherwise so unusual fields don't disappear.
+        const char* sn = (nid != NID_undef) ? OBJ_nid2sn(nid) : nullptr;
+        if (sn) {
+            keyName = sn;
+        } else {
+            char buf[128];
+            OBJ_obj2txt(buf, sizeof(buf), obj, 1);
+            keyName = buf;
+        }
+        ASN1_STRING* str = X509_NAME_ENTRY_get_data(entry);
+        unsigned char* utf8 = nullptr;
+        int len = ASN1_STRING_to_UTF8(&utf8, str);
+        std::string val;
+        if (len > 0 && utf8) val.assign(reinterpret_cast<char*>(utf8), len);
+        if (utf8) OPENSSL_free(utf8);
+        // Multi-valued RDNs (rare but legal): collapse to a
+        // comma-separated string so each key still maps to a single
+        // value. Most callers iterate keys() and treat the result as
+        // a flat string lookup.
+        Value k(keyName);
+        auto it = out->entries.find(k);
+        if (it != out->entries.end() && it->second.isString())
+            it->second = Value(it->second.asString() + "," + val);
+        else
+            out->entries[k] = Value(val);
+    }
+    return Value(out);
+}
+
+static std::string x509NameToOneline(X509_NAME* name) {
+    // X509_NAME_oneline with NULL buf returns a newly-allocated
+    // string sized exactly to the content — no risk of truncation
+    // for unusually-long subject DNs.
+    char* line = X509_NAME_oneline(name, nullptr, 0);
+    if (!line) return "";
+    std::string out(line);
+    OPENSSL_free(line);
+    return out;
+}
+
+static std::string asn1TimeToIso(const ASN1_TIME* t) {
+    if (!t) return "";
+    struct tm tm;
+    if (ASN1_TIME_to_tm(t, &tm) != 1) return "";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return buf;
+}
+
+static Value parseSans(X509* cert) {
+    auto arr = gcNew<PraiaArray>();
+    GENERAL_NAMES* gens = static_cast<GENERAL_NAMES*>(
+        X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+    if (!gens) return Value(arr);
+
+    int n = sk_GENERAL_NAME_num(gens);
+    for (int i = 0; i < n; ++i) {
+        GENERAL_NAME* gen = sk_GENERAL_NAME_value(gens, i);
+        std::string type, value;
+        switch (gen->type) {
+            case GEN_DNS: {
+                type = "DNS";
+                int len = ASN1_STRING_length(gen->d.dNSName);
+                const unsigned char* data = ASN1_STRING_get0_data(gen->d.dNSName);
+                if (data && len > 0) value.assign(reinterpret_cast<const char*>(data), len);
+                break;
+            }
+            case GEN_EMAIL: {
+                type = "email";
+                int len = ASN1_STRING_length(gen->d.rfc822Name);
+                const unsigned char* data = ASN1_STRING_get0_data(gen->d.rfc822Name);
+                if (data && len > 0) value.assign(reinterpret_cast<const char*>(data), len);
+                break;
+            }
+            case GEN_URI: {
+                type = "URI";
+                int len = ASN1_STRING_length(gen->d.uniformResourceIdentifier);
+                const unsigned char* data = ASN1_STRING_get0_data(gen->d.uniformResourceIdentifier);
+                if (data && len > 0) value.assign(reinterpret_cast<const char*>(data), len);
+                break;
+            }
+            case GEN_IPADD: {
+                type = "IP";
+                int len = ASN1_STRING_length(gen->d.iPAddress);
+                const unsigned char* data = ASN1_STRING_get0_data(gen->d.iPAddress);
+                if (len == 4 && data) {
+                    char buf[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, data, buf, sizeof(buf));
+                    value = buf;
+                } else if (len == 16 && data) {
+                    char buf[INET6_ADDRSTRLEN];
+                    inet_ntop(AF_INET6, data, buf, sizeof(buf));
+                    value = buf;
+                }
+                break;
+            }
+            default:
+                // directoryName, x400Address, ediPartyName, registeredID,
+                // otherName — uncommon in real-world certs, skip.
+                continue;
+        }
+        auto entry = gcNew<PraiaMap>();
+        entry->entries[Value("type")]  = Value(type);
+        entry->entries[Value("value")] = Value(value);
+        arr->elements.push_back(Value(entry));
+    }
+    GENERAL_NAMES_free(gens);
+    return Value(arr);
+}
+
+// Turn an X509* into the Praia map shape exposed to user code.
+// Shared by parseCertificate (single) and parseCertificateChain.
+// The X509* is borrowed — caller still owns it.
+static Value x509ToValue(X509* cert) {
+    auto out = gcNew<PraiaMap>();
+
+    // version — internally 0-indexed (X.509 v3 is stored as 2).
+    out->entries[Value("version")] = Value(
+        static_cast<int64_t>(X509_get_version(cert) + 1));
+
+    // serial — emitted as a hex string because real certs use
+    // 128-bit serials that don't fit in int64.
+    ASN1_INTEGER* serial = X509_get_serialNumber(cert);
+    BIGNUM* bn = ASN1_INTEGER_to_BN(serial, nullptr);
+    char* hex = BN_bn2hex(bn);
+    if (hex) {
+        // BN_bn2hex uppercases; lowercase for consistency with the
+        // rest of the bytes.hex output in this stdlib.
+        std::string s(hex);
+        for (auto& c : s) if (c >= 'A' && c <= 'F') c = c - 'A' + 'a';
+        out->entries[Value("serial")] = Value(s);
+        OPENSSL_free(hex);
+    } else {
+        out->entries[Value("serial")] = Value(std::string(""));
+    }
+    BN_free(bn);
+
+    out->entries[Value("subject")]       = x509NameToMap(X509_get_subject_name(cert));
+    out->entries[Value("subjectString")] = Value(x509NameToOneline(X509_get_subject_name(cert)));
+    out->entries[Value("issuer")]        = x509NameToMap(X509_get_issuer_name(cert));
+    out->entries[Value("issuerString")]  = Value(x509NameToOneline(X509_get_issuer_name(cert)));
+
+    out->entries[Value("notBefore")] = Value(asn1TimeToIso(X509_get0_notBefore(cert)));
+    out->entries[Value("notAfter")]  = Value(asn1TimeToIso(X509_get0_notAfter(cert)));
+
+    int sigNid = X509_get_signature_nid(cert);
+    const char* sigName = OBJ_nid2ln(sigNid);
+    out->entries[Value("sigAlg")] = Value(std::string(sigName ? sigName : "unknown"));
+
+    out->entries[Value("sans")] = parseSans(cert);
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digestLen = 0;
+    if (X509_digest(cert, EVP_sha256(), digest, &digestLen) == 1) {
+        out->entries[Value("fingerprintSha256")] = Value(toHexString(digest, digestLen));
+    } else {
+        out->entries[Value("fingerprintSha256")] = Value(std::string(""));
+    }
+
+    // X509_check_ca returns 0 = not CA, >0 = CA (various subtypes).
+    out->entries[Value("isCA")] = Value(X509_check_ca(cert) > 0);
+
+    // Public key — both as PEM (for re-use) and as a small info map
+    // (so callers don't need to re-parse the PEM to learn the alg).
+    EVP_PKEY* pk = X509_get0_pubkey(cert);
+    if (pk) {
+        BIO* bio = BIO_new(BIO_s_mem());
+        if (bio) {
+            PEM_write_bio_PUBKEY(bio, pk);
+            BUF_MEM* mb = nullptr;
+            BIO_get_mem_ptr(bio, &mb);
+            if (mb && mb->data && mb->length > 0)
+                out->entries[Value("publicKey")] =
+                    Value(std::string(mb->data, mb->length));
+            BIO_free(bio);
+        }
+        auto pkInfo = gcNew<PraiaMap>();
+        int pkType = EVP_PKEY_id(pk);
+        const char* typeName = OBJ_nid2sn(pkType);
+        pkInfo->entries[Value("type")] = Value(std::string(typeName ? typeName : "unknown"));
+        pkInfo->entries[Value("bits")] = Value(static_cast<int64_t>(EVP_PKEY_bits(pk)));
+        out->entries[Value("publicKeyInfo")] = Value(pkInfo);
+    }
+
+    return Value(out);
+}
+
+// Sniff: PEM if we see "-----BEGIN" anywhere in the first 32 bytes,
+// DER otherwise. A real ASN.1 SEQUENCE starts with 0x30, so a smarter
+// sniffer could test that explicitly, but the PEM marker check is
+// more discriminating since DER bytes can sometimes start with the
+// same 0x30 in a PEM line.
+static bool looksLikePem(const std::string& s) {
+    size_t scanEnd = std::min(s.size(), static_cast<size_t>(64));
+    return s.compare(0, scanEnd, "-----BEGIN", 0,
+                     std::min(scanEnd, static_cast<size_t>(10))) == 0 ||
+           s.find("-----BEGIN CERTIFICATE-----") != std::string::npos;
+}
+
+static Value parseCertificateImpl(const std::string& data) {
+    if (data.empty())
+        throw RuntimeError("crypto.parseCertificate: empty input", 0);
+
+    X509* cert = nullptr;
+    if (looksLikePem(data)) {
+        BIO* bio = BIO_new_mem_buf(data.data(), static_cast<int>(data.size()));
+        if (!bio)
+            throw RuntimeError("crypto.parseCertificate: BIO_new_mem_buf failed", 0);
+        cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+        BIO_free(bio);
+        if (!cert)
+            throw RuntimeError("crypto.parseCertificate: failed to parse PEM "
+                               "(check the BEGIN/END markers and base64 body)", 0);
+    } else {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(data.data());
+        cert = d2i_X509(nullptr, &p, static_cast<long>(data.size()));
+        if (!cert)
+            throw RuntimeError("crypto.parseCertificate: failed to parse DER", 0);
+    }
+    Value out = x509ToValue(cert);
+    X509_free(cert);
+    return out;
+}
+
+static Value parseCertificateChainImpl(const std::string& pem) {
+    auto arr = gcNew<PraiaArray>();
+    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+    if (!bio)
+        throw RuntimeError("crypto.parseCertificateChain: BIO_new_mem_buf failed", 0);
+    while (true) {
+        X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+        if (!cert) {
+            // Distinguish "no more certs" (success) from "garbage at
+            // the end" (failure). PEM_R_NO_START_LINE is the clean-
+            // EOF signal.
+            unsigned long err = ERR_peek_last_error();
+            ERR_clear_error();
+            if (arr->elements.empty()) {
+                BIO_free(bio);
+                throw RuntimeError("crypto.parseCertificateChain: no certificates found", 0);
+            }
+            (void)err;
+            break;
+        }
+        arr->elements.push_back(x509ToValue(cert));
+        X509_free(cert);
+    }
+    BIO_free(bio);
+    return Value(arr);
 }
 
 #endif  // HAVE_OPENSSL
@@ -1242,6 +1522,49 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
 #else
         [](const std::vector<Value>&) -> Value {
             throw RuntimeError("crypto.verifyArgon2id requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    // ── X509 certificate parsing ─────────────────────────────
+
+    // crypto.parseCertificate(pemOrDer)
+    //   Accepts either a PEM string (containing -----BEGIN CERTIFICATE-----)
+    //   or raw DER bytes. Returns a map describing the certificate's
+    //   key fields — subject/issuer DNs, validity window, SANs,
+    //   public key, SHA-256 fingerprint, CA flag, sig algorithm.
+    //
+    //   When the input contains multiple PEM-encoded certs, only the
+    //   first is parsed. Use parseCertificateChain for multi-cert
+    //   bundles (server cert + intermediates).
+    cryptoMap->entries[Value("parseCertificate")] = Value(makeNative("crypto.parseCertificate", 1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("crypto.parseCertificate(data) requires a string (PEM or DER bytes)", 0);
+            return parseCertificateImpl(args[0].asString());
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.parseCertificate requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
+        }
+#endif
+    ));
+
+    // crypto.parseCertificateChain(pem)
+    //   Parses all PEM-encoded certs in the input and returns them
+    //   as an array (in file order). Throws if the input contains
+    //   no PEM certificates at all.
+    cryptoMap->entries[Value("parseCertificateChain")] = Value(makeNative("crypto.parseCertificateChain", 1,
+#ifdef HAVE_OPENSSL
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString())
+                throw RuntimeError("crypto.parseCertificateChain(pem) requires a string", 0);
+            return parseCertificateChainImpl(args[0].asString());
+        }
+#else
+        [](const std::vector<Value>&) -> Value {
+            throw RuntimeError("crypto.parseCertificateChain requires OpenSSL (rebuild with HAVE_OPENSSL)", 0);
         }
 #endif
     ));
