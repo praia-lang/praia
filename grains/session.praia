@@ -14,9 +14,15 @@ func hasKey(m, k) {
     return keys(m).contains(k)
 }
 
+// 256-bit session token, hex-encoded (64 chars). Pulls straight from
+// the CSPRNG — `crypto.randomBytes` reads /dev/urandom (or the OpenSSL
+// RAND_bytes equivalent on systems that have it) — so the output is
+// unguessable. The previous implementation mixed `time.now()` with two
+// `random.float()` samples and hashed the result; that's predictable
+// because `random.*` uses Mersenne Twister, which an attacker can
+// reverse after observing a few outputs from the same process.
 func generateId() {
-    let raw = time.now().toString() + random.float().toString() + random.float().toString()
-    return crypto.sha256(raw)
+    return bytes.hex(crypto.randomBytes(32))
 }
 
 func create(options) {
@@ -151,4 +157,4 @@ func create(options) {
     }
 }
 
-export { create }
+export { create, generateId }

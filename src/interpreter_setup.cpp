@@ -2060,6 +2060,16 @@ Interpreter::Interpreter() {
     globals->define("crypto", Value(cryptoMap));
 
     // ── random namespace ──
+    //
+    // Mersenne Twister, seeded from std::random_device. Fast and
+    // uniform, suitable for simulations, games, shuffles, jitter, and
+    // any other case where statistical quality is what matters.
+    //
+    // NOT suitable for security: tokens, session IDs, password salts,
+    // UUIDs you treat as unguessable, anything attacker-facing. After
+    // a few hundred outputs MT's internal state can be recovered, and
+    // all future outputs predicted. Use `crypto.randomBytes(n)` for
+    // those — it pulls from the OS CSPRNG (/dev/urandom + friends).
 
     auto randomMap = gcNew<PraiaMap>();
     auto rng = std::make_shared<std::mt19937>(std::random_device{}());
