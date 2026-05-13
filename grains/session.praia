@@ -48,7 +48,20 @@ func create(options) {
 
     if (options) {
         if (hasKey(options, "cookieName")) { cookieName = options.cookieName }
-        if (hasKey(options, "maxAge")) { maxAge = options.maxAge }
+        if (hasKey(options, "maxAge")) {
+            // Validate before assigning: a non-number, NaN, infinity, or
+            // negative value would otherwise propagate into maxAgeMs and
+            // produce nonsense expiresAt timestamps (NaN comparisons
+            // are always false, so an entry could become un-evictable).
+            // Silently fall back to the default rather than throwing —
+            // this matches how the other options behave on bad input.
+            let m = options.maxAge
+            if (type(m) == "int" || type(m) == "float") {
+                if (!math.isNan(m) && !math.isInf(m) && m >= 0) {
+                    maxAge = m
+                }
+            }
+        }
         if (hasKey(options, "secure")) { cookieOptions.secure = options.secure }
         if (hasKey(options, "sameSite")) { cookieOptions.sameSite = options.sameSite }
     }

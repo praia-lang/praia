@@ -52,6 +52,24 @@ testing.test("build: rejects '=' / ';' / whitespace in name", lam{ in
     testing.assertThrows(lam{ in cookie.build("ses sion", "x", nil) }, "invalid character in name")
 })
 
+testing.test("build: rejects control bytes and non-ASCII in name", lam{ in
+    // CTLs (< 0x20 and == 0x7F) and any non-ASCII grapheme are outside
+    // the RFC 7230 tchar allow-list and must be rejected.
+    testing.assertThrows(lam{ in cookie.build("ses\x01ion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("ses\x7fion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("ses\x1fion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("café",       "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("名前",       "x", nil) }, "invalid character in name")
+})
+
+testing.test("build: accepts the full tchar punctuation set in names", lam{ in
+    // Valid tchar punctuation per RFC 7230 — used by some real cookie
+    // schemes (e.g. csrf-token, _ga, .session_id).
+    let h = cookie.build("!#$%&'*+-.^_`|~", "x", nil)
+    testing.assert(h.startsWith("!#$%&'*+-.^_`|~="),
+        "tchar punctuation must round-trip into the name unchanged")
+})
+
 testing.test("build: rejects unknown sameSite values", lam{ in
     testing.assertThrows(
         lam{ in cookie.build("session", "abc", {sameSite: "Bogus"}) },

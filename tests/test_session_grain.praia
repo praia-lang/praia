@@ -39,14 +39,17 @@ func _runReq(mw, cookieHeader) {
     return req
 }
 
-// We use a negative maxAge to make every session record already-expired
-// at creation. That tests the eviction + sweep paths without any
+// We use maxAge: 0 to make every session record already-expired at
+// creation (expiresAt = now + 0ms = now, and the eviction check is
+// `expiresAt <= now`). That tests the eviction + sweep paths without
 // wall-clock sleeps (which are slow AND flaky when the test runner has
-// other timing-sensitive tests in flight). Sliding-window behaviour is
-// verified by inspection — the `_touch` call in the middleware refreshes
-// expiresAt on every hit.
+// other timing-sensitive tests in flight). Negative maxAge would also
+// work in principle, but session.create() now validates input and
+// falls back to the 86400s default on a negative value. Sliding-window
+// behaviour is verified by inspection — the `_touch` call in the
+// middleware refreshes expiresAt on every hit.
 testing.test("expired session ID is rejected on the next request", lam{ in
-    let sessions = session.create({maxAge: -1})  // born expired
+    let sessions = session.create({maxAge: 0})  // born expired
     let mw = sessions.middleware()
 
     let req1 = _runReq(mw, "")
@@ -63,10 +66,35 @@ testing.test("expired session ID is rejected on the next request", lam{ in
         "stale record was swept; only the fresh session remains")
 })
 
+testing.test("invalid maxAge falls back to the default (no NaN expiresAt)", lam{ in
+    // A non-number / NaN / negative maxAge must not propagate into the
+    // expiresAt math. The original code wrote whatever the user passed
+    // into maxAgeMs verbatim, so options.maxAge = "foo" produced NaN
+    // timestamps that fail every <= comparison (sessions become
+    // un-evictable). Each call below should produce a long-lived
+    // session because the validator silently substituted the default.
+    let cases = [
+        session.create({maxAge: -1}),
+        session.create({maxAge: "1 hour"}),
+        session.create({maxAge: nil}),
+        session.create({maxAge: math.sqrt(-1.0)})  // NaN
+    ]
+    for (s in cases) {
+        let mw = s.middleware()
+        let req1 = _runReq(mw, "")
+        let id1 = req1.session.id
+        // Replay should hit the SAME session — none of these inputs
+        // produces an early-expiry record.
+        let req2 = _runReq(mw, "praia.sid=" + id1)
+        testing.assertEqual(req2.session.id, id1,
+            "invalid maxAge inputs must fall back to the default (long-lived) value")
+    }
+})
+
 testing.test("sweep prunes stale records on each request", lam{ in
     // Three already-expired sessions, then a fourth request triggers
     // the sweep — count must drop to 1 (only the freshly-minted one).
-    let sessions = session.create({maxAge: -1})
+    let sessions = session.create({maxAge: 0})
     let mw = sessions.middleware()
     _runReq(mw, "")
     _runReq(mw, "")

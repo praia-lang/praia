@@ -48,17 +48,26 @@ func parse(header) {
     return result
 }
 
-// Reject any character that would let an attacker-controlled cookie name
-// inject extra attributes. RFC 6265 token grammar: a-z A-Z 0-9 and a
-// subset of punctuation, no whitespace, no separators, no CTLs.
-let _TOKEN_FORBIDDEN = "()<>@,;:\\\"/[]?={} \t\r\n\x00"
+// Allow-list per RFC 7230 `tchar` (token grammar referenced by RFC 6265):
+//   ALPHA / DIGIT / "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+"
+//   / "-" / "." / "^" / "_" / "`" / "|" / "~"
+// Everything else — separators, CTLs (< 0x20 or == 0x7F), non-ASCII
+// bytes — is rejected. The deny-list approach we used before missed
+// most CTLs and all non-ASCII; switching to an allow-list is both
+// more correct and more secure (default-deny).
+let _TOKEN_ALLOWED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`|~"
 func _validateName(s) {
     if (type(s) != "string" || len(s) == 0) {
         throw "cookie.build: name must be a non-empty string"
     }
     for (i in 0..len(s)) {
-        if (_TOKEN_FORBIDDEN.contains(s[i])) {
-            throw "cookie.build: invalid character in name: '" + s[i] + "'"
+        let c = s[i]
+        // Multi-byte (non-ASCII) graphemes can't be in the allow-list
+        // string (which is pure single-byte ASCII), so .contains() will
+        // miss them — and CTLs / separators aren't in there either, so
+        // .contains() catches them too in one shot.
+        if (!_TOKEN_ALLOWED.contains(c)) {
+            throw "cookie.build: invalid character in name: '" + c + "'"
         }
     }
 }
