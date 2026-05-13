@@ -159,7 +159,15 @@ ParsedUrl parse(const std::string& input) {
 }
 
 std::string hostHeader(const ParsedUrl& u) {
-    return u.hostIsIPv6 ? ("[" + u.host + "]") : u.host;
+    // RFC 7230 §5.4: the Host field is the host (or IP literal) optionally
+    // followed by ":port". We include the port when the URL had one
+    // explicitly written — matches curl's behaviour and is required for
+    // virtual-host routing / reverse proxies that key on Host:port.
+    // Default ports (80/443) are still emitted if the user wrote them;
+    // we honour the URL as given rather than normalizing.
+    std::string h = u.hostIsIPv6 ? ("[" + u.host + "]") : u.host;
+    if (u.hasPort) h += ":" + std::to_string(u.port);
+    return h;
 }
 
 }  // namespace praia::url
