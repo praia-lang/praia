@@ -1,0 +1,34 @@
+use "testing"
+
+// `testing.only` activates focus mode for the rest of the file: subsequent
+// plain `test()` calls become skips. Two `only` tests bracket a regular
+// `test` call to demonstrate.
+
+let _ran = []
+
+// Runs normally because focus mode hasn't been triggered yet.
+testing.test("plain test before only(): runs", lam{ in
+    _ran.push("plain-before")
+    testing.assert(true, nil)
+})
+
+// Activates focus mode. From here on, plain `test()` skips.
+testing.only("first only(): runs", lam{ in
+    _ran.push("only-1")
+    testing.assert(true, nil)
+})
+
+// Skipped because focus mode is on.
+testing.test("plain test after only(): should skip", lam{ in
+    _ran.push("plain-after")  // must NOT execute
+    testing.assert(false, "this body must not run")
+})
+
+// Another only() — also runs.
+testing.only("second only(): also runs, verifies _ran", lam{ in
+    _ran.push("only-2")
+    testing.assertEqual(_ran, ["plain-before", "only-1", "only-2"],
+        "plain-after must not appear: skipped by focus mode")
+})
+
+testing.done()
