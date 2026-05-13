@@ -290,99 +290,6 @@ void setSocketTimeouts(int fd, int ms) {
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
-std::string readAll(SocketConn& conn) {
-    std::string data;
-    char buf[8192];
-    while (true) {
-        errno = 0;
-        ssize_t n = conn.read(buf, sizeof(buf));
-        if (n > 0) { data.append(buf, n); continue; }
-        if (n == 0) break;  // clean EOF (server closed)
-        // n < 0 — distinguish timeout (SO_RCVTIMEO fired) from other
-        // error. EAGAIN/EWOULDBLOCK is what SO_RCVTIMEO surfaces on
-        // Linux/macOS; SSL_read inherits the underlying recv errno.
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            throw RuntimeError("HTTP read timed out", 0);
-        if (errno == EINTR) continue;
-        throw RuntimeError("HTTP read error: " +
-                           std::string(errno ? std::strerror(errno) : "connection broken"), 0);
-    }
-    return data;
-}
-
-// Decode RFC 7230 §4.1 chunked transfer encoding from an in-memory body.
-// Mirrors the streaming decoder in openStream — same chunk-extension and
-// trailer handling, just over a std::string slice instead of a socket.
-// Throws on malformed framing so callers get a clear error rather than
-// silently truncated bytes.
-static std::string decodeChunkedBody(const std::string& enc) {
-    std::string out;
-    out.reserve(enc.size());
-    size_t i = 0;
-    while (i < enc.size()) {
-        // Find end of size line.
-        size_t lineEnd = enc.find("\r\n", i);
-        if (lineEnd == std::string::npos)
-            throw RuntimeError("HTTP chunked: missing CRLF after chunk size", 0);
-        std::string sizeLine = enc.substr(i, lineEnd - i);
-        // Strip chunk extensions after ';' (RFC 7230 §4.1.1) and trailing WS.
-        size_t semi = sizeLine.find(';');
-        if (semi != std::string::npos) sizeLine.resize(semi);
-        while (!sizeLine.empty() &&
-               (sizeLine.back() == ' ' || sizeLine.back() == '\t'))
-            sizeLine.pop_back();
-        if (sizeLine.empty())
-            throw RuntimeError("HTTP chunked: empty chunk size line", 0);
-        int64_t sz = 0;
-        for (char c : sizeLine) {
-            int d;
-            if      (c >= '0' && c <= '9') d = c - '0';
-            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-            else throw RuntimeError(
-                std::string("HTTP chunked: invalid hex in chunk size: '") +
-                c + "'", 0);
-            // Check overflow *before* shifting — signed left-shift past
-            // the value's width is UB. INT64_MAX >> 4 is the largest
-            // value that survives `<< 4 | 0xF`.
-            if (sz > (INT64_MAX >> 4))
-                throw RuntimeError("HTTP chunked: chunk size overflow", 0);
-            sz = (sz << 4) | d;
-        }
-        i = lineEnd + 2;
-        if (sz == 0) {
-            // Terminator: consume trailers until the empty line then stop.
-            // Trailers aren't surfaced — same policy as openStream. The
-            // final empty CRLF is REQUIRED (RFC 7230 §4.1) — without it
-            // the body is truncated, even when no trailer headers were
-            // sent (a `0\r\n` with no following CRLF is malformed).
-            bool sawEnd = false;
-            while (i < enc.size()) {
-                size_t tEnd = enc.find("\r\n", i);
-                if (tEnd == std::string::npos)
-                    throw RuntimeError("HTTP chunked: trailer missing terminating CRLF", 0);
-                bool empty = (tEnd == i);
-                i = tEnd + 2;
-                if (empty) { sawEnd = true; break; }
-            }
-            if (!sawEnd)
-                throw RuntimeError("HTTP chunked: trailer missing terminating CRLF", 0);
-            return out;
-        }
-        if (i + static_cast<size_t>(sz) > enc.size())
-            throw RuntimeError("HTTP chunked: chunk data truncated", 0);
-        out.append(enc, i, static_cast<size_t>(sz));
-        i += static_cast<size_t>(sz);
-        if (i + 2 > enc.size() || enc[i] != '\r' || enc[i + 1] != '\n')
-            throw RuntimeError("HTTP chunked: missing CRLF after chunk data", 0);
-        i += 2;
-    }
-    // Reached end of buffer without seeing the 0-sized terminator. Server
-    // closed mid-chunk — the data we *did* decode is still useful, but
-    // most callers want to know about it.
-    throw RuntimeError("HTTP chunked: stream ended before terminator chunk", 0);
-}
-
 // Parse just status + headers + cookies from a response header section
 // (no trailing \r\n\r\n). Separated from parseHttpResponse so the
 // streaming path (http.openStream) can read its headers without
@@ -468,29 +375,6 @@ static bool responseIsChunked(const std::shared_ptr<PraiaMap>& headers) {
         pos = comma + 1;
     }
     return false;
-}
-
-Value parseHttpResponse(const std::string& raw) {
-    auto headerEnd = raw.find("\r\n\r\n");
-    if (headerEnd == std::string::npos)
-        throw RuntimeError("Invalid HTTP response", 0);
-
-    auto fields = parseResponseHeaders(raw.substr(0, headerEnd));
-    std::string body = raw.substr(headerEnd + 4);
-
-    // Decode Transfer-Encoding: chunked before handing the body to the
-    // caller. Per RFC 7230 §3.3.3, TE-chunked overrides Content-Length
-    // for framing.
-    if (responseIsChunked(fields.headers)) {
-        body = decodeChunkedBody(body);
-    }
-
-    auto result = gcNew<PraiaMap>();
-    result->entries[Value("status")]  = Value(static_cast<double>(fields.status));
-    result->entries[Value("body")]    = Value(body);
-    result->entries[Value("headers")] = Value(fields.headers);
-    result->entries[Value("cookies")] = Value(fields.cookies);
-    return Value(result);
 }
 
 // Limits for incoming requests
@@ -745,6 +629,13 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
 
 } // anonymous namespace
 
+// Forward declaration: defined below the streaming helpers (HttpStreamState
+// + detectStreamMode + streamEnsure) because it leans on them. Reads the
+// full response off `conn` using the framed streaming decoder rather than
+// blocking on EOF, then returns parsed headers and the decoded body.
+static std::pair<ResponseHeaderFields, std::string>
+readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr);
+
 // ── Public API ───────────────────────────────────────────────
 
 // RFC 3986 §5.2.4 remove_dot_segments. Operates on an input path,
@@ -892,6 +783,13 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
                                "\": contains CR/LF/NUL (header injection)", 0);
     }
 
+    // Stack-allocated, exactly as before. We hand a non-owning
+    // shared_ptr to HttpStreamState below — the streaming machinery
+    // expects shared ownership for the openStream path where the
+    // socket outlives the function frame, but here doOneHttpRequest
+    // explicitly drives shutdown_close, so a no-op deleter is the
+    // right shape and avoids extra heap-allocation and any lifetime
+    // change versus the previous readAll() version.
     SocketConn conn;
     conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs);
     // After connect, apply the read/write timeout to the socket so
@@ -998,9 +896,24 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
         conn.shutdown_close();
         throw RuntimeError("Failed to send HTTP request", 0);
     }
-    std::string raw = readAll(conn);
+
+    // Read the response through the framed streaming decoder rather than
+    // slurping until EOF. The old `readAll` would block until the peer
+    // closed — a server that respects HTTP/1.1 framing but ignores our
+    // `Connection: close` request header (or sends `keep-alive` back)
+    // would hang there until the socket timeout, even though the body
+    // was already fully on the wire. The helper stops at Content-Length
+    // or the chunked terminator.
+    std::shared_ptr<SocketConn> connPtr(&conn, [](SocketConn*){});
+    auto [fields, respBody] = readFramedResponse(conn, connPtr);
     conn.shutdown_close();
-    return parseHttpResponse(raw);
+
+    auto result = gcNew<PraiaMap>();
+    result->entries[Value("status")]  = Value(static_cast<double>(fields.status));
+    result->entries[Value("body")]    = Value(std::move(respBody));
+    result->entries[Value("headers")] = Value(fields.headers);
+    result->entries[Value("cookies")] = Value(fields.cookies);
+    return Value(result);
 }
 
 Value doHttpRequest(const std::string& method, const std::string& url,
@@ -1313,35 +1226,11 @@ static void streamEnsure(HttpStreamState& s) {
 // 7230 §3.3.3, Transfer-Encoding (when present) takes precedence
 // over Content-Length. Anything without either is read-until-close.
 static void detectStreamMode(HttpStreamState& s) {
-    auto& h = s.headersMap->entries;
-    auto teIt = h.find(Value(std::string("transfer-encoding")));
-    if (teIt != h.end() && teIt->second.isString()) {
-        std::string te = teIt->second.asString();
-        for (auto& c : te) c = (char)std::tolower((unsigned char)c);
-        // Exact-token match on the comma-separated TE list. Same logic
-        // as the buffered branch in parseHttpResponse — substring
-        // matching would mis-fire on "x-chunked"/"chunked-extension".
-        bool hasChunked = false;
-        size_t pos = 0;
-        while (pos < te.size()) {
-            size_t comma = te.find(',', pos);
-            size_t end = (comma == std::string::npos) ? te.size() : comma;
-            size_t a = pos;
-            while (a < end && (te[a] == ' ' || te[a] == '\t')) a++;
-            size_t b = end;
-            while (b > a && (te[b - 1] == ' ' || te[b - 1] == '\t')) b--;
-            if (b - a == 7 && te.compare(a, 7, "chunked") == 0) {
-                hasChunked = true;
-                break;
-            }
-            if (comma == std::string::npos) break;
-            pos = comma + 1;
-        }
-        if (hasChunked) {
-            s.mode = HttpStreamState::Mode::Chunked;
-            return;
-        }
+    if (responseIsChunked(s.headersMap)) {
+        s.mode = HttpStreamState::Mode::Chunked;
+        return;
     }
+    auto& h = s.headersMap->entries;
     auto clIt = h.find(Value(std::string("content-length")));
     if (clIt != h.end() && clIt->second.isString()) {
         try {
@@ -1382,6 +1271,40 @@ static void readHeadersInto(SocketConn& conn, std::string& headerText,
         if (acc.size() > 1024 * 1024)
             throw RuntimeError("HTTP stream: response headers exceed 1 MiB", 0);
     }
+}
+
+// Read a full response off `conn` using the framed streaming decoder.
+// Used by doOneHttpRequest (the non-streaming http.get / http.request
+// path) so the body read terminates at Content-Length or the chunked
+// 0-terminator rather than waiting for the peer to close. `connPtr`
+// is the same connection wrapped in a shared_ptr — HttpStreamState
+// expects shared ownership.
+static std::pair<ResponseHeaderFields, std::string>
+readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr) {
+    std::string headerText, bodyPrefix;
+    readHeadersInto(conn, headerText, bodyPrefix);
+    std::string headerSection = (headerText.size() >= 4)
+        ? headerText.substr(0, headerText.size() - 4) : headerText;
+    auto fields = parseResponseHeaders(headerSection);
+
+    HttpStreamState state;
+    state.conn       = connPtr;
+    state.status     = fields.status;
+    state.headersMap = fields.headers;
+    state.cookiesArr = fields.cookies;
+    state.scratch    = std::move(bodyPrefix);
+    state.scratchPos = 0;
+    detectStreamMode(state);
+
+    std::string body;
+    while (true) {
+        streamEnsure(state);
+        if (state.bufPos >= state.buf.size()) break;
+        body.append(state.buf.data() + state.bufPos,
+                    state.buf.size() - state.bufPos);
+        state.bufPos = state.buf.size();
+    }
+    return {std::move(fields), std::move(body)};
 }
 
 // Drain whatever body is on the wire for a redirect response. We
