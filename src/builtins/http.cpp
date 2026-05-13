@@ -904,9 +904,18 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
     // would hang there until the socket timeout, even though the body
     // was already fully on the wire. The helper stops at Content-Length
     // or the chunked terminator.
+    //
+    // RAII scope guard so the socket/TLS state is released on every
+    // exit path — readFramedResponse can throw (truncated chunked,
+    // invalid hex, read timeouts) and we MUST not leak the fd or the
+    // OpenSSL context. shutdown_close is idempotent, so a redundant
+    // explicit call on the happy path would be safe too.
     std::shared_ptr<SocketConn> connPtr(&conn, [](SocketConn*){});
+    struct ConnCloseGuard {
+        SocketConn& c;
+        ~ConnCloseGuard() { c.shutdown_close(); }
+    } close_guard{conn};
     auto [fields, respBody] = readFramedResponse(conn, connPtr);
-    conn.shutdown_close();
 
     auto result = gcNew<PraiaMap>();
     result->entries[Value("status")]  = Value(static_cast<double>(fields.status));
@@ -1473,13 +1482,22 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                     }
 
                     // Drain whatever body this 3xx had, then close.
+                    // drainRedirectBody can throw (e.g. truncated chunked
+                    // framing on a misbehaving server); guarantee the
+                    // socket is closed in both paths so we don't leak
+                    // the fd/SSL state across the redirect-loop iteration.
                     HttpStreamState tmp;
                     tmp.conn = conn;
                     tmp.headersMap = parsedHeaders.headers;
                     tmp.scratch = std::move(bodyPrefix);
                     tmp.scratchPos = 0;
                     detectStreamMode(tmp);
-                    drainRedirectBody(tmp);
+                    try {
+                        drainRedirectBody(tmp);
+                    } catch (...) {
+                        conn->shutdown_close();
+                        throw;
+                    }
                     conn->shutdown_close();
 
                     if (status == 303 ||
