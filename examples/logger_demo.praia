@@ -1,0 +1,58 @@
+// ── logger grain demo ──
+//
+// Run with: ./praia examples/logger_demo.praia
+//
+// Walks through the four main capabilities:
+//   1. Plain text sink with level filtering
+//   2. JSON formatter (structured/machine-parseable)
+//   3. .with() for sticky context (per-request loggers)
+//   4. multiSink — write the same record to stdout AND a file
+
+use "logger"
+
+print("── 1. text sink + level filtering ──")
+let log = logger.create("demo")
+log.debug("not shown — default level is info")
+log.info("server up")
+log.warn("disk 80% full")
+log.error("connection refused")
+
+log.setLevel("debug")
+log.debug("now shown — setLevel lowered the threshold")
+
+print("\n── 2. JSON formatter, parseable by any consumer ──")
+let api = logger.create("api", {
+    formatter: logger.jsonFormatter(),
+    level: "debug"
+})
+api.info("served request", {method: "GET", path: "/users/42", status: 200, ms: 12})
+// → {"time":"...","level":"info","name":"api","message":"served request","method":"GET",...}
+
+print("\n── 3. .with() for sticky request-scoped context ──")
+let base = logger.create("svc")
+let req_log = base.with({req_id: "abc-123", tenant: "acme"})
+req_log.info("started")                  // record carries req_id + tenant
+req_log.warn("retrying", {attempt: 2})   // per-call fields layer on top
+req_log.info("done", {duration_ms: 47})
+// .with() can chain — right-most wins on key collisions
+let scoped = req_log.with({user_id: "u-9", tenant: "override"})
+scoped.info("nested context")
+
+print("\n── 4. multiSink: stdout + file fan-out ──")
+let auditPath = "/tmp/praia_logger_demo_audit.log"
+let audited = logger.create("audit", {
+    sink: logger.multiSink([
+        logger.stdoutSink(logger.textFormatter({color: true})),
+        logger.fileSink(auditPath, logger.jsonFormatter())
+    ])
+})
+audited.info("user signed in", {user_id: "u-1"})
+audited.info("user signed out", {user_id: "u-1"})
+audited.close()  // flush + close all sinks
+
+print("\nAudit log written to: " + auditPath)
+print("Contents:")
+print(fs.read(auditPath))
+
+// Clean up
+fs.remove(auditPath)
