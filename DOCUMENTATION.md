@@ -3664,6 +3664,10 @@ log.setLevel("warn")     // only warn and error
 log.setLevel("none")     // silence all
 ```
 
+`setLevel` on any logger in a `.with()` family propagates to every
+related logger (parent, children, siblings) — the threshold is shared
+state, not a per-logger copy.
+
 ### Structured fields
 
 Every emit method accepts an optional map of fields as a second argument:
@@ -3743,8 +3747,10 @@ testing.done()    // exits 0 on success, 1 on any failure
 ```
 
 Assertions: `assert`, `assertEqual`, `assertNotEqual`, `assertThrows`,
-`assertContains` (works on strings, arrays, maps). Multi-line string
-mismatches show a unified diff instead of a flat "expected/got" string.
+`assertContains`. The last works on strings (substring), arrays
+(element membership), and maps (**key presence** — `{a: nil}` counts
+as containing `"a"`). Multi-line string mismatches show a unified diff
+instead of a flat "expected/got" string.
 
 ### Fixtures
 
@@ -3757,8 +3763,10 @@ testing.test("uses a temp dir", lam{ in
 ```
 
 `testing.cleanup(fn)` registers an arbitrary cleanup that runs (in
-reverse order, like Go's `t.Cleanup`) when the test ends — even if
-the body throws.
+reverse registration order, like Go's `t.Cleanup`) when the test ends —
+even if the body throws. Cleanups drain *after* `afterEach` hooks, so an
+`afterEach` may itself call `testing.cleanup()` / `tempDir()` / `tempFile()`
+and have those teardowns honored.
 
 ### File-scoped hooks
 
@@ -3767,8 +3775,12 @@ testing.beforeEach(lam{ in /* shared setup */ })
 testing.afterEach(lam{ in /* shared teardown */ })
 ```
 
-Hooks run around every subsequent `test()` in the file. `afterEach`
-runs even when a body throws.
+Hooks run around every subsequent `test()` in the file. A throwing
+`beforeEach` records the failure and skips the test body — but
+`afterEach` and cleanups still run so anything earlier `beforeEach`
+hooks set up gets torn down. `afterEach` itself runs even when a body
+throws, and an `afterEach` that throws doesn't stop the rest of the
+`afterEach` chain.
 
 ### Subtests and table-driven tests
 
