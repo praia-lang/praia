@@ -633,8 +633,11 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
 // + detectStreamMode + streamEnsure) because it leans on them. Reads the
 // full response off `conn` using the framed streaming decoder rather than
 // blocking on EOF, then returns parsed headers and the decoded body.
+// `method` is the request method — HEAD responses get a zero-byte body
+// regardless of any framing headers (see detectStreamMode).
 static std::pair<ResponseHeaderFields, std::string>
-readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr);
+readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
+                   const std::string& method);
 
 // ── Public API ───────────────────────────────────────────────
 
@@ -915,7 +918,7 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
         SocketConn& c;
         ~ConnCloseGuard() { c.shutdown_close(); }
     } close_guard{conn};
-    auto [fields, respBody] = readFramedResponse(conn, connPtr);
+    auto [fields, respBody] = readFramedResponse(conn, connPtr, method);
 
     auto result = gcNew<PraiaMap>();
     result->entries[Value("status")]  = Value(static_cast<double>(fields.status));
@@ -1234,7 +1237,24 @@ static void streamEnsure(HttpStreamState& s) {
 // Detect the body framing from the parsed response headers. Per RFC
 // 7230 §3.3.3, Transfer-Encoding (when present) takes precedence
 // over Content-Length. Anything without either is read-until-close.
-static void detectStreamMode(HttpStreamState& s) {
+//
+// `method` is the request method (uppercased): HEAD responses MUST
+// have no body regardless of any framing headers the server sets,
+// and the same is true for 1xx / 204 / 304 status responses. We
+// short-circuit those to a zero-length ContentLength mode so
+// streamEnsure reports EOF immediately — otherwise a misbehaving
+// keep-alive server could leave us blocked forever waiting for
+// bytes that aren't coming.
+static void detectStreamMode(HttpStreamState& s, const std::string& method) {
+    bool noBody = (method == "HEAD") ||
+                  (s.status >= 100 && s.status < 200) ||
+                  (s.status == 204) ||
+                  (s.status == 304);
+    if (noBody) {
+        s.mode = HttpStreamState::Mode::ContentLength;
+        s.contentRemaining = 0;
+        return;
+    }
     if (responseIsChunked(s.headersMap)) {
         s.mode = HttpStreamState::Mode::Chunked;
         return;
@@ -1289,7 +1309,8 @@ static void readHeadersInto(SocketConn& conn, std::string& headerText,
 // is the same connection wrapped in a shared_ptr — HttpStreamState
 // expects shared ownership.
 static std::pair<ResponseHeaderFields, std::string>
-readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr) {
+readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
+                   const std::string& method) {
     std::string headerText, bodyPrefix;
     readHeadersInto(conn, headerText, bodyPrefix);
     std::string headerSection = (headerText.size() >= 4)
@@ -1303,7 +1324,7 @@ readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr)
     state.cookiesArr = fields.cookies;
     state.scratch    = std::move(bodyPrefix);
     state.scratchPos = 0;
-    detectStreamMode(state);
+    detectStreamMode(state, method);
 
     std::string body;
     while (true) {
@@ -1442,6 +1463,18 @@ Value httpOpenStream(const std::string& method, const std::string& url,
             throw RuntimeError("Failed to send HTTP request", 0);
         }
 
+        // RAII guard so any throw between here and the hand-off to
+        // HttpStreamState (or to the explicit redirect-path close)
+        // releases the socket. readHeadersInto / parseResponseHeaders /
+        // detectStreamMode / drainRedirectBody all throw on malformed
+        // responses; without this, those paths leaked the fd + SSL.
+        // shutdown_close is idempotent, so explicit closes below don't
+        // collide with the guard's destructor.
+        struct ConnCloseGuard {
+            std::shared_ptr<SocketConn> c;
+            ~ConnCloseGuard() { if (c) c->shutdown_close(); }
+        } close_guard{conn};
+
         std::string headerText, bodyPrefix;
         readHeadersInto(*conn, headerText, bodyPrefix);
 
@@ -1488,10 +1521,11 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                     // the fd/SSL state across the redirect-loop iteration.
                     HttpStreamState tmp;
                     tmp.conn = conn;
+                    tmp.status = status;
                     tmp.headersMap = parsedHeaders.headers;
                     tmp.scratch = std::move(bodyPrefix);
                     tmp.scratchPos = 0;
-                    detectStreamMode(tmp);
+                    detectStreamMode(tmp, currentMethod);
                     try {
                         drainRedirectBody(tmp);
                     } catch (...) {
@@ -1515,7 +1549,11 @@ Value httpOpenStream(const std::string& method, const std::string& url,
             }
         }
 
-        // Final response — build the stream handle.
+        // Final response — build the stream handle. Ownership of conn
+        // transfers to HttpStreamState; the stream handle's close()
+        // method (or the state going out of scope) is responsible for
+        // shutdown_close from here on. Release the guard so its
+        // destructor doesn't double-close before the handle is even used.
         auto state = std::make_shared<HttpStreamState>();
         state->conn       = conn;
         state->status     = status;
@@ -1523,7 +1561,8 @@ Value httpOpenStream(const std::string& method, const std::string& url,
         state->cookiesArr = parsedHeaders.cookies;
         state->scratch    = std::move(bodyPrefix);
         state->scratchPos = 0;
-        detectStreamMode(*state);
+        detectStreamMode(*state, currentMethod);
+        close_guard.c.reset();
 
         auto handle = gcNew<PraiaMap>();
         handle->entries[Value("status")]  = Value(static_cast<int64_t>(state->status));

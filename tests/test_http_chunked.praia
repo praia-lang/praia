@@ -79,6 +79,22 @@ let _serverFuture = async lam{ in
             resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nConnection: close\r\n\r\n" +
                    "5\r\nhello\r\n0\r\n\r\n"
         }
+        elif (path == "/head-trap") {
+            // 200 OK with body bytes — but the client should treat the
+            // HEAD response as no-body and ignore them. We send the
+            // bytes so a buggy client would *read* them and surface
+            // them as `body`; the fixed client returns body="".
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nFAKE!"
+        }
+        elif (path == "/no-body-204") {
+            // 204 No Content MUST have an empty body regardless of any
+            // Content-Length the server includes. A buggy client would
+            // read the trailing FAKE_ bytes; the fixed one ignores them.
+            resp = "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\nConnection: close\r\n\r\nFAKE!"
+        }
+        elif (path == "/no-body-304") {
+            resp = "HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\nConnection: close\r\n\r\nFAKE!"
+        }
         else {
             resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         }
@@ -156,6 +172,35 @@ testing.test("Transfer-Encoding 'gzip, chunked' detects chunked via token split"
     let r = http.get(base + "/te-trailing-chunked")
     testing.assertEqual(r.body, "hello",
         "chunked token in a comma-separated TE list must still be decoded")
+})
+
+// ── No-body-mandated responses ───────────────────────────────
+//
+// Per RFC 7230 §3.3.3, the response body MUST be empty for HEAD
+// requests and for 1xx / 204 / 304 status codes regardless of any
+// framing headers the server includes. We exercise that by sending
+// "FAKE!" body bytes after the headers — a buggy client that respects
+// Content-Length unconditionally would surface those bytes as the
+// body; a correct client treats the no-body status as authoritative
+// and returns body="".
+
+testing.test("HEAD response: ignores body bytes", lam{ in
+    let r = http.request({url: base + "/head-trap", method: "HEAD"})
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "",
+        "HEAD body must be empty regardless of Content-Length / body bytes on the wire")
+})
+
+testing.test("204 No Content: ignores body bytes", lam{ in
+    let r = http.get(base + "/no-body-204")
+    testing.assertEqual(r.status, 204, nil)
+    testing.assertEqual(r.body, "", "204 must have an empty body")
+})
+
+testing.test("304 Not Modified: ignores body bytes", lam{ in
+    let r = http.get(base + "/no-body-304")
+    testing.assertEqual(r.status, 304, nil)
+    testing.assertEqual(r.body, "", "304 must have an empty body")
 })
 
 testing.done()
