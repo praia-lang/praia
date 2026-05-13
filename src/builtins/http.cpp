@@ -693,15 +693,61 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
 
 // ── Public API ───────────────────────────────────────────────
 
+// RFC 3986 §5.2.4 remove_dot_segments. Operates on an input path,
+// stripping "." / ".." segments to canonicalize. Pure-string algorithm
+// straight from the RFC pseudocode — easy to audit against the spec.
+static std::string removeDotSegments(std::string in) {
+    std::string out;
+    while (!in.empty()) {
+        if (in.compare(0, 3, "../") == 0)        in.erase(0, 3);
+        else if (in.compare(0, 2, "./") == 0)    in.erase(0, 2);
+        else if (in.compare(0, 3, "/./") == 0)   in.replace(0, 3, "/");
+        else if (in == "/.")                     in = "/";
+        else if (in.compare(0, 4, "/../") == 0) {
+            in.replace(0, 4, "/");
+            auto slash = out.rfind('/');
+            if (slash != std::string::npos) out.resize(slash);
+            else out.clear();
+        }
+        else if (in == "/..") {
+            in = "/";
+            auto slash = out.rfind('/');
+            if (slash != std::string::npos) out.resize(slash);
+            else out.clear();
+        }
+        else if (in == "." || in == "..") {
+            in.clear();
+        }
+        else {
+            // Move first segment (including leading '/' if any) to output.
+            size_t end = in.find('/', in[0] == '/' ? 1 : 0);
+            if (end == std::string::npos) { out += in; in.clear(); }
+            else { out.append(in, 0, end); in.erase(0, end); }
+        }
+    }
+    return out;
+}
+
+// RFC 3986 §5.2.3 merge — for a relative reference whose authority is
+// undefined and path is not empty. When the base has an authority and
+// an empty path, treat as "/"; otherwise drop everything after the last
+// '/' in the base path and append the relative path.
+static std::string mergePaths(const praia::url::ParsedUrl& base,
+                              const std::string& refPath) {
+    bool baseHasAuthority = !base.host.empty();
+    if (baseHasAuthority && base.path.empty()) return "/" + refPath;
+    auto slash = base.path.rfind('/');
+    if (slash == std::string::npos) return refPath;
+    return base.path.substr(0, slash + 1) + refPath;
+}
+
 // Resolve a redirect Location header against the base URL.
 //   - absolute URL (has scheme)            → use as-is
 //   - protocol-relative (//host/path)      → prepend base scheme
 //   - absolute path (/foo)                 → keep base scheme/host/port
-//   - empty or anything else               → throw (rare in real
-//                                                   redirects, and supporting
-//                                                   it pulls in full RFC 3986
-//                                                   §5.2 path resolution which
-//                                                   is more code than payoff)
+//   - relative path (foo, ../bar)          → RFC 3986 §5.2 reference
+//                                            resolution against base path
+//   - empty                                → throw
 static std::string resolveLocation(const std::string& baseUrl,
                                    const std::string& location) {
     if (location.empty())
@@ -736,13 +782,21 @@ static std::string resolveLocation(const std::string& baseUrl,
         return out;
     }
 
-    // Same-authority: build base authority + new path.
-    if (loc.path.empty() || loc.path[0] != '/') {
-        // Real-world: 0.3% of redirects use relative paths. The
-        // RFC 3986 §5.2 path-merge algorithm is ~30 lines; deferred
-        // until someone needs it.
-        throw RuntimeError("HTTP redirect: relative Location \"" + location +
-                           "\" not supported (use an absolute URL or absolute path)", 0);
+    // Same-authority. Path may be absolute ("/x") or relative
+    // ("final" / "../bar"); RFC 3986 §5.2.2 + §5.2.4 handle both via
+    // merge + remove_dot_segments. If the reference path is empty,
+    // inherit the base path (and query, if the reference has none).
+    std::string targetPath;
+    std::string targetQuery;
+    if (loc.path.empty()) {
+        targetPath  = base.path;
+        targetQuery = loc.query.empty() ? base.query : loc.query;
+    } else if (loc.path[0] == '/') {
+        targetPath  = removeDotSegments(loc.path);
+        targetQuery = loc.query;
+    } else {
+        targetPath  = removeDotSegments(mergePaths(base, loc.path));
+        targetQuery = loc.query;
     }
 
     std::string out = base.scheme + "://";
@@ -753,8 +807,8 @@ static std::string resolveLocation(const std::string& baseUrl,
                          (base.scheme == "https" && base.port == 443);
         if (!isDefault) out += ":" + std::to_string(base.port);
     }
-    out += loc.path;
-    if (!loc.query.empty())    out += "?" + loc.query;
+    out += targetPath;
+    if (!targetQuery.empty())  out += "?" + targetQuery;
     if (!loc.fragment.empty()) out += "#" + loc.fragment;
     return out;
 }

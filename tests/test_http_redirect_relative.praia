@@ -1,0 +1,104 @@
+use "testing"
+
+// Regression: HTTP redirects with relative Location values (RFC 3986
+// §5.2 reference resolution) must be followed. Earlier the client
+// rejected `Location: final` / `Location: ../login` and threw
+// "relative Location ... not supported".
+
+let TEST_PORT = 38915
+
+let _serverFuture = async lam{ in
+    let s = net.listen(TEST_PORT)
+    while (true) {
+        let c = net.accept(s)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let chunk = net.recv(c, 4096)
+            if (len(chunk) == 0) { break }
+            req = req + chunk
+        }
+        let firstSp = req.indexOf(" ")
+        let after = req.slice(firstSp + 1, len(req))
+        let path = after.slice(0, after.indexOf(" "))
+
+        // Map of canned redirect sources → relative Location values.
+        // The "final" landing pages return 200 with the path as body so
+        // the test can assert which URL we ended up at.
+        let resp = ""
+        if (path == "/a/start") {
+            // sibling resource → /a/final
+            resp = "HTTP/1.1 302 Found\r\nLocation: final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/a/dotdot") {
+            // ../login from /a/dotdot → /login
+            resp = "HTTP/1.1 302 Found\r\nLocation: ../login\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/a/b/dotdot2") {
+            // ../../top from /a/b/dotdot2 → /top
+            resp = "HTTP/1.1 302 Found\r\nLocation: ../../top\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/a/dotslash") {
+            // ./other from /a/dotslash → /a/other
+            resp = "HTTP/1.1 302 Found\r\nLocation: ./other\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/a/qonly") {
+            // ?q=1 from /a/qonly → /a/qonly?q=1 (path inherited, query replaced)
+            resp = "HTTP/1.1 302 Found\r\nLocation: ?q=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/a/final" || path == "/login" || path == "/top" ||
+              path == "/a/other") {
+            // Echo back the path so the test can confirm where we landed.
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(path)) +
+                   "\r\nConnection: close\r\n\r\n" + path
+        }
+        elif (path.startsWith("/a/qonly?")) {
+            // Server-side the request URI carries the query — strip and
+            // echo so the test sees the full URI.
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(path)) +
+                   "\r\nConnection: close\r\n\r\n" + path
+        }
+        else {
+            resp = "HTTP/1.1 404 Not Found\r\nContent-Length: " + str(len(path)) +
+                   "\r\nConnection: close\r\n\r\n" + path
+        }
+        net.send(c, resp)
+        net.close(c)
+    }
+}()
+time.sleep(200)
+
+let base = "http://localhost:" + str(TEST_PORT)
+
+testing.test("relative sibling Location follows to merged path", lam{ in
+    let r = http.get(base + "/a/start")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "/a/final",
+        "Location: final from /a/start must merge to /a/final")
+})
+
+testing.test("../login resolves against parent", lam{ in
+    let r = http.get(base + "/a/dotdot")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "/login",
+        "Location: ../login from /a/dotdot must resolve to /login")
+})
+
+testing.test("../../top walks up two levels", lam{ in
+    let r = http.get(base + "/a/b/dotdot2")
+    testing.assertEqual(r.body, "/top",
+        "Location: ../../top from /a/b/dotdot2 must resolve to /top")
+})
+
+testing.test("./other normalizes to the current directory sibling", lam{ in
+    let r = http.get(base + "/a/dotslash")
+    testing.assertEqual(r.body, "/a/other",
+        "Location: ./other from /a/dotslash must resolve to /a/other")
+})
+
+testing.test("query-only Location keeps the base path, replaces the query", lam{ in
+    let r = http.get(base + "/a/qonly")
+    testing.assertEqual(r.body, "/a/qonly?q=1",
+        "Location: ?q=1 must inherit the base path and use the new query")
+})
+
+testing.done()
