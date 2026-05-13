@@ -587,7 +587,11 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
         auto c = line.find(':');
         if (c != std::string::npos) {
             std::string key = line.substr(0, c);
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            // Cast through unsigned char — passing a negative char to
+            // std::tolower is UB. Matches the lambda pattern used at
+            // the other corrected sites in this file.
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](char ch) { return (char)std::tolower((unsigned char)ch); });
             size_t valStart = c + 1;
             while (valStart < line.size() && line[valStart] == ' ') valStart++;
             reqHeaders->entries[Value(key)] = Value(line.substr(valStart));
