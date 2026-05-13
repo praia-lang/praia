@@ -43,7 +43,18 @@ testing.test("build: rejects '; Secure' injection via path", lam{ in
 testing.test("build: rejects CRLF in domain", lam{ in
     testing.assertThrows(
         lam{ in cookie.build("session", "abc", {domain: "evil.com\r\n"}) },
-        "invalid character in domain")
+        "invalid byte in domain")
+})
+
+testing.test("build: rejects every CTL + DEL in path/domain", lam{ in
+    // Spot-check a few CTLs that the previous deny-list missed:
+    // \x01, \x08 (BS), \x0B (VT), \x1F (US), \x7F (DEL).
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x01b"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x08b"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x0bb"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x1fb"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x7fb"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {domain: "x\x7fy"}) }, "invalid byte in domain")
 })
 
 testing.test("build: rejects '=' / ';' / whitespace in name", lam{ in
@@ -80,6 +91,28 @@ testing.test("build: accepts the three legal sameSite values", lam{ in
     testing.assert(cookie.build("a", "b", {sameSite: "Strict"}).contains("SameSite=Strict"), nil)
     testing.assert(cookie.build("a", "b", {sameSite: "Lax"}).contains("SameSite=Lax"), nil)
     testing.assert(cookie.build("a", "b", {sameSite: "None"}).contains("SameSite=None"), nil)
+})
+
+testing.test("build: rejects non-numeric / NaN / infinite maxAge", lam{ in
+    // Previously these values went through `toString()` and produced
+    // malformed `Max-Age=...` attributes that browsers silently ignore.
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: "soon"}) },
+        "maxAge must be a finite number")
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: nil}) },
+        "maxAge must be a finite number")
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: math.sqrt(-1.0)}) },
+        "maxAge must be a finite number")
+})
+
+testing.test("build: accepts integer + zero + negative maxAge", lam{ in
+    testing.assert(cookie.build("a", "b", {maxAge: 3600}).contains("Max-Age=3600"), nil)
+    testing.assert(cookie.build("a", "b", {maxAge: 0}).contains("Max-Age=0"),
+        "Max-Age=0 means delete — must still emit")
+    testing.assert(cookie.build("a", "b", {maxAge: -1}).contains("Max-Age=-1"),
+        "negative is non-RFC but common-in-the-wild for cookie deletion")
 })
 
 testing.test("clear: emits a maxAge=0 expiry", lam{ in

@@ -73,16 +73,20 @@ func _validateName(s) {
 }
 
 // path-value (RFC 6265 §4.1.1): any CHAR except CTLs or ";". We also
-// reject "," for parser-robustness (some legacy proxies split on it)
-// and the NUL byte.
-let _PATH_FORBIDDEN = ";,\r\n\x00"
+// reject "," for parser-robustness (some legacy proxies split on it).
+// Iterate by byte rather than grapheme so we catch every CTL (< 0x20)
+// and DEL (0x7F), not just the printable separators in the old
+// deny-list — those are the bytes that can sneak past per-grapheme
+// `contains()` checks. Non-ASCII bytes (≥ 0x80) are left alone:
+// browsers tolerate IDN-style domains and they can't carry injection
+// payloads (UTF-8 continuation bytes never equal ';' or CRLF).
 func _validateAttrChars(s, field) {
     if (type(s) != "string") {
         throw "cookie.build: " + field + " must be a string"
     }
-    for (i in 0..len(s)) {
-        if (_PATH_FORBIDDEN.contains(s[i])) {
-            throw "cookie.build: invalid character in " + field + ": '" + s[i] + "'"
+    for (b in bytes.toArray(s)) {
+        if (b < 0x20 || b == 0x7F || b == 0x3B || b == 0x2C) {
+            throw "cookie.build: invalid byte in " + field + " (code " + str(b) + ")"
         }
     }
 }
@@ -114,7 +118,16 @@ func build(name, value, options) {
 
     if (options) {
         if (hasKey(options, "maxAge")) {
-            cookie = cookie + "; Max-Age=" + options.maxAge.toString()
+            // Max-Age must be a finite number — anything else (string,
+            // nil, NaN, infinity) would emit a malformed cookie like
+            // `Max-Age=not-a-number` that browsers ignore silently.
+            // Throwing surfaces the bug at the call site instead.
+            let m = options.maxAge
+            if ((type(m) != "int" && type(m) != "float") ||
+                math.isNan(m) || math.isInf(m)) {
+                throw "cookie.build: maxAge must be a finite number"
+            }
+            cookie = cookie + "; Max-Age=" + m.toString()
         }
         if (hasKey(options, "path")) {
             _validateAttrChars(options.path, "path")

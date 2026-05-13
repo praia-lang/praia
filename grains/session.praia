@@ -78,12 +78,18 @@ func create(options) {
     func _now() { return time.now() }
 
     // Drop every entry whose expiresAt has passed. Called opportunistically
-    // on each request — for in-memory session stores the cost is O(n) per
-    // request, but `n` is the live-session count and an in-memory store is
-    // already sized to fit in RAM; high-traffic deployments should swap
-    // this grain for a Redis-backed equivalent.
+    // on each request — the common case (no stale entries) takes a single
+    // O(n) scan and exits without allocating; only when something needs
+    // evicting do we pay for the rebuild + reassignment. For in-memory
+    // session stores the worst-case cost is fine; high-traffic deployments
+    // should swap this grain for a Redis-backed equivalent.
     func _sweep() {
         let now = _now()
+        let hasStale = false
+        for (k in keys(store)) {
+            if (store[k].expiresAt <= now) { hasStale = true; break }
+        }
+        if (!hasStale) { return }
         let fresh = {}
         for (k in keys(store)) {
             if (store[k].expiresAt > now) { fresh[k] = store[k] }
