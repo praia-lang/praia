@@ -1,0 +1,53 @@
+use "testing"
+
+// Regression: a failing `beforeEach` must abort the test body. Earlier
+// versions of `_runHooks` recorded the failure and returned, letting the
+// test body run anyway.
+//
+// We can't write this assertion directly in a normal test because the
+// deliberate failure would show up in the file's pass/fail count. Drive
+// it through the side-channel pattern: set up a throwing beforeEach,
+// run one test, check side-channel, then `testing.reset()` to clear the
+// hook + the deliberate failure so the rest of the file is clean.
+
+let _bodyRan = false
+
+testing.beforeEach(lam{ in throw "intentional setup failure" })
+
+testing.test("body must be skipped when beforeEach throws", lam{ in
+    _bodyRan = true
+})
+
+// At this point: failed=1, errors has the recorded beforeEach failure,
+// _beforeEach still holds the throwing hook. Wipe state and assert.
+testing.reset()
+
+testing.test("verify the body did not run", lam{ in
+    testing.assertEqual(_bodyRan, false,
+        "test body must not execute when its beforeEach threw")
+})
+
+// ── Cleanup runs even when the body throws ───────────────────
+
+testing.reset()
+
+let _cleanupRanAfterThrow = false
+
+// This test body deliberately throws — `_runCleanups` MUST still drain
+// the stack so the cleanup runs. Earlier the in-grain test wrapped the
+// throw in try/catch, which meant the body returned normally and never
+// exercised the throw path.
+testing.test("body throws but its cleanup still runs", lam{ in
+    testing.cleanup(lam{ in _cleanupRanAfterThrow = true })
+    throw "intentional body failure"
+})
+
+// Wipe the recorded failure + state before the verification test runs.
+testing.reset()
+
+testing.test("verify cleanup ran after the body threw", lam{ in
+    testing.assertEqual(_cleanupRanAfterThrow, true,
+        "registered cleanup must run when the test body throws")
+})
+
+testing.done()

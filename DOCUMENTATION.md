@@ -3664,6 +3664,55 @@ log.setLevel("warn")     // only warn and error
 log.setLevel("none")     // silence all
 ```
 
+`setLevel` on any logger in a `.with()` family propagates to every
+related logger (parent, children, siblings) — the threshold is shared
+state, not a per-logger copy.
+
+### Structured fields
+
+Every emit method accepts an optional map of fields as a second argument:
+
+```
+log.info("served request", {method: "GET", path: "/users/42", status: 200})
+```
+
+Use `log.with(fields)` to get a child logger that adds those fields to
+every record automatically — same model as Go's `slog.With`:
+
+```
+let req_log = log.with({req_id: "abc-123", tenant: "acme"})
+req_log.info("started")       // record carries req_id + tenant
+req_log.info("done", {ms: 12}) // per-call fields layer on top
+```
+
+`log.log(level, msg, fields?)` is the generic entry point when the
+level itself is data.
+
+### Sinks and formatters
+
+By default, records go to stdout in text format. Override via `options`:
+
+```
+let log = logger.create("API", {
+    level: "debug",
+    sink: logger.fileSink("/var/log/api.log", logger.jsonFormatter())
+})
+
+// Fan out to multiple destinations:
+let log = logger.create("svc", {
+    sink: logger.multiSink([
+        logger.stdoutSink(logger.textFormatter({color: true})),
+        logger.fileSink("audit.log", logger.jsonFormatter())
+    ])
+})
+```
+
+Built-in sinks: `stdoutSink(formatter?)`, `stderrSink(formatter?)`,
+`fileSink(path, formatter?)`, `multiSink([s1, s2, ...])`. Built-in
+formatters: `textFormatter({color, timeFormat})`, `jsonFormatter()`.
+Custom sinks/formatters are just objects with `write(record)` /
+`format(record)`.
+
 ### As router middleware
 
 ```
@@ -3675,6 +3724,110 @@ let server = router.create()
 
 server.use(logger.middleware(log))
 // Logs: [timestamp] INFO [API] GET /users/42 200 12ms
+// Also attaches req.log — a child logger with method/path/req_id baked in.
+```
+
+---
+
+## Testing
+
+The `testing` grain provides assertions, fixtures, subtests, and
+snapshot testing for `praia test`.
+
+### Basics
+
+```
+use "testing"
+
+testing.test("addition", lam{ in
+    testing.assertEqual(1 + 1, 2, nil)
+})
+
+testing.done()    // exits 0 on success, 1 on any failure
+```
+
+Assertions: `assert`, `assertEqual`, `assertNotEqual`, `assertThrows`,
+`assertContains`. The last works on strings (substring), arrays
+(element membership), and maps (**key presence** — `{a: nil}` counts
+as containing `"a"`). Multi-line string mismatches show a unified diff
+instead of a flat "expected/got" string.
+
+### Fixtures
+
+```
+testing.test("uses a temp dir", lam{ in
+    let dir = testing.tempDir()        // auto-cleaned at end of test
+    fs.write(dir + "/x.txt", "hi")
+    let path = testing.tempFile(nil, "content")
+})
+```
+
+`testing.cleanup(fn)` registers an arbitrary cleanup that runs (in
+reverse registration order, like Go's `t.Cleanup`) when the test ends —
+even if the body throws. Cleanups drain *after* `afterEach` hooks, so an
+`afterEach` may itself call `testing.cleanup()` / `tempDir()` / `tempFile()`
+and have those teardowns honored.
+
+### File-scoped hooks
+
+```
+testing.beforeEach(lam{ in /* shared setup */ })
+testing.afterEach(lam{ in /* shared teardown */ })
+```
+
+Hooks run around every subsequent `test()` in the file. A throwing
+`beforeEach` records the failure and skips the test body — but
+`afterEach` and cleanups still run so anything earlier `beforeEach`
+hooks set up gets torn down. `afterEach` itself runs even when a body
+throws, and an `afterEach` that throws doesn't stop the rest of the
+`afterEach` chain.
+
+### Subtests and table-driven tests
+
+```
+testing.test("ip parser", lam{ in
+    testing.subtest("valid v4", lam{ t in
+        t.assertEqual(parse("1.2.3.4").family, 4, nil)
+    })
+    testing.subtest("rejects garbage", lam{ t in
+        t.assertThrows(lam{ in parse("nope") }, nil)
+    })
+})
+
+testing.testEach("addition cases", [
+    {name: "0+0", a: 0, b: 0, want: 0},
+    {name: "neg", a: -1, b: 1, want: 0}
+], lam{ t, c in
+    t.assertEqual(c.a + c.b, c.want, nil)
+})
+```
+
+### Skip and focus
+
+```
+testing.skip("not yet implemented", lam{ in /* ... */ })
+testing.only("debug just this one", lam{ in /* ... */ })
+// Subsequent plain test() calls in the file become skips.
+```
+
+(`only` must appear before the tests you want skipped — tests run
+eagerly, not deferred.)
+
+### Snapshot testing
+
+```
+testing.test("render", lam{ in
+    let output = render(input)
+    testing.matchSnapshot("default", output)
+})
+```
+
+First run writes `<testdir>/__snapshots__/<file>.<test>.<label>.snap`;
+subsequent runs compare against it and fail with a diff on mismatch.
+Set `PRAIA_UPDATE_SNAPSHOTS=1` to accept new output:
+
+```
+PRAIA_UPDATE_SNAPSHOTS=1 praia test
 ```
 
 ---

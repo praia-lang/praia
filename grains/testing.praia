@@ -1,6 +1,60 @@
+// Testing grain — assertions, fixtures, hooks, subtests, snapshots.
+//
+//   use "testing"
+//
+//   testing.test("addition", lam{ in
+//       testing.assertEqual(1 + 1, 2, nil)
+//   })
+//   testing.done()
+//
+// Beyond the assertion + summary core, this grain offers:
+//
+//   testing.cleanup(fn)         — run fn after the current test, even on throw
+//   testing.tempDir(prefix?)    — auto-cleaned temp directory
+//   testing.tempFile(prefix?, content?)
+//   testing.beforeEach(fn)      — file-scoped hook, runs before each test()
+//   testing.afterEach(fn)       — file-scoped hook, runs after each test()
+//   testing.skip(name, fn?)     — register a skipped test
+//   testing.only(name, fn)      — focus mode: subsequent non-only tests skip
+//
+// Run with `praia test`. `testing.done()` exits with status 0/1 by counts.
+//
+// Diffs for multi-line `assertEqual` and `matchSnapshot` are produced by
+// the inline `_diff` helper below rather than `use "diff"`. The diff
+// grain exports a `format(changes)` function, and the VM grain loader
+// copies grain globals into the parent VM's global table by name — so
+// importing diff here would shadow any user grain that also defines a
+// top-level `format` (datetime is the in-tree example). Inlining keeps
+// `testing` dependency-free and side-effect free for downstream grains.
+
+// ── State ────────────────────────────────────────────────────
+
 let passed = 0
 let failed = 0
+let skipped = 0
 let errors = []
+
+// _currentTest tracks the *innermost* active test for cleanup() /
+// tempDir() / module-level assertions. It's nil outside test bodies.
+// During a subtest, it points at the subtest context; assertions and
+// cleanups thus attach to the right place.
+let _currentTest = nil
+// _testStack tracks parent → subtest nesting so we can restore the
+// outer context when a subtest finishes.
+let _testStack = []
+
+// File-scoped hooks. Cleared between files by `reset()`.
+let _beforeEach = []
+let _afterEach = []
+
+// Focus mode: once `only(...)` has been called in a file, subsequent
+// non-only `test(...)` calls become skips. `only` MUST appear before
+// the tests it should focus — see the docstring above. We accept this
+// constraint to keep the eager-execution model; collecting tests for a
+// deferred run would be a bigger change.
+let _focusMode = false
+
+// ── Assertions ───────────────────────────────────────────────
 
 func assert(condition, message) {
     if (condition) {
@@ -13,12 +67,54 @@ func assert(condition, message) {
     }
 }
 
+// Multi-line string mismatches get a unified diff instead of the flat
+// "Expected X, got Y" string — much more useful when the two sides differ
+// in only a few lines deep inside a big blob. Single-line mismatches keep
+// the short form (a diff there is just noise).
+func _isMultiline(s) {
+    return type(s) == "string" && s.contains("\n")
+}
+
+// Simple line-based diff: equal lines pass through, mismatched runs are
+// shown as `- expected` / `+ actual` blocks. Not optimal LCS — produces
+// readable output for typical test mismatches without pulling in the
+// `diff` grain (see comment at top of file for why).
+func _lineDiff(expected, actual) {
+    let exp = expected.split("\n")
+    let act = actual.split("\n")
+    let i = 0
+    let j = 0
+    let out = ""
+    while (i < len(exp) || j < len(act)) {
+        let e = i < len(exp) ? exp[i] : nil
+        let a = j < len(act) ? act[j] : nil
+        if (e == a) {
+            out = out + "  " + (e || "") + "\n"
+            i = i + 1
+            j = j + 1
+        } else {
+            if (e != nil) { out = out + "\x1b[31m- " + e + "\x1b[0m\n"; i = i + 1 }
+            if (a != nil) { out = out + "\x1b[32m+ " + a + "\x1b[0m\n"; j = j + 1 }
+        }
+    }
+    return out
+}
+
+func _diffMessage(actual, expected) {
+    let a = str(actual)
+    let e = str(expected)
+    if (_isMultiline(a) || _isMultiline(e)) {
+        return "\n" + _lineDiff(e, a)
+    }
+    return "Expected %{expected}, got %{actual}"
+}
+
 func assertEqual(actual, expected, message) {
     if (actual == expected) {
         passed = passed + 1
     } else {
         failed = failed + 1
-        let msg = message || "Expected %{expected}, got %{actual}"
+        let msg = message || _diffMessage(actual, expected)
         errors.push(msg)
         print("  FAIL:", msg)
     }
@@ -30,6 +126,37 @@ func assertNotEqual(actual, expected, message) {
     } else {
         failed = failed + 1
         let msg = message || "Expected not %{expected}, but got it"
+        errors.push(msg)
+        print("  FAIL:", msg)
+    }
+}
+
+// assertContains works on strings (substring check), arrays (element
+// membership), and maps (key presence). Common ergonomic gap in the
+// original assertion set.
+func assertContains(haystack, needle, message) {
+    let found = false
+    if (type(haystack) == "string") {
+        found = haystack.contains(needle)
+    } elif (type(haystack) == "array") {
+        for (elem in haystack) { if (elem == needle) { found = true } }
+    } elif (type(haystack) == "map") {
+        // Key-presence, not value-truthiness — {a: nil} should still
+        // count as containing "a". `haystack[needle] != nil` would
+        // wrongly drop those keys.
+        for (k in keys(haystack)) { if (k == needle) { found = true } }
+    } else {
+        failed = failed + 1
+        let msg = message || "assertContains: unsupported haystack type %{type(haystack)}"
+        errors.push(msg)
+        print("  FAIL:", msg)
+        return
+    }
+    if (found) {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        let msg = message || "Expected %{haystack} to contain %{needle}"
         errors.push(msg)
         print("  FAIL:", msg)
     }
@@ -52,20 +179,328 @@ func assertThrows(fn, message) {
     }
 }
 
-func test(name, fn) {
-    print("TEST:", name)
-    try {
-        fn()
-    } catch (err) {
+// ── Fixtures ─────────────────────────────────────────────────
+
+// Register a cleanup to run after the current test finishes (whether by
+// return, assert failure, or throw). Cleanups run in reverse registration
+// order — same as Go's t.Cleanup. Throws caught and logged so one bad
+// cleanup doesn't prevent the rest from running.
+func cleanup(fn) {
+    if (_currentTest == nil) {
+        throw "testing.cleanup() must be called inside a test body"
+    }
+    _currentTest.cleanups.push(fn)
+}
+
+// Create a temp directory whose lifetime is bound to the current test.
+// The directory is removed (recursively) when the test ends. Returns
+// the absolute path.
+func tempDir(prefix) {
+    if (_currentTest == nil) {
+        throw "testing.tempDir() must be called inside a test body"
+    }
+    let dir = fs.tempDir(prefix || "praia-test-")
+    // fs.remove is recursive by default — directory trees disappear in one
+    // call. Swallow errors so a missing/already-removed path doesn't poison
+    // other cleanups.
+    _currentTest.cleanups.push(lam{ in
+        try { fs.remove(dir) } catch (e) { nil }
+    })
+    return dir
+}
+
+// Create a temp file under a temp directory, write `content` to it (if
+// given), and return the path. The containing directory is auto-cleaned.
+func tempFile(prefix, content) {
+    let dir = tempDir(prefix)
+    let path = dir + "/file"
+    fs.write(path, content || "")
+    return path
+}
+
+// ── Snapshots ────────────────────────────────────────────────
+
+// Sanitize a path segment: turn anything that's not [A-Za-z0-9._-] into "_".
+// Used to keep snapshot filenames stable across test names with spaces or
+// slashes.
+func _safeSegment(s) {
+    let out = ""
+    for (i in 0..len(s)) {
+        let c = s[i]
+        let isAlnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-".contains(c)
+        out = out + (isAlnum ? c : "_")
+    }
+    return out
+}
+
+func _snapshotPath(label) {
+    let file = sys.currentFile()
+    if (!file) { throw "testing.matchSnapshot: sys.currentFile() returned nil — cannot locate snapshot dir" }
+    // dirname / basename without leaning on a fs.path helper:
+    let lastSlash = file.lastIndexOf("/")
+    let dir = lastSlash >= 0 ? file.slice(0, lastSlash) : "."
+    let base = lastSlash >= 0 ? file.slice(lastSlash + 1, len(file)) : file
+    let testname = _currentTest ? _currentTest.name : "module"
+    return dir + "/__snapshots__/" + _safeSegment(base) + "." + _safeSegment(testname) + "." + _safeSegment(label) + ".snap"
+}
+
+// matchSnapshot — golden file testing. First run writes the snapshot and
+// passes. Subsequent runs compare and fail with a diff on mismatch. Set
+// `PRAIA_UPDATE_SNAPSHOTS=1` in the env to rewrite snapshots when the
+// expected output changes.
+func matchSnapshot(label, actual) {
+    let path = _snapshotPath(label)
+    let snapDir = path.slice(0, path.lastIndexOf("/"))
+    let update = sys.env("PRAIA_UPDATE_SNAPSHOTS") == "1"
+    let actualStr = type(actual) == "string" ? actual : str(actual)
+
+    if (!fs.exists(snapDir)) {
+        fs.mkdir(snapDir)
+    }
+
+    if (!fs.exists(path) || update) {
+        fs.write(path, actualStr)
+        passed = passed + 1
+        print("  SNAPSHOT (" + (update ? "updated" : "created") + "):", path)
+        return
+    }
+
+    let expected = fs.read(path)
+    if (actualStr == expected) {
+        passed = passed + 1
+    } else {
         failed = failed + 1
-        errors.push("%{name}: %{err}")
-        print("  ERROR:", err)
+        let msg = "snapshot mismatch (" + label + " @ " + path + "):\n" + _lineDiff(expected, actualStr) +
+                  "  (set PRAIA_UPDATE_SNAPSHOTS=1 to accept the new output)"
+        errors.push(msg)
+        print("  FAIL:", msg)
     }
 }
 
+// ── Hooks ────────────────────────────────────────────────────
+
+// File-scoped hook. Every subsequent `test()` runs `fn()` before its
+// body. Hooks run in registration order. A throw aborts the test before
+// the body runs; the failure is recorded as a test error.
+func beforeEach(fn) {
+    _beforeEach.push(fn)
+}
+
+// File-scoped hook. Every subsequent `test()` runs `fn()` after its
+// body, in reverse registration order. Hooks run even if the test body
+// threw or any earlier afterEach threw — best-effort cleanup. A throw
+// from a hook is recorded but doesn't block the rest.
+func afterEach(fn) {
+    _afterEach.push(fn)
+}
+
+// ── Test runner ──────────────────────────────────────────────
+
+// Run a list of hooks. Returns true iff every hook ran without throwing.
+// On a throw, the failure is recorded; if `stopOnError` is true, the
+// remaining hooks are skipped and we return false (used for `beforeEach`,
+// where the test body should not run on setup failure). For `afterEach`
+// we pass stopOnError=false so every teardown gets a chance to run even
+// if an earlier one threw.
+func _runHooks(hooks, label, stopOnError) {
+    let ok = true
+    for (h in hooks) {
+        try { h() } catch (err) {
+            failed = failed + 1
+            errors.push("%{label}: %{err}")
+            print("  ERROR (%{label}):", err)
+            ok = false
+            if (stopOnError) { return false }
+        }
+    }
+    return ok
+}
+
+func _runCleanups(testCtx) {
+    // Reverse order — like a stack of deferreds.
+    let i = len(testCtx.cleanups) - 1
+    while (i >= 0) {
+        try { testCtx.cleanups[i]() } catch (err) {
+            failed = failed + 1
+            errors.push("%{testCtx.name} cleanup: %{err}")
+            print("  ERROR (cleanup):", err)
+        }
+        i = i - 1
+    }
+}
+
+// Build a test-context object. The methods on it (`cleanup`,
+// `assertEqual`, etc.) delegate to module-level functions — those
+// resolve against `_currentTest`, which is always set to this context
+// while the body is running, so behaviour is identical between
+// `t.assertEqual(...)` and `testing.assertEqual(...)`. Two styles, one
+// underlying machinery.
+func _makeContext(name) {
+    return {
+        name: name,
+        cleanups: [],
+        assert: lam{ cond, msg in assert(cond, msg) },
+        assertEqual: lam{ a, e, msg in assertEqual(a, e, msg) },
+        assertNotEqual: lam{ a, e, msg in assertNotEqual(a, e, msg) },
+        assertThrows: lam{ f, msg in assertThrows(f, msg) },
+        assertContains: lam{ h, n, msg in assertContains(h, n, msg) },
+        matchSnapshot: lam{ label, actual in matchSnapshot(label, actual) },
+        cleanup: lam{ f in cleanup(f) },
+        tempDir: lam{ p in tempDir(p) },
+        tempFile: lam{ p, c in tempFile(p, c) },
+        run: lam{ subname, fn in subtest(subname, fn) }
+    }
+}
+
+func _pushCtx(ctx) {
+    _testStack.push(ctx)
+    _currentTest = ctx
+}
+
+func _popCtx() {
+    _testStack.pop()
+    if (len(_testStack) > 0) {
+        _currentTest = _testStack[len(_testStack) - 1]
+    } else {
+        _currentTest = nil
+    }
+}
+
+func test(name, fn) {
+    if (_focusMode) {
+        skipped = skipped + 1
+        print("TEST: %{name} (skipped — focus mode)")
+        return
+    }
+
+    print("TEST:", name)
+    let ctx = _makeContext(name)
+    _pushCtx(ctx)
+
+    // afterEach runs in reverse order (mirrors cleanup stack discipline).
+    let afters = []
+    for (h in _afterEach) { afters.push(h) }
+
+    // Body only runs if every beforeEach succeeded. On setup failure the
+    // test is already marked failed inside _runHooks; afterEach + cleanups
+    // still run so anything beforeEach managed to allocate gets torn down.
+    let beforeOk = _runHooks(_beforeEach, name + " / beforeEach", true)
+
+    if (beforeOk) {
+        try {
+            fn()
+        } catch (err) {
+            failed = failed + 1
+            errors.push("%{name}: %{err}")
+            print("  ERROR:", err)
+        }
+    }
+
+    // afterEach runs BEFORE cleanups so that an afterEach hook can call
+    // testing.cleanup() / tempDir() / tempFile() and have those teardowns
+    // honored — _currentTest is still set here, and we drain
+    // ctx.cleanups afterwards.
+    let reversed = []
+    let i = len(afters) - 1
+    while (i >= 0) { reversed.push(afters[i]); i = i - 1 }
+    _runHooks(reversed, name + " / afterEach", false)
+
+    _runCleanups(ctx)
+
+    _popCtx()
+}
+
+// Run a subtest within the current test body. The lambda receives a
+// test-context value (same shape `t.run` exposes recursively). Subtest
+// failures are tagged with the full `parent / child` name and roll up
+// into the global counts. Cleanups registered inside the subtest run
+// when the subtest ends, not when the parent ends.
+func subtest(name, fn) {
+    if (_currentTest == nil) {
+        throw "testing.subtest() must be called inside a test body"
+    }
+    let parent = _currentTest
+    let fullName = parent.name + " / " + name
+    print("TEST: %{fullName}")
+    let ctx = _makeContext(fullName)
+    _pushCtx(ctx)
+    try {
+        fn(ctx)
+    } catch (err) {
+        failed = failed + 1
+        errors.push("%{fullName}: %{err}")
+        print("  ERROR:", err)
+    }
+    _runCleanups(ctx)
+    _popCtx()
+}
+
+// Table-driven tests. Each entry in `cases` becomes a subtest under a
+// single parent named `name`. Case names come from `c.name` (when c is
+// a map with a name key) or the index. The callback receives
+// `(ctx, case)`.
+func testEach(name, cases, fn) {
+    test(name, lam{ in
+        for (i in 0..len(cases)) {
+            let c = cases[i]
+            let subname = (type(c) == "map" && c.name) ? c.name : str(i)
+            subtest(subname, lam{ ctx in fn(ctx, c) })
+        }
+    })
+}
+
+// Mark a test as skipped. The fn is not called. Counts toward `skipped`,
+// not `passed`/`failed`.
+func skip(name, fn) {
+    skipped = skipped + 1
+    print("TEST: %{name} (skipped)")
+}
+
+// Run only this test (and any other tests also marked `only`). Once any
+// `only` call has been made in a file, subsequent plain `test()` calls
+// become skips. Caveat: `only` must appear *before* the tests you want
+// to skip — we run tests eagerly rather than collecting.
+func only(name, fn) {
+    _focusMode = true
+    print("TEST: %{name} (only)")
+    let ctx = _makeContext(name)
+    _pushCtx(ctx)
+
+    // Snapshot _afterEach BEFORE the body runs (mirrors test()): a hook
+    // registered inside this only() body must not fire for the same body,
+    // otherwise an afterEach { in testing.afterEach(...) } would observe
+    // its own newly registered hook within the same call.
+    let afters = []
+    let i = len(_afterEach) - 1
+    while (i >= 0) { afters.push(_afterEach[i]); i = i - 1 }
+
+    let beforeOk = _runHooks(_beforeEach, name + " / beforeEach", true)
+    if (beforeOk) {
+        try {
+            fn()
+        } catch (err) {
+            failed = failed + 1
+            errors.push("%{name}: %{err}")
+            print("  ERROR:", err)
+        }
+    }
+    // afterEach before cleanups so afterEach can register additional
+    // cleanup actions — see comment in test() for rationale.
+    _runHooks(afters, name + " / afterEach", false)
+    _runCleanups(ctx)
+    _popCtx()
+}
+
+// ── Reporting ────────────────────────────────────────────────
+
 func summary() {
     print("")
-    print("Results: %{passed} passed, %{failed} failed, %{passed + failed} total")
+    let total = passed + failed + skipped
+    if (skipped > 0) {
+        print("Results: %{passed} passed, %{failed} failed, %{skipped} skipped, %{total} total")
+    } else {
+        print("Results: %{passed} passed, %{failed} failed, %{total} total")
+    }
     if (failed > 0) {
         print("Failures:")
         for (err in errors) {
@@ -78,7 +513,13 @@ func summary() {
 func reset() {
     passed = 0
     failed = 0
+    skipped = 0
     errors = []
+    _currentTest = nil
+    _testStack = []
+    _beforeEach = []
+    _afterEach = []
+    _focusMode = false
 }
 
 // Print a summary and exit — 0 if everything passed, 1 otherwise.
@@ -92,4 +533,11 @@ func done() {
     sys.exit(0)
 }
 
-export { assert, assertEqual, assertNotEqual, assertThrows, test, summary, reset, done }
+export {
+    assert, assertEqual, assertNotEqual, assertThrows, assertContains,
+    matchSnapshot,
+    test, subtest, testEach, skip, only,
+    cleanup, tempDir, tempFile,
+    beforeEach, afterEach,
+    summary, reset, done
+}

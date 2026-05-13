@@ -1,13 +1,46 @@
-// Logger grain — structured logging with levels
+// Logger grain — leveled, structured, multi-sink logging.
 //
-// Usage:
 //   use "logger"
-//   let log = logger.create("MyApp")
-//   log.info("server started")
-//   log.error("something broke", {code: 500})
 //
-// As router middleware:
-//   server.use(logger.middleware(log))
+//   // Backwards-compatible one-liner: stdout text sink, info+.
+//   let log = logger.create("MyApp")
+//   log.info("hello")
+//
+//   // Structured fields per record:
+//   log.info("served request", {method: "GET", path: "/", status: 200})
+//
+//   // Child logger with sticky context (Go's slog.With):
+//   let req_log = log.with({req_id: "abc-123"})
+//   req_log.info("started")   // includes req_id automatically
+//
+//   // Choose formatter + sink at create() time:
+//   let log = logger.create("API", {
+//       level: "debug",
+//       sink: logger.fileSink("/var/log/api.log", logger.jsonFormatter())
+//   })
+//
+//   // Fan out to multiple sinks:
+//   let log = logger.create("svc", {
+//       sink: logger.multiSink([
+//           logger.stdoutSink(logger.textFormatter({color: true})),
+//           logger.fileSink("audit.log", logger.jsonFormatter())
+//       ])
+//   })
+//
+// Sinks are any object with a `.write(record)` method; formatters expose
+// `.format(record) -> string`. Records have shape:
+//   {time: ms, level: "info", name: "MyApp", message: "...", fields: {...}}
+
+// ANSI escapes are inlined rather than imported from the `colors` grain.
+// The VM's grain loader currently copies a grain's top-level globals
+// into the parent VM by name, which can cross-pollinate identifiers like
+// `red`/`green`/`yellow` into any program that transitively uses
+// `logger`. Inlining keeps `logger` zero-dependency on other grains.
+let _ANSI_RESET  = "\x1b[0m"
+let _ANSI_GRAY   = "\x1b[90m"
+let _ANSI_GREEN  = "\x1b[32m"
+let _ANSI_YELLOW = "\x1b[33m"
+let _ANSI_RED    = "\x1b[31m"
 
 let LEVELS = {
     debug: 0,
@@ -17,55 +50,235 @@ let LEVELS = {
     none: 4
 }
 
-func create(name) {
-    let minLevel = LEVELS.info
+let LEVEL_NAMES = ["debug", "info", "warn", "error", "none"]
 
-    func shouldLog(level) {
-        return LEVELS[level] >= minLevel
-    }
+// ── Formatters ───────────────────────────────────────────────
 
-    func formatMessage(level, msg, data) {
-        let timestamp = time.format("%Y-%m-%d %H:%M:%S")
-        let prefix = "[%{timestamp}] %{level.upper()} [%{name}]"
-        if (data) {
-            return "%{prefix} %{msg} %{json.stringify(data)}"
-        }
-        return "%{prefix} %{msg}"
-    }
-
-    func log(level, msg, data) {
-        if (shouldLog(level)) {
-            print(formatMessage(level, msg, data))
-        }
-    }
-
+// Plain-text formatter:
+//   [2026-05-12 10:30:45] INFO  [MyApp] message {k: v}
+// Opts:
+//   color: true  — wrap the LEVEL token in ANSI color
+//   timeFormat: strftime-style override (default "%Y-%m-%d %H:%M:%S")
+func textFormatter(opts) {
+    let o = opts || {}
+    let timeFmt = o.timeFormat || "%Y-%m-%d %H:%M:%S"
+    let useColor = o.color == true
     return {
-        debug: lam{ msg in log("debug", msg, nil) },
-        info: lam{ msg in log("info", msg, nil) },
-        warn: lam{ msg in log("warn", msg, nil) },
-        error: lam{ msg in log("error", msg, nil) },
-        setLevel: lam{ level in
-            ensure (LEVELS[level] != nil) else {
-                throw "Invalid log level: %{level}. Use debug, info, warn, error, or none"
+        format: lam{ rec in
+            let ts = time.format(timeFmt, rec.time)
+            let levelStr = rec.level.upper()
+            if (useColor) {
+                if (rec.level == "debug")   { levelStr = _ANSI_GRAY   + levelStr + _ANSI_RESET }
+                elif (rec.level == "info")  { levelStr = _ANSI_GREEN  + levelStr + _ANSI_RESET }
+                elif (rec.level == "warn")  { levelStr = _ANSI_YELLOW + levelStr + _ANSI_RESET }
+                elif (rec.level == "error") { levelStr = _ANSI_RED    + levelStr + _ANSI_RESET }
             }
-            minLevel = LEVELS[level]
+            let prefix = "[%{ts}] %{levelStr} [%{rec.name}]"
+            if (rec.fields && len(keys(rec.fields)) > 0) {
+                return "%{prefix} %{rec.message} %{json.stringify(rec.fields)}"
+            }
+            return "%{prefix} %{rec.message}"
         }
     }
 }
 
-// Pre-built router middleware: logs method, path, status, and duration
+// JSON formatter — one record per line, parseable back via json.parse.
+// Timestamp emits as ISO-8601 in UTC for stable cross-system parsing.
+func jsonFormatter() {
+    return {
+        format: lam{ rec in
+            let obj = {
+                time: time.format("%Y-%m-%dT%H:%M:%SZ", rec.time),
+                level: rec.level,
+                name: rec.name,
+                message: rec.message
+            }
+            // Merge fields at the top level of the object. Reserved keys
+            // (time/level/name/message) win — surprising-but-safer than
+            // silently letting a user field overwrite the level.
+            if (rec.fields) {
+                for (k in keys(rec.fields)) {
+                    if (obj[k] == nil) { obj[k] = rec.fields[k] }
+                }
+            }
+            return json.stringify(obj)
+        }
+    }
+}
+
+// ── Sinks ────────────────────────────────────────────────────
+
+// Default formatter to use when a sink is constructed without one.
+func _defaultFormatter() {
+    return textFormatter(nil)
+}
+
+func stdoutSink(formatter) {
+    let fmt = formatter || _defaultFormatter()
+    return {
+        write: lam{ rec in print(fmt.format(rec)) },
+        close: lam{ in nil }
+    }
+}
+
+// stderr by way of /dev/stderr — works on Unix-y platforms (macOS,
+// Linux). Falls back to a `FileHandle` for that path; we don't try to
+// abstract this further because Praia doesn't currently expose a stderr
+// builtin.
+func stderrSink(formatter) {
+    let fmt = formatter || _defaultFormatter()
+    let fh = fs.open("/dev/stderr", "a")
+    return {
+        write: lam{ rec in fh.write(fmt.format(rec) + "\n") },
+        close: lam{ in fh.close() }
+    }
+}
+
+// File sink — appends to `path`. `flush` after every record so a crash
+// loses at most one in-flight write. Call `.close()` to release the fd
+// during clean shutdown (otherwise the fd leaks until process exit).
+func fileSink(path, formatter) {
+    let fmt = formatter || _defaultFormatter()
+    let fh = fs.open(path, "a")
+    return {
+        write: lam{ rec in
+            fh.write(fmt.format(rec) + "\n")
+            fh.flush()
+        },
+        close: lam{ in fh.close() }
+    }
+}
+
+// Fan out one record to many sinks. Per-sink throws are caught so one
+// broken sink doesn't drop the record for the others — the same pattern
+// most production loggers use. `.close()` closes all underlying sinks.
+func multiSink(sinks) {
+    return {
+        write: lam{ rec in
+            for (s in sinks) { try { s.write(rec) } catch (e) { nil } }
+        },
+        close: lam{ in
+            for (s in sinks) { try { s.close() } catch (e) { nil } }
+        }
+    }
+}
+
+// ── Logger ───────────────────────────────────────────────────
+
+// Internal: build a logger object given resolved level/sink/fields. The
+// `fields` map is the *sticky context*: every emit merges it into the
+// record before passing to the sink. Child loggers (.with) share the
+// same level + sink but layer additional fields on top.
+//
+// `levelRef` is a map of shape `{value: <numeric level>}` so that every
+// logger in a `.with()` family points at the same cell — `parent.setLevel`
+// must propagate to children that were created before the call. Passing a
+// bare integer would give each child its own copy, breaking propagation.
+func _makeLogger(name, levelRef, sink, fields) {
+    func emit(level, msg, perCallFields) {
+        if (LEVELS[level] < levelRef.value) { return }
+        // Merge sticky fields with per-call fields. Per-call wins on key
+        // collision — the more specific scope overrides the broader one.
+        let merged = {}
+        for (k in keys(fields)) { merged[k] = fields[k] }
+        if (perCallFields) {
+            for (k in keys(perCallFields)) { merged[k] = perCallFields[k] }
+        }
+        sink.write({
+            time: time.now(),
+            level: level,
+            name: name,
+            message: msg,
+            fields: merged
+        })
+    }
+
+    return {
+        debug: lam{ msg, f in emit("debug", msg, f) },
+        info:  lam{ msg, f in emit("info",  msg, f) },
+        warn:  lam{ msg, f in emit("warn",  msg, f) },
+        error: lam{ msg, f in emit("error", msg, f) },
+
+        // Generic entry — useful when the level itself is data.
+        log: lam{ level, msg, f in
+            ensure (LEVELS[level] != nil) else {
+                throw "logger.log: invalid level '%{level}'"
+            }
+            emit(level, msg, f)
+        },
+
+        // setLevel mutates the shared `levelRef` cell so every logger in
+        // the .with() family (including children created before this call)
+        // immediately sees the new threshold.
+        setLevel: lam{ level in
+            ensure (LEVELS[level] != nil) else {
+                throw "Invalid log level: %{level}. Use debug, info, warn, error, or none"
+            }
+            levelRef.value = LEVELS[level]
+        },
+
+        // .with(fields) returns a child logger that carries the union of
+        // this logger's fields and the new ones. Right-most wins. The
+        // sink and levelRef are shared by reference, so closing a child
+        // closes the parent's sink too — use parent's `.close()` for
+        // shutdown — and `setLevel` on either propagates to both.
+        with: lam{ extra in
+            let merged = {}
+            for (k in keys(fields)) { merged[k] = fields[k] }
+            for (k in keys(extra)) { merged[k] = extra[k] }
+            return _makeLogger(name, levelRef, sink, merged)
+        },
+
+        // Release the sink. After this, calls will throw from the
+        // underlying FileHandle.
+        close: lam{ in sink.close() }
+    }
+}
+
+// Create a top-level logger. Options:
+//   level     — string name; default "info"
+//   sink      — sink object (.write/.close); default stdoutSink with textFormatter
+//   formatter — convenience when you just want to override the default
+//               stdout formatter (e.g. JSON). Ignored if `sink` is set.
+func create(name, options) {
+    let o = options || {}
+    let levelName = o.level || "info"
+    ensure (LEVELS[levelName] != nil) else {
+        throw "logger.create: invalid level '%{levelName}'"
+    }
+    let sink = o.sink
+    if (!sink) {
+        sink = stdoutSink(o.formatter)
+    }
+    return _makeLogger(name, {value: LEVELS[levelName]}, sink, {})
+}
+
+// Router middleware: logs method/path/status/duration on every request.
+// Attaches a request-scoped child logger at `req.log` carrying method,
+// path, and req_id (if present) so downstream handlers can use it
+// directly. The final access-log line is emitted through req.log so the
+// structured record carries those same sticky fields — emitting through
+// the parent `log` here would drop them on the floor.
 func middleware(log) {
     return lam{ req, next in
         let start = time.now()
+        let ctx = {method: req.method, path: req.path}
+        if (req.id) { ctx.req_id = req.id }
+        req.log = log.with(ctx)
         let res = next(req)
         let duration = time.now() - start
         let status = 200
         if (type(res) == "map" && res.status) {
             status = res.status
         }
-        log.info("%{req.method} %{req.path} %{status} %{duration}ms")
+        req.log.info("%{req.method} %{req.path} %{status} %{duration}ms",
+                     {status: status, duration_ms: duration})
         return res
     }
 }
 
-export { create, middleware }
+export {
+    create, middleware,
+    textFormatter, jsonFormatter,
+    stdoutSink, stderrSink, fileSink, multiSink
+}

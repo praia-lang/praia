@@ -1,0 +1,250 @@
+use "testing"
+use "logger"
+
+// Tests for the logger grain. Most cases use a custom "capture sink"
+// that appends records to an array, so we can assert on the structured
+// record directly instead of stringifying output.
+
+func captureSink() {
+    let records = []
+    return {
+        records: records,
+        write: lam{ rec in records.push(rec) },
+        close: lam{ in nil }
+    }
+}
+
+// ── create() default behaviour matches the old API ───────────
+
+testing.test("create(name): emits to stdout with no error", lam{ in
+    // We can't easily capture stdout from within Praia, so this just
+    // exercises the path. Real default-stdout behaviour is covered by
+    // the existing test files that have been using logger.create() for
+    // months — they still pass.
+    let log = logger.create("noop")
+    log.info("hi")
+    log.warn("hi")
+    log.error("hi")
+    testing.assert(true, "no throws on default sink")
+})
+
+// ── level filtering ──────────────────────────────────────────
+
+testing.test("setLevel filters records below threshold", lam{ in
+    let sink = captureSink()
+    let log = logger.create("filter", {sink: sink})
+    log.debug("d1")  // filtered out (default level is info)
+    log.info("i1")
+    log.warn("w1")
+    log.error("e1")
+    testing.assertEqual(len(sink.records), 3, "debug dropped, info+ kept")
+    testing.assertEqual(sink.records[0].level, "info", nil)
+    testing.assertEqual(sink.records[1].level, "warn", nil)
+    testing.assertEqual(sink.records[2].level, "error", nil)
+})
+
+testing.test("setLevel raises threshold dynamically", lam{ in
+    let sink = captureSink()
+    let log = logger.create("dyn", {sink: sink, level: "debug"})
+    log.debug("d1")
+    log.setLevel("warn")
+    log.debug("d2")  // dropped
+    log.info("i1")   // dropped
+    log.warn("w1")   // kept
+    testing.assertEqual(len(sink.records), 2,
+        "one record before raise, one warn after — info and debug filtered")
+    testing.assertEqual(sink.records[1].level, "warn", nil)
+})
+
+testing.test("setLevel rejects unknown level names", lam{ in
+    let log = logger.create("bad")
+    testing.assertThrows(lam{ in log.setLevel("trace") }, nil)
+})
+
+// ── record shape ─────────────────────────────────────────────
+
+testing.test("record carries name, level, message, fields, time", lam{ in
+    let sink = captureSink()
+    let log = logger.create("svc", {sink: sink})
+    log.info("hi there", {k: "v"})
+    let r = sink.records[0]
+    testing.assertEqual(r.name, "svc", nil)
+    testing.assertEqual(r.level, "info", nil)
+    testing.assertEqual(r.message, "hi there", nil)
+    testing.assertEqual(r.fields.k, "v", nil)
+    testing.assert(r.time > 0, "time.now() returned a positive ms value")
+})
+
+// ── jsonFormatter produces parseable single-line JSON ────────
+
+testing.test("jsonFormatter output is a single parseable JSON object", lam{ in
+    let fmt = logger.jsonFormatter()
+    let rec = {
+        time: 1700000000000,
+        level: "info",
+        name: "API",
+        message: "served",
+        fields: {req_id: "abc-123", status: 200}
+    }
+    let line = fmt.format(rec)
+    testing.assert(!line.contains("\n"), "JSON formatter emits one line, no embedded newlines")
+    let parsed = json.parse(line)
+    testing.assertEqual(parsed.level, "info", nil)
+    testing.assertEqual(parsed.name, "API", nil)
+    testing.assertEqual(parsed.message, "served", nil)
+    testing.assertEqual(parsed.req_id, "abc-123", nil)
+    testing.assertEqual(parsed.status, 200, nil)
+})
+
+testing.test("jsonFormatter: reserved keys cannot be overwritten by user fields", lam{ in
+    let fmt = logger.jsonFormatter()
+    let rec = {
+        time: 1700000000000,
+        level: "info",
+        name: "svc",
+        message: "real msg",
+        fields: {level: "FAKE", message: "FAKE", custom: "ok"}
+    }
+    let parsed = json.parse(fmt.format(rec))
+    testing.assertEqual(parsed.level, "info", "reserved level not overridden")
+    testing.assertEqual(parsed.message, "real msg", "reserved message not overridden")
+    testing.assertEqual(parsed.custom, "ok", "non-reserved user fields merged in")
+})
+
+// ── fileSink writes lines ────────────────────────────────────
+
+testing.test("fileSink: appends one line per record", lam{ in
+    let dir = testing.tempDir()
+    let path = dir + "/app.log"
+    let log = logger.create("file", {
+        sink: logger.fileSink(path, logger.jsonFormatter())
+    })
+    log.info("first")
+    log.info("second")
+    log.info("third")
+    log.close()
+    let content = fs.read(path)
+    let lines = content.split("\n")
+    // Last entry produces a trailing newline → empty final element after split.
+    testing.assertEqual(len(lines), 4, "three records + trailing-newline empty")
+    let parsed = json.parse(lines[1])
+    testing.assertEqual(parsed.message, "second", nil)
+})
+
+// ── multiSink fans out ───────────────────────────────────────
+
+testing.test("multiSink writes to every child", lam{ in
+    let a = captureSink()
+    let b = captureSink()
+    let log = logger.create("fan", {sink: logger.multiSink([a, b])})
+    log.info("once")
+    testing.assertEqual(len(a.records), 1, nil)
+    testing.assertEqual(len(b.records), 1, nil)
+})
+
+testing.test("multiSink: one bad sink doesn't break the others", lam{ in
+    let good = captureSink()
+    let bad = {
+        write: lam{ rec in throw "broken sink" },
+        close: lam{ in nil }
+    }
+    let log = logger.create("resilient", {sink: logger.multiSink([bad, good])})
+    log.info("survives")
+    testing.assertEqual(len(good.records), 1, "good sink still received the record")
+})
+
+// ── .with() — sticky context ─────────────────────────────────
+
+testing.test("with(fields): child logger merges sticky fields", lam{ in
+    let sink = captureSink()
+    let base = logger.create("base", {sink: sink})
+    let child = base.with({req_id: "abc"})
+    child.info("hello")
+    let r = sink.records[0]
+    testing.assertEqual(r.fields.req_id, "abc",
+        "child logger attached its sticky field automatically")
+})
+
+testing.test("with(fields): chained calls layer fields, right-most wins", lam{ in
+    let sink = captureSink()
+    let base = logger.create("layered", {sink: sink, level: "debug"})
+    let a = base.with({k1: 1, k2: "a"})
+    let b = a.with({k2: "b", k3: 3})
+    b.info("merged")
+    let r = sink.records[0]
+    testing.assertEqual(r.fields.k1, 1, "outer field preserved")
+    testing.assertEqual(r.fields.k2, "b", "inner field overrides")
+    testing.assertEqual(r.fields.k3, 3, "inner-only field included")
+})
+
+testing.test("with(): parent logger unaffected by child's fields", lam{ in
+    let sink = captureSink()
+    let base = logger.create("iso", {sink: sink})
+    let child = base.with({tenant: "tA"})
+    base.info("from-base")
+    child.info("from-child")
+    testing.assert(sink.records[0].fields.tenant == nil,
+        "base log has no tenant field")
+    testing.assertEqual(sink.records[1].fields.tenant, "tA",
+        "child log has the sticky tenant")
+})
+
+// ── per-call fields override sticky ──────────────────────────
+
+testing.test("per-call fields override sticky fields", lam{ in
+    let sink = captureSink()
+    let log = logger.create("ovr", {sink: sink}).with({k: "sticky"})
+    log.info("hi", {k: "perCall"})
+    testing.assertEqual(sink.records[0].fields.k, "perCall",
+        "per-call value overrides the sticky one for that record only")
+    log.info("hi again")
+    testing.assertEqual(sink.records[1].fields.k, "sticky",
+        "the next call without per-call fields still sees sticky")
+})
+
+// ── generic .log(level, msg, fields?) ────────────────────────
+
+testing.test("log(level, msg) routes through the right emit path", lam{ in
+    let sink = captureSink()
+    let l = logger.create("g", {sink: sink, level: "debug"})
+    l.log("debug", "d", nil)
+    l.log("warn", "w", {x: 1})
+    testing.assertEqual(sink.records[0].level, "debug", nil)
+    testing.assertEqual(sink.records[1].level, "warn", nil)
+    testing.assertEqual(sink.records[1].fields.x, 1, nil)
+})
+
+testing.test("log(level): rejects unknown levels", lam{ in
+    let l = logger.create("g")
+    testing.assertThrows(lam{ in l.log("trace", "x", nil) }, nil)
+})
+
+// ── setLevel propagates through .with() families ─────────────
+
+testing.test("setLevel on parent propagates to a pre-existing child", lam{ in
+    let sink = captureSink()
+    let parent = logger.create("p", {sink: sink, level: "info"})
+    let child = parent.with({k: "v"})
+
+    parent.setLevel("warn")
+    child.info("dropped")    // should now be filtered out
+    child.warn("kept")
+    testing.assertEqual(len(sink.records), 1,
+        "child observed the parent's setLevel call")
+    testing.assertEqual(sink.records[0].level, "warn", nil)
+})
+
+testing.test("setLevel on child propagates to parent (shared cell)", lam{ in
+    let sink = captureSink()
+    let parent = logger.create("p", {sink: sink, level: "info"})
+    let child = parent.with({k: "v"})
+
+    child.setLevel("error")
+    parent.warn("dropped")   // parent now filtered too
+    parent.error("kept")
+    testing.assertEqual(len(sink.records), 1,
+        "parent observed the child's setLevel call")
+    testing.assertEqual(sink.records[0].level, "error", nil)
+})
+
+testing.done()
