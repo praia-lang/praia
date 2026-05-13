@@ -2954,11 +2954,26 @@ Interpreter::Interpreter() {
                     out += hostStr;
                 }
                 const Value* port = get("port");
-                if (port && !port->isNil() && port->isNumber()) {
-                    int64_t p = port->toInt64ForBitwise();
+                if (port && !port->isNil()) {
+                    // Strict validation: a `port` field that's present
+                    // but invalid is almost always a bug (port 0, an
+                    // out-of-range integer like 99999, or a non-numeric
+                    // value). Silently dropping it would hide that bug.
+                    // Caller should omit the key entirely if they don't
+                    // want a port in the output.
+                    if (!port->isNumber())
+                        throw RuntimeError("url.build: 'port' must be a number", 0);
+                    double pd = port->asNumber();
+                    if (pd != std::floor(pd))
+                        throw RuntimeError("url.build: 'port' must be an integer (got " +
+                                           std::to_string(pd) + ")", 0);
+                    int64_t p = static_cast<int64_t>(pd);
+                    if (p < 1 || p > 65535)
+                        throw RuntimeError("url.build: 'port' must be in 1..65535 (got " +
+                                           std::to_string(p) + ")", 0);
                     bool isDefault = (schemeStr == "http"  && p == 80) ||
                                       (schemeStr == "https" && p == 443);
-                    if (!isDefault && p > 0) {
+                    if (!isDefault) {
                         out += ':';
                         out += std::to_string(p);
                     }

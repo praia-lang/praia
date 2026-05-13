@@ -32,6 +32,47 @@ testing.test("build: omits the default port for http/https", lam{ in
         "https://x:8080/", "non-default port kept")
 })
 
+// ── port validation (regression) ─────────────────────────────
+
+testing.test("build: rejects port 0 (silently dropped before)", lam{ in
+    testing.assertThrows(
+        lam{ in url.build({scheme: "http", host: "x", port: 0, path: "/"}) },
+        "must be in 1..65535")
+})
+
+testing.test("build: rejects ports above 65535", lam{ in
+    testing.assertThrows(
+        lam{ in url.build({scheme: "http", host: "x", port: 99999, path: "/"}) },
+        "must be in 1..65535")
+})
+
+testing.test("build: rejects negative ports", lam{ in
+    testing.assertThrows(
+        lam{ in url.build({scheme: "http", host: "x", port: -1, path: "/"}) },
+        "must be in 1..65535")
+})
+
+testing.test("build: rejects fractional ports", lam{ in
+    testing.assertThrows(
+        lam{ in url.build({scheme: "http", host: "x", port: 80.5, path: "/"}) },
+        "must be an integer")
+})
+
+testing.test("build: rejects non-numeric port values", lam{ in
+    testing.assertThrows(
+        lam{ in url.build({scheme: "http", host: "x", port: "80", path: "/"}) },
+        "must be a number")
+})
+
+testing.test("build: nil port still works (key absent omits port)", lam{ in
+    testing.assertEqual(
+        url.build({scheme: "http", host: "x", path: "/"}),
+        "http://x/", nil)
+    testing.assertEqual(
+        url.build({scheme: "http", host: "x", port: nil, path: "/"}),
+        "http://x/", "explicit nil treated the same as missing")
+})
+
 testing.test("build: wraps IPv6 hosts in brackets", lam{ in
     testing.assertEqual(
         url.build({scheme: "http", host: "::1", port: 8080, path: "/"}),
