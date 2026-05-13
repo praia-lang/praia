@@ -352,18 +352,21 @@ static std::string decodeChunkedBody(const std::string& enc) {
         i = lineEnd + 2;
         if (sz == 0) {
             // Terminator: consume trailers until the empty line then stop.
-            // Trailers aren't surfaced — same policy as openStream. A
-            // missing CRLF here means the payload was truncated mid-trailer
-            // and we must surface that as an error rather than silently
-            // returning a partial body.
+            // Trailers aren't surfaced — same policy as openStream. The
+            // final empty CRLF is REQUIRED (RFC 7230 §4.1) — without it
+            // the body is truncated, even when no trailer headers were
+            // sent (a `0\r\n` with no following CRLF is malformed).
+            bool sawEnd = false;
             while (i < enc.size()) {
                 size_t tEnd = enc.find("\r\n", i);
                 if (tEnd == std::string::npos)
                     throw RuntimeError("HTTP chunked: trailer missing terminating CRLF", 0);
                 bool empty = (tEnd == i);
                 i = tEnd + 2;
-                if (empty) break;
+                if (empty) { sawEnd = true; break; }
             }
+            if (!sawEnd)
+                throw RuntimeError("HTTP chunked: trailer missing terminating CRLF", 0);
             return out;
         }
         if (i + static_cast<size_t>(sz) > enc.size())
@@ -1296,7 +1299,26 @@ static void detectStreamMode(HttpStreamState& s) {
     if (teIt != h.end() && teIt->second.isString()) {
         std::string te = teIt->second.asString();
         for (auto& c : te) c = (char)std::tolower((unsigned char)c);
-        if (te.find("chunked") != std::string::npos) {
+        // Exact-token match on the comma-separated TE list. Same logic
+        // as the buffered branch in parseHttpResponse — substring
+        // matching would mis-fire on "x-chunked"/"chunked-extension".
+        bool hasChunked = false;
+        size_t pos = 0;
+        while (pos < te.size()) {
+            size_t comma = te.find(',', pos);
+            size_t end = (comma == std::string::npos) ? te.size() : comma;
+            size_t a = pos;
+            while (a < end && (te[a] == ' ' || te[a] == '\t')) a++;
+            size_t b = end;
+            while (b > a && (te[b - 1] == ' ' || te[b - 1] == '\t')) b--;
+            if (b - a == 7 && te.compare(a, 7, "chunked") == 0) {
+                hasChunked = true;
+                break;
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+        if (hasChunked) {
             s.mode = HttpStreamState::Mode::Chunked;
             return;
         }

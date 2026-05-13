@@ -3,11 +3,17 @@ use "testing"
 // Regression: http.get / http.request must decode Transfer-Encoding: chunked
 // before returning. Earlier, the non-stream path returned the raw chunk
 // framing (`6\r\nHello ...0\r\n\r\n`) verbatim as the body.
+//
+// The server uses an ephemeral port (net.listen(0)) and publishes the
+// actual bound port through a SharedMap. The main thread polls the
+// shared map until the port appears, eliminating the previous race
+// between time.sleep(200) and the server's listen() call.
 
-let TEST_PORT = 38802
+let _state = SharedMap()
 
 let _serverFuture = async lam{ in
-    let s = net.listen(TEST_PORT)
+    let s = net.listen(0)                       // OS picks the port
+    _state.set("port", net.localAddr(s).port)   // publish for the test
     while (true) {
         let c = net.accept(s)
         let req = ""
@@ -80,8 +86,18 @@ let _serverFuture = async lam{ in
         net.close(c)
     }
 }()
-time.sleep(200)
 
+// Wait deterministically for the server to bind. Cap at 5s so a stuck
+// listen() in a broken environment surfaces as a clear failure instead
+// of an infinite spin.
+let _deadline = time.now() + 5000
+while (_state.get("port", nil) == nil) {
+    if (time.now() > _deadline) {
+        throw "test server failed to bind within 5s"
+    }
+    time.sleep(5)
+}
+let TEST_PORT = _state.get("port", 0)
 let base = "http://localhost:" + str(TEST_PORT)
 
 // ── Happy path: three chunks reassembled ─────────────────────

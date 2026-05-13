@@ -361,6 +361,40 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             return Value(static_cast<int64_t>(client));
         }));
 
+    // net.localAddr(fd) → {host, port}. Wraps getsockname(2). Used to
+    // discover the port chosen when binding with port=0 — tests want
+    // ephemeral binding so they don't collide with whatever's running.
+    netMap->entries[Value("localAddr")] = Value(makeNative("net.localAddr", 1,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isNumber())
+                throw RuntimeError("net.localAddr() requires a socket fd", 0);
+            int fd = static_cast<int>(args[0].asNumber());
+            struct sockaddr_storage ss;
+            socklen_t sl = sizeof(ss);
+            if (getsockname(fd, (struct sockaddr*)&ss, &sl) < 0)
+                throw RuntimeError(sysErr("getsockname failed"), 0);
+            char addrBuf[INET6_ADDRSTRLEN] = {};
+            int port = 0;
+            if (ss.ss_family == AF_INET) {
+                auto* s = reinterpret_cast<sockaddr_in*>(&ss);
+                inet_ntop(AF_INET, &s->sin_addr, addrBuf, sizeof(addrBuf));
+                port = ntohs(s->sin_port);
+            } else if (ss.ss_family == AF_INET6) {
+                auto* s = reinterpret_cast<sockaddr_in6*>(&ss);
+                inet_ntop(AF_INET6, &s->sin6_addr, addrBuf, sizeof(addrBuf));
+                port = ntohs(s->sin6_port);
+                if (IN6_IS_ADDR_V4MAPPED(&s->sin6_addr)) {
+                    inet_ntop(AF_INET, &s->sin6_addr.s6_addr[12], addrBuf, sizeof(addrBuf));
+                }
+            } else {
+                throw RuntimeError("net.localAddr(): unknown address family", 0);
+            }
+            auto result = gcNew<PraiaMap>();
+            result->entries[Value("host")] = Value(std::string(addrBuf));
+            result->entries[Value("port")] = Value(static_cast<int64_t>(port));
+            return Value(result);
+        }));
+
     netMap->entries[Value("send")] = Value(makeNative("net.send", 2,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isNumber())
