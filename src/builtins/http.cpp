@@ -342,17 +342,24 @@ static std::string decodeChunkedBody(const std::string& enc) {
             else throw RuntimeError(
                 std::string("HTTP chunked: invalid hex in chunk size: '") +
                 c + "'", 0);
-            sz = (sz << 4) | d;
-            if (sz < 0)
+            // Check overflow *before* shifting — signed left-shift past
+            // the value's width is UB. INT64_MAX >> 4 is the largest
+            // value that survives `<< 4 | 0xF`.
+            if (sz > (INT64_MAX >> 4))
                 throw RuntimeError("HTTP chunked: chunk size overflow", 0);
+            sz = (sz << 4) | d;
         }
         i = lineEnd + 2;
         if (sz == 0) {
             // Terminator: consume trailers until the empty line then stop.
-            // Trailers aren't surfaced — same policy as openStream.
+            // Trailers aren't surfaced — same policy as openStream. A
+            // missing CRLF here means the payload was truncated mid-trailer
+            // and we must surface that as an error rather than silently
+            // returning a partial body.
             while (i < enc.size()) {
                 size_t tEnd = enc.find("\r\n", i);
-                if (tEnd == std::string::npos) break;
+                if (tEnd == std::string::npos)
+                    throw RuntimeError("HTTP chunked: trailer missing terminating CRLF", 0);
                 bool empty = (tEnd == i);
                 i = tEnd + 2;
                 if (empty) break;
@@ -415,7 +422,11 @@ Value parseHttpResponse(const std::string& raw) {
         size_t ve = line.size();
         while (ve > vs && (line[ve - 1] == ' ' || line[ve - 1] == '\t')) ve--;
         std::string val = line.substr(vs, ve - vs);
-        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+        // Cast through unsigned char — passing a negative char to
+        // std::tolower is UB. Same pattern used elsewhere in this file
+        // (see line 1265 in the streaming TE check).
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](char c) { return (char)std::tolower((unsigned char)c); });
         if (key == "set-cookie")
             cookies->elements.push_back(Value(val));
         hdrs->entries[Value(key)] = Value(val);
@@ -430,8 +441,28 @@ Value parseHttpResponse(const std::string& raw) {
     if (teIt != hdrs->entries.end() && teIt->second.isString()) {
         const std::string& te = teIt->second.asString();
         std::string teLower(te);
-        std::transform(teLower.begin(), teLower.end(), teLower.begin(), ::tolower);
-        if (teLower.find("chunked") != std::string::npos) {
+        std::transform(teLower.begin(), teLower.end(), teLower.begin(),
+                       [](char c) { return (char)std::tolower((unsigned char)c); });
+        // Transfer-Encoding is a comma-separated list of tokens. Tokenize
+        // and match exactly — substring matching would falsely trigger on
+        // values like "x-chunked" or "chunked-extension".
+        bool hasChunked = false;
+        size_t pos = 0;
+        while (pos < teLower.size()) {
+            size_t comma = teLower.find(',', pos);
+            size_t end = (comma == std::string::npos) ? teLower.size() : comma;
+            size_t s = pos;
+            while (s < end && (teLower[s] == ' ' || teLower[s] == '\t')) s++;
+            size_t e = end;
+            while (e > s && (teLower[e - 1] == ' ' || teLower[e - 1] == '\t')) e--;
+            if (e - s == 7 && teLower.compare(s, 7, "chunked") == 0) {
+                hasChunked = true;
+                break;
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+        if (hasChunked) {
             body = decodeChunkedBody(body);
         }
     }
@@ -467,7 +498,8 @@ static std::string findHeaderValue(const std::string& headers, const std::string
         if (key.size() == name.size()) {
             bool match = true;
             for (size_t i = 0; i < key.size(); i++) {
-                if (std::tolower(key[i]) != std::tolower(name[i])) { match = false; break; }
+                if (std::tolower((unsigned char)key[i]) !=
+                    std::tolower((unsigned char)name[i])) { match = false; break; }
             }
             if (match) {
                 size_t valStart = pos + 1;
@@ -1209,9 +1241,10 @@ static void streamEnsure(HttpStreamState& s) {
                     else throw RuntimeError(
                         std::string("HTTP stream: invalid hex in chunk size: '") +
                         c + "'", 0);
-                    sz = (sz << 4) | d;
-                    if (sz < 0)
+                    // Pre-shift overflow guard — see decodeChunkedBody.
+                    if (sz > (INT64_MAX >> 4))
                         throw RuntimeError("HTTP stream: chunk size overflow", 0);
+                    sz = (sz << 4) | d;
                 }
                 if (sz == 0) {
                     // Terminator chunk: consume trailers until empty

@@ -60,6 +60,19 @@ let _serverFuture = async lam{ in
             resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
                    "a\r\ntrun\r\n"
         }
+        elif (path == "/te-substring-trap") {
+            // Value contains the substring "chunked" but is not the
+            // "chunked" token. Substring-based parsing would (wrongly)
+            // attempt chunked decode and throw on the plain body.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: x-chunked-stuff\r\nConnection: close\r\n\r\nplain body"
+        }
+        elif (path == "/te-trailing-chunked") {
+            // Real-world TE list: a real coding plus chunked at the end.
+            // Token parsing must detect "chunked" via comma split, not
+            // substring contain. Body IS chunked-encoded.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nConnection: close\r\n\r\n" +
+                   "5\r\nhello\r\n0\r\n\r\n"
+        }
         else {
             resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         }
@@ -110,6 +123,23 @@ testing.test("http.get throws on invalid hex chunk size", lam{ in
 testing.test("http.get throws on truncated chunk data", lam{ in
     testing.assertThrows(lam{ in http.get(base + "/chunked-truncated") },
         "truncated")
+})
+
+// ── Substring vs token-exact TE matching ─────────────────────
+
+testing.test("Transfer-Encoding 'x-chunked-stuff' is NOT treated as chunked", lam{ in
+    // Substring-based matching would invoke the chunked decoder on a
+    // plain body and throw. With token-exact matching, the body passes
+    // through unchanged.
+    let r = http.get(base + "/te-substring-trap")
+    testing.assertEqual(r.body, "plain body",
+        "TE token 'x-chunked-stuff' must not trigger chunked decoding")
+})
+
+testing.test("Transfer-Encoding 'gzip, chunked' detects chunked via token split", lam{ in
+    let r = http.get(base + "/te-trailing-chunked")
+    testing.assertEqual(r.body, "hello",
+        "chunked token in a comma-separated TE list must still be decoded")
 })
 
 testing.done()
