@@ -465,6 +465,15 @@ func only(name, fn) {
     print("TEST: %{name} (only)")
     let ctx = _makeContext(name)
     _pushCtx(ctx)
+
+    // Snapshot _afterEach BEFORE the body runs (mirrors test()): a hook
+    // registered inside this only() body must not fire for the same body,
+    // otherwise an afterEach { in testing.afterEach(...) } would observe
+    // its own newly registered hook within the same call.
+    let afters = []
+    let i = len(_afterEach) - 1
+    while (i >= 0) { afters.push(_afterEach[i]); i = i - 1 }
+
     let beforeOk = _runHooks(_beforeEach, name + " / beforeEach", true)
     if (beforeOk) {
         try {
@@ -477,9 +486,6 @@ func only(name, fn) {
     }
     // afterEach before cleanups so afterEach can register additional
     // cleanup actions — see comment in test() for rationale.
-    let afters = []
-    let i = len(_afterEach) - 1
-    while (i >= 0) { afters.push(_afterEach[i]); i = i - 1 }
     _runHooks(afters, name + " / afterEach", false)
     _runCleanups(ctx)
     _popCtx()
