@@ -30,6 +30,40 @@ testing.test("build: defaults apply Path=/; HttpOnly; SameSite=Lax", lam{ in
     testing.assert(h.contains("SameSite=Lax"), nil)
 })
 
+// ── attribute-injection rejection (regression) ───────────────
+
+testing.test("build: rejects '; Secure' injection via path", lam{ in
+    // Probe value from the audit. The semicolon would let an attacker
+    // smuggle additional cookie attributes if path were concatenated raw.
+    testing.assertThrows(
+        lam{ in cookie.build("session", "abc", {path: "/; Secure"}) },
+        "invalid character in path")
+})
+
+testing.test("build: rejects CRLF in domain", lam{ in
+    testing.assertThrows(
+        lam{ in cookie.build("session", "abc", {domain: "evil.com\r\n"}) },
+        "invalid character in domain")
+})
+
+testing.test("build: rejects '=' / ';' / whitespace in name", lam{ in
+    testing.assertThrows(lam{ in cookie.build("ses;sion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("ses=sion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("ses sion", "x", nil) }, "invalid character in name")
+})
+
+testing.test("build: rejects unknown sameSite values", lam{ in
+    testing.assertThrows(
+        lam{ in cookie.build("session", "abc", {sameSite: "Bogus"}) },
+        "sameSite must be 'Strict', 'Lax', or 'None'")
+})
+
+testing.test("build: accepts the three legal sameSite values", lam{ in
+    testing.assert(cookie.build("a", "b", {sameSite: "Strict"}).contains("SameSite=Strict"), nil)
+    testing.assert(cookie.build("a", "b", {sameSite: "Lax"}).contains("SameSite=Lax"), nil)
+    testing.assert(cookie.build("a", "b", {sameSite: "None"}).contains("SameSite=None"), nil)
+})
+
 testing.test("clear: emits a maxAge=0 expiry", lam{ in
     let h = cookie.clear("session", nil)
     testing.assert(h.contains("Max-Age=0"), nil)
