@@ -48,6 +48,57 @@ func parse(header) {
     return result
 }
 
+// Allow-list per RFC 7230 `tchar` (token grammar referenced by RFC 6265):
+//   ALPHA / DIGIT / "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+"
+//   / "-" / "." / "^" / "_" / "`" / "|" / "~"
+// Everything else — separators, CTLs (< 0x20 or == 0x7F), non-ASCII
+// bytes — is rejected. The deny-list approach we used before missed
+// most CTLs and all non-ASCII; switching to an allow-list is both
+// more correct and more secure (default-deny).
+let _TOKEN_ALLOWED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`|~"
+func _validateName(s) {
+    if (type(s) != "string" || len(s) == 0) {
+        throw "cookie.build: name must be a non-empty string"
+    }
+    for (i in 0..len(s)) {
+        let c = s[i]
+        // Multi-byte (non-ASCII) graphemes can't be in the allow-list
+        // string (which is pure single-byte ASCII), so .contains() will
+        // miss them — and CTLs / separators aren't in there either, so
+        // .contains() catches them too in one shot.
+        if (!_TOKEN_ALLOWED.contains(c)) {
+            throw "cookie.build: invalid character in name: '" + c + "'"
+        }
+    }
+}
+
+// path-value (RFC 6265 §4.1.1): any CHAR except CTLs or ";". We also
+// reject "," for parser-robustness (some legacy proxies split on it).
+// Iterate by byte rather than grapheme so we catch every CTL (< 0x20)
+// and DEL (0x7F), not just the printable separators in the old
+// deny-list — those are the bytes that can sneak past per-grapheme
+// `contains()` checks. Non-ASCII bytes (≥ 0x80) are left alone:
+// browsers tolerate IDN-style domains and they can't carry injection
+// payloads (UTF-8 continuation bytes never equal ';' or CRLF).
+func _validateAttrChars(s, field) {
+    if (type(s) != "string") {
+        throw "cookie.build: " + field + " must be a string"
+    }
+    for (b in bytes.toArray(s)) {
+        if (b < 0x20 || b == 0x7F || b == 0x3B || b == 0x2C) {
+            throw "cookie.build: invalid byte in " + field + " (code " + str(b) + ")"
+        }
+    }
+}
+
+// SameSite is an enum. We accept the three RFC values plus their
+// lowercased forms (some users write "lax").
+func _validateSameSite(s) {
+    if (s == "Strict" || s == "Lax" || s == "None") { return }
+    if (s == "strict" || s == "lax" || s == "none") { return }
+    throw "cookie.build: sameSite must be 'Strict', 'Lax', or 'None' (got '" + str(s) + "')"
+}
+
 // Build a Set-Cookie response header. `options` keys (all optional):
 //   maxAge   number   delta-seconds; <=0 deletes
 //   path     string   default "/"
@@ -55,19 +106,37 @@ func parse(header) {
 //   httpOnly bool     default false
 //   secure   bool     default false
 //   sameSite string   default "Lax"
+//
+// Name and string-valued attributes are validated: characters that
+// would let a caller inject additional cookie attributes (";", CR/LF,
+// etc.) are rejected with a clear error. Without this, a value like
+// `path: "/; Secure"` would emit `Path=/; Secure` and the cookie would
+// silently gain the Secure flag.
 func build(name, value, options) {
+    _validateName(name)
     let cookie = name + "=" + http.encodeURI(value)
 
     if (options) {
         if (hasKey(options, "maxAge")) {
-            cookie = cookie + "; Max-Age=" + options.maxAge.toString()
+            // Max-Age must be a finite number — anything else (string,
+            // nil, NaN, infinity) would emit a malformed cookie like
+            // `Max-Age=not-a-number` that browsers ignore silently.
+            // Throwing surfaces the bug at the call site instead.
+            let m = options.maxAge
+            if ((type(m) != "int" && type(m) != "float") ||
+                math.isNan(m) || math.isInf(m)) {
+                throw "cookie.build: maxAge must be a finite number"
+            }
+            cookie = cookie + "; Max-Age=" + m.toString()
         }
         if (hasKey(options, "path")) {
+            _validateAttrChars(options.path, "path")
             cookie = cookie + "; Path=" + options.path
         } else {
             cookie = cookie + "; Path=/"
         }
         if (hasKey(options, "domain")) {
+            _validateAttrChars(options.domain, "domain")
             cookie = cookie + "; Domain=" + options.domain
         }
         if (hasKey(options, "httpOnly") && options.httpOnly) {
@@ -77,6 +146,7 @@ func build(name, value, options) {
             cookie = cookie + "; Secure"
         }
         if (hasKey(options, "sameSite")) {
+            _validateSameSite(options.sameSite)
             cookie = cookie + "; SameSite=" + options.sameSite
         } else {
             cookie = cookie + "; SameSite=Lax"

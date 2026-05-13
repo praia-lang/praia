@@ -30,6 +30,101 @@ testing.test("build: defaults apply Path=/; HttpOnly; SameSite=Lax", lam{ in
     testing.assert(h.contains("SameSite=Lax"), nil)
 })
 
+// ── attribute-injection rejection (regression) ───────────────
+
+testing.test("build: rejects '; Secure' injection via path", lam{ in
+    // Probe value from the audit. The semicolon would let an attacker
+    // smuggle additional cookie attributes if path were concatenated raw.
+    testing.assertThrows(
+        lam{ in cookie.build("session", "abc", {path: "/; Secure"}) },
+        "invalid character in path")
+})
+
+testing.test("build: rejects CRLF in domain", lam{ in
+    testing.assertThrows(
+        lam{ in cookie.build("session", "abc", {domain: "evil.com\r\n"}) },
+        "invalid byte in domain")
+})
+
+testing.test("build: rejects every CTL + DEL in path/domain", lam{ in
+    // Spot-check a few CTLs that the previous deny-list missed:
+    // \x01, \x08 (BS), \x0B (VT), \x1F (US), \x7F (DEL).
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x01b"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x08b"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x0bb"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x1fb"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x7fb"}) }, "invalid byte in path")
+    testing.assertThrows(lam{ in cookie.build("s", "v", {domain: "x\x7fy"}) }, "invalid byte in domain")
+})
+
+testing.test("build: rejects '=' / ';' / whitespace in name", lam{ in
+    testing.assertThrows(lam{ in cookie.build("ses;sion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("ses=sion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("ses sion", "x", nil) }, "invalid character in name")
+})
+
+testing.test("build: rejects control bytes and non-ASCII in name", lam{ in
+    // CTLs (< 0x20 and == 0x7F) and any non-ASCII grapheme are outside
+    // the RFC 7230 tchar allow-list and must be rejected.
+    testing.assertThrows(lam{ in cookie.build("ses\x01ion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("ses\x7fion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("ses\x1fion", "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("café",       "x", nil) }, "invalid character in name")
+    testing.assertThrows(lam{ in cookie.build("名前",       "x", nil) }, "invalid character in name")
+})
+
+testing.test("build: accepts the full tchar punctuation set in names", lam{ in
+    // Valid tchar punctuation per RFC 7230 — used by some real cookie
+    // schemes (e.g. csrf-token, _ga, .session_id).
+    let h = cookie.build("!#$%&'*+-.^_`|~", "x", nil)
+    testing.assert(h.startsWith("!#$%&'*+-.^_`|~="),
+        "tchar punctuation must round-trip into the name unchanged")
+})
+
+testing.test("build: rejects unknown sameSite values", lam{ in
+    testing.assertThrows(
+        lam{ in cookie.build("session", "abc", {sameSite: "Bogus"}) },
+        "sameSite must be 'Strict', 'Lax', or 'None'")
+})
+
+testing.test("build: accepts the three legal sameSite values", lam{ in
+    testing.assert(cookie.build("a", "b", {sameSite: "Strict"}).contains("SameSite=Strict"), nil)
+    testing.assert(cookie.build("a", "b", {sameSite: "Lax"}).contains("SameSite=Lax"), nil)
+    testing.assert(cookie.build("a", "b", {sameSite: "None"}).contains("SameSite=None"), nil)
+})
+
+testing.test("build: rejects non-numeric / NaN / infinite maxAge", lam{ in
+    // Previously these values went through `toString()` and produced
+    // malformed `Max-Age=...` attributes that browsers silently ignore.
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: "soon"}) },
+        "maxAge must be a finite number")
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: nil}) },
+        "maxAge must be a finite number")
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: math.sqrt(-1.0)}) },
+        "maxAge must be a finite number")
+    // Positive and negative infinity must also be rejected — they
+    // exercise the math.isInf(m) branch the NaN test misses. `1.0/0.0`
+    // throws in Praia, so we produce inf via the canonical
+    // double-overflow trick.
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: 1e308 * 10}) },
+        "maxAge must be a finite number")
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: -1e308 * 10}) },
+        "maxAge must be a finite number")
+})
+
+testing.test("build: accepts integer + zero + negative maxAge", lam{ in
+    testing.assert(cookie.build("a", "b", {maxAge: 3600}).contains("Max-Age=3600"), nil)
+    testing.assert(cookie.build("a", "b", {maxAge: 0}).contains("Max-Age=0"),
+        "Max-Age=0 means delete — must still emit")
+    testing.assert(cookie.build("a", "b", {maxAge: -1}).contains("Max-Age=-1"),
+        "negative is non-RFC but common-in-the-wild for cookie deletion")
+})
+
 testing.test("clear: emits a maxAge=0 expiry", lam{ in
     let h = cookie.clear("session", nil)
     testing.assert(h.contains("Max-Age=0"), nil)

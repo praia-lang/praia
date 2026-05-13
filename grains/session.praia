@@ -2,13 +2,25 @@
 //
 // Usage:
 //   use "session"
-//   let sessions = session.create()
+//   let sessions = session.create({maxAge: 3600})  // seconds
 //   app.use(sessions.middleware())
 //
 // In handlers:
 //   req.session.set("user", {name: "Ada"})
 //   let user = req.session.get("user")
 //   req.session.destroy()
+//
+// Records carry an absolute expiresAt and are evicted both lazily (on
+// any access past the deadline) and via a per-request sweep, so a
+// replayed cookie cannot resurrect a timed-out session and the store
+// doesn't grow unbounded. Each request to an existing session refreshes
+// its expiry (sliding window, like Express's `rolling: true`).
+
+// Imported at module load — the previous `use "cookie"` inside
+// sessionMiddleware() re-fired on every `middleware()` call, which
+// trips the "already imported in this file" guard when a test creates
+// more than one session manager.
+use "cookie"
 
 func hasKey(m, k) {
     return keys(m).contains(k)
@@ -36,32 +48,91 @@ func create(options) {
 
     if (options) {
         if (hasKey(options, "cookieName")) { cookieName = options.cookieName }
-        if (hasKey(options, "maxAge")) { maxAge = options.maxAge }
+        if (hasKey(options, "maxAge")) {
+            // Validate before assigning: a non-number, NaN, infinity, or
+            // negative value would otherwise propagate into maxAgeMs and
+            // produce nonsense expiresAt timestamps (NaN comparisons
+            // are always false, so an entry could become un-evictable).
+            // Silently fall back to the default rather than throwing —
+            // this matches how the other options behave on bad input.
+            let m = options.maxAge
+            if (type(m) == "int" || type(m) == "float") {
+                if (!math.isNan(m) && !math.isInf(m) && m >= 0) {
+                    maxAge = m
+                }
+            }
+        }
         if (hasKey(options, "secure")) { cookieOptions.secure = options.secure }
         if (hasKey(options, "sameSite")) { cookieOptions.sameSite = options.sameSite }
     }
     cookieOptions.maxAge = maxAge
+    let maxAgeMs = maxAge * 1000
 
-    // In-memory session store: sessionId → data map
+    // In-memory session store: sessionId → {data, expiresAt}.
+    // expiresAt is an absolute time in ms (time.now() + maxAgeMs at
+    // creation). Storing it alongside the data lets us a) reject
+    // replays of cookies whose server-side record has timed out and
+    // b) sweep stale records so the map doesn't grow unbounded.
     let store = {}
 
-    func getSession(id) {
-        if (hasKey(store, id)) {
-            return store[id]
+    func _now() { return time.now() }
+
+    // Drop every entry whose expiresAt has passed. Called opportunistically
+    // on each request — the common case (no stale entries) takes a single
+    // O(n) scan and exits without allocating; only when something needs
+    // evicting do we pay for the rebuild + reassignment. For in-memory
+    // session stores the worst-case cost is fine; high-traffic deployments
+    // should swap this grain for a Redis-backed equivalent.
+    func _sweep() {
+        let now = _now()
+        let hasStale = false
+        for (k in keys(store)) {
+            if (store[k].expiresAt <= now) { hasStale = true; break }
         }
-        return nil
+        if (!hasStale) { return }
+        let fresh = {}
+        for (k in keys(store)) {
+            if (store[k].expiresAt > now) { fresh[k] = store[k] }
+        }
+        store = fresh
+    }
+
+    func getSession(id) {
+        if (!hasKey(store, id)) { return nil }
+        let entry = store[id]
+        // Lazy eviction: if a request comes in with an expired session
+        // ID before the next sweep, treat it as not-found so the user
+        // can't replay an old cookie value.
+        if (entry.expiresAt <= _now()) {
+            let fresh = {}
+            for (k in keys(store)) {
+                if (k != id) { fresh[k] = store[k] }
+            }
+            store = fresh
+            return nil
+        }
+        return entry.data
+    }
+
+    func _touch(id) {
+        if (hasKey(store, id)) {
+            store[id].expiresAt = _now() + maxAgeMs
+        }
     }
 
     func createSession() {
         let id = generateId()
-        store[id] = {}
+        store[id] = {data: {}, expiresAt: _now() + maxAgeMs}
         return id
     }
 
     func sessionMiddleware() {
-        use "cookie"
-
         return lam{ req, next in
+            // Drop expired records before serving this request. Keeps the
+            // store from growing unbounded over time even when no traffic
+            // hits the matching IDs to trigger lazy eviction.
+            _sweep()
+
             // Parse session ID from cookies
             let cookieHeader = ""
             if (hasKey(req, "headers") && hasKey(req.headers, "cookie")) {
@@ -75,15 +146,23 @@ func create(options) {
                 sid = cookies[cookieName]
             }
 
-            // Validate session exists in store
+            // Validate session exists in store (and hasn't expired —
+            // getSession evicts and returns nil if the record is stale,
+            // so an attacker can't replay a cookie past server-side
+            // expiry).
             let data = nil
             if (len(sid) > 0) {
                 data = getSession(sid)
             }
             if (!data) {
                 sid = createSession()
-                data = store[sid]
+                data = store[sid].data
                 isNew = true
+            } else {
+                // Sliding expiry: touch the record so an actively-used
+                // session doesn't time out mid-flow. Matches Express's
+                // `rolling` default; most users want this.
+                _touch(sid)
             }
 
             // Attach session API to request
@@ -108,14 +187,9 @@ func create(options) {
                     for (k in ks) {
                         if (k != key) { newData[k] = sessionData[k] }
                     }
-                    // Copy back
-                    let oldKeys = keys(sessionData)
-                    for (k in oldKeys) {
-                        if (k == key) {
-                            // Can't delete from map, so we replace store entry
-                        }
+                    if (hasKey(store, sessionId)) {
+                        store[sessionId].data = newData
                     }
-                    store[sessionId] = newData
                     sessionData = newData
                 },
                 destroy: lam{ in
