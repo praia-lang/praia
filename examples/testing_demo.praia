@@ -1,0 +1,95 @@
+// ── testing grain demo ──
+//
+// Run with: ./praia examples/testing_demo.praia
+//   (Or: ./praia test  — to run all test_*.praia files in tests/)
+//
+// Walks through the testing grain beyond the basic test/assertEqual
+// pattern: fixtures, hooks, subtests, table-driven runs, and snapshots.
+
+use "testing"
+
+// ── Module under test (toy: a tiny CSV-row formatter) ────────
+
+func formatRow(cells, sep) {
+    let out = ""
+    for (i in 0..len(cells)) {
+        if (i > 0) { out = out + sep }
+        out = out + str(cells[i])
+    }
+    return out
+}
+
+// ── 1. Plain assertions ──────────────────────────────────────
+
+testing.test("formatRow: basic join", lam{ in
+    testing.assertEqual(formatRow(["a", "b", "c"], ","), "a,b,c", nil)
+})
+
+// assertContains: substring, array element, or map key.
+testing.test("assertContains: three shapes", lam{ in
+    testing.assertContains("hello world", "lo w", nil)
+    testing.assertContains([1, 2, 3], 2, nil)
+    testing.assertContains({maybe: nil, real: 1}, "maybe",
+        "key with nil value still counts as present")
+})
+
+// ── 2. Fixtures with auto-cleanup ────────────────────────────
+
+testing.test("tempDir: auto-removed at end of test", lam{ in
+    let dir = testing.tempDir()       // registered for cleanup automatically
+    fs.write(dir + "/sample.csv", "name,age\nada,30\n")
+    testing.assert(fs.exists(dir + "/sample.csv"), "file exists during test")
+    // tempDir + everything under it is removed when this test returns.
+})
+
+// ── 3. File-scoped beforeEach / afterEach ────────────────────
+
+let _testCount = 0
+testing.beforeEach(lam{ in _testCount = _testCount + 1 })
+
+testing.test("beforeEach incremented the counter — pass 1", lam{ in
+    testing.assert(_testCount > 0, "beforeEach ran")
+})
+testing.test("beforeEach incremented the counter — pass 2", lam{ in
+    testing.assert(_testCount > 1, "beforeEach ran again")
+})
+
+// ── 4. Subtests + table-driven cases ─────────────────────────
+
+testing.testEach("formatRow with different separators", [
+    {name: "comma",   sep: ",",  want: "a,b,c"},
+    {name: "tab",     sep: "\t", want: "a\tb\tc"},
+    {name: "pipe",    sep: "|",  want: "a|b|c"}
+], lam{ t, c in
+    t.assertEqual(formatRow(["a", "b", "c"], c.sep), c.want, c.name)
+})
+
+testing.test("manual subtests inside a parent test", lam{ in
+    testing.subtest("empty input", lam{ t in
+        t.assertEqual(formatRow([], ","), "", nil)
+    })
+    testing.subtest("single cell", lam{ t in
+        t.assertEqual(formatRow(["x"], ","), "x", nil)
+    })
+})
+
+// ── 5. Snapshot testing ──────────────────────────────────────
+//
+// First run: writes the snapshot to
+//   examples/__snapshots__/testing_demo.praia.<test>.<label>.snap
+// Subsequent runs: compares actual to the file and fails with a diff
+// on mismatch. Re-run with PRAIA_UPDATE_SNAPSHOTS=1 to accept new output:
+//   PRAIA_UPDATE_SNAPSHOTS=1 ./praia examples/testing_demo.praia
+
+testing.test("snapshot: stable CSV output", lam{ in
+    let rendered = formatRow(["alpha", "beta", "gamma"], ",") + "\n" +
+                   formatRow(["one", "two", "three"], ",")
+    testing.matchSnapshot("two-rows", rendered)
+    // Demo cleanup: in real usage you'd commit the .snap file to git.
+    let file = sys.currentFile()
+    let dir = file.slice(0, file.lastIndexOf("/"))
+    let path = dir + "/__snapshots__/testing_demo.praia.snapshot__stable_CSV_output.two-rows.snap"
+    if (fs.exists(path)) { fs.remove(path) }
+})
+
+testing.done()
