@@ -1,0 +1,112 @@
+use "testing"
+
+// Regression: response header parsing must follow RFC 7230 §3.2 —
+// `field-name ":" OWS field-value OWS`. Earlier the parser required a
+// literal ": " (colon + space) and silently dropped headers like
+// `Location:/final` (no space after colon), which broke redirect
+// following and any client checking other no-space servers.
+
+let TEST_PORT = 38914
+
+let _serverFuture = async lam{ in
+    let s = net.listen(TEST_PORT)
+    while (true) {
+        let c = net.accept(s)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let chunk = net.recv(c, 4096)
+            if (len(chunk) == 0) { break }
+            req = req + chunk
+        }
+        let firstSp = req.indexOf(" ")
+        let after = req.slice(firstSp + 1, len(req))
+        let path = after.slice(0, after.indexOf(" "))
+
+        let resp = ""
+        if (path == "/no-space") {
+            // RFC 7230 allows zero OWS after the colon.
+            resp = "HTTP/1.1 302 Found\r\nLocation:/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/tab-after-colon") {
+            // Tab is also OWS.
+            resp = "HTTP/1.1 200 OK\r\nX-Custom:\tvalue\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/multi-space") {
+            // Multiple spaces — all are stripped.
+            resp = "HTTP/1.1 200 OK\r\nX-Custom:    indented value\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/trailing-ws") {
+            // Trailing OWS must be trimmed too.
+            resp = "HTTP/1.1 200 OK\r\nX-Custom: value   \r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/space-before-colon") {
+            // Whitespace between field-name and colon is FORBIDDEN by
+            // §3.2.4 — we drop these silently.
+            resp = "HTTP/1.1 200 OK\r\nX-Bad : value\r\nX-Ok: kept\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/empty-value") {
+            resp = "HTTP/1.1 200 OK\r\nX-Empty:\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        elif (path == "/final") {
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"
+        }
+        else {
+            resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        net.send(c, resp)
+        net.close(c)
+    }
+}()
+time.sleep(200)
+
+let base = "http://localhost:" + str(TEST_PORT)
+
+testing.test("parses headers with no space after colon", lam{ in
+    // followRedirects:false to observe the 302 with its raw Location header.
+    let r = http.request({url: base + "/no-space", followRedirects: false})
+    testing.assertEqual(r.status, 302, nil)
+    testing.assertEqual(r.headers["location"], "/final",
+        "Location:/final must parse — the colon-space requirement was a bug")
+})
+
+testing.test("redirect-following works with colon-only Location", lam{ in
+    // End-to-end: the client must read Location:/final to know where to
+    // follow. Earlier the header was silently dropped and the redirect
+    // path failed.
+    let r = http.get(base + "/no-space")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "hello", "ended up at /final")
+})
+
+testing.test("accepts a tab after the colon", lam{ in
+    let r = http.get(base + "/tab-after-colon")
+    testing.assertEqual(r.headers["x-custom"], "value",
+        "OWS includes HTAB per RFC 7230")
+})
+
+testing.test("strips multiple leading spaces", lam{ in
+    let r = http.get(base + "/multi-space")
+    testing.assertEqual(r.headers["x-custom"], "indented value", nil)
+})
+
+testing.test("strips trailing whitespace", lam{ in
+    let r = http.get(base + "/trailing-ws")
+    testing.assertEqual(r.headers["x-custom"], "value",
+        "trailing OWS must be trimmed")
+})
+
+testing.test("rejects whitespace before the colon (RFC 7230 §3.2.4)", lam{ in
+    let r = http.get(base + "/space-before-colon")
+    testing.assertEqual(r.headers["x-bad"], nil,
+        "header with whitespace before colon must be dropped")
+    testing.assertEqual(r.headers["x-ok"], "kept",
+        "the well-formed sibling header still parses")
+})
+
+testing.test("empty values are accepted", lam{ in
+    let r = http.get(base + "/empty-value")
+    testing.assertEqual(r.headers["x-empty"], "",
+        "X-Empty: with no value must parse as empty string")
+})
+
+testing.done()

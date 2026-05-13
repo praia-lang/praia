@@ -1,0 +1,161 @@
+use "testing"
+
+// Regression: http.get / http.request must decode Transfer-Encoding: chunked
+// before returning. Earlier, the non-stream path returned the raw chunk
+// framing (`6\r\nHello ...0\r\n\r\n`) verbatim as the body.
+//
+// The server uses an ephemeral port (net.listen(0)) and publishes the
+// actual bound port through a SharedMap. The main thread polls the
+// shared map until the port appears, eliminating the previous race
+// between time.sleep(200) and the server's listen() call.
+
+let _state = SharedMap()
+
+let _serverFuture = async lam{ in
+    let s = net.listen(0)                       // OS picks the port
+    _state.set("port", net.localAddr(s).port)   // publish for the test
+    while (true) {
+        let c = net.accept(s)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let chunk = net.recv(c, 4096)
+            if (len(chunk) == 0) { break }
+            req = req + chunk
+        }
+        let firstSp = req.indexOf(" ")
+        let after = req.slice(firstSp + 1, len(req))
+        let path = after.slice(0, after.indexOf(" "))
+
+        let resp = ""
+        if (path == "/chunked") {
+            // "Hello " + "streaming " + "world" = "Hello streaming world"
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+                   "6\r\nHello \r\n" +
+                   "a\r\nstreaming \r\n" +
+                   "5\r\nworld\r\n" +
+                   "0\r\n\r\n"
+        }
+        elif (path == "/chunked-with-ext") {
+            // Chunk extensions (after ';') must be ignored.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+                   "5;name=foo\r\nhello\r\n" +
+                   "0\r\n\r\n"
+        }
+        elif (path == "/chunked-trailer") {
+            // Terminator chunk followed by trailer headers, then empty line.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+                   "4\r\nping\r\n" +
+                   "0\r\nX-Trailer: ignored\r\n\r\n"
+        }
+        elif (path == "/chunked-large") {
+            // Single 102000-byte chunk to exercise the accumulator over
+            // multiple recv() calls inside readAll.
+            let big = "abcdefghij".repeat(10200)  // 102000 bytes
+            // 102000 decimal = 18E70 hex.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+                   "18e70\r\n" + big + "\r\n" +
+                   "0\r\n\r\n"
+        }
+        elif (path == "/chunked-bad-hex") {
+            // Garbage in the chunk-size line — decoder must throw.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+                   "XYZ\r\nhello\r\n0\r\n\r\n"
+        }
+        elif (path == "/chunked-truncated") {
+            // Chunk declares 10 bytes but only 4 are present.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+                   "a\r\ntrun\r\n"
+        }
+        elif (path == "/te-substring-trap") {
+            // Value contains the substring "chunked" but is not the
+            // "chunked" token. Substring-based parsing would (wrongly)
+            // attempt chunked decode and throw on the plain body.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: x-chunked-stuff\r\nConnection: close\r\n\r\nplain body"
+        }
+        elif (path == "/te-trailing-chunked") {
+            // Real-world TE list: a real coding plus chunked at the end.
+            // Token parsing must detect "chunked" via comma split, not
+            // substring contain. Body IS chunked-encoded.
+            resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nConnection: close\r\n\r\n" +
+                   "5\r\nhello\r\n0\r\n\r\n"
+        }
+        else {
+            resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        net.send(c, resp)
+        net.close(c)
+    }
+}()
+
+// Wait deterministically for the server to bind. Cap at 5s so a stuck
+// listen() in a broken environment surfaces as a clear failure instead
+// of an infinite spin.
+let _deadline = time.now() + 5000
+while (_state.get("port", nil) == nil) {
+    if (time.now() > _deadline) {
+        throw "test server failed to bind within 5s"
+    }
+    time.sleep(5)
+}
+let TEST_PORT = _state.get("port", 0)
+let base = "http://localhost:" + str(TEST_PORT)
+
+// ── Happy path: three chunks reassembled ─────────────────────
+
+testing.test("http.get decodes a chunked response", lam{ in
+    let r = http.get(base + "/chunked")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "Hello streaming world",
+        "chunked framing must be stripped — body is the decoded payload")
+    // The header should still be present so callers can introspect.
+    testing.assertEqual(r.headers["transfer-encoding"], "chunked", nil)
+})
+
+testing.test("http.get handles chunk extensions", lam{ in
+    let r = http.get(base + "/chunked-with-ext")
+    testing.assertEqual(r.body, "hello",
+        "trailing ';name=foo' on the size line must be ignored")
+})
+
+testing.test("http.get discards trailer headers", lam{ in
+    let r = http.get(base + "/chunked-trailer")
+    testing.assertEqual(r.body, "ping",
+        "trailer headers after the 0-sized chunk must be skipped")
+})
+
+testing.test("http.get reassembles a 100 KiB chunked body", lam{ in
+    let r = http.get(base + "/chunked-large")
+    testing.assertEqual(len(r.body.bytes()), 102000,
+        "full chunk must be delivered intact")
+})
+
+// ── Error paths: malformed chunk framing throws ──────────────
+
+testing.test("http.get throws on invalid hex chunk size", lam{ in
+    testing.assertThrows(lam{ in http.get(base + "/chunked-bad-hex") },
+        "invalid hex")
+})
+
+testing.test("http.get throws on truncated chunk data", lam{ in
+    testing.assertThrows(lam{ in http.get(base + "/chunked-truncated") },
+        "truncated")
+})
+
+// ── Substring vs token-exact TE matching ─────────────────────
+
+testing.test("Transfer-Encoding 'x-chunked-stuff' is NOT treated as chunked", lam{ in
+    // Substring-based matching would invoke the chunked decoder on a
+    // plain body and throw. With token-exact matching, the body passes
+    // through unchanged.
+    let r = http.get(base + "/te-substring-trap")
+    testing.assertEqual(r.body, "plain body",
+        "TE token 'x-chunked-stuff' must not trigger chunked decoding")
+})
+
+testing.test("Transfer-Encoding 'gzip, chunked' detects chunked via token split", lam{ in
+    let r = http.get(base + "/te-trailing-chunked")
+    testing.assertEqual(r.body, "hello",
+        "chunked token in a comma-separated TE list must still be decoded")
+})
+
+testing.done()

@@ -1,0 +1,59 @@
+use "testing"
+
+// Regression: the HTTP client must include the URL's explicit port in
+// the Host: header so virtual-host routing and reverse proxies see the
+// correct authority. Earlier, http://localhost:PORT/x sent `Host:
+// localhost` (no port), breaking vhost/proxy lookups keyed on Host:port.
+
+let TEST_PORT = 38913
+
+// Mock server: parses the request, finds the Host: line, and echoes
+// it back as the response body. One canned path is enough — we vary
+// the *client URL* (with and without port) to exercise the behaviour.
+let _serverFuture = async lam{ in
+    let s = net.listen(TEST_PORT)
+    while (true) {
+        let c = net.accept(s)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let chunk = net.recv(c, 4096)
+            if (len(chunk) == 0) { break }
+            req = req + chunk
+        }
+
+        // Pull out the Host header value (case-insensitive search would
+        // be nicer; the client always emits "Host: " literally).
+        let hostVal = ""
+        let h = req.indexOf("Host: ")
+        if (h >= 0) {
+            let valStart = h + 6
+            let lineEnd = req.indexOf("\r\n", valStart)
+            hostVal = req.slice(valStart, lineEnd)
+        }
+
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(hostVal)) +
+                   "\r\nConnection: close\r\n\r\n" + hostVal
+        net.send(c, resp)
+        net.close(c)
+    }
+}()
+time.sleep(200)
+
+testing.test("Host header includes the explicit non-default port", lam{ in
+    let r = http.get("http://localhost:" + str(TEST_PORT) + "/x")
+    testing.assertEqual(r.body, "localhost:" + str(TEST_PORT),
+        "Host: must carry the user-written port for vhost/proxy routing")
+})
+
+// IPv6 + port formatting is handled by the same hostHeader() routine in
+// src/url.cpp that http.get uses. We can't drive a real request to ::1
+// from this test (server is bound to IPv4 only), but url.build is a
+// thin wrapper over the same authority formatter and gives us coverage
+// of the bracket-and-port path.
+testing.test("authority format brackets IPv6 host and appends port", lam{ in
+    let h = url.build({scheme: "http", host: "::1", port: 8080, path: "/"})
+    testing.assertEqual(h, "http://[::1]:8080/",
+        "IPv6 literals must be bracketed before the colon-port suffix")
+})
+
+testing.done()

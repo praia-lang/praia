@@ -310,6 +310,79 @@ std::string readAll(SocketConn& conn) {
     return data;
 }
 
+// Decode RFC 7230 §4.1 chunked transfer encoding from an in-memory body.
+// Mirrors the streaming decoder in openStream — same chunk-extension and
+// trailer handling, just over a std::string slice instead of a socket.
+// Throws on malformed framing so callers get a clear error rather than
+// silently truncated bytes.
+static std::string decodeChunkedBody(const std::string& enc) {
+    std::string out;
+    out.reserve(enc.size());
+    size_t i = 0;
+    while (i < enc.size()) {
+        // Find end of size line.
+        size_t lineEnd = enc.find("\r\n", i);
+        if (lineEnd == std::string::npos)
+            throw RuntimeError("HTTP chunked: missing CRLF after chunk size", 0);
+        std::string sizeLine = enc.substr(i, lineEnd - i);
+        // Strip chunk extensions after ';' (RFC 7230 §4.1.1) and trailing WS.
+        size_t semi = sizeLine.find(';');
+        if (semi != std::string::npos) sizeLine.resize(semi);
+        while (!sizeLine.empty() &&
+               (sizeLine.back() == ' ' || sizeLine.back() == '\t'))
+            sizeLine.pop_back();
+        if (sizeLine.empty())
+            throw RuntimeError("HTTP chunked: empty chunk size line", 0);
+        int64_t sz = 0;
+        for (char c : sizeLine) {
+            int d;
+            if      (c >= '0' && c <= '9') d = c - '0';
+            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+            else throw RuntimeError(
+                std::string("HTTP chunked: invalid hex in chunk size: '") +
+                c + "'", 0);
+            // Check overflow *before* shifting — signed left-shift past
+            // the value's width is UB. INT64_MAX >> 4 is the largest
+            // value that survives `<< 4 | 0xF`.
+            if (sz > (INT64_MAX >> 4))
+                throw RuntimeError("HTTP chunked: chunk size overflow", 0);
+            sz = (sz << 4) | d;
+        }
+        i = lineEnd + 2;
+        if (sz == 0) {
+            // Terminator: consume trailers until the empty line then stop.
+            // Trailers aren't surfaced — same policy as openStream. The
+            // final empty CRLF is REQUIRED (RFC 7230 §4.1) — without it
+            // the body is truncated, even when no trailer headers were
+            // sent (a `0\r\n` with no following CRLF is malformed).
+            bool sawEnd = false;
+            while (i < enc.size()) {
+                size_t tEnd = enc.find("\r\n", i);
+                if (tEnd == std::string::npos)
+                    throw RuntimeError("HTTP chunked: trailer missing terminating CRLF", 0);
+                bool empty = (tEnd == i);
+                i = tEnd + 2;
+                if (empty) { sawEnd = true; break; }
+            }
+            if (!sawEnd)
+                throw RuntimeError("HTTP chunked: trailer missing terminating CRLF", 0);
+            return out;
+        }
+        if (i + static_cast<size_t>(sz) > enc.size())
+            throw RuntimeError("HTTP chunked: chunk data truncated", 0);
+        out.append(enc, i, static_cast<size_t>(sz));
+        i += static_cast<size_t>(sz);
+        if (i + 2 > enc.size() || enc[i] != '\r' || enc[i + 1] != '\n')
+            throw RuntimeError("HTTP chunked: missing CRLF after chunk data", 0);
+        i += 2;
+    }
+    // Reached end of buffer without seeing the 0-sized terminator. Server
+    // closed mid-chunk — the data we *did* decode is still useful, but
+    // most callers want to know about it.
+    throw RuntimeError("HTTP chunked: stream ended before terminator chunk", 0);
+}
+
 Value parseHttpResponse(const std::string& raw) {
     auto headerEnd = raw.find("\r\n\r\n");
     if (headerEnd == std::string::npos)
@@ -338,14 +411,62 @@ Value parseHttpResponse(const std::string& raw) {
     std::getline(hs, line);
     while (std::getline(hs, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        auto c = line.find(": ");
-        if (c != std::string::npos) {
-            std::string key = line.substr(0, c);
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-            std::string val = line.substr(c + 2);
-            if (key == "set-cookie")
-                cookies->elements.push_back(Value(val));
-            hdrs->entries[Value(key)] = Value(val);
+        // RFC 7230 §3.2: field-name ":" OWS field-value OWS. We find the
+        // first colon (not ": "), reject any whitespace between name and
+        // colon (forbidden by §3.2.4), then strip leading + trailing OWS
+        // from the value. Earlier code required a literal ": " and
+        // silently dropped headers like "Location:/final" (no space).
+        auto c = line.find(':');
+        if (c == std::string::npos || c == 0) continue;
+        std::string key = line.substr(0, c);
+        if (key.back() == ' ' || key.back() == '\t') continue;
+        size_t vs = c + 1;
+        while (vs < line.size() && (line[vs] == ' ' || line[vs] == '\t')) vs++;
+        size_t ve = line.size();
+        while (ve > vs && (line[ve - 1] == ' ' || line[ve - 1] == '\t')) ve--;
+        std::string val = line.substr(vs, ve - vs);
+        // Cast through unsigned char — passing a negative char to
+        // std::tolower is UB. Same pattern used elsewhere in this file
+        // (see line 1265 in the streaming TE check).
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](char c) { return (char)std::tolower((unsigned char)c); });
+        if (key == "set-cookie")
+            cookies->elements.push_back(Value(val));
+        hdrs->entries[Value(key)] = Value(val);
+    }
+
+    // Decode Transfer-Encoding: chunked before handing the body to the
+    // caller. Per RFC 7230 §3.3.3, TE-chunked overrides Content-Length
+    // for framing; we matched on lowercase header keys above. Multiple
+    // codings other than "chunked" are not in scope (no compression
+    // here), so we just look for the chunked token.
+    auto teIt = hdrs->entries.find(Value(std::string("transfer-encoding")));
+    if (teIt != hdrs->entries.end() && teIt->second.isString()) {
+        const std::string& te = teIt->second.asString();
+        std::string teLower(te);
+        std::transform(teLower.begin(), teLower.end(), teLower.begin(),
+                       [](char c) { return (char)std::tolower((unsigned char)c); });
+        // Transfer-Encoding is a comma-separated list of tokens. Tokenize
+        // and match exactly — substring matching would falsely trigger on
+        // values like "x-chunked" or "chunked-extension".
+        bool hasChunked = false;
+        size_t pos = 0;
+        while (pos < teLower.size()) {
+            size_t comma = teLower.find(',', pos);
+            size_t end = (comma == std::string::npos) ? teLower.size() : comma;
+            size_t s = pos;
+            while (s < end && (teLower[s] == ' ' || teLower[s] == '\t')) s++;
+            size_t e = end;
+            while (e > s && (teLower[e - 1] == ' ' || teLower[e - 1] == '\t')) e--;
+            if (e - s == 7 && teLower.compare(s, 7, "chunked") == 0) {
+                hasChunked = true;
+                break;
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+        if (hasChunked) {
+            body = decodeChunkedBody(body);
         }
     }
 
@@ -380,7 +501,8 @@ static std::string findHeaderValue(const std::string& headers, const std::string
         if (key.size() == name.size()) {
             bool match = true;
             for (size_t i = 0; i < key.size(); i++) {
-                if (std::tolower(key[i]) != std::tolower(name[i])) { match = false; break; }
+                if (std::tolower((unsigned char)key[i]) !=
+                    std::tolower((unsigned char)name[i])) { match = false; break; }
             }
             if (match) {
                 size_t valStart = pos + 1;
@@ -465,7 +587,11 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
         auto c = line.find(':');
         if (c != std::string::npos) {
             std::string key = line.substr(0, c);
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            // Cast through unsigned char — passing a negative char to
+            // std::tolower is UB. Matches the lambda pattern used at
+            // the other corrected sites in this file.
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](char ch) { return (char)std::tolower((unsigned char)ch); });
             size_t valStart = c + 1;
             while (valStart < line.size() && line[valStart] == ' ') valStart++;
             reqHeaders->entries[Value(key)] = Value(line.substr(valStart));
@@ -606,15 +732,61 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
 
 // ── Public API ───────────────────────────────────────────────
 
+// RFC 3986 §5.2.4 remove_dot_segments. Operates on an input path,
+// stripping "." / ".." segments to canonicalize. Pure-string algorithm
+// straight from the RFC pseudocode — easy to audit against the spec.
+static std::string removeDotSegments(std::string in) {
+    std::string out;
+    while (!in.empty()) {
+        if (in.compare(0, 3, "../") == 0)        in.erase(0, 3);
+        else if (in.compare(0, 2, "./") == 0)    in.erase(0, 2);
+        else if (in.compare(0, 3, "/./") == 0)   in.replace(0, 3, "/");
+        else if (in == "/.")                     in = "/";
+        else if (in.compare(0, 4, "/../") == 0) {
+            in.replace(0, 4, "/");
+            auto slash = out.rfind('/');
+            if (slash != std::string::npos) out.resize(slash);
+            else out.clear();
+        }
+        else if (in == "/..") {
+            in = "/";
+            auto slash = out.rfind('/');
+            if (slash != std::string::npos) out.resize(slash);
+            else out.clear();
+        }
+        else if (in == "." || in == "..") {
+            in.clear();
+        }
+        else {
+            // Move first segment (including leading '/' if any) to output.
+            size_t end = in.find('/', in[0] == '/' ? 1 : 0);
+            if (end == std::string::npos) { out += in; in.clear(); }
+            else { out.append(in, 0, end); in.erase(0, end); }
+        }
+    }
+    return out;
+}
+
+// RFC 3986 §5.2.3 merge — for a relative reference whose authority is
+// undefined and path is not empty. When the base has an authority and
+// an empty path, treat as "/"; otherwise drop everything after the last
+// '/' in the base path and append the relative path.
+static std::string mergePaths(const praia::url::ParsedUrl& base,
+                              const std::string& refPath) {
+    bool baseHasAuthority = !base.host.empty();
+    if (baseHasAuthority && base.path.empty()) return "/" + refPath;
+    auto slash = base.path.rfind('/');
+    if (slash == std::string::npos) return refPath;
+    return base.path.substr(0, slash + 1) + refPath;
+}
+
 // Resolve a redirect Location header against the base URL.
 //   - absolute URL (has scheme)            → use as-is
 //   - protocol-relative (//host/path)      → prepend base scheme
 //   - absolute path (/foo)                 → keep base scheme/host/port
-//   - empty or anything else               → throw (rare in real
-//                                                   redirects, and supporting
-//                                                   it pulls in full RFC 3986
-//                                                   §5.2 path resolution which
-//                                                   is more code than payoff)
+//   - relative path (foo, ../bar)          → RFC 3986 §5.2 reference
+//                                            resolution against base path
+//   - empty                                → throw
 static std::string resolveLocation(const std::string& baseUrl,
                                    const std::string& location) {
     if (location.empty())
@@ -649,13 +821,21 @@ static std::string resolveLocation(const std::string& baseUrl,
         return out;
     }
 
-    // Same-authority: build base authority + new path.
-    if (loc.path.empty() || loc.path[0] != '/') {
-        // Real-world: 0.3% of redirects use relative paths. The
-        // RFC 3986 §5.2 path-merge algorithm is ~30 lines; deferred
-        // until someone needs it.
-        throw RuntimeError("HTTP redirect: relative Location \"" + location +
-                           "\" not supported (use an absolute URL or absolute path)", 0);
+    // Same-authority. Path may be absolute ("/x") or relative
+    // ("final" / "../bar"); RFC 3986 §5.2.2 + §5.2.4 handle both via
+    // merge + remove_dot_segments. If the reference path is empty,
+    // inherit the base path (and query, if the reference has none).
+    std::string targetPath;
+    std::string targetQuery;
+    if (loc.path.empty()) {
+        targetPath  = base.path;
+        targetQuery = loc.query.empty() ? base.query : loc.query;
+    } else if (loc.path[0] == '/') {
+        targetPath  = removeDotSegments(loc.path);
+        targetQuery = loc.query;
+    } else {
+        targetPath  = removeDotSegments(mergePaths(base, loc.path));
+        targetQuery = loc.query;
     }
 
     std::string out = base.scheme + "://";
@@ -666,8 +846,8 @@ static std::string resolveLocation(const std::string& baseUrl,
                          (base.scheme == "https" && base.port == 443);
         if (!isDefault) out += ":" + std::to_string(base.port);
     }
-    out += loc.path;
-    if (!loc.query.empty())    out += "?" + loc.query;
+    out += targetPath;
+    if (!targetQuery.empty())  out += "?" + targetQuery;
     if (!loc.fragment.empty()) out += "#" + loc.fragment;
     return out;
 }
@@ -1068,9 +1248,10 @@ static void streamEnsure(HttpStreamState& s) {
                     else throw RuntimeError(
                         std::string("HTTP stream: invalid hex in chunk size: '") +
                         c + "'", 0);
-                    sz = (sz << 4) | d;
-                    if (sz < 0)
+                    // Pre-shift overflow guard — see decodeChunkedBody.
+                    if (sz > (INT64_MAX >> 4))
                         throw RuntimeError("HTTP stream: chunk size overflow", 0);
+                    sz = (sz << 4) | d;
                 }
                 if (sz == 0) {
                     // Terminator chunk: consume trailers until empty
@@ -1122,7 +1303,26 @@ static void detectStreamMode(HttpStreamState& s) {
     if (teIt != h.end() && teIt->second.isString()) {
         std::string te = teIt->second.asString();
         for (auto& c : te) c = (char)std::tolower((unsigned char)c);
-        if (te.find("chunked") != std::string::npos) {
+        // Exact-token match on the comma-separated TE list. Same logic
+        // as the buffered branch in parseHttpResponse — substring
+        // matching would mis-fire on "x-chunked"/"chunked-extension".
+        bool hasChunked = false;
+        size_t pos = 0;
+        while (pos < te.size()) {
+            size_t comma = te.find(',', pos);
+            size_t end = (comma == std::string::npos) ? te.size() : comma;
+            size_t a = pos;
+            while (a < end && (te[a] == ' ' || te[a] == '\t')) a++;
+            size_t b = end;
+            while (b > a && (te[b - 1] == ' ' || te[b - 1] == '\t')) b--;
+            if (b - a == 7 && te.compare(a, 7, "chunked") == 0) {
+                hasChunked = true;
+                break;
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+        if (hasChunked) {
             s.mode = HttpStreamState::Mode::Chunked;
             return;
         }
