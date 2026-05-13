@@ -529,7 +529,12 @@ std::string xmlUnescape(const std::string& s) {
         std::string body = s.substr(i + 1, semi - i - 1);
         if (!body.empty() && body[0] == '#') {
             int32_t cp = 0;
+            // XML §4.1 grammar: CharRef ::= '&#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'
+            // The "+" means at least one digit is required — without
+            // the explicit length checks below, "&#;" and "&#x;" would
+            // skip their digit loops with cp left at 0 and emit a NUL.
             if (body.size() >= 2 && (body[1] == 'x' || body[1] == 'X')) {
+                if (body.size() < 3) fail("empty hex character reference");
                 for (size_t k = 2; k < body.size(); ++k) {
                     char h = body[k];
                     int d = (h >= '0' && h <= '9') ? h - '0'
@@ -540,6 +545,7 @@ std::string xmlUnescape(const std::string& s) {
                     if (cp > 0x10FFFF) fail("character reference out of range");
                 }
             } else {
+                if (body.size() < 2) fail("empty decimal character reference");
                 for (size_t k = 1; k < body.size(); ++k) {
                     char h = body[k];
                     if (h < '0' || h > '9') fail("invalid digit in &#");

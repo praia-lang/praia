@@ -5520,7 +5520,6 @@ my-project/
 │       ├── grain.yaml
 │       └── main.praia
 ├── grains/                  <- project-bundled grains
-│   ├── math.praia
 │   └── geometry.praia
 ├── grain.yaml               <- project manifest
 ├── sand-lock.yaml           <- lock file (auto-generated)

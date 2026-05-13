@@ -187,4 +187,24 @@ testing.test("xml.unescape on unknown entity throws", lam{ in
                          "unknown entity")
 })
 
+// Regression: XML §4.1 requires at least one digit in &#N; / &#xN;.
+// Before the fix, "&#;" / "&#x;" silently produced U+0000 (NUL).
+testing.test("xml.unescape rejects empty decimal character reference", lam{ in
+    testing.assertThrows(lam{ in xml.unescape("&#;") },
+                         "empty decimal character reference")
+})
+
+testing.test("xml.unescape rejects empty hex character reference", lam{ in
+    testing.assertThrows(lam{ in xml.unescape("&#x;") },
+                         "empty hex character reference")
+    testing.assertThrows(lam{ in xml.unescape("&#X;") },
+                         "empty hex character reference")
+})
+
+testing.test("xml.unescape still accepts valid character references", lam{ in
+    testing.assertEqual(xml.unescape("&#65;"),   "A", "decimal CharRef")
+    testing.assertEqual(xml.unescape("&#x41;"),  "A", "hex CharRef")
+    testing.assertEqual(xml.unescape("&#x4A;"),  "J", "uppercase hex digits")
+})
+
 testing.done()

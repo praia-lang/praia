@@ -359,6 +359,11 @@ class OrderedMap {
 class Counter {
     func init(iterable = nil) {
         this._m = {}
+        // _order tracks first-insertion order so mostCommon() can break
+        // ties Python-style (equal counts → first-encountered first).
+        // Praia maps iterate in hash order, so we can't rely on `_m`
+        // for that.
+        this._order = []
         if (iterable != nil) {
             for (item in iterable) {
                 this.increment(item)
@@ -371,6 +376,7 @@ class Counter {
             this._m[key] = this._m[key] + by
         } else {
             this._m[key] = by
+            this._order.push(key)
         }
     }
 
@@ -387,6 +393,7 @@ class Counter {
 
     // Set an explicit count. Useful for loading saved Counter state.
     func set(key, n) {
+        if (!this._m.has(key)) { this._order.push(key) }
         this._m[key] = n
     }
 
@@ -426,16 +433,21 @@ class Counter {
 
     // Top-n keys by count, as an array of {key, count} maps in
     // descending order. With no n, returns all keys sorted; with
-    // n, returns the first n.
+    // n, returns the first n. Ties break by first-insertion order
+    // (Python's Counter.most_common contract). We iterate _order
+    // rather than keys(_m) so insertion order is the input order to
+    // the sort, and the comparator below preserves it on ties — Praia's
+    // sort isn't stable, so we encode the tiebreak explicitly.
     func mostCommon(n = nil) {
         let pairs = []
-        for (k in keys(this._m)) {
-            pairs.push({key: k, count: this._m[k]})
+        for (i in 0..len(this._order)) {
+            let k = this._order[i]
+            pairs.push({key: k, count: this._m[k], _idx: i})
         }
-        // Praia sort comparator: negative → first arg sorts first.
-        // For descending we want the larger count first, so the
-        // comparator returns (y.count - x.count).
-        let sorted = sort(pairs, lam{ x, y in y.count - x.count })
+        let sorted = sort(pairs, lam{ x, y in
+            if (y.count != x.count) { return y.count - x.count }
+            return x._idx - y._idx
+        })
         if (n == nil) { return sorted }
         let result = []
         for (i in 0..len(sorted)) {

@@ -206,6 +206,38 @@ testing.test("Counter: mostCommon without n returns all entries", lam{ in
     testing.assertEqual(all[0].key, "a", nil)
 })
 
+testing.test("Counter: mostCommon ties break by first-insertion order", lam{ in
+    // Regression: previously the tie order came from the underlying
+    // hash-map's bucket layout, so equal counts could come back in
+    // any order. Python's Counter.most_common spec keeps them in
+    // first-encountered order — which is what we now guarantee.
+    let c = collections.Counter(["b", "c", "a", "b", "c", "a"])
+    let top = c.mostCommon()
+    testing.assertEqual(len(top), 3, nil)
+    // All three keys tie at count=2. Expected order is the insertion
+    // order: b, c, a.
+    testing.assertEqual(top[0].key, "b", "first-inserted key wins the tie")
+    testing.assertEqual(top[1].key, "c", "second-inserted next")
+    testing.assertEqual(top[2].key, "a", "third-inserted last")
+})
+
+testing.test("Counter: mostCommon tie order across two count tiers", lam{ in
+    // Higher counts beat insertion order; insertion order only
+    // matters as a tiebreaker within the same count.
+    let c = collections.Counter()
+    c.increment("first",  1)
+    c.increment("second", 2)
+    c.increment("third",  1)
+    c.increment("fourth", 2)
+    let top = c.mostCommon()
+    // Expected: count=2 group first in insertion order (second, fourth),
+    // then count=1 group in insertion order (first, third).
+    testing.assertEqual(top[0].key, "second", nil)
+    testing.assertEqual(top[1].key, "fourth", nil)
+    testing.assertEqual(top[2].key, "first",  nil)
+    testing.assertEqual(top[3].key, "third",  nil)
+})
+
 testing.test("Counter: update / subtract with another Counter", lam{ in
     let a = collections.Counter(["x", "x", "y"])
     let b = collections.Counter(["x", "z"])
