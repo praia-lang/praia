@@ -2,13 +2,19 @@
 //
 // Usage:
 //   use "session"
-//   let sessions = session.create()
+//   let sessions = session.create({maxAge: 3600})  // seconds
 //   app.use(sessions.middleware())
 //
 // In handlers:
 //   req.session.set("user", {name: "Ada"})
 //   let user = req.session.get("user")
 //   req.session.destroy()
+//
+// Records carry an absolute expiresAt and are evicted both lazily (on
+// any access past the deadline) and via a per-request sweep, so a
+// replayed cookie cannot resurrect a timed-out session and the store
+// doesn't grow unbounded. Each request to an existing session refreshes
+// its expiry (sliding window, like Express's `rolling: true`).
 
 // Imported at module load — the previous `use "cookie"` inside
 // sessionMiddleware() re-fired on every `middleware()` call, which

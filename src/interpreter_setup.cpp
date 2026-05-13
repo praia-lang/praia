@@ -2964,13 +2964,16 @@ Interpreter::Interpreter() {
                     if (!port->isNumber())
                         throw RuntimeError("url.build: 'port' must be a number", 0);
                     double pd = port->asNumber();
+                    // Range-check on the double BEFORE casting — values
+                    // outside int64_t range (e.g. 1e30, inf) make the
+                    // static_cast<int64_t> UB pre-C++23. NaN fails the
+                    // integer check below since NaN != NaN.
+                    if (!(pd >= 1.0 && pd <= 65535.0))
+                        throw RuntimeError("url.build: 'port' must be in 1..65535", 0);
                     if (pd != std::floor(pd))
                         throw RuntimeError("url.build: 'port' must be an integer (got " +
                                            std::to_string(pd) + ")", 0);
                     int64_t p = static_cast<int64_t>(pd);
-                    if (p < 1 || p > 65535)
-                        throw RuntimeError("url.build: 'port' must be in 1..65535 (got " +
-                                           std::to_string(p) + ")", 0);
                     bool isDefault = (schemeStr == "http"  && p == 80) ||
                                       (schemeStr == "https" && p == 443);
                     if (!isDefault) {
