@@ -310,6 +310,69 @@ std::string readAll(SocketConn& conn) {
     return data;
 }
 
+// Decode RFC 7230 §4.1 chunked transfer encoding from an in-memory body.
+// Mirrors the streaming decoder in openStream — same chunk-extension and
+// trailer handling, just over a std::string slice instead of a socket.
+// Throws on malformed framing so callers get a clear error rather than
+// silently truncated bytes.
+static std::string decodeChunkedBody(const std::string& enc) {
+    std::string out;
+    out.reserve(enc.size());
+    size_t i = 0;
+    while (i < enc.size()) {
+        // Find end of size line.
+        size_t lineEnd = enc.find("\r\n", i);
+        if (lineEnd == std::string::npos)
+            throw RuntimeError("HTTP chunked: missing CRLF after chunk size", 0);
+        std::string sizeLine = enc.substr(i, lineEnd - i);
+        // Strip chunk extensions after ';' (RFC 7230 §4.1.1) and trailing WS.
+        size_t semi = sizeLine.find(';');
+        if (semi != std::string::npos) sizeLine.resize(semi);
+        while (!sizeLine.empty() &&
+               (sizeLine.back() == ' ' || sizeLine.back() == '\t'))
+            sizeLine.pop_back();
+        if (sizeLine.empty())
+            throw RuntimeError("HTTP chunked: empty chunk size line", 0);
+        int64_t sz = 0;
+        for (char c : sizeLine) {
+            int d;
+            if      (c >= '0' && c <= '9') d = c - '0';
+            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+            else throw RuntimeError(
+                std::string("HTTP chunked: invalid hex in chunk size: '") +
+                c + "'", 0);
+            sz = (sz << 4) | d;
+            if (sz < 0)
+                throw RuntimeError("HTTP chunked: chunk size overflow", 0);
+        }
+        i = lineEnd + 2;
+        if (sz == 0) {
+            // Terminator: consume trailers until the empty line then stop.
+            // Trailers aren't surfaced — same policy as openStream.
+            while (i < enc.size()) {
+                size_t tEnd = enc.find("\r\n", i);
+                if (tEnd == std::string::npos) break;
+                bool empty = (tEnd == i);
+                i = tEnd + 2;
+                if (empty) break;
+            }
+            return out;
+        }
+        if (i + static_cast<size_t>(sz) > enc.size())
+            throw RuntimeError("HTTP chunked: chunk data truncated", 0);
+        out.append(enc, i, static_cast<size_t>(sz));
+        i += static_cast<size_t>(sz);
+        if (i + 2 > enc.size() || enc[i] != '\r' || enc[i + 1] != '\n')
+            throw RuntimeError("HTTP chunked: missing CRLF after chunk data", 0);
+        i += 2;
+    }
+    // Reached end of buffer without seeing the 0-sized terminator. Server
+    // closed mid-chunk — the data we *did* decode is still useful, but
+    // most callers want to know about it.
+    throw RuntimeError("HTTP chunked: stream ended before terminator chunk", 0);
+}
+
 Value parseHttpResponse(const std::string& raw) {
     auto headerEnd = raw.find("\r\n\r\n");
     if (headerEnd == std::string::npos)
@@ -346,6 +409,21 @@ Value parseHttpResponse(const std::string& raw) {
             if (key == "set-cookie")
                 cookies->elements.push_back(Value(val));
             hdrs->entries[Value(key)] = Value(val);
+        }
+    }
+
+    // Decode Transfer-Encoding: chunked before handing the body to the
+    // caller. Per RFC 7230 §3.3.3, TE-chunked overrides Content-Length
+    // for framing; we matched on lowercase header keys above. Multiple
+    // codings other than "chunked" are not in scope (no compression
+    // here), so we just look for the chunked token.
+    auto teIt = hdrs->entries.find(Value(std::string("transfer-encoding")));
+    if (teIt != hdrs->entries.end() && teIt->second.isString()) {
+        const std::string& te = teIt->second.asString();
+        std::string teLower(te);
+        std::transform(teLower.begin(), teLower.end(), teLower.begin(), ::tolower);
+        if (teLower.find("chunked") != std::string::npos) {
+            body = decodeChunkedBody(body);
         }
     }
 
