@@ -105,6 +105,16 @@ testing.test("build: rejects non-numeric / NaN / infinite maxAge", lam{ in
     testing.assertThrows(
         lam{ in cookie.build("a", "b", {maxAge: math.sqrt(-1.0)}) },
         "maxAge must be a finite number")
+    // Positive and negative infinity must also be rejected — they
+    // exercise the math.isInf(m) branch the NaN test misses. `1.0/0.0`
+    // throws in Praia, so we produce inf via the canonical
+    // double-overflow trick.
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: 1e308 * 10}) },
+        "maxAge must be a finite number")
+    testing.assertThrows(
+        lam{ in cookie.build("a", "b", {maxAge: -1e308 * 10}) },
+        "maxAge must be a finite number")
 })
 
 testing.test("build: accepts integer + zero + negative maxAge", lam{ in
