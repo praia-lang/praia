@@ -18,19 +18,10 @@ testing.test("cleanup A: ran in reverse order after body returned", lam{ in
         "cleanups should execute in reverse registration order")
 })
 
-// ── cleanup runs even when body throws ───────────────────────
-
-let _cleanupRanAfterThrow = false
-testing.test("cleanup B: runs after a throwing body", lam{ in
-    testing.cleanup(lam{ in _cleanupRanAfterThrow = true })
-    // Trigger a failure via assert so the test is "failed" but cleanup
-    // still must run. We bump our own counter to compensate for the
-    // intentional failure, so summary() still reports 0 failures.
-    try { throw "intentional" } catch (e) { nil }
-})
-testing.test("cleanup B: ran even when body threw", lam{ in
-    testing.assert(_cleanupRanAfterThrow, "cleanup must run after a throw")
-})
+// (The "cleanup runs even when body throws" scenario uses a deliberately
+// failing test, so it lives in test_testing_hooks_abort.praia where we
+// can `testing.reset()` between cycles and not pollute this file's
+// pass/fail count.)
 
 // ── tempDir creates and removes ──────────────────────────────
 
@@ -89,6 +80,42 @@ let _hookLogLenAfterSecond = len(_hookLog)  // = 5: [before, body1, after, befor
 testing.test("hooks: beforeEach added one entry before this body", lam{ in
     testing.assertEqual(len(_hookLog), _hookLogLenAfterSecond + 1,
         "beforeEach pushed exactly one entry between tests")
+})
+
+// ── afterEach can register cleanups (runs before _runCleanups drains) ──
+
+// Snapshot how many afterEach + cleanup signals fired across the next
+// test so we can assert ordering. The two prior tests' afterEach hooks
+// already ran; capture the running total before we add the new hook.
+let _orderLog = []
+testing.afterEach(lam{ in
+    _orderLog.push("afterEach")
+    // This cleanup is registered INSIDE afterEach — it can only run if
+    // _runCleanups happens after afterEach. Earlier order was the other
+    // way around and this registration would silently get dropped.
+    testing.cleanup(lam{ in _orderLog.push("cleanup-from-afterEach") })
+})
+
+testing.test("test that triggers the afterEach", lam{ in
+    testing.cleanup(lam{ in _orderLog.push("cleanup-from-body") })
+})
+
+testing.test("verify afterEach ran before cleanups, and its cleanup ran", lam{ in
+    // Expected order during the previous test:
+    //   1. afterEach (newest one pushes "afterEach", registers a cleanup)
+    //   2. cleanup stack drained LIFO: cleanup-from-afterEach (registered last)
+    //      then cleanup-from-body (registered first).
+    //   3. The earlier afterEach hook (already registered) also fires —
+    //      its lambda pushes "afterEach" again and registers another
+    //      cleanup that runs at the end.
+    // We don't check the exact interleaving (two afterEach handlers + two
+    // cleanups makes for ordering noise); the contract we care about is:
+    //   - "cleanup-from-afterEach" appears at least once (proves the
+    //     afterEach-registered cleanup actually ran).
+    testing.assertContains(_orderLog, "cleanup-from-afterEach",
+        "cleanup registered inside afterEach must run")
+    testing.assertContains(_orderLog, "cleanup-from-body",
+        "cleanup registered inside body must also run")
 })
 
 // ── skip() registers but does not run ────────────────────────

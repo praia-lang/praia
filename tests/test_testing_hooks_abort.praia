@@ -27,4 +27,27 @@ testing.test("verify the body did not run", lam{ in
         "test body must not execute when its beforeEach threw")
 })
 
+// ── Cleanup runs even when the body throws ───────────────────
+
+testing.reset()
+
+let _cleanupRanAfterThrow = false
+
+// This test body deliberately throws — `_runCleanups` MUST still drain
+// the stack so the cleanup runs. Earlier the in-grain test wrapped the
+// throw in try/catch, which meant the body returned normally and never
+// exercised the throw path.
+testing.test("body throws but its cleanup still runs", lam{ in
+    testing.cleanup(lam{ in _cleanupRanAfterThrow = true })
+    throw "intentional body failure"
+})
+
+// Wipe the recorded failure + state before the verification test runs.
+testing.reset()
+
+testing.test("verify cleanup ran after the body threw", lam{ in
+    testing.assertEqual(_cleanupRanAfterThrow, true,
+        "registered cleanup must run when the test body throws")
+})
+
 testing.done()

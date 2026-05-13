@@ -254,8 +254,11 @@ func create(name, options) {
 }
 
 // Router middleware: logs method/path/status/duration on every request.
-// Attaches a request-scoped child logger at `req.log` carrying req_id (if
-// the request has one) so downstream handlers can use it directly.
+// Attaches a request-scoped child logger at `req.log` carrying method,
+// path, and req_id (if present) so downstream handlers can use it
+// directly. The final access-log line is emitted through req.log so the
+// structured record carries those same sticky fields — emitting through
+// the parent `log` here would drop them on the floor.
 func middleware(log) {
     return lam{ req, next in
         let start = time.now()
@@ -268,8 +271,8 @@ func middleware(log) {
         if (type(res) == "map" && res.status) {
             status = res.status
         }
-        log.info("%{req.method} %{req.path} %{status} %{duration}ms",
-                 {status: status, duration_ms: duration})
+        req.log.info("%{req.method} %{req.path} %{status} %{duration}ms",
+                     {status: status, duration_ms: duration})
         return res
     }
 }

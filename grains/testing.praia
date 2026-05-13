@@ -396,13 +396,16 @@ func test(name, fn) {
         }
     }
 
-    _runCleanups(ctx)
-
-    // Reverse the afterEach list before running.
+    // afterEach runs BEFORE cleanups so that an afterEach hook can call
+    // testing.cleanup() / tempDir() / tempFile() and have those teardowns
+    // honored — _currentTest is still set here, and we drain
+    // ctx.cleanups afterwards.
     let reversed = []
     let i = len(afters) - 1
     while (i >= 0) { reversed.push(afters[i]); i = i - 1 }
     _runHooks(reversed, name + " / afterEach", false)
+
+    _runCleanups(ctx)
 
     _popCtx()
 }
@@ -472,11 +475,13 @@ func only(name, fn) {
             print("  ERROR:", err)
         }
     }
-    _runCleanups(ctx)
+    // afterEach before cleanups so afterEach can register additional
+    // cleanup actions — see comment in test() for rationale.
     let afters = []
     let i = len(_afterEach) - 1
     while (i >= 0) { afters.push(_afterEach[i]); i = i - 1 }
     _runHooks(afters, name + " / afterEach", false)
+    _runCleanups(ctx)
     _popCtx()
 }
 
