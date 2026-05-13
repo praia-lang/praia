@@ -66,29 +66,26 @@ testing.test("expired session ID is rejected on the next request", lam{ in
         "stale record was swept; only the fresh session remains")
 })
 
-testing.test("invalid maxAge falls back to the default (no NaN expiresAt)", lam{ in
-    // A non-number / NaN / negative maxAge must not propagate into the
-    // expiresAt math. The original code wrote whatever the user passed
-    // into maxAgeMs verbatim, so options.maxAge = "foo" produced NaN
-    // timestamps that fail every <= comparison (sessions become
-    // un-evictable). Each call below should produce a long-lived
-    // session because the validator silently substituted the default.
-    let cases = [
-        session.create({maxAge: -1}),
-        session.create({maxAge: "1 hour"}),
-        session.create({maxAge: nil}),
-        session.create({maxAge: math.sqrt(-1.0)})  // NaN
-    ]
-    for (s in cases) {
-        let mw = s.middleware()
-        let req1 = _runReq(mw, "")
-        let id1 = req1.session.id
-        // Replay should hit the SAME session — none of these inputs
-        // produces an early-expiry record.
-        let req2 = _runReq(mw, "praia.sid=" + id1)
-        testing.assertEqual(req2.session.id, id1,
-            "invalid maxAge inputs must fall back to the default (long-lived) value")
-    }
+testing.test("invalid maxAge is rejected at create() time", lam{ in
+    // Security: maxAge controls session lifetime. A silent fallback
+    // would convert a typo'd "1 hour" string into a long-lived session,
+    // which is the OPPOSITE of what the caller intended. Loud failure
+    // is safer than silent lengthening.
+    testing.assertThrows(
+        lam{ in session.create({maxAge: -1}) },
+        "must be a finite non-negative number")
+    testing.assertThrows(
+        lam{ in session.create({maxAge: "1 hour"}) },
+        "must be a finite non-negative number")
+    testing.assertThrows(
+        lam{ in session.create({maxAge: nil}) },
+        "must be a finite non-negative number")
+    testing.assertThrows(
+        lam{ in session.create({maxAge: math.sqrt(-1.0)}) },
+        "must be a finite non-negative number")
+    testing.assertThrows(
+        lam{ in session.create({maxAge: 1e308 * 10}) },
+        "must be a finite non-negative number")
 })
 
 testing.test("sweep prunes stale records on each request", lam{ in
