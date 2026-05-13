@@ -383,29 +383,39 @@ static std::string decodeChunkedBody(const std::string& enc) {
     throw RuntimeError("HTTP chunked: stream ended before terminator chunk", 0);
 }
 
-Value parseHttpResponse(const std::string& raw) {
-    auto headerEnd = raw.find("\r\n\r\n");
-    if (headerEnd == std::string::npos)
-        throw RuntimeError("Invalid HTTP response", 0);
+// Parse just status + headers + cookies from a response header section
+// (no trailing \r\n\r\n). Separated from parseHttpResponse so the
+// streaming path (http.openStream) can read its headers without
+// triggering an eager body decode on a partial first chunk —
+// previously that path called parseHttpResponse with header+prefix,
+// which then ran the chunked decoder over a tiny prefix and threw
+// "chunk data truncated" before the stream could be returned.
+struct ResponseHeaderFields {
+    int status;
+    std::shared_ptr<PraiaMap> headers;
+    std::shared_ptr<PraiaArray> cookies;
+};
 
-    std::string headerSection = raw.substr(0, headerEnd);
-    std::string body = raw.substr(headerEnd + 4);
+static ResponseHeaderFields parseResponseHeaders(const std::string& headerSection) {
+    ResponseHeaderFields out;
+    out.status = 0;
+    out.headers = gcNew<PraiaMap>();
+    out.cookies = gcNew<PraiaArray>();
 
-    int status = 0;
     auto sp1 = headerSection.find(' ');
     if (sp1 != std::string::npos) {
         auto sp2 = headerSection.find(' ', sp1 + 1);
-        try { status = std::stoi(headerSection.substr(sp1 + 1, sp2 - sp1 - 1)); } catch (...) {}
+        try {
+            out.status = std::stoi(headerSection.substr(sp1 + 1, sp2 - sp1 - 1));
+        } catch (...) {}
     }
 
-    auto hdrs = gcNew<PraiaMap>();
     // Set-Cookie is the one header that legitimately repeats — every
     // cookie a server sets in one response is a separate Set-Cookie
     // line. The headers map can only hold one value per key, so we
     // expose the full list as a dedicated `cookies` array (in arrival
     // order). For back-compat the headers map still carries the
     // last value at "set-cookie" too.
-    auto cookies = gcNew<PraiaArray>();
     std::istringstream hs(headerSection);
     std::string line;
     std::getline(hs, line);
@@ -426,55 +436,60 @@ Value parseHttpResponse(const std::string& raw) {
         while (ve > vs && (line[ve - 1] == ' ' || line[ve - 1] == '\t')) ve--;
         std::string val = line.substr(vs, ve - vs);
         // Cast through unsigned char — passing a negative char to
-        // std::tolower is UB. Same pattern used elsewhere in this file
-        // (see line 1265 in the streaming TE check).
+        // std::tolower is UB. Same pattern used elsewhere in this file.
         std::transform(key.begin(), key.end(), key.begin(),
                        [](char c) { return (char)std::tolower((unsigned char)c); });
         if (key == "set-cookie")
-            cookies->elements.push_back(Value(val));
-        hdrs->entries[Value(key)] = Value(val);
+            out.cookies->elements.push_back(Value(val));
+        out.headers->entries[Value(key)] = Value(val);
     }
+    return out;
+}
+
+// Does the response declare Transfer-Encoding: chunked? Exact-token
+// match on the comma-separated list. Shared by parseHttpResponse and
+// detectStreamMode so the two engines stay in lockstep.
+static bool responseIsChunked(const std::shared_ptr<PraiaMap>& headers) {
+    auto teIt = headers->entries.find(Value(std::string("transfer-encoding")));
+    if (teIt == headers->entries.end() || !teIt->second.isString()) return false;
+    std::string te = teIt->second.asString();
+    std::transform(te.begin(), te.end(), te.begin(),
+                   [](char c) { return (char)std::tolower((unsigned char)c); });
+    size_t pos = 0;
+    while (pos < te.size()) {
+        size_t comma = te.find(',', pos);
+        size_t end = (comma == std::string::npos) ? te.size() : comma;
+        size_t s = pos;
+        while (s < end && (te[s] == ' ' || te[s] == '\t')) s++;
+        size_t e = end;
+        while (e > s && (te[e - 1] == ' ' || te[e - 1] == '\t')) e--;
+        if (e - s == 7 && te.compare(s, 7, "chunked") == 0) return true;
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+Value parseHttpResponse(const std::string& raw) {
+    auto headerEnd = raw.find("\r\n\r\n");
+    if (headerEnd == std::string::npos)
+        throw RuntimeError("Invalid HTTP response", 0);
+
+    auto fields = parseResponseHeaders(raw.substr(0, headerEnd));
+    std::string body = raw.substr(headerEnd + 4);
 
     // Decode Transfer-Encoding: chunked before handing the body to the
     // caller. Per RFC 7230 §3.3.3, TE-chunked overrides Content-Length
-    // for framing; we matched on lowercase header keys above. Multiple
-    // codings other than "chunked" are not in scope (no compression
-    // here), so we just look for the chunked token.
-    auto teIt = hdrs->entries.find(Value(std::string("transfer-encoding")));
-    if (teIt != hdrs->entries.end() && teIt->second.isString()) {
-        const std::string& te = teIt->second.asString();
-        std::string teLower(te);
-        std::transform(teLower.begin(), teLower.end(), teLower.begin(),
-                       [](char c) { return (char)std::tolower((unsigned char)c); });
-        // Transfer-Encoding is a comma-separated list of tokens. Tokenize
-        // and match exactly — substring matching would falsely trigger on
-        // values like "x-chunked" or "chunked-extension".
-        bool hasChunked = false;
-        size_t pos = 0;
-        while (pos < teLower.size()) {
-            size_t comma = teLower.find(',', pos);
-            size_t end = (comma == std::string::npos) ? teLower.size() : comma;
-            size_t s = pos;
-            while (s < end && (teLower[s] == ' ' || teLower[s] == '\t')) s++;
-            size_t e = end;
-            while (e > s && (teLower[e - 1] == ' ' || teLower[e - 1] == '\t')) e--;
-            if (e - s == 7 && teLower.compare(s, 7, "chunked") == 0) {
-                hasChunked = true;
-                break;
-            }
-            if (comma == std::string::npos) break;
-            pos = comma + 1;
-        }
-        if (hasChunked) {
-            body = decodeChunkedBody(body);
-        }
+    // for framing.
+    if (responseIsChunked(fields.headers)) {
+        body = decodeChunkedBody(body);
     }
 
     auto result = gcNew<PraiaMap>();
-    result->entries[Value("status")]  = Value(static_cast<double>(status));
+    result->entries[Value("status")]  = Value(static_cast<double>(fields.status));
     result->entries[Value("body")]    = Value(body);
-    result->entries[Value("headers")] = Value(hdrs);
-    result->entries[Value("cookies")] = Value(cookies);
+    result->entries[Value("headers")] = Value(fields.headers);
+    result->entries[Value("cookies")] = Value(fields.cookies);
     return Value(result);
 }
 
@@ -1498,20 +1513,25 @@ Value httpOpenStream(const std::string& method, const std::string& url,
         std::string headerText, bodyPrefix;
         readHeadersInto(*conn, headerText, bodyPrefix);
 
-        Value parsed = parseHttpResponse(headerText + bodyPrefix);
-        // parseHttpResponse parses headers AND splits its `raw` into
-        // headerSection+body. We pass headers+prefix so it sees the
-        // \r\n\r\n boundary, but we re-extract status/headers/cookies
-        // here and keep the prefix as the FIRST body bytes for the
-        // stream — we don't want to slurp the full body in.
-        auto& parsedMap = parsed.asMap()->entries;
-        int status = static_cast<int>(parsedMap[Value("status")].asNumber());
+        // Header-only parse — DO NOT call parseHttpResponse here. That
+        // would re-attach bodyPrefix as the "body" and run the chunked
+        // decoder over a possibly-truncated first chunk, throwing
+        // "chunk data truncated" before we ever return the stream.
+        // The streaming decoder (HttpStreamState) consumes the rest of
+        // the body incrementally; the prefix is its first input.
+        // readHeadersInto includes the trailing \r\n\r\n in headerText,
+        // so slice it back off before parsing.
+        std::string headerSection = (headerText.size() >= 4)
+            ? headerText.substr(0, headerText.size() - 4)
+            : headerText;
+        auto parsedHeaders = parseResponseHeaders(headerSection);
+        int status = parsedHeaders.status;
 
         // Redirect handling — fully drain the redirect's body via the
         // streaming path so the connection state is clean before we
         // open the next one.
         if (opts.followRedirects) {
-            auto& respHeaders = parsedMap[Value("headers")].asMap()->entries;
+            auto& respHeaders = parsedHeaders.headers->entries;
             if (status >= 300 && status < 400) {
                 auto locIt = respHeaders.find(Value("location"));
                 if (locIt != respHeaders.end() && locIt->second.isString()) {
@@ -1532,7 +1552,7 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                     // Drain whatever body this 3xx had, then close.
                     HttpStreamState tmp;
                     tmp.conn = conn;
-                    tmp.headersMap = parsedMap[Value("headers")].asMap();
+                    tmp.headersMap = parsedHeaders.headers;
                     tmp.scratch = std::move(bodyPrefix);
                     tmp.scratchPos = 0;
                     detectStreamMode(tmp);
@@ -1558,8 +1578,8 @@ Value httpOpenStream(const std::string& method, const std::string& url,
         auto state = std::make_shared<HttpStreamState>();
         state->conn       = conn;
         state->status     = status;
-        state->headersMap = parsedMap[Value("headers")].asMap();
-        state->cookiesArr = parsedMap[Value("cookies")].asArray();
+        state->headersMap = parsedHeaders.headers;
+        state->cookiesArr = parsedHeaders.cookies;
         state->scratch    = std::move(bodyPrefix);
         state->scratchPos = 0;
         detectStreamMode(*state);
