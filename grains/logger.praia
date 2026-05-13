@@ -169,9 +169,14 @@ func multiSink(sinks) {
 // `fields` map is the *sticky context*: every emit merges it into the
 // record before passing to the sink. Child loggers (.with) share the
 // same level + sink but layer additional fields on top.
-func _makeLogger(name, levelNum, sink, fields) {
+//
+// `levelRef` is a map of shape `{value: <numeric level>}` so that every
+// logger in a `.with()` family points at the same cell — `parent.setLevel`
+// must propagate to children that were created before the call. Passing a
+// bare integer would give each child its own copy, breaking propagation.
+func _makeLogger(name, levelRef, sink, fields) {
     func emit(level, msg, perCallFields) {
-        if (LEVELS[level] < levelNum) { return }
+        if (LEVELS[level] < levelRef.value) { return }
         // Merge sticky fields with per-call fields. Per-call wins on key
         // collision — the more specific scope overrides the broader one.
         let merged = {}
@@ -202,25 +207,26 @@ func _makeLogger(name, levelNum, sink, fields) {
             emit(level, msg, f)
         },
 
-        // setLevel mutates THIS logger's minimum. Children created via
-        // `.with()` capture this same closure-bound mutable level, so
-        // raising it on a parent also raises it on its descendants.
+        // setLevel mutates the shared `levelRef` cell so every logger in
+        // the .with() family (including children created before this call)
+        // immediately sees the new threshold.
         setLevel: lam{ level in
             ensure (LEVELS[level] != nil) else {
                 throw "Invalid log level: %{level}. Use debug, info, warn, error, or none"
             }
-            levelNum = LEVELS[level]
+            levelRef.value = LEVELS[level]
         },
 
         // .with(fields) returns a child logger that carries the union of
         // this logger's fields and the new ones. Right-most wins. The
-        // sink is shared by identity, so closing a child closes the
-        // parent's sink too — use parent's `.close()` for shutdown.
+        // sink and levelRef are shared by reference, so closing a child
+        // closes the parent's sink too — use parent's `.close()` for
+        // shutdown — and `setLevel` on either propagates to both.
         with: lam{ extra in
             let merged = {}
             for (k in keys(fields)) { merged[k] = fields[k] }
             for (k in keys(extra)) { merged[k] = extra[k] }
-            return _makeLogger(name, levelNum, sink, merged)
+            return _makeLogger(name, levelRef, sink, merged)
         },
 
         // Release the sink. After this, calls will throw from the
@@ -244,7 +250,7 @@ func create(name, options) {
     if (!sink) {
         sink = stdoutSink(o.formatter)
     }
-    return _makeLogger(name, LEVELS[levelName], sink, {})
+    return _makeLogger(name, {value: LEVELS[levelName]}, sink, {})
 }
 
 // Router middleware: logs method/path/status/duration on every request.

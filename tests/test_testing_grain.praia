@@ -176,6 +176,12 @@ testing.test("assertContains: array membership", lam{ in
 testing.test("assertContains: map key", lam{ in
     testing.assertContains({a: 1, b: 2}, "a", nil)
 })
+testing.test("assertContains: map key with a nil value is still present", lam{ in
+    // Regression: `m[k] != nil` would drop keys that legitimately point
+    // at nil. assertContains checks for *key existence*.
+    testing.assertContains({maybe: nil, real: 1}, "maybe",
+        "key with nil value should still be considered present")
+})
 
 // ── matchSnapshot: create on first run, match on second ──────
 

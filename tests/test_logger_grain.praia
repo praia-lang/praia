@@ -219,4 +219,32 @@ testing.test("log(level): rejects unknown levels", lam{ in
     testing.assertThrows(lam{ in l.log("trace", "x", nil) }, nil)
 })
 
+// ── setLevel propagates through .with() families ─────────────
+
+testing.test("setLevel on parent propagates to a pre-existing child", lam{ in
+    let sink = captureSink()
+    let parent = logger.create("p", {sink: sink, level: "info"})
+    let child = parent.with({k: "v"})
+
+    parent.setLevel("warn")
+    child.info("dropped")    // should now be filtered out
+    child.warn("kept")
+    testing.assertEqual(len(sink.records), 1,
+        "child observed the parent's setLevel call")
+    testing.assertEqual(sink.records[0].level, "warn", nil)
+})
+
+testing.test("setLevel on child propagates to parent (shared cell)", lam{ in
+    let sink = captureSink()
+    let parent = logger.create("p", {sink: sink, level: "info"})
+    let child = parent.with({k: "v"})
+
+    child.setLevel("error")
+    parent.warn("dropped")   // parent now filtered too
+    parent.error("kept")
+    testing.assertEqual(len(sink.records), 1,
+        "parent observed the child's setLevel call")
+    testing.assertEqual(sink.records[0].level, "error", nil)
+})
+
 testing.done()

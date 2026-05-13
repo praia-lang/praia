@@ -141,7 +141,10 @@ func assertContains(haystack, needle, message) {
     } elif (type(haystack) == "array") {
         for (elem in haystack) { if (elem == needle) { found = true } }
     } elif (type(haystack) == "map") {
-        found = haystack[needle] != nil
+        // Key-presence, not value-truthiness — {a: nil} should still
+        // count as containing "a". `haystack[needle] != nil` would
+        // wrongly drop those keys.
+        for (k in keys(haystack)) { if (k == needle) { found = true } }
     } else {
         failed = failed + 1
         let msg = message || "assertContains: unsupported haystack type %{type(haystack)}"
@@ -293,14 +296,24 @@ func afterEach(fn) {
 
 // ── Test runner ──────────────────────────────────────────────
 
-func _runHooks(hooks, label) {
+// Run a list of hooks. Returns true iff every hook ran without throwing.
+// On a throw, the failure is recorded; if `stopOnError` is true, the
+// remaining hooks are skipped and we return false (used for `beforeEach`,
+// where the test body should not run on setup failure). For `afterEach`
+// we pass stopOnError=false so every teardown gets a chance to run even
+// if an earlier one threw.
+func _runHooks(hooks, label, stopOnError) {
+    let ok = true
     for (h in hooks) {
         try { h() } catch (err) {
             failed = failed + 1
             errors.push("%{label}: %{err}")
             print("  ERROR (%{label}):", err)
+            ok = false
+            if (stopOnError) { return false }
         }
     }
+    return ok
 }
 
 func _runCleanups(testCtx) {
@@ -368,14 +381,19 @@ func test(name, fn) {
     let afters = []
     for (h in _afterEach) { afters.push(h) }
 
-    _runHooks(_beforeEach, "beforeEach")
+    // Body only runs if every beforeEach succeeded. On setup failure the
+    // test is already marked failed inside _runHooks; afterEach + cleanups
+    // still run so anything beforeEach managed to allocate gets torn down.
+    let beforeOk = _runHooks(_beforeEach, name + " / beforeEach", true)
 
-    try {
-        fn()
-    } catch (err) {
-        failed = failed + 1
-        errors.push("%{name}: %{err}")
-        print("  ERROR:", err)
+    if (beforeOk) {
+        try {
+            fn()
+        } catch (err) {
+            failed = failed + 1
+            errors.push("%{name}: %{err}")
+            print("  ERROR:", err)
+        }
     }
 
     _runCleanups(ctx)
@@ -384,7 +402,7 @@ func test(name, fn) {
     let reversed = []
     let i = len(afters) - 1
     while (i >= 0) { reversed.push(afters[i]); i = i - 1 }
-    _runHooks(reversed, "afterEach")
+    _runHooks(reversed, name + " / afterEach", false)
 
     _popCtx()
 }
@@ -444,19 +462,21 @@ func only(name, fn) {
     print("TEST: %{name} (only)")
     let ctx = _makeContext(name)
     _pushCtx(ctx)
-    _runHooks(_beforeEach, "beforeEach")
-    try {
-        fn()
-    } catch (err) {
-        failed = failed + 1
-        errors.push("%{name}: %{err}")
-        print("  ERROR:", err)
+    let beforeOk = _runHooks(_beforeEach, name + " / beforeEach", true)
+    if (beforeOk) {
+        try {
+            fn()
+        } catch (err) {
+            failed = failed + 1
+            errors.push("%{name}: %{err}")
+            print("  ERROR:", err)
+        }
     }
     _runCleanups(ctx)
     let afters = []
     let i = len(_afterEach) - 1
     while (i >= 0) { afters.push(_afterEach[i]); i = i - 1 }
-    _runHooks(afters, "afterEach")
+    _runHooks(afters, name + " / afterEach", false)
     _popCtx()
 }
 
