@@ -401,15 +401,24 @@ Value parseHttpResponse(const std::string& raw) {
     std::getline(hs, line);
     while (std::getline(hs, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        auto c = line.find(": ");
-        if (c != std::string::npos) {
-            std::string key = line.substr(0, c);
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-            std::string val = line.substr(c + 2);
-            if (key == "set-cookie")
-                cookies->elements.push_back(Value(val));
-            hdrs->entries[Value(key)] = Value(val);
-        }
+        // RFC 7230 §3.2: field-name ":" OWS field-value OWS. We find the
+        // first colon (not ": "), reject any whitespace between name and
+        // colon (forbidden by §3.2.4), then strip leading + trailing OWS
+        // from the value. Earlier code required a literal ": " and
+        // silently dropped headers like "Location:/final" (no space).
+        auto c = line.find(':');
+        if (c == std::string::npos || c == 0) continue;
+        std::string key = line.substr(0, c);
+        if (key.back() == ' ' || key.back() == '\t') continue;
+        size_t vs = c + 1;
+        while (vs < line.size() && (line[vs] == ' ' || line[vs] == '\t')) vs++;
+        size_t ve = line.size();
+        while (ve > vs && (line[ve - 1] == ' ' || line[ve - 1] == '\t')) ve--;
+        std::string val = line.substr(vs, ve - vs);
+        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+        if (key == "set-cookie")
+            cookies->elements.push_back(Value(val));
+        hdrs->entries[Value(key)] = Value(val);
     }
 
     // Decode Transfer-Encoding: chunked before handing the body to the
