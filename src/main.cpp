@@ -648,11 +648,11 @@ static void vmRepl(bool showTokens, bool showAst) {
        attributable failures attached to the file that triggered them.
      - fork/exec failure → return 1.
 
-   Behavior change vs the previous in-process runner: a test file that
-   finishes without calling testing.done() / sys.exit will exit 0 (the
-   script's normal "ran to end" code) instead of being treated as a
-   failure. Every test file in the suite calls testing.done(), so this
-   only affects malformed test files. */
+   Child invocation passes `--test-file`, an internal flag that tells
+   the script-run path to treat "ran to end without sys.exit" as a
+   failure (exit 2 with a clear error). This preserves the in-process
+   runner's contract that a test file must call testing.done() /
+   sys.exit before returning. */
 static int runTestFile(const std::string& path, bool useVm) {
     if (g_praiaExecPath.empty()) {
         std::cerr << "praia test: could not locate own executable for "
@@ -666,12 +666,20 @@ static int runTestFile(const std::string& path, bool useVm) {
         return 1;
     }
     if (pid == 0) {
-        // Child: become process-group leader so a Ctrl-C in the parent's
-        // terminal hits us too. Mirrors sys.exec's pattern.
-        setpgid(0, 0);
+        // Child stays in the parent's process group so terminal SIGINT
+        // (Ctrl-C) reaches it — the kernel sends SIGINT to the whole
+        // foreground process group, and moving the child to its own
+        // group would actually suppress that. sys.exec uses setpgid
+        // because it wires up its own signal forwarding via kill(-pid,
+        // ...); the test runner just waits and lets the kernel do it.
+        //
+        // Pass `--test-file` so the child knows to fail if the script
+        // returns without calling testing.done() / sys.exit (preserves
+        // the in-process runner's strict semantics).
         std::vector<char*> argv;
         argv.push_back(const_cast<char*>(g_praiaExecPath.c_str()));
         if (!useVm) argv.push_back(const_cast<char*>("--tree"));
+        argv.push_back(const_cast<char*>("--test-file"));
         argv.push_back(const_cast<char*>(path.c_str()));
         argv.push_back(nullptr);
         execv(g_praiaExecPath.c_str(), argv.data());
@@ -815,17 +823,20 @@ int main(int argc, char* argv[]) {
             try { resolved = fs::canonical(arg0); }
             catch (...) {}
         } else {
-            // Bare name (e.g. "praia") — search PATH
+            // Bare name (e.g. "praia") — search PATH. Require execute
+            // permission, not just file existence; otherwise a same-
+            // named non-executable (e.g. a config file or a directory)
+            // would short-circuit the search and execv would later
+            // fail with EACCES on the wrong path.
             const char* pathEnv = std::getenv("PATH");
             if (pathEnv) {
                 std::istringstream paths(pathEnv);
                 std::string dir;
                 while (std::getline(paths, dir, ':')) {
                     auto candidate = fs::path(dir) / arg0;
-                    if (fs::exists(candidate)) {
-                        try { resolved = fs::canonical(candidate); } catch (...) {}
-                        break;
-                    }
+                    if (access(candidate.c_str(), X_OK) != 0) continue;
+                    try { resolved = fs::canonical(candidate); } catch (...) {}
+                    if (!resolved.empty()) break;
                 }
             }
         }
@@ -909,6 +920,11 @@ int main(int argc, char* argv[]) {
     std::string cCode;
     bool hasCFlag = false;
     int cArgStart = -1;
+    // Internal flag set by the `praia test` subprocess runner. Tells
+    // this child process to treat "the script returned without calling
+    // sys.exit" as a failure — preserves the in-process runner's
+    // contract that test files must end via testing.done() / sys.exit.
+    bool testFileMode = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -916,6 +932,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--ast")      showAst = true;
         else if (arg == "--vm")       useVm = true;
         else if (arg == "--tree")     useVm = false;
+        else if (arg == "--test-file") testFileMode = true;
         else if (arg == "-c") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: -c requires an argument\n";
@@ -985,6 +1002,14 @@ int main(int argc, char* argv[]) {
     auto program = compile(source, showTokens, showAst, hadError);
     if (hadError) return ExitCode::CompileError;
     if (!program.empty()) {
+        // Helper: when running under `praia test`'s subprocess runner,
+        // a clean script return without sys.exit means testing.done()
+        // was never called. Surface that loudly so a malformed test
+        // file is flagged rather than silently passing.
+        auto reportMissingTestingDone = [&]() {
+            std::cerr << "praia test: " << filename
+                      << " finished without calling testing.done()" << std::endl;
+        };
         if (useVm) {
             // Bytecode VM path
             Compiler compiler;
@@ -998,8 +1023,9 @@ int main(int argc, char* argv[]) {
             vm.setCurrentFile(filename);
             try {
                 auto result = vm.run(script);
-                return result == VM::Result::OK
-                    ? ExitCode::Success : ExitCode::RuntimeError;
+                if (result != VM::Result::OK) return ExitCode::RuntimeError;
+                if (testFileMode) { reportMissingTestingDone(); return 2; }
+                return ExitCode::Success;
             } catch (const ExitSignal& e) { return e.code; }
         } else {
             // Tree-walker path
@@ -1008,6 +1034,7 @@ int main(int argc, char* argv[]) {
             interpreter.setCurrentFile(filename);
             try {
                 if (!interpreter.interpret(program)) return ExitCode::RuntimeError;
+                if (testFileMode) { reportMissingTestingDone(); return 2; }
             }
             catch (const ExitSignal& e) { return e.code; }
         }
