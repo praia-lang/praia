@@ -8,13 +8,17 @@
 #include "vm/vm.h"
 #include "vm/debug.h"
 #include <algorithm>
+#include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <vector>
+#include <sys/wait.h>
+#include <unistd.h>
 #ifdef HAVE_READLINE
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -620,40 +624,90 @@ static void vmRepl(bool showTokens, bool showAst) {
     }
 }
 
-/* Run a single test file in its own interpreter. Returns 0 if the file
-called sys.exit(0) (convention: testing.done() when all asserts passed),
-anything else counts as a failure. Errors are kept on stderr so the user
-can see them in the run log. */
-static int runTestFile(const std::string& path, bool useVm) {
-    std::string source = readFile(path);
-    bool hadError = false;
-    auto program = compile(source, /*showTokens*/false, /*showAst*/false, hadError);
-    if (program.empty()) return 1; // parse/lex error
+/* Run a single test file in an isolated subprocess. Returns 0 if the
+   child exited cleanly via sys.exit(0) (convention: testing.done()
+   when all asserts passed), anything else counts as a failure.
 
-    if (useVm) {
-        Compiler compiler;
-        auto script = compiler.compile(program);
-        if (!script) return 1;
-        extern void vmRegisterNatives(VM& vm);
-        VM vm;
-        vmRegisterNatives(vm);
-        vm.setCurrentFile(path);
-        try {
-            return vm.run(script) == VM::Result::OK ? 2 : 1;
-        } catch (const ExitSignal& e) {
-            return e.code;
-        }
-    } else {
-        Interpreter interp;
-        interp.setCurrentFile(path);
-        try {
-            interp.interpret(program);
-        } catch (const ExitSignal& e) {
-            return e.code;
-        }
+   The subprocess re-execs ourselves with the same `--tree` flag (if
+   any) and the test file path. This gives every test file a pristine
+   process: each fd it opens, every thread it spawns via `async`, and
+   every retained inflight future dies with the child. That matters
+   because the HTTP/async test files spawn `while (true) { accept }`
+   server loops that the in-process runner used to accumulate across
+   files — causing flake on Linux CI and forcing several timing-
+   sensitive tests to be reshaped or dropped.
+
+   stdout/stderr are inherited (no pipes) so the child's `TEST: ...`
+   and `Results: ...` lines stream to the user in real time, matching
+   the previous output.
+
+   Exit-code mapping:
+     - WIFEXITED  → return WEXITSTATUS (preserves the sys.exit code).
+     - WIFSIGNALED → print "(crashed by signal N (NAME))" to stderr
+       and return 128+signal. Turns mystery SIGSEGVs into loud,
+       attributable failures attached to the file that triggered them.
+     - fork/exec failure → return 1.
+
+   Child invocation passes `--test-file`, an internal flag that tells
+   the script-run path to treat "ran to end without sys.exit" as a
+   failure (exit 2 with a clear error). This preserves the in-process
+   runner's contract that a test file must call testing.done() /
+   sys.exit before returning. */
+static int runTestFile(const std::string& path, bool useVm) {
+    if (g_praiaExecPath.empty()) {
+        std::cerr << "praia test: could not locate own executable for "
+                  << "subprocess test runner" << std::endl;
+        return 1;
     }
-    // No sys.exit means the file didn't call testing.done() — treat as fail
-    return 2;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::cerr << "praia test: fork failed: " << std::strerror(errno) << std::endl;
+        return 1;
+    }
+    if (pid == 0) {
+        // Child stays in the parent's process group so terminal SIGINT
+        // (Ctrl-C) reaches it — the kernel sends SIGINT to the whole
+        // foreground process group, and moving the child to its own
+        // group would actually suppress that. sys.exec uses setpgid
+        // because it wires up its own signal forwarding via kill(-pid,
+        // ...); the test runner just waits and lets the kernel do it.
+        //
+        // Pass `--test-file` so the child knows to fail if the script
+        // returns without calling testing.done() / sys.exit (preserves
+        // the in-process runner's strict semantics).
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>(g_praiaExecPath.c_str()));
+        if (!useVm) argv.push_back(const_cast<char*>("--tree"));
+        argv.push_back(const_cast<char*>("--test-file"));
+        argv.push_back(const_cast<char*>(path.c_str()));
+        argv.push_back(nullptr);
+        execv(g_praiaExecPath.c_str(), argv.data());
+        // execv only returns on failure.
+        std::cerr << "praia test: exec failed: " << std::strerror(errno) << std::endl;
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        std::cerr << "praia test: waitpid failed: " << std::strerror(errno) << std::endl;
+        return 1;
+    }
+
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) {
+        int sig = WTERMSIG(status);
+        // strsignal() may return NULL for unknown signal numbers — fall
+        // back to a fixed label so we don't UB by streaming a null
+        // pointer into ostream.
+        const char* desc = strsignal(sig);
+        if (!desc) desc = "unknown signal";
+        std::cerr << "  (crashed by signal " << sig
+                  << " (" << desc << "))" << std::endl;
+        return 128 + sig;
+    }
+    return 1;
 }
 
 static int runTestsCommand(const std::string& dir, bool useVm) {
@@ -760,29 +814,43 @@ int main(int argc, char* argv[]) {
 
     installDefaultSignalHandlers();
 
-    // Resolve the directory where the praia binary lives.
-    // Used by grain resolution to find bundled stdlib grains.
+    // Resolve the directory where the praia binary lives AND the full
+    // canonical path to the binary itself. The directory is used by
+    // grain resolution to find bundled stdlib grains; the full path is
+    // used by `praia test` to fork+exec ourselves per test file for
+    // subprocess isolation.
     {
         namespace fs = std::filesystem;
         fs::path arg0(argv[0]);
+        fs::path resolved;
         if (arg0.is_absolute() || arg0.string().find('/') != std::string::npos) {
             // Absolute or relative path — resolve directly
-            try { g_praiaInstallDir = fs::canonical(arg0).parent_path().string(); }
+            try { resolved = fs::canonical(arg0); }
             catch (...) {}
         } else {
-            // Bare name (e.g. "praia") — search PATH
+            // Bare name (e.g. "praia") — search PATH. Skip directory
+            // entries: a same-named directory passes access(X_OK) (the
+            // "traverse" bit for dirs) but execv on it later fails
+            // with EISDIR. Then require execute permission, not just
+            // file existence, so a non-executable file at the matching
+            // path doesn't short-circuit the search either.
             const char* pathEnv = std::getenv("PATH");
             if (pathEnv) {
                 std::istringstream paths(pathEnv);
                 std::string dir;
                 while (std::getline(paths, dir, ':')) {
                     auto candidate = fs::path(dir) / arg0;
-                    if (fs::exists(candidate)) {
-                        g_praiaInstallDir = fs::canonical(candidate).parent_path().string();
-                        break;
-                    }
+                    std::error_code ec;
+                    if (fs::is_directory(candidate, ec) || ec) continue;
+                    if (access(candidate.c_str(), X_OK) != 0) continue;
+                    try { resolved = fs::canonical(candidate); } catch (...) {}
+                    if (!resolved.empty()) break;
                 }
             }
+        }
+        if (!resolved.empty()) {
+            g_praiaExecPath   = resolved.string();
+            g_praiaInstallDir = resolved.parent_path().string();
         }
     }
 
@@ -860,6 +928,11 @@ int main(int argc, char* argv[]) {
     std::string cCode;
     bool hasCFlag = false;
     int cArgStart = -1;
+    // Internal flag set by the `praia test` subprocess runner. Tells
+    // this child process to treat "the script returned without calling
+    // sys.exit" as a failure — preserves the in-process runner's
+    // contract that test files must end via testing.done() / sys.exit.
+    bool testFileMode = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -867,6 +940,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--ast")      showAst = true;
         else if (arg == "--vm")       useVm = true;
         else if (arg == "--tree")     useVm = false;
+        else if (arg == "--test-file") testFileMode = true;
         else if (arg == "-c") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: -c requires an argument\n";
@@ -936,6 +1010,14 @@ int main(int argc, char* argv[]) {
     auto program = compile(source, showTokens, showAst, hadError);
     if (hadError) return ExitCode::CompileError;
     if (!program.empty()) {
+        // Helper: when running under `praia test`'s subprocess runner,
+        // a clean script return without sys.exit means testing.done()
+        // was never called. Surface that loudly so a malformed test
+        // file is flagged rather than silently passing.
+        auto reportMissingTestingDone = [&]() {
+            std::cerr << "praia test: " << filename
+                      << " finished without calling testing.done()" << std::endl;
+        };
         if (useVm) {
             // Bytecode VM path
             Compiler compiler;
@@ -949,8 +1031,9 @@ int main(int argc, char* argv[]) {
             vm.setCurrentFile(filename);
             try {
                 auto result = vm.run(script);
-                return result == VM::Result::OK
-                    ? ExitCode::Success : ExitCode::RuntimeError;
+                if (result != VM::Result::OK) return ExitCode::RuntimeError;
+                if (testFileMode) { reportMissingTestingDone(); return 2; }
+                return ExitCode::Success;
             } catch (const ExitSignal& e) { return e.code; }
         } else {
             // Tree-walker path
@@ -959,6 +1042,7 @@ int main(int argc, char* argv[]) {
             interpreter.setCurrentFile(filename);
             try {
                 if (!interpreter.interpret(program)) return ExitCode::RuntimeError;
+                if (testFileMode) { reportMissingTestingDone(); return 2; }
             }
             catch (const ExitSignal& e) { return e.code; }
         }

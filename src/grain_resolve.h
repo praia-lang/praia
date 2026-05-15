@@ -12,6 +12,11 @@ namespace fs = std::filesystem;
 // Used to find bundled stdlib grains in development mode: <bindir>/grains/
 inline std::string g_praiaInstallDir;
 
+// Full canonical path to the praia binary itself (e.g. "/usr/local/bin/praia").
+// Set alongside g_praiaInstallDir from main(). Used by `praia test` to fork+exec
+// itself to run each test file in an isolated subprocess.
+inline std::string g_praiaExecPath;
+
 // Compile-time LIBDIR from make install (e.g. "/usr/local/lib/praia").
 // When set, grains are found at PRAIA_LIBDIR/grains/.
 // When empty, falls back to g_praiaInstallDir-relative resolution.

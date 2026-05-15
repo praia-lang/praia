@@ -220,62 +220,10 @@ testing.test("json.parser consumes the stream end-to-end", lam{ in
     s.close()
 })
 
-// ── Redirect following ───────────────────────────────────────
-
-testing.test("openStream follows 302 to the final body by default", lam{ in
-    let s = http.openStream({url: base + "/redirect"})
-    testing.assertEqual(s.status, 200, "ended at /contentlength")
-    testing.assert(s.readAll().contains("Hello streaming world"), nil)
-    s.close()
-})
-
-testing.test("followRedirects: false returns the 3xx stream", lam{ in
-    let s = http.openStream({url: base + "/redirect", followRedirects: false})
-    testing.assertEqual(s.status, 302, nil)
-    testing.assertEqual(s.headers["location"], "/contentlength", nil)
-    s.close()
-})
-
-// ── Lifecycle ────────────────────────────────────────────────
-
-testing.test("read / readLine / readAll / eof after close throw", lam{ in
-    let s = http.openStream({url: base + "/contentlength"})
-    s.close()
-    testing.assertThrows(lam{ in s.read(1) },    "is closed")
-    testing.assertThrows(lam{ in s.readLine() }, "is closed")
-    testing.assertThrows(lam{ in s.readAll() },  "is closed")
-    testing.assertEqual(s.eof(), true, "eof() is true after close (not a throw)")
-})
-
-testing.test("close is idempotent", lam{ in
-    let s = http.openStream({url: base + "/contentlength"})
-    s.close()
-    s.close()
-    testing.assert(true, "second close did not throw")
-})
-
-testing.test("openStream requires a url", lam{ in
-    testing.assertThrows(lam{ in http.openStream({}) }, "'url'")
-})
-
-testing.test("openStream requires a map", lam{ in
-    testing.assertThrows(lam{ in http.openStream("http://x") }, "options map")
-})
-
-testing.test("dropped stream handles release their fd (RAII cleanup)", lam{ in
-    // Regression: HttpStreamState / SocketConn had no destructor, so a
-    // caller who dropped the handle without calling .close() leaked
-    // the fd + SSL state until process exit. Now SocketConn::~SocketConn
-    // calls shutdown_close, so dropping the handle releases everything
-    // through the shared_ptr refcount chain. 300 streams is well above
-    // the default soft-FD-limit (256 on macOS), so without the dtor
-    // this loop would EMFILE long before completing.
-    for (i in 0..300) {
-        let s = http.openStream({url: base + "/contentlength"})
-        let _ = s.readAll()
-        // intentionally NO s.close() — relies on RAII
-    }
-    testing.assert(true, "completed 300 implicit-close streams without exhausting fds")
-})
+// Redirect-following, lifecycle, argument validation, and RAII tests
+// live in tests/test_http_stream_lifecycle.praia. Splitting them off
+// keeps each test file's openStream count low enough that the tree
+// walker doesn't accumulate async-server state into the failure zone
+// when each file runs in its own subprocess.
 
 testing.done()
