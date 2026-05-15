@@ -791,22 +791,31 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
         std::cout << std::endl;
     };
 
+    // Runner-level failure (mkstemp / fork blew up — process-wide
+    // resource exhaustion, not a fault of the test file). When set we
+    // stop enqueueing new spawns, let already-running children drain
+    // to completion, then return ExitCode::RuntimeError. The flag is
+    // distinct from per-file pass/fail so we don't mis-attribute the
+    // failure to whichever file happened to be next in line.
+    bool runnerError = false;
+
     while (nextToSpawn < files.size() || !running.empty()) {
-        // Spawn until we hit the job cap (or run out of files).
-        while (nextToSpawn < files.size() && (int)running.size() < jobs) {
-            auto pt = spawnTestFile(files[nextToSpawn], useVm);
-            if (pt.pid < 0) {
-                printHeaderAndOutput(files[nextToSpawn], "",
-                    "  (failed to spawn subprocess)");
-                failed++;
-                failedFiles.push_back(files[nextToSpawn]);
-                completed++;
-            } else {
+        // Spawn until we hit the job cap (or run out of files), unless
+        // a runner-level error has occurred — then stop enqueueing
+        // and let pending children drain.
+        if (!runnerError) {
+            while (nextToSpawn < files.size() && (int)running.size() < jobs) {
+                auto pt = spawnTestFile(files[nextToSpawn], useVm);
+                if (pt.pid < 0) {
+                    runnerError = true;
+                    break;
+                }
                 running.push_back(std::move(pt));
+                nextToSpawn++;
             }
-            nextToSpawn++;
         }
-        if (running.empty()) continue;
+        // Nothing running + nothing more to enqueue → we're done.
+        if (running.empty()) break;
 
         // Wait for any child to finish.
         int status = 0;
@@ -869,6 +878,15 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
         std::sort(failedFiles.begin(), failedFiles.end());
         std::cout << "Failed:" << std::endl;
         for (auto& f : failedFiles) std::cout << "  " << f << std::endl;
+    }
+    // Runner-level error (spawn failure) takes precedence over the
+    // pass/fail tally: even if every test that *did* run passed, we
+    // exited early without running the remainder, so the suite result
+    // is incomplete. Return RuntimeError rather than 0.
+    if (runnerError) {
+        std::cerr << "praia test: aborted — could not spawn subprocess for "
+                  << "remaining test files (see earlier error)" << std::endl;
+        return ExitCode::RuntimeError;
     }
     return failed == 0 ? 0 : 1;
 }
@@ -1019,11 +1037,11 @@ int main(int argc, char* argv[]) {
                         return ExitCode::UsageError;
                     }
                 }
-                else if (a[0] != '-') { dir = a; break; }
+                else if (!a.empty() && a[0] != '-') { dir = a; break; }
             }
             return runTestsCommand(dir, useVm, jobs);
         }
-        else if (arg[0] != '-') break; // hit a non-flag, non-"test" arg (filename)
+        else if (!arg.empty() && arg[0] != '-') break; // hit a non-flag, non-"test" arg (filename)
     }
 
     // Parse all flags first
