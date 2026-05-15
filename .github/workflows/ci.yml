@@ -119,9 +119,13 @@ jobs:
         # Linux CI but not on macOS CI, real Linux, or local dev). Bumping
         # the per-process file/thread limits gives plenty of headroom
         # until the test-runner-isolation rework lands.
+        #
+        # macOS doesn't allow non-root processes to raise `nproc` and
+        # already has higher defaults, so we `|| true` the ulimit calls
+        # — they're best-effort on either platform.
         run: |
-          ulimit -n 8192
-          ulimit -u 8192
+          ulimit -n 8192 || true
+          ulimit -u 8192 || true
           ./praia --tree test
 
   # Coverage-guided fuzz regression. For each parser target, build the
