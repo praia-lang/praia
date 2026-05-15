@@ -698,8 +698,13 @@ static int runTestFile(const std::string& path, bool useVm) {
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
+        // strsignal() may return NULL for unknown signal numbers — fall
+        // back to a fixed label so we don't UB by streaming a null
+        // pointer into ostream.
+        const char* desc = strsignal(sig);
+        if (!desc) desc = "unknown signal";
         std::cerr << "  (crashed by signal " << sig
-                  << " (" << strsignal(sig) << "))" << std::endl;
+                  << " (" << desc << "))" << std::endl;
         return 128 + sig;
     }
     return 1;
