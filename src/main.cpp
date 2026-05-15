@@ -696,8 +696,18 @@ static PendingTest spawnTestFile(const std::string& path, bool useVm) {
     if (pt.pid == 0) {
         // Child stays in the parent's process group so terminal SIGINT
         // (Ctrl-C) reaches it via the foreground-group dispatch.
-        dup2(pt.outFd, STDOUT_FILENO);
-        dup2(pt.outFd, STDERR_FILENO);
+        // If dup2 fails the child has no usable stdout/stderr to report
+        // through — write to the original fd2 and bail before exec.
+        if (dup2(pt.outFd, STDOUT_FILENO) < 0) {
+            std::fprintf(stderr, "praia test: dup2(stdout) failed: %s\n",
+                         std::strerror(errno));
+            _exit(127);
+        }
+        if (dup2(pt.outFd, STDERR_FILENO) < 0) {
+            std::fprintf(stderr, "praia test: dup2(stderr) failed: %s\n",
+                         std::strerror(errno));
+            _exit(127);
+        }
         close(pt.outFd);
         std::vector<char*> argv;
         argv.push_back(const_cast<char*>(g_praiaExecPath.c_str()));
@@ -717,7 +727,7 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
     if (g_praiaExecPath.empty()) {
         std::cerr << "praia test: could not locate own executable for "
                   << "subprocess test runner" << std::endl;
-        return 1;
+        return ExitCode::RuntimeError;
     }
     if (!fs::exists(dir)) {
         std::cerr << "praia test: directory not found: " << dir << std::endl;
@@ -823,7 +833,7 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
         if (done < 0) {
             if (errno == EINTR) continue;
             std::cerr << "praia test: waitpid failed: " << std::strerror(errno) << std::endl;
-            return 1;
+            return ExitCode::RuntimeError;
         }
         auto job = std::find_if(running.begin(), running.end(),
             [&](const PendingTest& j) { return j.pid == done; });
@@ -864,10 +874,17 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
         running.erase(job);
     }
 
-    // Final progress bar + summary.
+    // Final progress bar + summary. When the runner aborted early
+    // (mkstemp/fork failure), draw the bar to actual completion and
+    // tag it "(aborted)" so the user doesn't see a full bar over an
+    // incomplete run.
     {
-        std::string bar(20, '#');
-        std::cout << "\r\033[K[" << bar << "] " << total << "/" << total << " done" << std::endl;
+        int barWidth = 20;
+        int filled = (completed * barWidth) / std::max(total, 1);
+        std::string bar(filled, '#');
+        bar += std::string(barWidth - filled, '.');
+        std::cout << "\r\033[K[" << bar << "] " << completed << "/" << total
+                  << (runnerError ? " (aborted)" : " done") << std::endl;
     }
     std::cout << "═══ " << passed << "/" << files.size()
               << " test files passed ═══" << std::endl;
