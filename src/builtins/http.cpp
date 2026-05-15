@@ -1240,15 +1240,17 @@ static void streamEnsure(HttpStreamState& s) {
 //
 // `method` is the request method (uppercased): HEAD responses MUST
 // have no body regardless of any framing headers the server sets,
-// and the same is true for 1xx / 204 / 304 status responses. We
-// short-circuit those to a zero-length ContentLength mode so
+// and the same is true for 1xx / 204 / 205 / 304 status responses.
+// We short-circuit those to a zero-length ContentLength mode so
 // streamEnsure reports EOF immediately — otherwise a misbehaving
 // keep-alive server could leave us blocked forever waiting for
-// bytes that aren't coming.
+// bytes that aren't coming. 205 Reset Content is included per
+// RFC 9110 §15.3.6 ("it cannot contain content or trailers").
 static void detectStreamMode(HttpStreamState& s, const std::string& method) {
     bool noBody = (method == "HEAD") ||
                   (s.status >= 100 && s.status < 200) ||
                   (s.status == 204) ||
+                  (s.status == 205) ||
                   (s.status == 304);
     if (noBody) {
         s.mode = HttpStreamState::Mode::ContentLength;
@@ -1334,6 +1336,25 @@ readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
                     state.buf.size() - state.bufPos);
         state.bufPos = state.buf.size();
     }
+
+    // Truncation guard: if the headers framed the body but the peer
+    // closed before delivering it in full, the bytes we have are
+    // unreliable — surface that rather than silently returning a
+    // truncated payload. streamEnsure sets eofReached on a clean EOF
+    // and leaves contentRemaining / chunkedDone intact so we can
+    // distinguish "complete" from "cut short" here.
+    if (state.mode == HttpStreamState::Mode::ContentLength &&
+        state.contentRemaining > 0) {
+        int64_t expected = static_cast<int64_t>(body.size()) + state.contentRemaining;
+        throw RuntimeError("HTTP response truncated: Content-Length=" +
+                           std::to_string(expected) + " but got " +
+                           std::to_string(body.size()) + " bytes", 0);
+    }
+    if (state.mode == HttpStreamState::Mode::Chunked && !state.chunkedDone) {
+        throw RuntimeError("HTTP response truncated: chunked body ended "
+                           "before 0-size terminator chunk", 0);
+    }
+
     return {std::move(fields), std::move(body)};
 }
 
