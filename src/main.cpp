@@ -659,22 +659,43 @@ static void vmRepl(bool showTokens, bool showAst) {
 struct PendingTest {
     pid_t pid = -1;
     int   outFd = -1;
+    // Parent's read end of the pre-exec error channel. The child holds
+    // the (CLOEXEC) write end open until execv: on successful exec the
+    // kernel auto-closes it (parent's read returns 0); on any failure
+    // before exec the child writes a marker byte first, so the parent
+    // can distinguish "child died before running the script" (runner
+    // infrastructure fault → ExitCode::RuntimeError) from "script ran
+    // and exited with code 127" (a real test failure).
+    int   errFd = -1;
     std::string file;
 };
 
 static PendingTest spawnTestFile(const std::string& path, bool useVm) {
+    namespace fs = std::filesystem;
     PendingTest pt;
     pt.file = path;
 
     // Anonymous capture file: mkstemp + immediate unlink. The fd lives
     // until we close it; on close the kernel reclaims the inode.
-    char tmpl[] = "/tmp/praia-test-out.XXXXXX";
-    pt.outFd = mkstemp(tmpl);
+    // fs::temp_directory_path() honors $TMPDIR / $TMP / $TEMP /
+    // $TEMPDIR on POSIX and falls back to /tmp — works on locked-down
+    // hosts where /tmp itself isn't writable (sandboxes, containers).
+    std::error_code tmpEc;
+    fs::path tmpDir = fs::temp_directory_path(tmpEc);
+    if (tmpEc) {
+        const char* env = std::getenv("TMPDIR");
+        tmpDir = env ? env : "/tmp";
+    }
+    std::string tmplStr = (tmpDir / "praia-test-out.XXXXXX").string();
+    std::vector<char> tmpl(tmplStr.begin(), tmplStr.end());
+    tmpl.push_back('\0');
+    pt.outFd = mkstemp(tmpl.data());
     if (pt.outFd < 0) {
-        std::cerr << "praia test: mkstemp failed: " << std::strerror(errno) << std::endl;
+        std::cerr << "praia test: mkstemp(" << tmplStr << ") failed: "
+                  << std::strerror(errno) << std::endl;
         return pt;
     }
-    unlink(tmpl);
+    unlink(tmpl.data());
 
     // Mark close-on-exec so concurrent siblings (parallel `-j N`)
     // don't inherit this fd through fork+exec. The child that owns
@@ -690,28 +711,53 @@ static PendingTest spawnTestFile(const std::string& path, bool useVm) {
         return pt;
     }
 
+    // Pre-exec error pipe. Both ends are CLOEXEC: parent's read end so
+    // sibling exec'd children don't inherit it (would hold the write
+    // side open and stall the read); write end so a successful exec
+    // auto-closes it (parent's read returns 0, "exec succeeded").
+    int errPipe[2];
+    if (pipe(errPipe) < 0) {
+        std::cerr << "praia test: pipe failed: " << std::strerror(errno) << std::endl;
+        close(pt.outFd); pt.outFd = -1;
+        return pt;
+    }
+    for (int fd : {errPipe[0], errPipe[1]}) {
+        int f = fcntl(fd, F_GETFD);
+        if (f < 0 || fcntl(fd, F_SETFD, f | FD_CLOEXEC) < 0) {
+            std::cerr << "praia test: fcntl(FD_CLOEXEC) on pipe failed: "
+                      << std::strerror(errno) << std::endl;
+            close(errPipe[0]); close(errPipe[1]);
+            close(pt.outFd); pt.outFd = -1;
+            return pt;
+        }
+    }
+
     pt.pid = fork();
     if (pt.pid < 0) {
         std::cerr << "praia test: fork failed: " << std::strerror(errno) << std::endl;
-        close(pt.outFd);
-        pt.outFd = -1;
+        close(errPipe[0]); close(errPipe[1]);
+        close(pt.outFd); pt.outFd = -1;
         return pt;
     }
     if (pt.pid == 0) {
         // Child stays in the parent's process group so terminal SIGINT
         // (Ctrl-C) reaches it via the foreground-group dispatch.
-        // If dup2 fails the child has no usable stdout/stderr to report
-        // through — write to the original fd2 and bail before exec.
-        if (dup2(pt.outFd, STDOUT_FILENO) < 0) {
-            std::fprintf(stderr, "praia test: dup2(stdout) failed: %s\n",
-                         std::strerror(errno));
+        close(errPipe[0]);
+        int errWrite = errPipe[1];
+        auto preExecFail = [&](const char* what) {
+            // Diagnose to the inherited stderr (or to the captured
+            // temp file if stderr was already dup2'd). The marker byte
+            // is what the parent reads — its contents don't matter,
+            // only that the read returns > 0 bytes.
+            std::fprintf(stderr, "praia test: %s failed: %s\n",
+                         what, std::strerror(errno));
+            char marker = 1;
+            ssize_t w = write(errWrite, &marker, 1);
+            (void)w; // best-effort; parent treats any non-empty read as failure
             _exit(127);
-        }
-        if (dup2(pt.outFd, STDERR_FILENO) < 0) {
-            std::fprintf(stderr, "praia test: dup2(stderr) failed: %s\n",
-                         std::strerror(errno));
-            _exit(127);
-        }
+        };
+        if (dup2(pt.outFd, STDOUT_FILENO) < 0) preExecFail("dup2(stdout)");
+        if (dup2(pt.outFd, STDERR_FILENO) < 0) preExecFail("dup2(stderr)");
         close(pt.outFd);
         std::vector<char*> argv;
         argv.push_back(const_cast<char*>(g_praiaExecPath.c_str()));
@@ -720,9 +766,10 @@ static PendingTest spawnTestFile(const std::string& path, bool useVm) {
         argv.push_back(const_cast<char*>(path.c_str()));
         argv.push_back(nullptr);
         execv(g_praiaExecPath.c_str(), argv.data());
-        std::fprintf(stderr, "praia test: exec failed: %s\n", std::strerror(errno));
-        _exit(127);
+        preExecFail("exec");
     }
+    close(errPipe[1]);
+    pt.errFd = errPipe[0];
     return pt;
 }
 
@@ -858,6 +905,19 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
             close(job->outFd);
         }
 
+        // Drain the pre-exec error channel. Any bytes here mean the
+        // child died before execv() (dup2 failure, exec failure, etc.)
+        // — that's runner infrastructure, not the test file's fault.
+        // A successful exec closes the write end via CLOEXEC, so the
+        // read returns 0 and we fall through to the normal path.
+        bool preExecFailed = false;
+        if (job->errFd >= 0) {
+            char ebuf[16];
+            ssize_t n = read(job->errFd, ebuf, sizeof(ebuf));
+            if (n > 0) preExecFailed = true;
+            close(job->errFd);
+        }
+
         // Map waitpid status to exit code + optional crash diagnostic.
         int code;
         std::string crashLine;
@@ -876,8 +936,16 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
 
         printHeaderAndOutput(job->file, output, crashLine);
 
-        if (code == 0) passed++;
-        else { failed++; failedFiles.push_back(job->file); }
+        if (preExecFailed) {
+            // Don't attribute to job->file — the script never ran.
+            // Flip runnerError so the main loop stops enqueueing and
+            // the footer prints the abort message + RuntimeError.
+            runnerError = true;
+        } else if (code == 0) {
+            passed++;
+        } else {
+            failed++; failedFiles.push_back(job->file);
+        }
         completed++;
         running.erase(job);
     }
