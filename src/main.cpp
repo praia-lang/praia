@@ -26,7 +26,7 @@
 
 // ── Version ──────────────────────────────────────────────────
 
-static constexpr const char* PRAIA_VERSION = "0.6.0";
+static constexpr const char* PRAIA_VERSION = "0.6.1";
 
 // ── Exit codes ───────────────────────────────────────────────
 // Documented in --help. `sys.exit(N)` from user code passes through
@@ -624,58 +624,66 @@ static void vmRepl(bool showTokens, bool showAst) {
     }
 }
 
-/* Run a single test file in an isolated subprocess. Returns 0 if the
-   child exited cleanly via sys.exit(0) (convention: testing.done()
-   when all asserts passed), anything else counts as a failure.
+/* Per-file isolation via subprocess: every test file runs in its own
+   `praia [--tree] --test-file <path>` invocation. The child inherits
+   no state from prior files (fds, async threads, retained futures all
+   die with it), which eliminated the long-tail flake caused by the
+   HTTP test files' `while (true) { accept }` server loops piling up
+   across an in-process run.
 
-   The subprocess re-execs ourselves with the same `--tree` flag (if
-   any) and the test file path. This gives every test file a pristine
-   process: each fd it opens, every thread it spawns via `async`, and
-   every retained inflight future dies with the child. That matters
-   because the HTTP/async test files spawn `while (true) { accept }`
-   server loops that the in-process runner used to accumulate across
-   files — causing flake on Linux CI and forcing several timing-
-   sensitive tests to be reshaped or dropped.
+   The runner can also fan multiple subprocesses out concurrently via
+   `-j N`. To keep output readable under parallelism, each child's
+   stdout+stderr is redirected to its own anonymous temp file
+   (`mkstemp` + `unlink`); the parent reads it back after `waitpid`
+   and prints it as one block under that file's header. Sequential
+   (`-j 1`, the default) uses the exact same plumbing, just one job
+   at a time, so behaviour is identical to the previous in-process
+   runner with one exception:
 
-   stdout/stderr are inherited (no pipes) so the child's `TEST: ...`
-   and `Results: ...` lines stream to the user in real time, matching
-   the previous output.
+     - A test file that returns from `main` without calling
+       `testing.done()` / `sys.exit` is treated as failed via the
+       `--test-file` flag (the child's script path notices the flag
+       and exits with code 2 + a stderr line).
 
-   Exit-code mapping:
-     - WIFEXITED  → return WEXITSTATUS (preserves the sys.exit code).
-     - WIFSIGNALED → print "(crashed by signal N (NAME))" to stderr
-       and return 128+signal. Turns mystery SIGSEGVs into loud,
-       attributable failures attached to the file that triggered them.
-     - fork/exec failure → return 1.
+   Exit-code mapping per child:
+     - WIFEXITED  → WEXITSTATUS (preserves user-chosen sys.exit code).
+     - WIFSIGNALED → 128 + signal, with a clear `(crashed by signal
+       N (NAME))` stderr line attached to the offending file.
+     - fork/exec/mkstemp failure → 1, file counted as failed.
+*/
+struct PendingTest {
+    pid_t pid = -1;
+    int   outFd = -1;
+    std::string file;
+};
 
-   Child invocation passes `--test-file`, an internal flag that tells
-   the script-run path to treat "ran to end without sys.exit" as a
-   failure (exit 2 with a clear error). This preserves the in-process
-   runner's contract that a test file must call testing.done() /
-   sys.exit before returning. */
-static int runTestFile(const std::string& path, bool useVm) {
-    if (g_praiaExecPath.empty()) {
-        std::cerr << "praia test: could not locate own executable for "
-                  << "subprocess test runner" << std::endl;
-        return 1;
+static PendingTest spawnTestFile(const std::string& path, bool useVm) {
+    PendingTest pt;
+    pt.file = path;
+
+    // Anonymous capture file: mkstemp + immediate unlink. The fd lives
+    // until we close it; on close the kernel reclaims the inode.
+    char tmpl[] = "/tmp/praia-test-out.XXXXXX";
+    pt.outFd = mkstemp(tmpl);
+    if (pt.outFd < 0) {
+        std::cerr << "praia test: mkstemp failed: " << std::strerror(errno) << std::endl;
+        return pt;
     }
+    unlink(tmpl);
 
-    pid_t pid = fork();
-    if (pid < 0) {
+    pt.pid = fork();
+    if (pt.pid < 0) {
         std::cerr << "praia test: fork failed: " << std::strerror(errno) << std::endl;
-        return 1;
+        close(pt.outFd);
+        pt.outFd = -1;
+        return pt;
     }
-    if (pid == 0) {
+    if (pt.pid == 0) {
         // Child stays in the parent's process group so terminal SIGINT
-        // (Ctrl-C) reaches it — the kernel sends SIGINT to the whole
-        // foreground process group, and moving the child to its own
-        // group would actually suppress that. sys.exec uses setpgid
-        // because it wires up its own signal forwarding via kill(-pid,
-        // ...); the test runner just waits and lets the kernel do it.
-        //
-        // Pass `--test-file` so the child knows to fail if the script
-        // returns without calling testing.done() / sys.exit (preserves
-        // the in-process runner's strict semantics).
+        // (Ctrl-C) reaches it via the foreground-group dispatch.
+        dup2(pt.outFd, STDOUT_FILENO);
+        dup2(pt.outFd, STDERR_FILENO);
+        close(pt.outFd);
         std::vector<char*> argv;
         argv.push_back(const_cast<char*>(g_praiaExecPath.c_str()));
         if (!useVm) argv.push_back(const_cast<char*>("--tree"));
@@ -683,39 +691,24 @@ static int runTestFile(const std::string& path, bool useVm) {
         argv.push_back(const_cast<char*>(path.c_str()));
         argv.push_back(nullptr);
         execv(g_praiaExecPath.c_str(), argv.data());
-        // execv only returns on failure.
-        std::cerr << "praia test: exec failed: " << std::strerror(errno) << std::endl;
+        std::fprintf(stderr, "praia test: exec failed: %s\n", std::strerror(errno));
         _exit(127);
     }
-
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno == EINTR) continue;
-        std::cerr << "praia test: waitpid failed: " << std::strerror(errno) << std::endl;
-        return 1;
-    }
-
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) {
-        int sig = WTERMSIG(status);
-        // strsignal() may return NULL for unknown signal numbers — fall
-        // back to a fixed label so we don't UB by streaming a null
-        // pointer into ostream.
-        const char* desc = strsignal(sig);
-        if (!desc) desc = "unknown signal";
-        std::cerr << "  (crashed by signal " << sig
-                  << " (" << desc << "))" << std::endl;
-        return 128 + sig;
-    }
-    return 1;
+    return pt;
 }
 
-static int runTestsCommand(const std::string& dir, bool useVm) {
+static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
     namespace fs = std::filesystem;
+    if (g_praiaExecPath.empty()) {
+        std::cerr << "praia test: could not locate own executable for "
+                  << "subprocess test runner" << std::endl;
+        return 1;
+    }
     if (!fs::exists(dir)) {
         std::cerr << "praia test: directory not found: " << dir << std::endl;
         return ExitCode::UsageError;
     }
+    if (jobs < 1) jobs = 1;
 
     std::vector<std::string> files;
     // Don't recurse into directory symlinks (loop risk), but file symlinks
@@ -755,43 +748,106 @@ static int runTestsCommand(const std::string& dir, bool useVm) {
 
     int passed = 0, failed = 0;
     int total = static_cast<int>(files.size());
+    int completed = 0;
     std::vector<std::string> failedFiles;
-    for (int fi = 0; fi < total; fi++) {
-        auto& file = files[fi];
+    std::vector<PendingTest> running;
+    size_t nextToSpawn = 0;
 
-        // Progress bar: [####....] 3/10 test_foo.praia
-        {
-            int barWidth = 20;
-            int filled = (fi * barWidth) / total;
-            std::string bar(filled, '#');
-            bar += std::string(barWidth - filled, '.');
-            // Extract just the filename
-            std::string fname = file;
-            auto slash = fname.rfind('/');
-            if (slash != std::string::npos) fname = fname.substr(slash + 1);
-            std::cout << "\r\033[K[" << bar << "] " << fi << "/" << total
-                      << " " << fname << std::flush;
-        }
-
+    auto printHeaderAndOutput = [&](const std::string& file,
+                                    const std::string& output,
+                                    const std::string& crashLine) {
+        // Progress: [####....] N/total filename
+        int barWidth = 20;
+        int filled = (completed * barWidth) / std::max(total, 1);
+        std::string bar(filled, '#');
+        bar += std::string(barWidth - filled, '.');
+        std::string fname = file;
+        auto slash = fname.rfind('/');
+        if (slash != std::string::npos) fname = fname.substr(slash + 1);
+        std::cout << "\r\033[K[" << bar << "] " << completed << "/" << total
+                  << " " << fname << std::flush;
         std::cout << "\r\033[K── " << file << " ───────────────────────" << std::endl;
-        int code = runTestFile(file, useVm);
-        if (code == 0) {
-            passed++;
-        } else {
-            failed++;
-            failedFiles.push_back(file);
-        }
+        std::cout << output;
+        if (!crashLine.empty()) std::cerr << crashLine << std::endl;
         std::cout << std::endl;
+    };
+
+    while (nextToSpawn < files.size() || !running.empty()) {
+        // Spawn until we hit the job cap (or run out of files).
+        while (nextToSpawn < files.size() && (int)running.size() < jobs) {
+            auto pt = spawnTestFile(files[nextToSpawn], useVm);
+            if (pt.pid < 0) {
+                printHeaderAndOutput(files[nextToSpawn], "",
+                    "  (failed to spawn subprocess)");
+                failed++;
+                failedFiles.push_back(files[nextToSpawn]);
+                completed++;
+            } else {
+                running.push_back(std::move(pt));
+            }
+            nextToSpawn++;
+        }
+        if (running.empty()) continue;
+
+        // Wait for any child to finish.
+        int status = 0;
+        pid_t done = waitpid(-1, &status, 0);
+        if (done < 0) {
+            if (errno == EINTR) continue;
+            std::cerr << "praia test: waitpid failed: " << std::strerror(errno) << std::endl;
+            return 1;
+        }
+        auto job = std::find_if(running.begin(), running.end(),
+            [&](const PendingTest& j) { return j.pid == done; });
+        if (job == running.end()) continue; // not one of ours
+
+        // Drain captured output from the child's temp file.
+        std::string output;
+        if (job->outFd >= 0) {
+            lseek(job->outFd, 0, SEEK_SET);
+            char buf[4096];
+            ssize_t n;
+            while ((n = read(job->outFd, buf, sizeof(buf))) > 0)
+                output.append(buf, static_cast<size_t>(n));
+            close(job->outFd);
+        }
+
+        // Map waitpid status to exit code + optional crash diagnostic.
+        int code;
+        std::string crashLine;
+        if (WIFEXITED(status)) {
+            code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            int sig = WTERMSIG(status);
+            const char* desc = strsignal(sig);
+            if (!desc) desc = "unknown signal";
+            crashLine = "  (crashed by signal " + std::to_string(sig)
+                      + " (" + desc + "))";
+            code = 128 + sig;
+        } else {
+            code = 1;
+        }
+
+        printHeaderAndOutput(job->file, output, crashLine);
+
+        if (code == 0) passed++;
+        else { failed++; failedFiles.push_back(job->file); }
+        completed++;
+        running.erase(job);
     }
-    // Final progress bar: complete
+
+    // Final progress bar + summary.
     {
         std::string bar(20, '#');
         std::cout << "\r\033[K[" << bar << "] " << total << "/" << total << " done" << std::endl;
     }
-
     std::cout << "═══ " << passed << "/" << files.size()
               << " test files passed ═══" << std::endl;
     if (!failedFiles.empty()) {
+        // Stable order: failed files were collected in finish-order
+        // (which is spawn-order under -j 1 but arbitrary under -j N).
+        // Sort alphabetically so CI output is deterministic.
+        std::sort(failedFiles.begin(), failedFiles.end());
         std::cout << "Failed:" << std::endl;
         for (auto& f : failedFiles) std::cout << "  " << f << std::endl;
     }
@@ -885,12 +941,13 @@ int main(int argc, char* argv[]) {
                   << "  praia <file>                   Run a script\n"
                   << "  praia <file> [args...]          Run a script with arguments (sys.args)\n"
                   << "  praia -c '<code>' [args...]     Run a one-liner\n"
-                  << "  praia test [dir]                Run test suite (default: tests/)\n"
+                  << "  praia test [-j N] [dir]         Run test suite (default: tests/)\n"
                   << "\n"
                   << "Options:\n"
                   << "  -h, --help       Show this help message\n"
                   << "  -v, --version    Print version\n"
                   << "  -c <code>        Evaluate a string as code\n"
+                  << "  -j N             (test) Run up to N test files in parallel (default 1)\n"
                   << "  --tree           Use tree-walker interpreter instead of VM\n"
                   << "  --tokens         Print lexer tokens and exit\n"
                   << "  --ast            Print parse tree and exit\n"
@@ -911,15 +968,34 @@ int main(int argc, char* argv[]) {
         if (arg == "--tree") useVm = false;
         else if (arg == "--vm") useVm = true;
         else if (arg == "test") {
-            // Scan remaining args for flags and an optional directory
+            // Scan remaining args for flags and an optional directory.
+            // `-j N` opts into parallel subprocess execution; default
+            // is 1 (sequential), keeping the deterministic-order
+            // contract for `praia test` invocations without the flag.
             std::string dir = "tests";
+            int jobs = 1;
             for (int j = i + 1; j < argc; j++) {
                 std::string a = argv[j];
                 if (a == "--tree") useVm = false;
                 else if (a == "--vm") useVm = true;
+                else if (a == "-j") {
+                    if (j + 1 >= argc) {
+                        std::cerr << "praia test: -j requires an integer (e.g. -j 4)\n";
+                        return ExitCode::UsageError;
+                    }
+                    try { jobs = std::stoi(argv[++j]); }
+                    catch (...) {
+                        std::cerr << "praia test: -j needs a positive integer\n";
+                        return ExitCode::UsageError;
+                    }
+                    if (jobs < 1) {
+                        std::cerr << "praia test: -j must be >= 1\n";
+                        return ExitCode::UsageError;
+                    }
+                }
                 else if (a[0] != '-') { dir = a; break; }
             }
-            return runTestsCommand(dir, useVm);
+            return runTestsCommand(dir, useVm, jobs);
         }
         else if (arg[0] != '-') break; // hit a non-flag, non-"test" arg (filename)
     }
