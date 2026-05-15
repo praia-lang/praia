@@ -31,9 +31,10 @@ public:
 ParsedUrl parse(const std::string& input);
 
 // Render the host suitable for an HTTP `Host:` header value: bracketed
-// when the authority used an IPv6 literal, bare otherwise. Does NOT
-// append the port — that's left to the caller, matching the existing
-// http builtin's behavior.
+// when the authority used an IPv6 literal, bare otherwise. Appends
+// `:port` iff the URL had an explicit port (`u.hasPort`) — matches
+// curl's behaviour and is required by RFC 7230 §5.4 for non-default
+// ports (virtual-host routing keys on Host:port).
 std::string hostHeader(const ParsedUrl& u);
 
 }  // namespace praia::url

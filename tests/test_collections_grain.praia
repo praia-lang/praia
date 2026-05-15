@@ -206,6 +206,18 @@ testing.test("Counter: mostCommon without n returns all entries", lam{ in
     testing.assertEqual(all[0].key, "a", nil)
 })
 
+testing.test("Counter: mostCommon return shape has no internal fields", lam{ in
+    // Regression: the tie-break implementation stamps an `_idx` field
+    // on each pair before sorting. That helper must not be visible in
+    // the returned maps — callers see only {key, count}.
+    let c = collections.Counter(["a", "b", "a"])
+    let top = c.mostCommon()
+    testing.assertEqual(keys(top[0]).sort(), ["count", "key"],
+        "returned entries must contain exactly 'key' and 'count'")
+    testing.assertEqual(top[0]._idx, nil,
+        "internal _idx must not be present on the returned pair")
+})
+
 testing.test("Counter: mostCommon ties break by first-insertion order", lam{ in
     // Regression: previously the tie order came from the underlying
     // hash-map's bucket layout, so equal counts could come back in

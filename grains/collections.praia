@@ -448,11 +448,14 @@ class Counter {
             if (y.count != x.count) { return y.count - x.count }
             return x._idx - y._idx
         })
-        if (n == nil) { return sorted }
+        // Project to {key, count} before returning — the _idx field is
+        // an internal tiebreaker for the comparator and must not leak
+        // into the caller's data.
+        let limit = (n == nil) ? len(sorted) : n
         let result = []
         for (i in 0..len(sorted)) {
-            if (i >= n) { break }
-            result.push(sorted[i])
+            if (i >= limit) { break }
+            result.push({key: sorted[i].key, count: sorted[i].count})
         }
         return result
     }

@@ -3184,7 +3184,7 @@ The client follows 3xx responses with a Location header by default, up to `maxRe
 - **301 Moved Permanently / 302 Found**: switches POST (or any non-GET/HEAD method) to GET and drops the body. Strict RFC 7231 says preserve the method, but every browser and HTTP library since 1995 switches; matching that behavior is what callers expect.
 - **307 Temporary Redirect / 308 Permanent Redirect**: preserves both method AND body. These codes exist precisely to disambiguate from the 301/302 method-switch convention.
 
-**Security**: an `https://` → `http://` Location is refused outright. Open-redirect attacks that try to leak cookies or auth headers over plaintext don't get to. (Matches `curl --proto-redir` behavior.) Relative-path Locations like `?foo=bar` are not supported — emit an absolute path or absolute URL. Absolute paths like `/foo` and protocol-relative `//host/foo` are both supported.
+**Security**: an `https://` → `http://` Location is refused outright. Open-redirect attacks that try to leak cookies or auth headers over plaintext don't get to. (Matches `curl --proto-redir` behavior.) All Location forms permitted by RFC 3986 §5.2 are followed: absolute URLs (`https://other/path`), protocol-relative (`//host/foo`), absolute paths (`/foo`), relative paths (`final`, `../login`, `./sibling`), and query-only references (`?q=1`, which inherits the base path).
 
 When `followRedirects` is `false`, the 3xx response is returned as-is with `Location` in `headers.location`.
 

@@ -75,11 +75,33 @@ let _serverFuture = async lam{ in
             resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body.bytes())) +
                    "\r\nConnection: close\r\n\r\n" + body
         }
+        elif (path == "/chunked-split") {
+            // Regression: openStream must NOT eagerly decode chunked
+            // bodies. The client's first recv() lands the headers plus
+            // a partial chunk; the previous parseHttpResponse(headers
+            // + prefix) call decoded that partial chunk and threw
+            // "chunk data truncated" before returning the stream.
+            //
+            // We force the split by sending headers + 3 of 5 chunk
+            // bytes, sleeping past TCP coalescing, then sending the
+            // rest. The streaming decoder must pick up where the
+            // prefix left off and read the remaining bytes.
+            let h = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            net.send(c, h + "5\r\nhel")
+            time.sleep(50)
+            net.send(c, "lo\r\n0\r\n\r\n")
+            net.close(c)
+            // Skip the bottom-of-loop send by leaving `resp` empty —
+            // an empty net.send is harmless and we re-close defensively.
+            resp = ""
+        }
         else {
             resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nroot"
         }
-        net.send(c, resp)
-        net.close(c)
+        if (len(resp) > 0) {
+            net.send(c, resp)
+            net.close(c)
+        }
     }
 }()
 time.sleep(200)
@@ -148,6 +170,17 @@ testing.test("Transfer-Encoding: chunked decodes correctly", lam{ in
 testing.test("Chunked: chunk extensions after ';' are ignored", lam{ in
     let s = http.openStream({url: base + "/chunked-with-ext"})
     testing.assertEqual(s.readAll(), "hello", nil)
+    s.close()
+})
+
+testing.test("Chunked: openStream survives a packet-boundary mid-chunk", lam{ in
+    // Regression: bodyPrefix used to be passed through parseHttpResponse
+    // which eagerly decoded chunked bodies — a partial first chunk
+    // would throw "chunk data truncated" before openStream returned.
+    let s = http.openStream({url: base + "/chunked-split"})
+    testing.assertEqual(s.status, 200, "headers parsed before any body bytes")
+    testing.assertEqual(s.readAll(), "hello",
+        "streaming decoder reassembles across the TCP split")
     s.close()
 })
 

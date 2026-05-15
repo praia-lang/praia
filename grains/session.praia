@@ -49,18 +49,16 @@ func create(options) {
     if (options) {
         if (hasKey(options, "cookieName")) { cookieName = options.cookieName }
         if (hasKey(options, "maxAge")) {
-            // Validate before assigning: a non-number, NaN, infinity, or
-            // negative value would otherwise propagate into maxAgeMs and
-            // produce nonsense expiresAt timestamps (NaN comparisons
-            // are always false, so an entry could become un-evictable).
-            // Silently fall back to the default rather than throwing —
-            // this matches how the other options behave on bad input.
+            // maxAge gates session lifetime — getting it wrong silently
+            // is a security smell (a typo'd "1 hour" string would now
+            // grant 1-day sessions instead of failing loudly at startup).
+            // Reject non-numbers, NaN, infinity, and negative values.
             let m = options.maxAge
-            if (type(m) == "int" || type(m) == "float") {
-                if (!math.isNan(m) && !math.isInf(m) && m >= 0) {
-                    maxAge = m
-                }
+            ensure ((type(m) == "int" || type(m) == "float") &&
+                    !math.isNan(m) && !math.isInf(m) && m >= 0) else {
+                throw "session.create: maxAge must be a finite non-negative number"
             }
+            maxAge = m
         }
         if (hasKey(options, "secure")) { cookieOptions.secure = options.secure }
         if (hasKey(options, "sameSite")) { cookieOptions.sameSite = options.sameSite }
