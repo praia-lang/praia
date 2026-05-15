@@ -823,17 +823,20 @@ int main(int argc, char* argv[]) {
             try { resolved = fs::canonical(arg0); }
             catch (...) {}
         } else {
-            // Bare name (e.g. "praia") — search PATH. Require execute
-            // permission, not just file existence; otherwise a same-
-            // named non-executable (e.g. a config file or a directory)
-            // would short-circuit the search and execv would later
-            // fail with EACCES on the wrong path.
+            // Bare name (e.g. "praia") — search PATH. Skip directory
+            // entries: a same-named directory passes access(X_OK) (the
+            // "traverse" bit for dirs) but execv on it later fails
+            // with EISDIR. Then require execute permission, not just
+            // file existence, so a non-executable file at the matching
+            // path doesn't short-circuit the search either.
             const char* pathEnv = std::getenv("PATH");
             if (pathEnv) {
                 std::istringstream paths(pathEnv);
                 std::string dir;
                 while (std::getline(paths, dir, ':')) {
                     auto candidate = fs::path(dir) / arg0;
+                    std::error_code ec;
+                    if (fs::is_directory(candidate, ec) || ec) continue;
                     if (access(candidate.c_str(), X_OK) != 0) continue;
                     try { resolved = fs::canonical(candidate); } catch (...) {}
                     if (!resolved.empty()) break;
