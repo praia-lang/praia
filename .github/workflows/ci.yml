@@ -108,7 +108,21 @@ jobs:
         run: ./praia test
 
       - name: Test (tree-walker)
-        run: ./praia --tree test
+        # `praia --tree test` runs every test file in a fresh Interpreter
+        # within the same process, and the HTTP / async tests leave
+        # background `while(true) { accept }` server threads (plus their
+        # listening sockets) alive across files — by file ~90 we've
+        # accumulated ~6 lingering server threads plus their fds. On the
+        # default GitHub Actions Ubuntu runner the soft `nofile` limit is
+        # 1024 and `nproc` is similarly modest; that's apparently close
+        # enough to trip a SIGSEGV during a later file's startup (seen on
+        # Linux CI but not on macOS CI, real Linux, or local dev). Bumping
+        # the per-process file/thread limits gives plenty of headroom
+        # until the test-runner-isolation rework lands.
+        run: |
+          ulimit -n 8192
+          ulimit -u 8192
+          ./praia --tree test
 
   # Coverage-guided fuzz regression. For each parser target, build the
   # fuzz binary and run for ~60 s against the committed seeds. Any crash

@@ -68,15 +68,6 @@ struct SocketConn {
 #endif
         if (fd >= 0) { ::close(fd); fd = -1; }
     }
-
-    // RAII cleanup. shutdown_close is idempotent so this composes
-    // safely with the explicit shutdown_close() calls scattered
-    // through the request paths — they release the fd / SSL state
-    // promptly when the protocol layer is done, and this catches
-    // anything that escaped (notably: an http.openStream caller that
-    // drops the stream handle without calling .close(), where the
-    // refcount drops to zero on the shared_ptr<SocketConn>).
-    ~SocketConn() { shutdown_close(); }
 };
 
 #ifdef HAVE_OPENSSL
@@ -1080,6 +1071,17 @@ struct HttpStreamState {
     int status = 0;
     std::shared_ptr<PraiaMap>  headersMap;
     std::shared_ptr<PraiaArray> cookiesArr;
+
+    // RAII fallback: if the caller drops the stream handle without
+    // calling .close(), the handle's closures destruct, the state's
+    // last shared_ptr ref drops, and this destructor runs — releasing
+    // the underlying socket / SSL state through shutdown_close.
+    // shutdown_close is idempotent, so the explicit .close() handler
+    // (line ~1670) and this destructor coexist safely. Scoped to
+    // HttpStreamState rather than SocketConn so the rest of the
+    // request path (which uses stack-local SocketConns and various
+    // throw-and-explicit-close patterns) isn't affected.
+    ~HttpStreamState() { if (conn) conn->shutdown_close(); }
 };
 
 // Pull one chunk of bytes from the socket into `out`. Returns the
