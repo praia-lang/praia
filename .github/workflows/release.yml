@@ -8,19 +8,27 @@ on:
 permissions:
   contents: write
 
+env:
+  # Argon2id (RFC 9106) lands in OpenSSL 3.2 — Ubuntu 24.04 still ships
+  # 3.0, so we build a recent OpenSSL from source on Linux. macOS uses
+  # Homebrew's openssl@3 which is 3.6.x and already has the macros.
+  OPENSSL_VERSION: "3.4.0"
+
 jobs:
   build:
     strategy:
       matrix:
         include:
-          - os: macos-14          # Apple Silicon (M1+)
+          - os: macos-14            # Apple Silicon (M1+)
             target: macos-arm64
-          #- os: macos-13          # Intel Mac
+          #- os: macos-13           # Intel Mac
           #  target: macos-x86_64
-          - os: ubuntu-24.04      # Linux x86_64
+          - os: ubuntu-24.04        # Linux x86_64
             target: linux-x86_64
-          - os: ubuntu-24.04-arm  # Linux arm64
+            openssl_config: linux-x86_64
+          - os: ubuntu-24.04-arm    # Linux arm64
             target: linux-arm64
+            openssl_config: linux-aarch64
 
     runs-on: ${{ matrix.os }}
 
@@ -33,11 +41,53 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: brew install openssl@3 readline sqlite utf8proc re2 dylibbundler
 
-      - name: Install dependencies (Linux)
+      - name: Cache OpenSSL ${{ env.OPENSSL_VERSION }} (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/openssl-install
+          # Key on version + OS + arch so a bump (or a runner image
+          # update that changes the toolchain) cleanly invalidates.
+          key: openssl-${{ env.OPENSSL_VERSION }}-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Build OpenSSL ${{ env.OPENSSL_VERSION }} from source (Linux, cache miss only)
+        if: startsWith(matrix.os, 'ubuntu') && steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cd /tmp
+          URL="https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"
+          curl -fsSL "$URL" -o openssl.tar.gz
+          curl -fsSL "$URL.sha256" -o openssl.tar.gz.sha256
+          EXPECTED=$(awk '{print $1}' openssl.tar.gz.sha256)
+          ACTUAL=$(sha256sum openssl.tar.gz | awk '{print $1}')
+          test "$EXPECTED" = "$ACTUAL"
+          tar xf openssl.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure ${{ matrix.openssl_config }} \
+              --prefix=$HOME/openssl-install \
+              --openssldir=$HOME/openssl-install/ssl \
+              no-tests no-docs shared
+          make -j$(nproc)
+          make install_sw
+
+      - name: Configure environment for custom OpenSSL (Linux)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
+          PREFIX=$HOME/openssl-install
+          echo "CPATH=$PREFIX/include:${CPATH:-}" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          export LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}
+          $PREFIX/bin/openssl version
+
+      - name: Install other dependencies (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        # libssl-dev intentionally omitted — we use the custom-built
+        # OpenSSL above for Argon2id support. The rest come from apt.
+        run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev patchelf
+          sudo apt-get install -y libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev patchelf
 
       - name: Build
         # Bake PRAIA_LIBDIR=/usr/local/lib/praia into the binary so that
