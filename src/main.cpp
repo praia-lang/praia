@@ -11,6 +11,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -671,6 +672,20 @@ static PendingTest spawnTestFile(const std::string& path, bool useVm) {
     }
     unlink(tmpl);
 
+    // Mark close-on-exec so concurrent siblings (parallel `-j N`)
+    // don't inherit this fd through fork+exec. The child that owns
+    // *this* outFd `dup2`s it onto STDOUT/STDERR (which lose CLOEXEC)
+    // and explicitly closes it before exec, so the redirection still
+    // works; only the inherited copies in siblings get auto-closed.
+    int flags = fcntl(pt.outFd, F_GETFD);
+    if (flags < 0 || fcntl(pt.outFd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+        std::cerr << "praia test: fcntl(FD_CLOEXEC) failed: "
+                  << std::strerror(errno) << std::endl;
+        close(pt.outFd);
+        pt.outFd = -1;
+        return pt;
+    }
+
     pt.pid = fork();
     if (pt.pid < 0) {
         std::cerr << "praia test: fork failed: " << std::strerror(errno) << std::endl;
@@ -756,15 +771,19 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
     auto printHeaderAndOutput = [&](const std::string& file,
                                     const std::string& output,
                                     const std::string& crashLine) {
-        // Progress: [####....] N/total filename
+        // Progress: [####....] N/total filename, where N counts this
+        // just-finished file. `completed` is incremented by the
+        // callers after this lambda returns; we use `completed + 1`
+        // here so the bar reaches `total/total` on the last file.
+        int done = completed + 1;
         int barWidth = 20;
-        int filled = (completed * barWidth) / std::max(total, 1);
+        int filled = (done * barWidth) / std::max(total, 1);
         std::string bar(filled, '#');
         bar += std::string(barWidth - filled, '.');
         std::string fname = file;
         auto slash = fname.rfind('/');
         if (slash != std::string::npos) fname = fname.substr(slash + 1);
-        std::cout << "\r\033[K[" << bar << "] " << completed << "/" << total
+        std::cout << "\r\033[K[" << bar << "] " << done << "/" << total
                   << " " << fname << std::flush;
         std::cout << "\r\033[K── " << file << " ───────────────────────" << std::endl;
         std::cout << output;
@@ -983,8 +1002,15 @@ int main(int argc, char* argv[]) {
                         std::cerr << "praia test: -j requires an integer (e.g. -j 4)\n";
                         return ExitCode::UsageError;
                     }
-                    try { jobs = std::stoi(argv[++j]); }
-                    catch (...) {
+                    // Use stoi's pos out-param + size check so trailing
+                    // garbage like "-j 4abc" is rejected (plain stoi
+                    // would silently parse 4 and drop the rest).
+                    std::string jobsArg = argv[++j];
+                    try {
+                        size_t pos = 0;
+                        jobs = std::stoi(jobsArg, &pos);
+                        if (pos != jobsArg.size()) throw std::invalid_argument("trailing");
+                    } catch (...) {
                         std::cerr << "praia test: -j needs a positive integer\n";
                         return ExitCode::UsageError;
                     }
