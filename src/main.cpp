@@ -650,7 +650,11 @@ static void vmRepl(bool showTokens, bool showAst) {
      - WIFEXITED  → WEXITSTATUS (preserves user-chosen sys.exit code).
      - WIFSIGNALED → 128 + signal, with a clear `(crashed by signal
        N (NAME))` stderr line attached to the offending file.
-     - fork/exec/mkstemp failure → 1, file counted as failed.
+     - fork/exec/mkstemp failure → runner-level abort. The failure is
+       not charged to any individual test file (it's an infrastructure
+       fault, not the file's). The runner stops enqueueing new spawns,
+       drains already-running children, and returns ExitCode::RuntimeError
+       once everything has finished.
 */
 struct PendingTest {
     pid_t pid = -1;
@@ -731,6 +735,10 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
     }
     if (!fs::exists(dir)) {
         std::cerr << "praia test: directory not found: " << dir << std::endl;
+        return ExitCode::UsageError;
+    }
+    if (!fs::is_directory(dir)) {
+        std::cerr << "praia test: not a directory: " << dir << std::endl;
         return ExitCode::UsageError;
     }
     if (jobs < 1) jobs = 1;
@@ -1055,6 +1063,15 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 else if (!a.empty() && a[0] != '-') { dir = a; break; }
+                else {
+                    // Anything else starting with '-' is an unknown flag
+                    // (e.g. "-j4" with no space, "--foo", a typo'd
+                    // option). Reject loudly rather than silently
+                    // skipping — silent skip turned typos into
+                    // unexplained "default behavior" runs.
+                    std::cerr << "praia test: unknown option: " << a << std::endl;
+                    return ExitCode::UsageError;
+                }
             }
             return runTestsCommand(dir, useVm, jobs);
         }
