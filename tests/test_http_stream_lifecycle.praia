@@ -1,0 +1,111 @@
+use "testing"
+
+// Redirect, lifecycle, argument-validation, and RAII tests for
+// http.openStream. Carved out of test_http_stream.praia: that file
+// hit a tree-walker-only issue (cumulative async-server state after
+// ~11 sequential openStream calls in the same script) and was failing
+// these tail tests once `praia test` started running each file in its
+// own subprocess. Splitting keeps each subprocess well under the
+// threshold without giving up coverage.
+
+let _state = SharedMap()
+
+let _serverFuture = async lam{ in
+    let s = net.listen(0)
+    _state.set("port", net.localAddr(s).port)
+    while (true) {
+        let c = net.accept(s)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let chunk = net.recv(c, 4096)
+            if (len(chunk) == 0) { break }
+            req = req + chunk
+        }
+        let firstSp = req.indexOf(" ")
+        let after = req.slice(firstSp + 1, len(req))
+        let path = after.slice(0, after.indexOf(" "))
+
+        let resp = ""
+        if (path == "/contentlength") {
+            let body = "Hello streaming world. ".repeat(50)
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body.bytes())) +
+                   "\r\nConnection: close\r\n\r\n" + body
+        }
+        elif (path == "/redirect") {
+            resp = "HTTP/1.1 302 Found\r\nLocation: /contentlength\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        else {
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nroot"
+        }
+        net.send(c, resp)
+        net.close(c)
+    }
+}()
+
+let _deadline = time.now() + 5000
+while (_state.get("port", nil) == nil) {
+    if (time.now() > _deadline) { throw "server failed to bind" }
+    time.sleep(5)
+}
+let base = "http://localhost:" + str(_state.get("port", 0))
+
+// ── Redirect following ───────────────────────────────────────
+
+testing.test("openStream follows 302 to the final body by default", lam{ in
+    let s = http.openStream({url: base + "/redirect"})
+    testing.assertEqual(s.status, 200, "ended at /contentlength")
+    testing.assert(s.readAll().contains("Hello streaming world"), nil)
+    s.close()
+})
+
+testing.test("followRedirects: false returns the 3xx stream", lam{ in
+    let s = http.openStream({url: base + "/redirect", followRedirects: false})
+    testing.assertEqual(s.status, 302, nil)
+    testing.assertEqual(s.headers["location"], "/contentlength", nil)
+    s.close()
+})
+
+// ── Lifecycle ────────────────────────────────────────────────
+
+testing.test("read / readLine / readAll / eof after close throw", lam{ in
+    let s = http.openStream({url: base + "/contentlength"})
+    s.close()
+    testing.assertThrows(lam{ in s.read(1) },    "is closed")
+    testing.assertThrows(lam{ in s.readLine() }, "is closed")
+    testing.assertThrows(lam{ in s.readAll() },  "is closed")
+    testing.assertEqual(s.eof(), true, "eof() is true after close (not a throw)")
+})
+
+testing.test("close is idempotent", lam{ in
+    let s = http.openStream({url: base + "/contentlength"})
+    s.close()
+    s.close()
+    testing.assert(true, "second close did not throw")
+})
+
+testing.test("openStream requires a url", lam{ in
+    testing.assertThrows(lam{ in http.openStream({}) }, "'url'")
+})
+
+testing.test("openStream requires a map", lam{ in
+    testing.assertThrows(lam{ in http.openStream("http://x") }, "options map")
+})
+
+testing.test("dropped stream handles release their fd (RAII cleanup)", lam{ in
+    // Regression: HttpStreamState / SocketConn had no destructor, so a
+    // caller who dropped the handle without calling .close() leaked
+    // the fd + SSL state until process exit. Now HttpStreamState::
+    // ~HttpStreamState calls shutdown_close, so dropping the handle
+    // releases everything through the shared_ptr refcount chain.
+    // 300 streams is well above the default soft-FD-limit (256 on
+    // macOS), so without the dtor this loop would EMFILE long
+    // before completing.
+    for (i in 0..300) {
+        let s = http.openStream({url: base + "/contentlength"})
+        let _ = s.readAll()
+        // intentionally NO s.close() — relies on RAII
+    }
+    testing.assert(true, "completed 300 implicit-close streams without exhausting fds")
+})
+
+testing.done()

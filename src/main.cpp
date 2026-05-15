@@ -8,13 +8,17 @@
 #include "vm/vm.h"
 #include "vm/debug.h"
 #include <algorithm>
+#include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <vector>
+#include <sys/wait.h>
+#include <unistd.h>
 #ifdef HAVE_READLINE
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -620,40 +624,77 @@ static void vmRepl(bool showTokens, bool showAst) {
     }
 }
 
-/* Run a single test file in its own interpreter. Returns 0 if the file
-called sys.exit(0) (convention: testing.done() when all asserts passed),
-anything else counts as a failure. Errors are kept on stderr so the user
-can see them in the run log. */
-static int runTestFile(const std::string& path, bool useVm) {
-    std::string source = readFile(path);
-    bool hadError = false;
-    auto program = compile(source, /*showTokens*/false, /*showAst*/false, hadError);
-    if (program.empty()) return 1; // parse/lex error
+/* Run a single test file in an isolated subprocess. Returns 0 if the
+   child exited cleanly via sys.exit(0) (convention: testing.done()
+   when all asserts passed), anything else counts as a failure.
 
-    if (useVm) {
-        Compiler compiler;
-        auto script = compiler.compile(program);
-        if (!script) return 1;
-        extern void vmRegisterNatives(VM& vm);
-        VM vm;
-        vmRegisterNatives(vm);
-        vm.setCurrentFile(path);
-        try {
-            return vm.run(script) == VM::Result::OK ? 2 : 1;
-        } catch (const ExitSignal& e) {
-            return e.code;
-        }
-    } else {
-        Interpreter interp;
-        interp.setCurrentFile(path);
-        try {
-            interp.interpret(program);
-        } catch (const ExitSignal& e) {
-            return e.code;
-        }
+   The subprocess re-execs ourselves with the same `--tree` flag (if
+   any) and the test file path. This gives every test file a pristine
+   process: each fd it opens, every thread it spawns via `async`, and
+   every retained inflight future dies with the child. That matters
+   because the HTTP/async test files spawn `while (true) { accept }`
+   server loops that the in-process runner used to accumulate across
+   files — causing flake on Linux CI and forcing several timing-
+   sensitive tests to be reshaped or dropped.
+
+   stdout/stderr are inherited (no pipes) so the child's `TEST: ...`
+   and `Results: ...` lines stream to the user in real time, matching
+   the previous output.
+
+   Exit-code mapping:
+     - WIFEXITED  → return WEXITSTATUS (preserves the sys.exit code).
+     - WIFSIGNALED → print "(crashed by signal N (NAME))" to stderr
+       and return 128+signal. Turns mystery SIGSEGVs into loud,
+       attributable failures attached to the file that triggered them.
+     - fork/exec failure → return 1.
+
+   Behavior change vs the previous in-process runner: a test file that
+   finishes without calling testing.done() / sys.exit will exit 0 (the
+   script's normal "ran to end" code) instead of being treated as a
+   failure. Every test file in the suite calls testing.done(), so this
+   only affects malformed test files. */
+static int runTestFile(const std::string& path, bool useVm) {
+    if (g_praiaExecPath.empty()) {
+        std::cerr << "praia test: could not locate own executable for "
+                  << "subprocess test runner" << std::endl;
+        return 1;
     }
-    // No sys.exit means the file didn't call testing.done() — treat as fail
-    return 2;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::cerr << "praia test: fork failed: " << std::strerror(errno) << std::endl;
+        return 1;
+    }
+    if (pid == 0) {
+        // Child: become process-group leader so a Ctrl-C in the parent's
+        // terminal hits us too. Mirrors sys.exec's pattern.
+        setpgid(0, 0);
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>(g_praiaExecPath.c_str()));
+        if (!useVm) argv.push_back(const_cast<char*>("--tree"));
+        argv.push_back(const_cast<char*>(path.c_str()));
+        argv.push_back(nullptr);
+        execv(g_praiaExecPath.c_str(), argv.data());
+        // execv only returns on failure.
+        std::cerr << "praia test: exec failed: " << std::strerror(errno) << std::endl;
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        std::cerr << "praia test: waitpid failed: " << std::strerror(errno) << std::endl;
+        return 1;
+    }
+
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) {
+        int sig = WTERMSIG(status);
+        std::cerr << "  (crashed by signal " << sig
+                  << " (" << strsignal(sig) << "))" << std::endl;
+        return 128 + sig;
+    }
+    return 1;
 }
 
 static int runTestsCommand(const std::string& dir, bool useVm) {
@@ -760,14 +801,18 @@ int main(int argc, char* argv[]) {
 
     installDefaultSignalHandlers();
 
-    // Resolve the directory where the praia binary lives.
-    // Used by grain resolution to find bundled stdlib grains.
+    // Resolve the directory where the praia binary lives AND the full
+    // canonical path to the binary itself. The directory is used by
+    // grain resolution to find bundled stdlib grains; the full path is
+    // used by `praia test` to fork+exec ourselves per test file for
+    // subprocess isolation.
     {
         namespace fs = std::filesystem;
         fs::path arg0(argv[0]);
+        fs::path resolved;
         if (arg0.is_absolute() || arg0.string().find('/') != std::string::npos) {
             // Absolute or relative path — resolve directly
-            try { g_praiaInstallDir = fs::canonical(arg0).parent_path().string(); }
+            try { resolved = fs::canonical(arg0); }
             catch (...) {}
         } else {
             // Bare name (e.g. "praia") — search PATH
@@ -778,11 +823,15 @@ int main(int argc, char* argv[]) {
                 while (std::getline(paths, dir, ':')) {
                     auto candidate = fs::path(dir) / arg0;
                     if (fs::exists(candidate)) {
-                        g_praiaInstallDir = fs::canonical(candidate).parent_path().string();
+                        try { resolved = fs::canonical(candidate); } catch (...) {}
                         break;
                     }
                 }
             }
+        }
+        if (!resolved.empty()) {
+            g_praiaExecPath   = resolved.string();
+            g_praiaInstallDir = resolved.parent_path().string();
         }
     }
 
