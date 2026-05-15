@@ -37,6 +37,16 @@ struct SocketConn {
     SSL_CTX* ctx = nullptr;
 #endif
 
+    SocketConn() = default;
+    // Resource-owning: disable copy/move so a stray copy can't lead
+    // to a double shutdown_close in two destructors. Every code path
+    // uses SocketConn by reference or via shared_ptr; deleting these
+    // catches future regressions at compile time.
+    SocketConn(const SocketConn&) = delete;
+    SocketConn& operator=(const SocketConn&) = delete;
+    SocketConn(SocketConn&&) = delete;
+    SocketConn& operator=(SocketConn&&) = delete;
+
     ssize_t write(const void* buf, size_t len) {
 #ifdef HAVE_OPENSSL
         if (ssl) return SSL_write(ssl, buf, static_cast<int>(len));
@@ -58,6 +68,15 @@ struct SocketConn {
 #endif
         if (fd >= 0) { ::close(fd); fd = -1; }
     }
+
+    // RAII cleanup. shutdown_close is idempotent so this composes
+    // safely with the explicit shutdown_close() calls scattered
+    // through the request paths — they release the fd / SSL state
+    // promptly when the protocol layer is done, and this catches
+    // anything that escaped (notably: an http.openStream caller that
+    // drops the stream handle without calling .close(), where the
+    // refcount drops to zero on the shared_ptr<SocketConn>).
+    ~SocketConn() { shutdown_close(); }
 };
 
 #ifdef HAVE_OPENSSL
