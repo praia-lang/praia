@@ -361,22 +361,40 @@ phcParseKvSegment(const std::string& s) {
     return out;
 }
 
+// Parse a PHC numeric param strictly: ASCII digits only (no sign, no
+// whitespace, no base prefix, no trailing junk), and bounded to
+// [minV, maxV]. The strictness matters for security — a lenient
+// parser like plain `std::stoull` silently accepts "m=64xyz" as 64
+// or "m=4294967360" as a value that wraps when narrowed to uint32_t,
+// which lets an attacker forge a PHC string that verifies under a
+// weaker cost factor than the one stored in the hash.
 static uint64_t phcParseUint(const std::string& name,
                              const std::vector<std::pair<std::string, std::string>>& kvs,
-                             uint64_t deflt, bool required = true) {
+                             uint64_t minV, uint64_t maxV) {
     for (auto& [k, v] : kvs) {
-        if (k == name) {
-            try {
-                return std::stoull(v);
-            } catch (...) {
-                throw RuntimeError("PHC: parameter '" + name + "' is not a number: \"" +
-                                   v + "\"", 0);
-            }
+        if (k != name) continue;
+        if (v.empty())
+            throw RuntimeError("PHC: parameter '" + name + "' is empty", 0);
+        for (char c : v) {
+            if (c < '0' || c > '9')
+                throw RuntimeError("PHC: parameter '" + name +
+                                   "' is not a base-10 integer: \"" + v + "\"", 0);
         }
+        uint64_t n;
+        try {
+            n = std::stoull(v);
+        } catch (...) {
+            // std::out_of_range — value >= 2^64.
+            throw RuntimeError("PHC: parameter '" + name +
+                               "' is too large: \"" + v + "\"", 0);
+        }
+        if (n < minV || n > maxV)
+            throw RuntimeError("PHC: parameter '" + name + "'=" + v +
+                               " out of range [" + std::to_string(minV) +
+                               ", " + std::to_string(maxV) + "]", 0);
+        return n;
     }
-    if (required)
-        throw RuntimeError("PHC: missing required parameter '" + name + "'", 0);
-    return deflt;
+    throw RuntimeError("PHC: missing required parameter '" + name + "'", 0);
 }
 
 // Parse a PHC string into its components. The result keeps params as
@@ -408,8 +426,16 @@ static PhcParts phcParse(const std::string& s) {
         throw RuntimeError("PHC: must start with '$'", 0);
     parts.erase(parts.begin());
 
-    if (parts.size() < 4)
-        throw RuntimeError("PHC: too few segments (expected algo / [v=...] / params / salt / hash)", 0);
+    // Exact segment counts: scrypt has 4 (algo / params / salt / hash),
+    // argon2 has 5 (algo / v=NN / params / salt / hash). A lenient
+    // ">=4" check silently ignores trailing segments, which means an
+    // attacker can append "$junk" to a valid PHC string without
+    // changing verification — defense-in-depth requires that the
+    // whole input be consumed by the schema.
+    if (parts.size() != 4 && parts.size() != 5)
+        throw RuntimeError("PHC: expected 4 segments (scrypt) or 5 segments "
+                           "(argon2 with v=NN), got " +
+                           std::to_string(parts.size()), 0);
 
     PhcParts out;
     out.algo = parts[0];
@@ -1431,11 +1457,12 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (p.algo != "scrypt")
                 throw RuntimeError("crypto.verifyScrypt: PHC algorithm is '" + p.algo +
                                    "', expected 'scrypt'", 0);
-            uint64_t ln = phcParseUint("ln", p.params, 0);
-            uint64_t r  = phcParseUint("r",  p.params, 0);
-            uint64_t pp = phcParseUint("p",  p.params, 0);
-            if (ln < 1 || ln > 30)
-                throw RuntimeError("crypto.verifyScrypt: ln out of range", 0);
+            // Bounds mirror crypto.scrypt's generator: ln ∈ [1, 30],
+            // r and p in the uint32_t range that scryptDerive accepts
+            // (it then passes them to OpenSSL via uint64 params).
+            uint64_t ln = phcParseUint("ln", p.params, 1, 30);
+            uint64_t r  = phcParseUint("r",  p.params, 1, UINT32_MAX);
+            uint64_t pp = phcParseUint("p",  p.params, 1, UINT32_MAX);
             std::string derived = scryptDerive(password, p.salt, 1ULL << ln, r, pp, p.hash.size());
             return Value(ctEqual(derived, p.hash));
         }
@@ -1509,9 +1536,16 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             // We don't pin v=19 strictly — if a future v=20 shows up,
             // OpenSSL will reject it at derive time. For now nothing
             // else exists.
-            uint64_t t = phcParseUint("t", p.params, 0);
-            uint64_t m = phcParseUint("m", p.params, 0);
-            uint64_t pp = phcParseUint("p", p.params, 0);
+            // argon2idDerive narrows to uint32_t for OpenSSL's
+            // OSSL_PARAM_construct_uint32. Cap at UINT32_MAX *before*
+            // the cast — without this bound, "m=4294967360" silently
+            // wraps to m=64, which means an attacker can verify the
+            // password under a much weaker cost factor than the
+            // generator chose. UINT32_MAX as the ceiling is exactly
+            // the size of the OpenSSL field.
+            uint64_t t  = phcParseUint("t", p.params, 1, UINT32_MAX);
+            uint64_t m  = phcParseUint("m", p.params, 1, UINT32_MAX);
+            uint64_t pp = phcParseUint("p", p.params, 1, UINT32_MAX);
             std::string derived = argon2idDerive(password, p.salt,
                                                  static_cast<uint32_t>(t),
                                                  static_cast<uint32_t>(m),
