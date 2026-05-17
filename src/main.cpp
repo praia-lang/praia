@@ -585,8 +585,13 @@ static void vmRepl(bool showTokens, bool showAst) {
         auto program = compile(line, showTokens, showAst, hadError);
         if (program.empty()) continue;
 
-        // Check if the last statement is a bare expression
-        bool lastIsExpr = static_cast<const ExprStmt*>(program.back().get()) != nullptr;
+        // Check if the last statement is a bare expression. The
+        // earlier `static_cast<const ExprStmt*>(...) != nullptr` was
+        // a no-op: static_cast doesn't validate the runtime type on
+        // a base→derived downcast, so the result was always non-null
+        // for any non-null statement and every REPL line ran through
+        // the expression-printing path.
+        bool lastIsExpr = program.back()->type == StmtType::Expr;
 
         Compiler compiler;
         auto script = compiler.compile(program);
@@ -1103,6 +1108,7 @@ int main(int argc, char* argv[]) {
             // is 1 (sequential), keeping the deterministic-order
             // contract for `praia test` invocations without the flag.
             std::string dir = "tests";
+            bool dirSet = false;
             int jobs = 1;
             for (int j = i + 1; j < argc; j++) {
                 std::string a = argv[j];
@@ -1130,13 +1136,29 @@ int main(int argc, char* argv[]) {
                         return ExitCode::UsageError;
                     }
                 }
-                else if (!a.empty() && a[0] != '-') { dir = a; break; }
+                else if (!a.empty() && a[0] != '-') {
+                    // Positional argument: the test directory. Only
+                    // one is allowed; reject extras instead of
+                    // silently using the first and ignoring the rest.
+                    if (dirSet) {
+                        std::cerr << "praia test: unexpected argument: " << a
+                                  << " (test dir already set to '" << dir << "')"
+                                  << std::endl;
+                        return ExitCode::UsageError;
+                    }
+                    dir = a;
+                    dirSet = true;
+                }
                 else {
                     // Anything else starting with '-' is an unknown flag
                     // (e.g. "-j4" with no space, "--foo", a typo'd
                     // option). Reject loudly rather than silently
                     // skipping — silent skip turned typos into
-                    // unexplained "default behavior" runs.
+                    // unexplained "default behavior" runs. Previously
+                    // we broke out of this loop on the first positional
+                    // arg, so `praia test tests --bad-flag` slipped
+                    // past this check; continuing the scan after dir
+                    // is set closes that hole.
                     std::cerr << "praia test: unknown option: " << a << std::endl;
                     return ExitCode::UsageError;
                 }

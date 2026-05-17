@@ -952,6 +952,27 @@ Interpreter::Interpreter() {
             throw RuntimeError("fs.atomicWrite(): rename to " + targetPath +
                                " failed: " + err, 0);
         }
+
+        // fsync the parent directory so the rename's directory-entry
+        // update is durable. Without this, a power-loss after a
+        // successful rename(2) can revert to the pre-rename listing
+        // — the data is on disk (we fsynced fd above) but the
+        // directory's pointer to it isn't. "Atomic for readers"
+        // already held; this extends the guarantee to "durable across
+        // crashes." On platforms where directory fsync is unsupported
+        // we surface the error rather than silently downgrading the
+        // contract.
+        int dirFd = ::open(dir.string().c_str(), O_RDONLY | O_DIRECTORY);
+        if (dirFd < 0)
+            throw RuntimeError("fs.atomicWrite(): open parent dir for fsync failed: " +
+                               std::string(std::strerror(errno)), 0);
+        if (::fsync(dirFd) != 0) {
+            int e = errno;
+            ::close(dirFd);
+            throw RuntimeError("fs.atomicWrite(): fsync parent dir failed: " +
+                               std::string(std::strerror(e)), 0);
+        }
+        ::close(dirFd);
         return Value();
     };
 
