@@ -361,22 +361,52 @@ phcParseKvSegment(const std::string& s) {
     return out;
 }
 
+// Parse a PHC numeric param strictly: ASCII digits only (no sign, no
+// whitespace, no base prefix, no trailing junk), and bounded to
+// [minV, maxV]. The strictness matters for security — a lenient
+// parser like plain `std::stoull` silently accepts "m=64xyz" as 64
+// or "m=4294967360" as a value that wraps when narrowed to uint32_t,
+// which lets an attacker forge a PHC string that verifies under a
+// weaker cost factor than the one stored in the hash.
 static uint64_t phcParseUint(const std::string& name,
                              const std::vector<std::pair<std::string, std::string>>& kvs,
-                             uint64_t deflt, bool required = true) {
+                             uint64_t minV, uint64_t maxV) {
+    // Locate *the* match. Duplicate keys are malformed input — silently
+    // accepting the first occurrence lets an attacker bury a benign
+    // value (e.g. m=8) next to a wrap-target (e.g. m=4294967360); we'd
+    // verify under the first while the displayed PHC string carries
+    // the second. Reject the whole string.
+    const std::string* matched = nullptr;
     for (auto& [k, v] : kvs) {
-        if (k == name) {
-            try {
-                return std::stoull(v);
-            } catch (...) {
-                throw RuntimeError("PHC: parameter '" + name + "' is not a number: \"" +
-                                   v + "\"", 0);
-            }
-        }
+        if (k != name) continue;
+        if (matched != nullptr)
+            throw RuntimeError("PHC: duplicate parameter '" + name + "'", 0);
+        matched = &v;
     }
-    if (required)
+    if (!matched)
         throw RuntimeError("PHC: missing required parameter '" + name + "'", 0);
-    return deflt;
+    const std::string& v = *matched;
+
+    if (v.empty())
+        throw RuntimeError("PHC: parameter '" + name + "' is empty", 0);
+    for (char c : v) {
+        if (c < '0' || c > '9')
+            throw RuntimeError("PHC: parameter '" + name +
+                               "' is not a base-10 integer: \"" + v + "\"", 0);
+    }
+    uint64_t n;
+    try {
+        n = std::stoull(v);
+    } catch (...) {
+        // std::out_of_range — value >= 2^64.
+        throw RuntimeError("PHC: parameter '" + name +
+                           "' is too large: \"" + v + "\"", 0);
+    }
+    if (n < minV || n > maxV)
+        throw RuntimeError("PHC: parameter '" + name + "'=" + v +
+                           " out of range [" + std::to_string(minV) +
+                           ", " + std::to_string(maxV) + "]", 0);
+    return n;
 }
 
 // Parse a PHC string into its components. The result keeps params as
@@ -408,20 +438,36 @@ static PhcParts phcParse(const std::string& s) {
         throw RuntimeError("PHC: must start with '$'", 0);
     parts.erase(parts.begin());
 
-    if (parts.size() < 4)
-        throw RuntimeError("PHC: too few segments (expected algo / [v=...] / params / salt / hash)", 0);
-
     PhcParts out;
     out.algo = parts[0];
 
-    // Argon2 family inserts a $v=19$ between algo and params. Detect
-    // by sniffing for the lone "v=N" segment.
+    // Argon2 family (argon2i/argon2d/argon2id) per RFC 9106 §3.1 has
+    // a mandatory version segment "$v=NN$" between algo and params —
+    // exactly 5 segments. Everything else (scrypt and friends) has
+    // no version segment — exactly 4 segments. An "argon2id" PHC
+    // without v=NN is malformed; previously accepted at parse time
+    // and silently fed to the derive with an implicit version, which
+    // means two semantically different PHC strings could verify the
+    // same password.
+    bool isArgon2 = out.algo.rfind("argon2", 0) == 0;
+    size_t expected = isArgon2 ? 5 : 4;
+    if (parts.size() != expected)
+        throw RuntimeError("PHC: '" + out.algo + "' expects " +
+                           std::to_string(expected) + " segments, got " +
+                           std::to_string(parts.size()), 0);
+
     size_t paramIdx = 1;
-    if (parts.size() == 5) {
-        // Treat parts[1] as version segment.
+    if (isArgon2) {
         auto kv = phcParseKvSegment(parts[1]);
         if (kv.size() != 1 || kv[0].first != "v")
             throw RuntimeError("PHC: expected version segment 'v=NN' between algo and params", 0);
+        // RFC 9106 defines v=0x13 (19) as the current Argon2 version.
+        // Earlier v=0x10 (16) exists but isn't supported by modern
+        // OpenSSL's ARGON2ID derive — reject rather than silently
+        // hand off a value the KDF would either ignore or reinterpret.
+        if (kv[0].second != "19")
+            throw RuntimeError("PHC: unsupported argon2 version 'v=" +
+                               kv[0].second + "' (only v=19 is supported)", 0);
         out.params.emplace_back("v", kv[0].second);
         paramIdx = 2;
     }
@@ -1287,18 +1333,33 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
                 throw RuntimeError("crypto.hashPassword() requires a password string", 0);
             auto& password = args[0].asString();
 
-            // Generate or use provided salt
+            // Salt: omitted, or explicitly nil (the positional-skip
+            // idiom — `hashPassword(pw, nil, 1000)`) → 16 random bytes.
+            // Any other provided type is a caller bug: silently
+            // falling back to random for e.g. a number or a map
+            // produces a hash the caller can never reproduce, and
+            // hides typos in fixture wiring.
             std::string salt;
-            if (args.size() > 1 && args[1].isString()) {
+            if (args.size() > 1 && !args[1].isNil()) {
+                if (!args[1].isString())
+                    throw RuntimeError("crypto.hashPassword(): salt must be a string or nil", 0);
                 salt = args[1].asString();
             } else {
                 salt = generateRandomBytes(16);
             }
 
             int iterations = 100000;
-            if (args.size() > 2 && args[2].isNumber()) {
-                iterations = static_cast<int>(args[2].asNumber());
-                if (iterations < 1) iterations = 1;
+            if (args.size() > 2 && !args[2].isNil()) {
+                // Same rationale as salt: a non-number iterations arg
+                // (or one < 1) is a caller bug, not something to
+                // silently paper over with the default or a clamp.
+                if (!args[2].isNumber())
+                    throw RuntimeError("crypto.hashPassword(): iterations must be a number", 0);
+                int64_t n = static_cast<int64_t>(args[2].asNumber());
+                if (n < 1)
+                    throw RuntimeError("crypto.hashPassword(): iterations must be >= 1 (got " +
+                                       std::to_string(n) + ")", 0);
+                iterations = static_cast<int>(std::min<int64_t>(n, INT32_MAX));
             }
 
             unsigned char derived[32];
@@ -1325,21 +1386,35 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             auto& saltHex = args[2].asString();
 
             int iterations = 100000;
-            if (args.size() > 3 && args[3].isNumber())
-                iterations = static_cast<int>(args[3].asNumber());
+            if (args.size() > 3 && !args[3].isNil()) {
+                if (!args[3].isNumber())
+                    throw RuntimeError("crypto.verifyPassword(): iterations must be a number", 0);
+                int64_t n = static_cast<int64_t>(args[3].asNumber());
+                if (n < 1)
+                    throw RuntimeError("crypto.verifyPassword(): iterations must be >= 1 (got " +
+                                       std::to_string(n) + ")", 0);
+                iterations = static_cast<int>(std::min<int64_t>(n, INT32_MAX));
+            }
 
-            // Decode salt from hex
+            // Decode salt from hex. Odd length is rejected: the old
+            // `i + 1 < size` loop silently dropped the final nibble,
+            // so e.g. "616263f" decoded to the same bytes as "616263"
+            // and matched a hash made with that shorter salt — a
+            // verification bypass for any caller that fed in a
+            // truncated or attacker-controlled salt string.
+            if (saltHex.size() % 2 != 0)
+                throw RuntimeError("crypto.verifyPassword() salt hex must have even length", 0);
             std::string salt;
+            salt.reserve(saltHex.size() / 2);
             for (size_t i = 0; i + 1 < saltHex.size(); i += 2) {
-                int hi = 0, lo = 0;
                 auto hexVal = [](char c) -> int {
                     if (c >= '0' && c <= '9') return c - '0';
                     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
                     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
                     return -1;
                 };
-                hi = hexVal(saltHex[i]);
-                lo = hexVal(saltHex[i+1]);
+                int hi = hexVal(saltHex[i]);
+                int lo = hexVal(saltHex[i+1]);
                 if (hi < 0 || lo < 0) throw RuntimeError("crypto.verifyPassword() invalid salt hex", 0);
                 salt += static_cast<char>((hi << 4) | lo);
             }
@@ -1431,11 +1506,12 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (p.algo != "scrypt")
                 throw RuntimeError("crypto.verifyScrypt: PHC algorithm is '" + p.algo +
                                    "', expected 'scrypt'", 0);
-            uint64_t ln = phcParseUint("ln", p.params, 0);
-            uint64_t r  = phcParseUint("r",  p.params, 0);
-            uint64_t pp = phcParseUint("p",  p.params, 0);
-            if (ln < 1 || ln > 30)
-                throw RuntimeError("crypto.verifyScrypt: ln out of range", 0);
+            // Bounds mirror crypto.scrypt's generator: ln ∈ [1, 30],
+            // r and p in the uint32_t range that scryptDerive accepts
+            // (it then passes them to OpenSSL via uint64 params).
+            uint64_t ln = phcParseUint("ln", p.params, 1, 30);
+            uint64_t r  = phcParseUint("r",  p.params, 1, UINT32_MAX);
+            uint64_t pp = phcParseUint("p",  p.params, 1, UINT32_MAX);
             std::string derived = scryptDerive(password, p.salt, 1ULL << ln, r, pp, p.hash.size());
             return Value(ctEqual(derived, p.hash));
         }
@@ -1506,12 +1582,20 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (p.algo != "argon2id")
                 throw RuntimeError("crypto.verifyArgon2id: PHC algorithm is '" + p.algo +
                                    "', expected 'argon2id'", 0);
-            // We don't pin v=19 strictly — if a future v=20 shows up,
-            // OpenSSL will reject it at derive time. For now nothing
-            // else exists.
-            uint64_t t = phcParseUint("t", p.params, 0);
-            uint64_t m = phcParseUint("m", p.params, 0);
-            uint64_t pp = phcParseUint("p", p.params, 0);
+            // phcParse has already enforced that the v=NN segment is
+            // present and equals "19" (the only Argon2 version this
+            // build supports). No further version handling needed
+            // here — t/m/p are the only remaining knobs.
+            // argon2idDerive narrows to uint32_t for OpenSSL's
+            // OSSL_PARAM_construct_uint32. Cap at UINT32_MAX *before*
+            // the cast — without this bound, "m=4294967360" silently
+            // wraps to m=64, which means an attacker can verify the
+            // password under a much weaker cost factor than the
+            // generator chose. UINT32_MAX as the ceiling is exactly
+            // the size of the OpenSSL field.
+            uint64_t t  = phcParseUint("t", p.params, 1, UINT32_MAX);
+            uint64_t m  = phcParseUint("m", p.params, 1, UINT32_MAX);
+            uint64_t pp = phcParseUint("p", p.params, 1, UINT32_MAX);
             std::string derived = argon2idDerive(password, p.salt,
                                                  static_cast<uint32_t>(t),
                                                  static_cast<uint32_t>(m),

@@ -111,6 +111,46 @@ testing.test("hashPassword custom iterations", lam{ in
     testing.assert(crypto.verifyPassword("test", result.hash, result.salt, 1000), nil)
 })
 
+// ── Input-validation regressions ──────────────────────────────
+
+testing.test("verifyPassword rejects odd-length salt hex", lam{ in
+    // Regression: an odd trailing nibble used to be silently dropped,
+    // so e.g. "616263f" decoded the same as "616263" ("abc") and
+    // verified a hash made with that shorter salt.
+    let result = crypto.hashPassword("pw", "abc", 1000)
+    testing.assertEqual(result.salt, "616263", "sanity: salt encodes as 616263")
+    testing.assertThrows(
+        lam{ in crypto.verifyPassword("pw", result.hash, "616263f", 1000) },
+        "even length")
+})
+
+testing.test("hashPassword rejects non-string salt", lam{ in
+    // Regression: previously silently generated a random salt when
+    // the salt arg wasn't a string, masking caller bugs.
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", 42) },
+        "salt must be a string")
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", {"x": 1}) },
+        "salt must be a string")
+})
+
+testing.test("hashPassword rejects iterations < 1", lam{ in
+    // Regression: previously clamped < 1 to 1 silently.
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", "salt", 0) },
+        "iterations must be >= 1")
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", "salt", -5) },
+        "iterations must be >= 1")
+})
+
+testing.test("hashPassword rejects non-number iterations", lam{ in
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", "salt", "lots") },
+        "iterations must be a number")
+})
+
 // ── AES-256-GCM AEAD (seal / open) ────────────────────────────
 
 testing.test("seal/open roundtrip", lam{ in
