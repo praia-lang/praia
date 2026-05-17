@@ -952,6 +952,27 @@ Interpreter::Interpreter() {
             throw RuntimeError("fs.atomicWrite(): rename to " + targetPath +
                                " failed: " + err, 0);
         }
+
+        // fsync the parent directory so the rename's directory-entry
+        // update is durable. Without this, a power-loss after a
+        // successful rename(2) can revert to the pre-rename listing
+        // — the data is on disk (we fsynced fd above) but the
+        // directory's pointer to it isn't. "Atomic for readers"
+        // already held; this extends the guarantee to "durable across
+        // crashes." On platforms where directory fsync is unsupported
+        // we surface the error rather than silently downgrading the
+        // contract.
+        int dirFd = ::open(dir.string().c_str(), O_RDONLY | O_DIRECTORY);
+        if (dirFd < 0)
+            throw RuntimeError("fs.atomicWrite(): open parent dir for fsync failed: " +
+                               std::string(std::strerror(errno)), 0);
+        if (::fsync(dirFd) != 0) {
+            int e = errno;
+            ::close(dirFd);
+            throw RuntimeError("fs.atomicWrite(): fsync parent dir failed: " +
+                               std::string(std::strerror(e)), 0);
+        }
+        ::close(dirFd);
         return Value();
     };
 
@@ -1506,6 +1527,35 @@ Interpreter::Interpreter() {
                 bool waited = false;
                 int exitCode = -1;
                 std::mutex mtx;
+
+                // RAII cleanup for handles the user drops without
+                // calling .wait(). Without this dtor the three pipe
+                // fds stay open until the process exits (fd leak in
+                // long-running servers that spawn helpers in a loop)
+                // and the child stays as a zombie until reaped. Mirrors
+                // the HttpStreamState::~HttpStreamState fix.
+                //
+                // Refcount-zero on the shared_ptr means no other
+                // thread holds this state, so no locking is needed.
+                ~SpawnState() {
+                    if (stdinOpen) ::close(stdinFd);
+                    ::close(stdoutFd);
+                    ::close(stderrFd);
+                    if (!waited) {
+                        int status = 0;
+                        // Try a non-blocking reap first — the child may
+                        // already have exited cleanly. If still running,
+                        // SIGKILL the whole process group (matches
+                        // proc.kill's pgroup semantics) and block on
+                        // the final reap. Bounded wait: we're killing,
+                        // not asking for a clean shutdown.
+                        pid_t r = ::waitpid(pid, &status, WNOHANG);
+                        if (r == 0) {
+                            ::kill(-pid, SIGKILL);
+                            ::waitpid(pid, &status, 0);
+                        }
+                    }
+                }
             };
             auto state = std::make_shared<SpawnState>();
             state->pid = pid;

@@ -57,4 +57,19 @@ testing.test("spawn pid", lam{ in
     proc.wait()
 })
 
+testing.test("dropped spawn handles release fds + reap child (RAII cleanup)", lam{ in
+    // Regression: SpawnState had no destructor, so a caller who
+    // dropped the handle without calling .wait() leaked 3 pipe fds
+    // and left a zombie child for the rest of the process lifetime.
+    // 300 spawns is well above the default macOS soft FD limit (256)
+    // and any reasonable user/proc ulimit — without the dtor this
+    // would EMFILE or hit the per-user process cap long before
+    // completing.
+    for (i in 0..300) {
+        let proc = sys.spawn(["true"])
+        // intentionally NO proc.wait() — relies on RAII
+    }
+    testing.assert(true, "completed 300 implicit-cleanup spawns without exhausting fds/procs")
+})
+
 testing.done()
