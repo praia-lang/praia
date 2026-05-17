@@ -371,30 +371,42 @@ phcParseKvSegment(const std::string& s) {
 static uint64_t phcParseUint(const std::string& name,
                              const std::vector<std::pair<std::string, std::string>>& kvs,
                              uint64_t minV, uint64_t maxV) {
+    // Locate *the* match. Duplicate keys are malformed input — silently
+    // accepting the first occurrence lets an attacker bury a benign
+    // value (e.g. m=8) next to a wrap-target (e.g. m=4294967360); we'd
+    // verify under the first while the displayed PHC string carries
+    // the second. Reject the whole string.
+    const std::string* matched = nullptr;
     for (auto& [k, v] : kvs) {
         if (k != name) continue;
-        if (v.empty())
-            throw RuntimeError("PHC: parameter '" + name + "' is empty", 0);
-        for (char c : v) {
-            if (c < '0' || c > '9')
-                throw RuntimeError("PHC: parameter '" + name +
-                                   "' is not a base-10 integer: \"" + v + "\"", 0);
-        }
-        uint64_t n;
-        try {
-            n = std::stoull(v);
-        } catch (...) {
-            // std::out_of_range — value >= 2^64.
-            throw RuntimeError("PHC: parameter '" + name +
-                               "' is too large: \"" + v + "\"", 0);
-        }
-        if (n < minV || n > maxV)
-            throw RuntimeError("PHC: parameter '" + name + "'=" + v +
-                               " out of range [" + std::to_string(minV) +
-                               ", " + std::to_string(maxV) + "]", 0);
-        return n;
+        if (matched != nullptr)
+            throw RuntimeError("PHC: duplicate parameter '" + name + "'", 0);
+        matched = &v;
     }
-    throw RuntimeError("PHC: missing required parameter '" + name + "'", 0);
+    if (!matched)
+        throw RuntimeError("PHC: missing required parameter '" + name + "'", 0);
+    const std::string& v = *matched;
+
+    if (v.empty())
+        throw RuntimeError("PHC: parameter '" + name + "' is empty", 0);
+    for (char c : v) {
+        if (c < '0' || c > '9')
+            throw RuntimeError("PHC: parameter '" + name +
+                               "' is not a base-10 integer: \"" + v + "\"", 0);
+    }
+    uint64_t n;
+    try {
+        n = std::stoull(v);
+    } catch (...) {
+        // std::out_of_range — value >= 2^64.
+        throw RuntimeError("PHC: parameter '" + name +
+                           "' is too large: \"" + v + "\"", 0);
+    }
+    if (n < minV || n > maxV)
+        throw RuntimeError("PHC: parameter '" + name + "'=" + v +
+                           " out of range [" + std::to_string(minV) +
+                           ", " + std::to_string(maxV) + "]", 0);
+    return n;
 }
 
 // Parse a PHC string into its components. The result keeps params as
@@ -426,28 +438,36 @@ static PhcParts phcParse(const std::string& s) {
         throw RuntimeError("PHC: must start with '$'", 0);
     parts.erase(parts.begin());
 
-    // Exact segment counts: scrypt has 4 (algo / params / salt / hash),
-    // argon2 has 5 (algo / v=NN / params / salt / hash). A lenient
-    // ">=4" check silently ignores trailing segments, which means an
-    // attacker can append "$junk" to a valid PHC string without
-    // changing verification — defense-in-depth requires that the
-    // whole input be consumed by the schema.
-    if (parts.size() != 4 && parts.size() != 5)
-        throw RuntimeError("PHC: expected 4 segments (scrypt) or 5 segments "
-                           "(argon2 with v=NN), got " +
-                           std::to_string(parts.size()), 0);
-
     PhcParts out;
     out.algo = parts[0];
 
-    // Argon2 family inserts a $v=19$ between algo and params. Detect
-    // by sniffing for the lone "v=N" segment.
+    // Argon2 family (argon2i/argon2d/argon2id) per RFC 9106 §3.1 has
+    // a mandatory version segment "$v=NN$" between algo and params —
+    // exactly 5 segments. Everything else (scrypt and friends) has
+    // no version segment — exactly 4 segments. An "argon2id" PHC
+    // without v=NN is malformed; previously accepted at parse time
+    // and silently fed to the derive with an implicit version, which
+    // means two semantically different PHC strings could verify the
+    // same password.
+    bool isArgon2 = out.algo.rfind("argon2", 0) == 0;
+    size_t expected = isArgon2 ? 5 : 4;
+    if (parts.size() != expected)
+        throw RuntimeError("PHC: '" + out.algo + "' expects " +
+                           std::to_string(expected) + " segments, got " +
+                           std::to_string(parts.size()), 0);
+
     size_t paramIdx = 1;
-    if (parts.size() == 5) {
-        // Treat parts[1] as version segment.
+    if (isArgon2) {
         auto kv = phcParseKvSegment(parts[1]);
         if (kv.size() != 1 || kv[0].first != "v")
             throw RuntimeError("PHC: expected version segment 'v=NN' between algo and params", 0);
+        // RFC 9106 defines v=0x13 (19) as the current Argon2 version.
+        // Earlier v=0x10 (16) exists but isn't supported by modern
+        // OpenSSL's ARGON2ID derive — reject rather than silently
+        // hand off a value the KDF would either ignore or reinterpret.
+        if (kv[0].second != "19")
+            throw RuntimeError("PHC: unsupported argon2 version 'v=" +
+                               kv[0].second + "' (only v=19 is supported)", 0);
         out.params.emplace_back("v", kv[0].second);
         paramIdx = 2;
     }
@@ -1562,9 +1582,10 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (p.algo != "argon2id")
                 throw RuntimeError("crypto.verifyArgon2id: PHC algorithm is '" + p.algo +
                                    "', expected 'argon2id'", 0);
-            // We don't pin v=19 strictly — if a future v=20 shows up,
-            // OpenSSL will reject it at derive time. For now nothing
-            // else exists.
+            // phcParse has already enforced that the v=NN segment is
+            // present and equals "19" (the only Argon2 version this
+            // build supports). No further version handling needed
+            // here — t/m/p are the only remaining knobs.
             // argon2idDerive narrows to uint32_t for OpenSSL's
             // OSSL_PARAM_construct_uint32. Cap at UINT32_MAX *before*
             // the cast — without this bound, "m=4294967360" silently
