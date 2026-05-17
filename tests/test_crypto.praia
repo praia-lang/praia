@@ -151,6 +151,50 @@ testing.test("hashPassword rejects non-number iterations", lam{ in
         "iterations must be a number")
 })
 
+testing.test("hashPassword rejects fractional iterations", lam{ in
+    // Regression: 1.9 silently truncated to 1 (caller asked for >= 2
+    // work, silently got the absolute minimum).
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", "salt", 1.9) },
+        "must be an integer")
+})
+
+testing.test("hashPassword rejects non-finite iterations", lam{ in
+    // Regression: math.INF cast to int64 is UB; on most arches it
+    // happened to hit the < 1 branch, but the behavior was platform-
+    // dependent and the input itself is the bug.
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", "salt", math.INF) },
+        "finite number")
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", "salt", -math.INF) },
+        "finite number")
+})
+
+testing.test("hashPassword rejects iterations > INT32_MAX", lam{ in
+    // Regression: values above INT32_MAX got std::min'd down to
+    // INT32_MAX, so iterations=1e10 silently ran ~2 billion HMAC
+    // rounds — effectively a self-DoS.
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", "salt", 1e10) },
+        "1e10 exceeds INT32_MAX")
+    testing.assertThrows(
+        lam{ in crypto.hashPassword("pw", "salt", 2147483648) },
+        "INT32_MAX + 1 rejected as out of range")
+})
+
+testing.test("verifyPassword applies the same iterations rigor", lam{ in
+    testing.assertThrows(
+        lam{ in crypto.verifyPassword("pw", "00", "00", 1.5) },
+        "fractional rejected")
+    testing.assertThrows(
+        lam{ in crypto.verifyPassword("pw", "00", "00", math.INF) },
+        "infinity rejected")
+    testing.assertThrows(
+        lam{ in crypto.verifyPassword("pw", "00", "00", 1e10) },
+        "out-of-range rejected")
+})
+
 // ── AES-256-GCM AEAD (seal / open) ────────────────────────────
 
 testing.test("seal/open roundtrip", lam{ in

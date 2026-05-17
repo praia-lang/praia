@@ -2,6 +2,7 @@
 #include "../gc_heap.h"
 #include "scope_guards.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -324,10 +325,27 @@ static std::string phcB64Decode(const std::string& in) {
         if (c == '/') return 63;
         return -1;
     };
+    // Canonical base64 lengths mod 4 are {0, 2, 3} — a single trailing
+    // char encodes only 6 bits and can't form a byte. Without this
+    // check, a 1-char segment like "A" decodes to "" silently, which
+    // lets a malformed PHC ("$scrypt$...$saltb64$") with a junk-but-
+    // non-empty hash segment derive zero bytes and ctEqual("", "")
+    // any password.
+    if (in.size() % 4 == 1)
+        throw RuntimeError("PHC: non-canonical base64 length (" +
+                           std::to_string(in.size()) + " chars)", 0);
     std::string out;
     int val = 0, valb = -8;
     for (unsigned char c : in) {
-        if (c == '=') break;
+        // Praia emits unpadded PHC base64 (per the argon2-reference /
+        // passlib convention). The earlier `if (c == '=') break;` was
+        // a verification bypass: an attacker could splice an "=" into
+        // the middle of the hash segment to truncate decoding, so
+        // e.g. a 32-byte stored hash collapsed to its 16-byte prefix.
+        // The verifier then derived 16 bytes (outLen = hash.size())
+        // and matched the prefix — gifting the attacker a 2^128
+        // brute-force advantage over honest verification. Reject any
+        // '=' along with every other non-base64 character.
         int d = dec(c);
         if (d < 0)
             throw RuntimeError("PHC: invalid base64 character in salt or hash", 0);
@@ -407,6 +425,48 @@ static uint64_t phcParseUint(const std::string& name,
                            " out of range [" + std::to_string(minV) +
                            ", " + std::to_string(maxV) + "]", 0);
     return n;
+}
+
+// Strict integer-in-[1, INT32_MAX] validator for the PBKDF2 iterations
+// argument. The lenient `static_cast<int64_t>(asNumber())` pattern that
+// used to live at the call sites had three latent bugs:
+//   - 1.9 silently truncated to 1 (caller asked for >= 2 work, got
+//     the absolute minimum).
+//   - math.INF cast to int64 is undefined behavior — happened to throw
+//     "< 1" on x86/arm because UB returns INT64_MIN, but a different
+//     compiler/arch could just as easily produce a huge positive value
+//     and run a near-infinite PBKDF2.
+//   - Values above INT32_MAX got `std::min`'d down to INT32_MAX, so
+//     `iterations: 1e10` silently ran ~2 billion HMAC rounds instead
+//     of being rejected as nonsense. Effectively a self-DoS.
+// This helper rejects all three with a clear message and a single
+// integral-in-range result.
+static int validatePbkdf2Iterations(const Value& v, const char* fnName) {
+    if (v.isInt()) {
+        int64_t n = v.asInt();
+        if (n < 1 || n > INT32_MAX)
+            throw RuntimeError(std::string(fnName) +
+                               ": iterations must be in [1, " +
+                               std::to_string(INT32_MAX) + "] (got " +
+                               std::to_string(n) + ")", 0);
+        return static_cast<int>(n);
+    }
+    // Double path. Reject NaN/Inf and any fractional value before the
+    // range check — silently truncating 1.9 to 1 hides a caller bug.
+    double d = v.asNumber();
+    if (!std::isfinite(d))
+        throw RuntimeError(std::string(fnName) +
+                           ": iterations must be a finite number", 0);
+    if (d != std::floor(d))
+        throw RuntimeError(std::string(fnName) +
+                           ": iterations must be an integer (got " +
+                           std::to_string(d) + ")", 0);
+    if (d < 1.0 || d > static_cast<double>(INT32_MAX))
+        throw RuntimeError(std::string(fnName) +
+                           ": iterations must be in [1, " +
+                           std::to_string(INT32_MAX) + "] (got " +
+                           std::to_string(d) + ")", 0);
+    return static_cast<int>(d);
 }
 
 // Parse a PHC string into its components. The result keeps params as
@@ -1351,15 +1411,12 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             int iterations = 100000;
             if (args.size() > 2 && !args[2].isNil()) {
                 // Same rationale as salt: a non-number iterations arg
-                // (or one < 1) is a caller bug, not something to
-                // silently paper over with the default or a clamp.
+                // (or one < 1, fractional, NaN/Inf, or > INT32_MAX)
+                // is a caller bug, not something to silently paper
+                // over with truncation or clamping.
                 if (!args[2].isNumber())
                     throw RuntimeError("crypto.hashPassword(): iterations must be a number", 0);
-                int64_t n = static_cast<int64_t>(args[2].asNumber());
-                if (n < 1)
-                    throw RuntimeError("crypto.hashPassword(): iterations must be >= 1 (got " +
-                                       std::to_string(n) + ")", 0);
-                iterations = static_cast<int>(std::min<int64_t>(n, INT32_MAX));
+                iterations = validatePbkdf2Iterations(args[2], "crypto.hashPassword()");
             }
 
             unsigned char derived[32];
@@ -1389,11 +1446,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (args.size() > 3 && !args[3].isNil()) {
                 if (!args[3].isNumber())
                     throw RuntimeError("crypto.verifyPassword(): iterations must be a number", 0);
-                int64_t n = static_cast<int64_t>(args[3].asNumber());
-                if (n < 1)
-                    throw RuntimeError("crypto.verifyPassword(): iterations must be >= 1 (got " +
-                                       std::to_string(n) + ")", 0);
-                iterations = static_cast<int>(std::min<int64_t>(n, INT32_MAX));
+                iterations = validatePbkdf2Iterations(args[3], "crypto.verifyPassword()");
             }
 
             // Decode salt from hex. Odd length is rejected: the old
@@ -1512,6 +1565,19 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             uint64_t ln = phcParseUint("ln", p.params, 1, 30);
             uint64_t r  = phcParseUint("r",  p.params, 1, UINT32_MAX);
             uint64_t pp = phcParseUint("p",  p.params, 1, UINT32_MAX);
+            // Reject empty / too-small / too-large salt and hash
+            // segments. Without these checks an attacker can craft
+            // a PHC with a hash segment that decodes to zero bytes
+            // (e.g. an empty segment, or a stray 1-char segment),
+            // get the derive to produce zero bytes, and have
+            // ctEqual("", "") return true for any password. Bounds
+            // mirror the generator: salt ≥ 8 bytes, hash ∈ [16, 1024].
+            if (p.salt.size() < 8)
+                throw RuntimeError("crypto.verifyScrypt: salt must be at least 8 bytes "
+                                   "(got " + std::to_string(p.salt.size()) + ")", 0);
+            if (p.hash.size() < 16 || p.hash.size() > 1024)
+                throw RuntimeError("crypto.verifyScrypt: hash length must be in [16, 1024] "
+                                   "(got " + std::to_string(p.hash.size()) + ")", 0);
             std::string derived = scryptDerive(password, p.salt, 1ULL << ln, r, pp, p.hash.size());
             return Value(ctEqual(derived, p.hash));
         }
@@ -1596,6 +1662,16 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             uint64_t t  = phcParseUint("t", p.params, 1, UINT32_MAX);
             uint64_t m  = phcParseUint("m", p.params, 1, UINT32_MAX);
             uint64_t pp = phcParseUint("p", p.params, 1, UINT32_MAX);
+            // Reject degenerate salt/hash segments — see verifyScrypt
+            // for the rationale (empty hash → derive(0) → ctEqual("",
+            // "") → any password verifies). Bounds match the
+            // argon2id generator: salt ≥ 8, hash ∈ [4, 1024].
+            if (p.salt.size() < 8)
+                throw RuntimeError("crypto.verifyArgon2id: salt must be at least 8 bytes "
+                                   "(got " + std::to_string(p.salt.size()) + ")", 0);
+            if (p.hash.size() < 4 || p.hash.size() > 1024)
+                throw RuntimeError("crypto.verifyArgon2id: hash length must be in [4, 1024] "
+                                   "(got " + std::to_string(p.hash.size()) + ")", 0);
             std::string derived = argon2idDerive(password, p.salt,
                                                  static_cast<uint32_t>(t),
                                                  static_cast<uint32_t>(m),
