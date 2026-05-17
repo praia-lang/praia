@@ -1313,18 +1313,33 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
                 throw RuntimeError("crypto.hashPassword() requires a password string", 0);
             auto& password = args[0].asString();
 
-            // Generate or use provided salt
+            // Salt: omitted, or explicitly nil (the positional-skip
+            // idiom — `hashPassword(pw, nil, 1000)`) → 16 random bytes.
+            // Any other provided type is a caller bug: silently
+            // falling back to random for e.g. a number or a map
+            // produces a hash the caller can never reproduce, and
+            // hides typos in fixture wiring.
             std::string salt;
-            if (args.size() > 1 && args[1].isString()) {
+            if (args.size() > 1 && !args[1].isNil()) {
+                if (!args[1].isString())
+                    throw RuntimeError("crypto.hashPassword(): salt must be a string or nil", 0);
                 salt = args[1].asString();
             } else {
                 salt = generateRandomBytes(16);
             }
 
             int iterations = 100000;
-            if (args.size() > 2 && args[2].isNumber()) {
-                iterations = static_cast<int>(args[2].asNumber());
-                if (iterations < 1) iterations = 1;
+            if (args.size() > 2 && !args[2].isNil()) {
+                // Same rationale as salt: a non-number iterations arg
+                // (or one < 1) is a caller bug, not something to
+                // silently paper over with the default or a clamp.
+                if (!args[2].isNumber())
+                    throw RuntimeError("crypto.hashPassword(): iterations must be a number", 0);
+                int64_t n = static_cast<int64_t>(args[2].asNumber());
+                if (n < 1)
+                    throw RuntimeError("crypto.hashPassword(): iterations must be >= 1 (got " +
+                                       std::to_string(n) + ")", 0);
+                iterations = static_cast<int>(std::min<int64_t>(n, INT32_MAX));
             }
 
             unsigned char derived[32];
@@ -1351,21 +1366,35 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             auto& saltHex = args[2].asString();
 
             int iterations = 100000;
-            if (args.size() > 3 && args[3].isNumber())
-                iterations = static_cast<int>(args[3].asNumber());
+            if (args.size() > 3 && !args[3].isNil()) {
+                if (!args[3].isNumber())
+                    throw RuntimeError("crypto.verifyPassword(): iterations must be a number", 0);
+                int64_t n = static_cast<int64_t>(args[3].asNumber());
+                if (n < 1)
+                    throw RuntimeError("crypto.verifyPassword(): iterations must be >= 1 (got " +
+                                       std::to_string(n) + ")", 0);
+                iterations = static_cast<int>(std::min<int64_t>(n, INT32_MAX));
+            }
 
-            // Decode salt from hex
+            // Decode salt from hex. Odd length is rejected: the old
+            // `i + 1 < size` loop silently dropped the final nibble,
+            // so e.g. "616263f" decoded to the same bytes as "616263"
+            // and matched a hash made with that shorter salt — a
+            // verification bypass for any caller that fed in a
+            // truncated or attacker-controlled salt string.
+            if (saltHex.size() % 2 != 0)
+                throw RuntimeError("crypto.verifyPassword() salt hex must have even length", 0);
             std::string salt;
+            salt.reserve(saltHex.size() / 2);
             for (size_t i = 0; i + 1 < saltHex.size(); i += 2) {
-                int hi = 0, lo = 0;
                 auto hexVal = [](char c) -> int {
                     if (c >= '0' && c <= '9') return c - '0';
                     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
                     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
                     return -1;
                 };
-                hi = hexVal(saltHex[i]);
-                lo = hexVal(saltHex[i+1]);
+                int hi = hexVal(saltHex[i]);
+                int lo = hexVal(saltHex[i+1]);
                 if (hi < 0 || lo < 0) throw RuntimeError("crypto.verifyPassword() invalid salt hex", 0);
                 salt += static_cast<char>((hi << 4) | lo);
             }
