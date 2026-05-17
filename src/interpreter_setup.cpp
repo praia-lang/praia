@@ -1506,6 +1506,35 @@ Interpreter::Interpreter() {
                 bool waited = false;
                 int exitCode = -1;
                 std::mutex mtx;
+
+                // RAII cleanup for handles the user drops without
+                // calling .wait(). Without this dtor the three pipe
+                // fds stay open until the process exits (fd leak in
+                // long-running servers that spawn helpers in a loop)
+                // and the child stays as a zombie until reaped. Mirrors
+                // the HttpStreamState::~HttpStreamState fix.
+                //
+                // Refcount-zero on the shared_ptr means no other
+                // thread holds this state, so no locking is needed.
+                ~SpawnState() {
+                    if (stdinOpen) ::close(stdinFd);
+                    ::close(stdoutFd);
+                    ::close(stderrFd);
+                    if (!waited) {
+                        int status = 0;
+                        // Try a non-blocking reap first — the child may
+                        // already have exited cleanly. If still running,
+                        // SIGKILL the whole process group (matches
+                        // proc.kill's pgroup semantics) and block on
+                        // the final reap. Bounded wait: we're killing,
+                        // not asking for a clean shutdown.
+                        pid_t r = ::waitpid(pid, &status, WNOHANG);
+                        if (r == 0) {
+                            ::kill(-pid, SIGKILL);
+                            ::waitpid(pid, &status, 0);
+                        }
+                    }
+                }
             };
             auto state = std::make_shared<SpawnState>();
             state->pid = pid;
