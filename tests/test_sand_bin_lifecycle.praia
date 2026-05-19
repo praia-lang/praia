@@ -1,0 +1,188 @@
+use "testing"
+
+// End-to-end: build a fixture grain with a `bin:` entry, run sand
+// install/update/remove against it, and verify the wrapper is planted
+// on PATH (under a temp HOME), runs, then disappears on remove.
+//
+// Sand is invoked via `sys.exec` so its state is fully contained in
+// the child process — no global mutation of the test's GC heap.
+
+// Skip on systems without git (sand needs it to clone fixtures).
+let _gitProbe = sys.exec(["which", "git"])
+if (_gitProbe.exitCode != 0) {
+    print("(skipping: git not available)")
+    testing.done()
+    sys.exit(0)
+}
+
+// Path to our just-built praia binary. Sand state is contained in a
+// single throwaway HOME shared across tests in this file (so the
+// install→update→remove ordering verifies). The dirs are unlinked at
+// the end of the file via a sys.exec("rm -rf").
+let praiaBin = path.join(sys.cwd(), "praia")
+let sandMain = path.join(sys.cwd(), "sand", "main.praia")
+let _mk = lam{ in
+    let r = sys.exec(["mktemp", "-d"])
+    return r.stdout.strip()
+}
+let sandHome = _mk()
+let fixtureRoot = _mk()
+
+// Build a tiny git-tracked grain at fixtureRoot/prscan.
+func makeFixture(name, binEntries) {
+    let grain = path.join(fixtureRoot, name)
+    if (fs.exists(grain)) { fs.remove(grain) }
+    fs.mkdir(grain)
+    fs.mkdir(path.join(grain, "bin"))
+    fs.write(path.join(grain, "main.praia"), "print(\"%{name} main\")\n")
+    let binBlock = ""
+    for (k in keys(binEntries)) {
+        binBlock = binBlock + "  %{k}: %{binEntries[k]}\n"
+        fs.write(path.join(grain, binEntries[k]),
+                  "print(\"%{name} bin %{k}:\", sys.args)\n")
+    }
+    fs.write(path.join(grain, "grain.yaml"),
+        "name: %{name}\nversion: 0.1.0\nmain: main.praia\nbin:\n%{binBlock}")
+    // git init + commit so sand can clone the fixture via file://
+    sys.exec(["git", "init", "-q", grain])
+    sys.exec(["git", "-C", grain, "add", "-A"])
+    sys.exec(["git", "-C", grain,
+              "-c", "user.email=t@t", "-c", "user.name=t",
+              "commit", "-q", "-m", "init"])
+    return grain
+}
+
+// Run sand against the test's temp HOME with the bundled praia.
+// sys.exec inherits the parent's env (no per-call env map), so we
+// prefix with `env HOME=…` to override just that one variable.
+func runSand(args) {
+    let cmd = ["env", "HOME=" + sandHome, praiaBin, sandMain]
+    for (a in args) { cmd.push(a) }
+    return sys.exec(cmd)
+}
+
+testing.test("sand init generates grain.yaml with a discoverable bin: section", lam{ in
+    // Regression: sand init's grain.yaml used to omit any mention of
+    // bin: at all, so users had to read the docs to know the feature
+    // existed. Init now drops a live empty `bin:` line with a
+    // commented hint above it — leaving it empty is the library
+    // default; uncommenting the example wires up a CLI.
+    let projectDir = path.join(fixtureRoot, "init-fixture")
+    fs.mkdir(projectDir)
+    // sand init reads cwd; sys.exec respects cd via a sh trampoline.
+    // Use `sh -c '...' sh <cwd> <argv...>` form so paths with spaces
+    // or shell metacharacters in $praiaBin / $sandMain (e.g. a repo
+    // checkout at "/My Projects/Praia") don't get word-split or
+    // glob-expanded by the trampoline.
+    let r = sys.exec(["sh", "-c", "cd \"$1\" && shift && exec \"$@\"",
+                       "sh", projectDir, praiaBin, sandMain, "init"])
+    testing.assertEqual(r.exitCode, 0, "init exit 0: " + r.stderr)
+
+    let yaml = fs.read(path.join(projectDir, "grain.yaml"))
+    testing.assert(yaml.contains("\nbin:\n"),
+                    "grain.yaml has a live bin: section: " + yaml)
+    testing.assert(yaml.contains("# bin: declares CLI entry points"),
+                    "grain.yaml has the bin: discovery comment")
+    // Test plugin variant too — same hint should appear.
+    let pluginDir = path.join(fixtureRoot, "init-plugin-fixture")
+    fs.mkdir(pluginDir)
+    let r2 = sys.exec(["sh", "-c", "cd \"$1\" && shift && exec \"$@\"",
+                        "sh", pluginDir, praiaBin, sandMain, "init", "--plugin"])
+    testing.assertEqual(r2.exitCode, 0, "init --plugin exit 0: " + r2.stderr)
+    let pyaml = fs.read(path.join(pluginDir, "grain.yaml"))
+    testing.assert(pyaml.contains("\nbin:\n"),
+                    "plugin grain.yaml also has bin: section")
+})
+
+testing.test("install -g plants a wrapper on PATH, removes it cleanly", lam{ in
+    let grain = makeFixture("prscan", {prscan: "bin/prscan.praia"})
+    let r = runSand(["install", "-g", "file://" + grain])
+    testing.assertEqual(r.exitCode, 0, "install exit 0: " + r.stderr)
+
+    let wrapper = path.join(sandHome, ".praia", "bin", "prscan")
+    testing.assert(fs.exists(wrapper), "wrapper exists at ~/.praia/bin/prscan")
+    let body = fs.read(wrapper)
+    testing.assert(body.contains("# sand-managed wrapper for prscan"),
+                    "sentinel comment present")
+    testing.assert(body.contains("/ext_grains/prscan/bin/prscan.praia"),
+                    "absolute path baked in")
+
+    // The wrapper should be executable and point at praia.
+    let runR = sys.exec([wrapper, "alpha", "beta"])
+    testing.assertEqual(runR.exitCode, 0, "wrapper runs: " + runR.stderr)
+    testing.assert(runR.stdout.contains("alpha"), "args passed through")
+
+    let rmR = runSand(["remove", "-g", "prscan"])
+    testing.assertEqual(rmR.exitCode, 0, "remove exit 0: " + rmR.stderr)
+    testing.assert(!fs.exists(wrapper), "wrapper unlinked after remove")
+})
+
+testing.test("install rolls back wrappers when the grain fails to register", lam{ in
+    // A grain with TWO bins where the second references a non-existent
+    // script. bin.install rolls back the first wrapper internally;
+    // installGrain also has its own rollback. End state: no wrappers,
+    // no grain dir, no lockfile entry.
+    let grain = path.join(fixtureRoot, "broken")
+    if (fs.exists(grain)) { fs.remove(grain) }
+    fs.mkdir(grain)
+    fs.mkdir(path.join(grain, "bin"))
+    fs.write(path.join(grain, "main.praia"), "print(\"broken\")\n")
+    fs.write(path.join(grain, "bin", "a.praia"), "print(\"a\")\n")
+    // `bin/b.praia` deliberately NOT written — manifest references a
+    // missing file.
+    fs.write(path.join(grain, "grain.yaml"),
+        "name: broken\nversion: 0.1.0\nmain: main.praia\nbin:\n" +
+        "  a: bin/a.praia\n  b: bin/b.praia\n")
+    sys.exec(["git", "init", "-q", grain])
+    sys.exec(["git", "-C", grain, "add", "-A"])
+    sys.exec(["git", "-C", grain,
+              "-c", "user.email=t@t", "-c", "user.name=t",
+              "commit", "-q", "-m", "init"])
+
+    let r = runSand(["install", "-g", "file://" + grain])
+    testing.assertNotEqual(r.exitCode, 0, "install should fail")
+
+    let binA = path.join(sandHome, ".praia", "bin", "a")
+    let binB = path.join(sandHome, ".praia", "bin", "b")
+    testing.assert(!fs.exists(binA), "first wrapper rolled back")
+    testing.assert(!fs.exists(binB), "second wrapper never written")
+    testing.assert(
+        !fs.exists(path.join(sandHome, ".praia", "ext_grains", "broken")),
+        "grain dir rolled back")
+})
+
+testing.test("update -g rewrites wrappers and cleans up renamed bins", lam{ in
+    // v1: bin: { foo: bin/foo.praia }
+    let grain = makeFixture("renamer", {foo: "bin/foo.praia"})
+    let r1 = runSand(["install", "-g", "file://" + grain])
+    testing.assertEqual(r1.exitCode, 0, "initial install: " + r1.stderr)
+    testing.assert(fs.exists(path.join(sandHome, ".praia", "bin", "foo")),
+                    "foo wrapper present after install")
+
+    // v2: rename the bin from foo to bar (commit so update picks it up)
+    fs.write(path.join(grain, "bin", "bar.praia"),
+              "print(\"renamer bin bar:\", sys.args)\n")
+    fs.write(path.join(grain, "grain.yaml"),
+        "name: renamer\nversion: 0.2.0\nmain: main.praia\nbin:\n" +
+        "  bar: bin/bar.praia\n")
+    sys.exec(["git", "-C", grain, "add", "-A"])
+    sys.exec(["git", "-C", grain,
+              "-c", "user.email=t@t", "-c", "user.name=t",
+              "commit", "-q", "-m", "rename foo to bar"])
+
+    let r2 = runSand(["update", "-g", "renamer"])
+    testing.assertEqual(r2.exitCode, 0, "update: " + r2.stderr)
+    testing.assert(!fs.exists(path.join(sandHome, ".praia", "bin", "foo")),
+                    "old foo wrapper cleaned up on rename")
+    testing.assert(fs.exists(path.join(sandHome, ".praia", "bin", "bar")),
+                    "new bar wrapper present after rename")
+
+    let rmR = runSand(["remove", "-g", "renamer"])
+    testing.assertEqual(rmR.exitCode, 0, "cleanup: " + rmR.stderr)
+})
+
+// Final cleanup — tempDirs live outside any test body so testing's
+// per-test cleanup doesn't reach them.
+sys.exec(["rm", "-rf", sandHome, fixtureRoot])
+
+testing.done()

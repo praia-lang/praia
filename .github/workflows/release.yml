@@ -121,28 +121,37 @@ jobs:
           mkdir -p dist/lib/praia
           cp praia dist/
           cp -R grains dist/lib/praia/grains
-          mkdir -p dist/lib/praia/sand
-          cp sand/main.praia dist/lib/praia/sand/
-          cp sand/grain.yaml dist/lib/praia/sand/
-          cp -R sand/grains dist/lib/praia/sand/grains
-          # Layout-aware `sand` wrapper. Handles both supported install
-          # shapes:
+          # Sand is now a regular global grain under ext_grains/sand/.
+          mkdir -p dist/lib/praia/ext_grains/sand
+          cp sand/main.praia dist/lib/praia/ext_grains/sand/
+          cp sand/grain.yaml dist/lib/praia/ext_grains/sand/
+          cp -R sand/grains dist/lib/praia/ext_grains/sand/grains
+          # Layout-aware `sand` wrapper. Handles both supported shapes:
           #   • Tarball extracted in place: sand and praia are siblings,
-          #     lib/praia/sand/main.praia is at $DIR/lib/praia/sand/.
+          #     lib/praia/ext_grains/sand/main.praia is at
+          #     $DIR/lib/praia/ext_grains/sand/.
           #   • make-install / sudo-cp to /usr/local: binary in bin/,
-          #     lib/praia/sand/main.praia is at $DIR/../lib/praia/sand/.
-          # We probe for both rather than hardcoding one, so the same
-          # tarball works whether the user just extracts it or moves
-          # the files into place under a prefix.
+          #     lib/praia/ext_grains/sand/main.praia is at
+          #     $DIR/../lib/praia/ext_grains/sand/.
+          # The sentinel comment ("# sand-managed wrapper for sand")
+          # is what lets sand recognize this wrapper as its own on a
+          # later self-update (sand/grains/bin.praia checks line 2).
+          # Layout-aware probing uses double-quoted shell expansions
+          # rather than single-quoted absolute paths (it has to —
+          # the path is computed at run time, not bake time). Sand's
+          # bin.wrapperContent uses single-quoted absolutes; a later
+          # `sand install -g sand@<ver>` replaces this layout-aware
+          # form with the absolute single-quoted form.
           cat > dist/sand <<'SAND_EOF'
           #!/bin/sh
+          # sand-managed wrapper for sand
           SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-          for candidate in "$SCRIPT_DIR/lib/praia/sand" "$SCRIPT_DIR/../lib/praia/sand"; do
+          for candidate in "$SCRIPT_DIR/lib/praia/ext_grains/sand" "$SCRIPT_DIR/../lib/praia/ext_grains/sand"; do
               if [ -f "$candidate/main.praia" ]; then
                   exec "$SCRIPT_DIR/praia" "$candidate/main.praia" "$@"
               fi
           done
-          echo "sand: lib/praia/sand/main.praia not found near $SCRIPT_DIR" >&2
+          echo "sand: lib/praia/ext_grains/sand/main.praia not found near $SCRIPT_DIR" >&2
           exit 1
           SAND_EOF
           chmod 755 dist/sand

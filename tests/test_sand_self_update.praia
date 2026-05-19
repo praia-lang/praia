@@ -1,0 +1,175 @@
+use "testing"
+
+// PR 3 — self-update safety. Three behaviors under test:
+//   1. `sand list -g` synthesizes a sand entry when the dir exists but
+//      no lockfile entry is present (the post-`make install` state).
+//   2. `sand install -g file://<mirror>` against a user-scope sand
+//      replaces it via the atomic swap. Wrapper at ~/.praia/bin/sand
+//      regenerates byte-identical to bin.wrapperContent's output.
+//   3. The atomic swap restores from .bak.<pid> when something fails
+//      mid-rename. (Hard to inject a real failure deterministically;
+//      we settle for asserting no .bak.<pid> dir leaks on success.)
+
+// Probe git directly rather than relying on `which`. Some minimal
+// container images ship git but lack `which`; some shells override
+// `which` with a builtin that has different exit-code semantics.
+// `git --version` is the canonical "is git usable" check.
+let _gitProbe = sys.exec(["git", "--version"])
+if (_gitProbe.exitCode != 0) {
+    print("(skipping: git not available)")
+    testing.done()
+    sys.exit(0)
+}
+
+let praiaBin = path.join(sys.cwd(), "praia")
+let sandMain = path.join(sys.cwd(), "sand", "main.praia")
+let sandSrcDir = path.join(sys.cwd(), "sand")
+// Wrapper around `mktemp -d` that fails the test file loudly if mktemp
+// returns non-zero OR produces empty output. Without this, a silent
+// mktemp failure would propagate as an empty path used in subsequent
+// fs.mkdir / cp calls, surfacing as confusing "directory not found"
+// errors much later.
+let _mk = lam{ in
+    let r = sys.exec(["mktemp", "-d"])
+    if (r.exitCode != 0) {
+        print("setup failed: mktemp -d (exit " + str(r.exitCode) + ")")
+        if (r.stderr) { print("stderr: " + r.stderr) }
+        sys.exit(1)
+    }
+    let dir = r.stdout.strip()
+    if (len(dir) == 0) {
+        print("setup failed: mktemp -d returned empty path")
+        sys.exit(1)
+    }
+    return dir
+}
+let sandHome = _mk()
+let mirrorRoot = _mk()
+
+// Abort the test file with a clear message if a setup step fails.
+// Without this, a failed fixture command (cp/git/rm) silently leaves
+// the mirror or install dir incomplete and the behavior assertions
+// then fail with a confusing "wrapper not found" or "exit 1" instead
+// of pointing at the actual failure.
+func _requireExec(label, r) {
+    if (r.exitCode != 0) {
+        print("setup failed: " + label + " (exit " + str(r.exitCode) + ")")
+        if (r.stderr) { print("stderr: " + r.stderr) }
+        if (r.stdout) { print("stdout: " + r.stdout) }
+        sys.exit(1)
+    }
+}
+
+// Build a git-tracked mirror of sand that sand can clone via file://.
+// We use `cp -R` rather than `git clone` so the mirror reflects the
+// CURRENT working tree (with PR 3 edits applied), not whatever sand's
+// upstream remote points at.
+//
+// $1 = sandSrcDir, $2 = mirrorRoot. Passing them as positional params
+// keeps the shell's double-quoted expansion safe against paths with
+// spaces or metachars (e.g. a repo checkout at "/My Projects/Praia").
+_requireExec("mirror setup (cp + git init + commit)", sys.exec(["sh", "-c",
+    "cp -R \"$1\" \"$2/sand\" && " +
+    "cd \"$2/sand\" && " +
+    "rm -rf .git && git init -q && git add -A && " +
+    "git -c user.email=t@t -c user.name=t commit -q -m mirror",
+    "sh", sandSrcDir, mirrorRoot]))
+
+func runSandWithCwd(args, cwd) {
+    // sys.exec doesn't accept a cwd, so we route through `sh -c` with
+    // positional parameters: $1 is the target cwd, the rest is the
+    // argv to exec. `shift` drops cwd then `exec "$@"` runs the
+    // remaining argv literally — no manual quoting needed, so paths
+    // containing single quotes or other shell metachars still work.
+    let cmd = ["sh", "-c", "cd \"$1\" && shift && exec \"$@\"",
+               "sh", cwd,
+               "env", "HOME=" + sandHome, praiaBin, sandMain]
+    for (a in args) { cmd.push(a) }
+    return sys.exec(cmd)
+}
+
+func runSand(args) {
+    return runSandWithCwd(args, sys.cwd())
+}
+
+// Simulate a prior install of sand at the user-scope global location.
+// `make install` would normally do this; we mimic the directory shape
+// because we don't want a sudo step in the test.
+let installedSandDir = path.join(sandHome, ".praia", "ext_grains", "sand")
+fs.mkdir(path.join(sandHome, ".praia"))
+fs.mkdir(path.join(sandHome, ".praia", "ext_grains"))
+_requireExec("seed installed sand dir (cp -R)",
+             sys.exec(["cp", "-R", sandSrcDir, installedSandDir]))
+// Strip .git from the simulated install (matches make install).
+if (fs.exists(path.join(installedSandDir, ".git"))) {
+    fs.remove(path.join(installedSandDir, ".git"))
+}
+
+testing.test("sand list -g synthesizes a sand entry from grain.yaml", lam{ in
+    // No lockfile written yet — synthSandEntry kicks in.
+    testing.assert(
+        !fs.exists(path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")),
+        "precondition: no lockfile present")
+    let r = runSand(["list", "-g"])
+    testing.assertEqual(r.exitCode, 0, "list -g exit 0: " + r.stderr)
+    testing.assert(r.stdout.contains("sand@"),
+                    "lazy bootstrap surfaces sand in list output")
+})
+
+testing.test("sand install -g atomic-swaps over existing sand", lam{ in
+    // Snapshot a marker file inside the running sand so we can verify
+    // the swap actually happened. We write a sentinel that the mirror
+    // doesn't contain — after the swap, the sentinel must be gone.
+    fs.write(path.join(installedSandDir, "PRE_SWAP_MARKER"), "before\n")
+
+    let mirrorSand = path.join(mirrorRoot, "sand")
+    let r = runSand(["install", "-g", "file://" + mirrorSand])
+    testing.assertEqual(r.exitCode, 0, "install exit 0: " + r.stderr + " | " + r.stdout)
+
+    // Atomic swap replaced the dir — sentinel from the OLD sand is gone.
+    testing.assert(!fs.exists(path.join(installedSandDir, "PRE_SWAP_MARKER")),
+                    "old marker gone after atomic swap")
+
+    // No .bak.<pid> or .new.<pid> leftovers on a successful swap.
+    let parent = path.join(sandHome, ".praia", "ext_grains")
+    let entries = fs.readDir(parent)
+    for (e in entries) {
+        testing.assert(!e.contains(".bak."), "no .bak leftover: " + e)
+        testing.assert(!e.contains(".new."), "no .new leftover: " + e)
+    }
+
+    // Wrapper at ~/.praia/bin/sand exists, is sand-managed, points at
+    // the new sand main.
+    let wrapper = path.join(sandHome, ".praia", "bin", "sand")
+    testing.assert(fs.exists(wrapper), "sand wrapper installed to ~/.praia/bin/sand")
+    let body = fs.read(wrapper)
+    testing.assert(body.contains("# sand-managed wrapper for sand"),
+                    "wrapper carries sand-managed sentinel")
+    testing.assert(
+        body.contains(path.join(installedSandDir, "main.praia")),
+        "wrapper points at the swapped sand main.praia")
+
+    // The reinstalled sand should report the same version it cloned
+    // (whatever sand/grain.yaml currently says).
+    let verR = sys.exec([wrapper, "--version"])
+    testing.assertEqual(verR.exitCode, 0, "wrapper runs: " + verR.stderr)
+    testing.assert(verR.stdout.contains("sand v"),
+                    "wrapper prints sand version: " + verR.stdout)
+})
+
+testing.test("post-swap: sand list -g shows the now-real lockfile entry", lam{ in
+    // After the previous install, the lockfile has a real sand entry.
+    // The synth path shouldn't trigger now (real entry takes precedence).
+    let r = runSand(["list", "-g"])
+    testing.assertEqual(r.exitCode, 0, nil)
+    testing.assert(r.stdout.contains("sand@"), "sand listed")
+    // Source should be the file:// mirror URL we used, not the synth's
+    // github.com placeholder.
+    testing.assert(r.stdout.contains("file://"),
+                    "real lockfile entry retained: " + r.stdout)
+})
+
+// Final cleanup — tempDirs live outside any test body.
+sys.exec(["rm", "-rf", sandHome, mirrorRoot])
+
+testing.done()

@@ -172,10 +172,17 @@ clean:
 # Paths:
 #   Binary:  $(PREFIX)/bin/praia
 #   Grains:  $(LIBDIR)/grains/         (LIBDIR defaults to $(PREFIX)/lib/praia)
-#   Sand:    $(LIBDIR)/sand/
+#   Sand:    $(LIBDIR)/ext_grains/sand/   (a regular global grain)
 #
 # LIBDIR is baked into the binary at compile time so grains resolve
 # without relative path guessing. DESTDIR is supported for staging.
+#
+# The `$(BINDIR)/sand` wrapper is written inline below so `make install`
+# doesn't depend on running sand to install sand. Its byte format MUST
+# match `sand/grains/bin.praia::wrapperContent` exactly — a test in
+# tests/test_sand_manifest_bin.praia asserts equivalence so `sand
+# install -g sand@<ver>` produces a wrapper byte-identical to what
+# this rule writes.
 
 PREFIX  ?= /usr/local
 LIBDIR  ?= $(PREFIX)/lib/praia
@@ -199,11 +206,15 @@ install:
 	cp $(SRC_DIR)/signal_state.h $(DESTDIR)$(LIBDIR)/include/
 	install -d $(DESTDIR)$(LIBDIR)/grains
 	cp -R grains/* $(DESTDIR)$(LIBDIR)/grains/
-	install -d $(DESTDIR)$(LIBDIR)/sand
-	cp -R $(SAND_DIR)/main.praia $(DESTDIR)$(LIBDIR)/sand/
-	cp -R $(SAND_DIR)/grains $(DESTDIR)$(LIBDIR)/sand/
-	cp -R $(SAND_DIR)/grain.yaml $(DESTDIR)$(LIBDIR)/sand/
-	@printf '#!/bin/sh\nexec "$(BINDIR)/praia" "$(LIBDIR)/sand/main.praia" "$$@"\n' > $(DESTDIR)$(BINDIR)/sand
+	# One-release migration: prior installs put sand at $(LIBDIR)/sand.
+	# Sand is now a regular global grain under ext_grains/, so drop the
+	# stale tree before laying down the new location. Idempotent.
+	rm -rf $(DESTDIR)$(LIBDIR)/sand
+	install -d $(DESTDIR)$(LIBDIR)/ext_grains/sand
+	cp -R $(SAND_DIR)/main.praia $(DESTDIR)$(LIBDIR)/ext_grains/sand/
+	cp -R $(SAND_DIR)/grains $(DESTDIR)$(LIBDIR)/ext_grains/sand/
+	cp -R $(SAND_DIR)/grain.yaml $(DESTDIR)$(LIBDIR)/ext_grains/sand/
+	@printf "#!/bin/sh\n# sand-managed wrapper for sand\nexec '$(BINDIR)/praia' '$(LIBDIR)/ext_grains/sand/main.praia' \"\$$@\"\n" > $(DESTDIR)$(BINDIR)/sand
 	chmod 755 $(DESTDIR)$(BINDIR)/sand
 	rm -rf /tmp/praia-install-build
 	@echo "Installed praia -> $(DESTDIR)$(BINDIR)/praia"
