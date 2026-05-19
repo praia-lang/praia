@@ -117,6 +117,19 @@ jobs:
           cp sand/main.praia dist/lib/praia/sand/
           cp sand/grain.yaml dist/lib/praia/sand/
           cp -R sand/grains dist/lib/praia/sand/grains
+          # Relocatable `sand` wrapper. `make install` writes one with
+          # hardcoded $BINDIR/$LIBDIR paths because it knows the
+          # install prefix at make time; the release tarball doesn't,
+          # so the wrapper has to resolve its own dirname at runtime.
+          # Layout assumption matches the rest of dist/: sand and
+          # praia are siblings, lib/praia/sand/main.praia is at
+          # ./lib/praia/sand/main.praia relative to that directory.
+          cat > dist/sand <<'SAND_EOF'
+          #!/bin/sh
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          exec "$SCRIPT_DIR/praia" "$SCRIPT_DIR/lib/praia/sand/main.praia" "$@"
+          SAND_EOF
+          chmod 755 dist/sand
           mkdir -p dist/lib/praia/include
           cp src/praia_plugin.h \
              src/value.h \
