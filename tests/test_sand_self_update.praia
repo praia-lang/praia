@@ -31,11 +31,16 @@ let mirrorRoot = _mk()
 // We use `cp -R` rather than `git clone` so the mirror reflects the
 // CURRENT working tree (with PR 3 edits applied), not whatever sand's
 // upstream remote points at.
+//
+// $1 = sandSrcDir, $2 = mirrorRoot. Passing them as positional params
+// keeps the shell's double-quoted expansion safe against paths with
+// spaces or metachars (e.g. a repo checkout at "/My Projects/Praia").
 let _ = sys.exec(["sh", "-c",
-    "cp -R " + sandSrcDir + " " + mirrorRoot + "/sand && " +
-    "cd " + mirrorRoot + "/sand && " +
+    "cp -R \"$1\" \"$2/sand\" && " +
+    "cd \"$2/sand\" && " +
     "rm -rf .git && git init -q && git add -A && " +
-    "git -c user.email=t@t -c user.name=t commit -q -m mirror"])
+    "git -c user.email=t@t -c user.name=t commit -q -m mirror",
+    "sh", sandSrcDir, mirrorRoot])
 
 func runSandWithCwd(args, cwd) {
     // sys.exec doesn't accept a cwd, so we route through `sh -c` with
