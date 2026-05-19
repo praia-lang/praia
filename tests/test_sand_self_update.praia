@@ -27,6 +27,20 @@ let _mk = lam{ in
 let sandHome = _mk()
 let mirrorRoot = _mk()
 
+// Abort the test file with a clear message if a setup step fails.
+// Without this, a failed fixture command (cp/git/rm) silently leaves
+// the mirror or install dir incomplete and the behavior assertions
+// then fail with a confusing "wrapper not found" or "exit 1" instead
+// of pointing at the actual failure.
+func _requireExec(label, r) {
+    if (r.exitCode != 0) {
+        print("setup failed: " + label + " (exit " + str(r.exitCode) + ")")
+        if (r.stderr) { print("stderr: " + r.stderr) }
+        if (r.stdout) { print("stdout: " + r.stdout) }
+        sys.exit(1)
+    }
+}
+
 // Build a git-tracked mirror of sand that sand can clone via file://.
 // We use `cp -R` rather than `git clone` so the mirror reflects the
 // CURRENT working tree (with PR 3 edits applied), not whatever sand's
@@ -35,12 +49,12 @@ let mirrorRoot = _mk()
 // $1 = sandSrcDir, $2 = mirrorRoot. Passing them as positional params
 // keeps the shell's double-quoted expansion safe against paths with
 // spaces or metachars (e.g. a repo checkout at "/My Projects/Praia").
-let _ = sys.exec(["sh", "-c",
+_requireExec("mirror setup (cp + git init + commit)", sys.exec(["sh", "-c",
     "cp -R \"$1\" \"$2/sand\" && " +
     "cd \"$2/sand\" && " +
     "rm -rf .git && git init -q && git add -A && " +
     "git -c user.email=t@t -c user.name=t commit -q -m mirror",
-    "sh", sandSrcDir, mirrorRoot])
+    "sh", sandSrcDir, mirrorRoot]))
 
 func runSandWithCwd(args, cwd) {
     // sys.exec doesn't accept a cwd, so we route through `sh -c` with
@@ -65,7 +79,8 @@ func runSand(args) {
 let installedSandDir = path.join(sandHome, ".praia", "ext_grains", "sand")
 fs.mkdir(path.join(sandHome, ".praia"))
 fs.mkdir(path.join(sandHome, ".praia", "ext_grains"))
-let cpRes = sys.exec(["cp", "-R", sandSrcDir, installedSandDir])
+_requireExec("seed installed sand dir (cp -R)",
+             sys.exec(["cp", "-R", sandSrcDir, installedSandDir]))
 // Strip .git from the simulated install (matches make install).
 if (fs.exists(path.join(installedSandDir, ".git"))) {
     fs.remove(path.join(installedSandDir, ".git"))
