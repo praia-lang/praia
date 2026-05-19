@@ -61,6 +61,35 @@ func runSand(args) {
     return sys.exec(cmd)
 }
 
+testing.test("sand init generates grain.yaml with a discoverable bin: section", lam{ in
+    // Regression: sand init's grain.yaml used to omit any mention of
+    // bin: at all, so users had to read the docs to know the feature
+    // existed. Init now drops a live empty `bin:` line with a
+    // commented hint above it — leaving it empty is the library
+    // default; uncommenting the example wires up a CLI.
+    let projectDir = path.join(fixtureRoot, "init-fixture")
+    fs.mkdir(projectDir)
+    // sand init reads cwd; sys.exec respects cd via a sh trampoline.
+    let r = sys.exec(["sh", "-c",
+        "cd " + projectDir + " && " + praiaBin + " " + sandMain + " init"])
+    testing.assertEqual(r.exitCode, 0, "init exit 0: " + r.stderr)
+
+    let yaml = fs.read(path.join(projectDir, "grain.yaml"))
+    testing.assert(yaml.contains("\nbin:\n"),
+                    "grain.yaml has a live bin: section: " + yaml)
+    testing.assert(yaml.contains("# bin: declares CLI entry points"),
+                    "grain.yaml has the bin: discovery comment")
+    // Test plugin variant too — same hint should appear.
+    let pluginDir = path.join(fixtureRoot, "init-plugin-fixture")
+    fs.mkdir(pluginDir)
+    let r2 = sys.exec(["sh", "-c",
+        "cd " + pluginDir + " && " + praiaBin + " " + sandMain + " init --plugin"])
+    testing.assertEqual(r2.exitCode, 0, "init --plugin exit 0: " + r2.stderr)
+    let pyaml = fs.read(path.join(pluginDir, "grain.yaml"))
+    testing.assert(pyaml.contains("\nbin:\n"),
+                    "plugin grain.yaml also has bin: section")
+})
+
 testing.test("install -g plants a wrapper on PATH, removes it cleanly", lam{ in
     let grain = makeFixture("prscan", {prscan: "bin/prscan.praia"})
     let r = runSand(["install", "-g", "file://" + grain])
