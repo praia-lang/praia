@@ -81,13 +81,42 @@ testing.test("bin.wrapperContent format matches the Makefile bootstrap", lam{ in
     let w = bin.wrapperContent("sand",
                                 "/usr/local/bin/praia",
                                 "/usr/local/lib/praia/ext_grains/sand/main.praia")
-    // Hand-build the same string the Makefile's printf produces (PR 2
-    // updates the Makefile to include the same sentinel comment).
+    // Hand-build the same string the Makefile's printf produces.
+    // Paths are POSIX single-quoted so shell metachars in a grain's
+    // bin: path can't break out of the exec line; "$@" stays
+    // double-quoted (that's the correct POSIX way to forward argv).
     let expected = "#!/bin/sh\n" +
                    "# sand-managed wrapper for sand\n" +
-                   "exec \"/usr/local/bin/praia\" " +
-                   "\"/usr/local/lib/praia/ext_grains/sand/main.praia\" \"$@\"\n"
+                   "exec '/usr/local/bin/praia' " +
+                   "'/usr/local/lib/praia/ext_grains/sand/main.praia' \"$@\"\n"
     testing.assertEqual(w, expected, "wrapper byte-identical to bootstrap form")
+})
+
+testing.test("bin.wrapperContent escapes single quotes in paths", lam{ in
+    // POSIX escape: `'O'\''Brien'` for a path with a single quote.
+    let w = bin.wrapperContent("foo", "/usr/local/bin/praia",
+                                "/Users/O'Brien/foo.praia")
+    testing.assert(w.contains("'/Users/O'\\''Brien/foo.praia'"),
+                    "single quote inside path is POSIX-escaped: " + w)
+})
+
+testing.test("bin.wrapperContent neutralizes shell metachars in paths", lam{ in
+    // Regression: an attacker-controllable bin path containing `"; rm
+    // -rf ~; "` used to break out of double-quoted exec args. Single
+    // quotes don't process any escape sequences inside, so the only
+    // dangerous byte is the quote itself — which shellQuote handles.
+    // The bytes `rm -rf` still appear literally inside the
+    // single-quoted region, but sh treats them as data, not a command.
+    let evil = "/tmp/grain/evil\"; rm -rf ~; \".praia"
+    let w = bin.wrapperContent("evil", "/usr/local/bin/praia", evil)
+    // The evil path is preserved verbatim inside the single-quoted arg.
+    testing.assert(w.contains("'" + evil + "'"),
+                    "evil path wrapped in single quotes verbatim: " + w)
+    // And the wrapper contains exactly two single-quoted args before
+    // "$@" — no extra `;` or unbalanced quote sneaks in.
+    let execLine = "exec '/usr/local/bin/praia' '" + evil + "' \"$@\"\n"
+    testing.assert(w.endsWith(execLine),
+                    "exec line uses single-quoted form, ends correctly: " + w)
 })
 
 testing.test("bin.isReserved blocks praia and sand only", lam{ in
@@ -142,6 +171,35 @@ testing.test("bin.install rolls back partial writes on failure", lam{ in
         "throws on missing script")
     testing.assert(!fs.exists(path.join(binDir, "a")),
                     "first wrapper was rolled back")
+})
+
+testing.test("bin.install restores prior sand-managed wrapper on rollback", lam{ in
+    // Regression: the rollback used to blindly fs.remove() everything
+    // it wrote. If a sand-managed wrapper existed from a prior install
+    // of the same grain, that would leave the user with NO wrapper at
+    // all. The per-target backup now restores the original bytes +
+    // mode when the install fails.
+    let grainDir = testing.tempDir(nil)
+    let binDir = testing.tempDir(nil)
+    fs.mkdir(path.join(grainDir, "bin"))
+    fs.write(path.join(grainDir, "bin", "a.praia"), "print(\"new a\")\n")
+    let m = {name: "demo", version: "0.1.0",
+             bin: {a: "bin/a.praia", b: "bin/missing.praia"}}
+
+    // Pre-install a sand-managed wrapper for `a` so the rollback has
+    // something to restore (rather than just unlink).
+    let prior = "#!/bin/sh\n# sand-managed wrapper for a\nexec '/old/praia' '/old/a' \"$@\"\n"
+    let target = path.join(binDir, "a")
+    fs.write(target, prior)
+    fs.chmod(target, 0o755)
+
+    testing.assertThrows(
+        lam{ in bin.install(grainDir, m, binDir) },
+        "throws on missing second script")
+    testing.assert(fs.exists(target),
+                    "prior wrapper restored (not unlinked)")
+    testing.assertEqual(fs.read(target), prior,
+                         "prior wrapper bytes restored exactly")
 })
 
 testing.test("bin.install refuses to overwrite foreign files", lam{ in

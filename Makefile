@@ -214,7 +214,7 @@ install:
 	cp -R $(SAND_DIR)/main.praia $(DESTDIR)$(LIBDIR)/ext_grains/sand/
 	cp -R $(SAND_DIR)/grains $(DESTDIR)$(LIBDIR)/ext_grains/sand/
 	cp -R $(SAND_DIR)/grain.yaml $(DESTDIR)$(LIBDIR)/ext_grains/sand/
-	@printf '#!/bin/sh\n# sand-managed wrapper for sand\nexec "$(BINDIR)/praia" "$(LIBDIR)/ext_grains/sand/main.praia" "$$@"\n' > $(DESTDIR)$(BINDIR)/sand
+	@printf "#!/bin/sh\n# sand-managed wrapper for sand\nexec '$(BINDIR)/praia' '$(LIBDIR)/ext_grains/sand/main.praia' \"\$$@\"\n" > $(DESTDIR)$(BINDIR)/sand
 	chmod 755 $(DESTDIR)$(BINDIR)/sand
 	rm -rf /tmp/praia-install-build
 	@echo "Installed praia -> $(DESTDIR)$(BINDIR)/praia"

@@ -136,6 +136,12 @@ jobs:
           # The sentinel comment ("# sand-managed wrapper for sand")
           # is what lets sand recognize this wrapper as its own on a
           # later self-update (sand/grains/bin.praia checks line 2).
+          # Layout-aware probing uses double-quoted shell expansions
+          # rather than single-quoted absolute paths (it has to —
+          # the path is computed at run time, not bake time). Sand's
+          # bin.wrapperContent uses single-quoted absolutes; a later
+          # `sand install -g sand@<ver>` replaces this layout-aware
+          # form with the absolute single-quoted form.
           cat > dist/sand <<'SAND_EOF'
           #!/bin/sh
           # sand-managed wrapper for sand
