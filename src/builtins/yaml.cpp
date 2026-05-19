@@ -262,13 +262,16 @@ class YamlParser {
             } else {
                 std::string val = line.substr(colonPos + 2);
                 // Block scalar indicator. `|` = literal (keep newlines),
-                // `>` = folded (single \n → ' ', \n\n → \n). Chomping
-                // suffix (-/+) is parsed but only the default ("clip" —
-                // single trailing \n) is currently honored; +/- get
-                // mapped onto that for now. Without this, `run: |` and
-                // its multi-line body parsed as the literal string "|"
-                // and the body was attributed to the parent — silently
-                // losing whole script blocks in CI workflows.
+                // `>` = folded (single \n → ' ', \n\n → \n). Only the
+                // bare indicator is recognized — chomping indicators
+                // (`|-`, `|+`, `>-`, `>+`) and explicit indentation
+                // indicators (`|2`, `|+3`, etc.) are silently ignored
+                // along with any other suffix, and the result uses
+                // default ("clip") chomping (single trailing newline).
+                // Without this branch, `run: |` and its multi-line body
+                // parsed as the literal string "|" and the body was
+                // attributed to the parent — silently losing whole
+                // script blocks in CI workflows.
                 bool isBlock = !val.empty() && (val[0] == '|' || val[0] == '>');
                 if (isBlock) {
                     char style = val[0];
