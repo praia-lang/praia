@@ -73,4 +73,23 @@ testing.test("map key named 'get' shadows method", lam{ in
     testing.assertEqual(m.get, "value", nil)
 })
 
+testing.test("trailing comma in map literal is accepted", lam{ in
+    let m = {x: 1, y: 2,}
+    testing.assertEqual(m.x, 1, nil)
+    testing.assertEqual(m.y, 2, nil)
+    testing.assertEqual(len(m), 2, "trailing comma does not add a key")
+
+    let single = {only: "yes",}
+    testing.assertEqual(single.only, "yes", nil)
+})
+
+testing.test("trailing comma in array literal is accepted", lam{ in
+    let a = [1, 2, 3,]
+    testing.assertEqual(len(a), 3, "trailing comma does not add an element")
+    testing.assertEqual(a[2], 3, nil)
+
+    let single = [42,]
+    testing.assertEqual(len(single), 1, nil)
+})
+
 testing.done()
