@@ -1,5 +1,19 @@
 CXX = g++
-CXXFLAGS = -std=c++20 -Wall -Wextra -Wno-deprecated-declarations -g -MMD -MP -D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE
+
+# Optimization/debug profile. Default `-g` keeps local builds fast
+# (no optimizer cost on incremental rebuilds) with full debug info.
+# Release builds override this to `-O2 -g -DNDEBUG`:
+#   - `-O2` is the standard sweet spot (≈3-5x faster than -O0 on
+#     interpreter loops); `-O3`'s aggressive vectorization buys little
+#     here and inflates binary size.
+#   - `-g` is kept so users with crash reports can produce
+#     symbolicated stack traces (debug info lives in a separate
+#     section and has no runtime cost).
+#   - `-DNDEBUG` is a future-proofing convention; the tree currently
+#     has no `assert()` calls.
+OPT ?= -g
+
+CXXFLAGS = -std=c++20 -Wall -Wextra -Wno-deprecated-declarations $(OPT) -MMD -MP -D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE
 SRC_DIR = src
 BUILD_DIR = build
 

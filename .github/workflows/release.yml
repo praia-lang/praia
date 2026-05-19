@@ -93,9 +93,12 @@ jobs:
         # Bake PRAIA_LIBDIR=/usr/local/lib/praia into the binary so that
         # `praia --include-path` resolves to the headers we ship below,
         # which lets users build native plugins without a Praia source checkout.
+        # OPT=-O2 -g -DNDEBUG turns on optimization while keeping debug
+        # info for symbolicated crash reports — local dev builds keep
+        # their faster-incremental -g default.
         run: |
           make clean
-          make EXTRA_CXXFLAGS='-DPRAIA_LIBDIR="\"/usr/local/lib/praia\""'
+          make OPT='-O2 -g -DNDEBUG' EXTRA_CXXFLAGS='-DPRAIA_LIBDIR="\"/usr/local/lib/praia\""'
 
       - name: Run tests
         run: make test
