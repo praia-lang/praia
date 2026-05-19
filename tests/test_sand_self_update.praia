@@ -10,7 +10,11 @@ use "testing"
 //      mid-rename. (Hard to inject a real failure deterministically;
 //      we settle for asserting no .bak.<pid> dir leaks on success.)
 
-let _gitProbe = sys.exec(["which", "git"])
+// Probe git directly rather than relying on `which`. Some minimal
+// container images ship git but lack `which`; some shells override
+// `which` with a builtin that has different exit-code semantics.
+// `git --version` is the canonical "is git usable" check.
+let _gitProbe = sys.exec(["git", "--version"])
 if (_gitProbe.exitCode != 0) {
     print("(skipping: git not available)")
     testing.done()
@@ -20,9 +24,24 @@ if (_gitProbe.exitCode != 0) {
 let praiaBin = path.join(sys.cwd(), "praia")
 let sandMain = path.join(sys.cwd(), "sand", "main.praia")
 let sandSrcDir = path.join(sys.cwd(), "sand")
+// Wrapper around `mktemp -d` that fails the test file loudly if mktemp
+// returns non-zero OR produces empty output. Without this, a silent
+// mktemp failure would propagate as an empty path used in subsequent
+// fs.mkdir / cp calls, surfacing as confusing "directory not found"
+// errors much later.
 let _mk = lam{ in
     let r = sys.exec(["mktemp", "-d"])
-    return r.stdout.strip()
+    if (r.exitCode != 0) {
+        print("setup failed: mktemp -d (exit " + str(r.exitCode) + ")")
+        if (r.stderr) { print("stderr: " + r.stderr) }
+        sys.exit(1)
+    }
+    let dir = r.stdout.strip()
+    if (len(dir) == 0) {
+        print("setup failed: mktemp -d returned empty path")
+        sys.exit(1)
+    }
+    return dir
 }
 let sandHome = _mk()
 let mirrorRoot = _mk()
