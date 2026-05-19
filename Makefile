@@ -127,6 +127,30 @@ endif
 #   make EXTRA_CXXFLAGS='-DPRAIA_LIBDIR="\"/usr/local/lib/praia\""'
 CXXFLAGS += $(EXTRA_CXXFLAGS)
 
+# ── Version stamping ──
+# Single source of truth: a git tag. `git describe --tags --always --dirty`
+# gives clean tag names on release builds (e.g. `v0.7.0`), commit-suffixed
+# dev names between tags (`v0.7.0-3-gabc1234`), and a `-dirty` marker if the
+# working tree has uncommitted changes. Source tarballs without a `.git/`
+# directory fall back to the contents of VERSION at the repo root.
+#
+# `src/version.h` is generated, gitignored, and depends on a phony target
+# so the rule re-evaluates every build. The `cmp -s` check keeps the
+# header's mtime stable when the version hasn't actually changed, so
+# main.cpp only recompiles on real version moves.
+.PHONY: force-version
+$(SRC_DIR)/version.h: force-version
+	@VERSION=$$(git describe --tags --always --dirty 2>/dev/null) ; \
+	[ -z "$$VERSION" ] && VERSION=$$(cat VERSION 2>/dev/null) ; \
+	[ -z "$$VERSION" ] && VERSION="unknown" ; \
+	printf '#pragma once\n#define PRAIA_VERSION "%s"\n' "$$VERSION" > $@.tmp ; \
+	if ! cmp -s $@.tmp $@ 2>/dev/null ; then mv $@.tmp $@ ; else rm $@.tmp ; fi
+
+# main.cpp embeds the version banner — make the dependency explicit so the
+# first build creates version.h before compiling main.o. Subsequent rebuilds
+# are picked up via the -MMD-generated .d files.
+$(BUILD_DIR)/main.o: $(SRC_DIR)/version.h
+
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -139,7 +163,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/vm $(BUILD_DIR)/builtins
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET)
+	rm -rf $(BUILD_DIR) $(TARGET) $(SRC_DIR)/version.h
 
 # ── Install / Uninstall ──
 # Usage: make install PREFIX=/usr/local
