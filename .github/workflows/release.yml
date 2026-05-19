@@ -125,17 +125,25 @@ jobs:
           cp sand/main.praia dist/lib/praia/sand/
           cp sand/grain.yaml dist/lib/praia/sand/
           cp -R sand/grains dist/lib/praia/sand/grains
-          # Relocatable `sand` wrapper. `make install` writes one with
-          # hardcoded $BINDIR/$LIBDIR paths because it knows the
-          # install prefix at make time; the release tarball doesn't,
-          # so the wrapper has to resolve its own dirname at runtime.
-          # Layout assumption matches the rest of dist/: sand and
-          # praia are siblings, lib/praia/sand/main.praia is at
-          # ./lib/praia/sand/main.praia relative to that directory.
+          # Layout-aware `sand` wrapper. Handles both supported install
+          # shapes:
+          #   • Tarball extracted in place: sand and praia are siblings,
+          #     lib/praia/sand/main.praia is at $DIR/lib/praia/sand/.
+          #   • make-install / sudo-cp to /usr/local: binary in bin/,
+          #     lib/praia/sand/main.praia is at $DIR/../lib/praia/sand/.
+          # We probe for both rather than hardcoding one, so the same
+          # tarball works whether the user just extracts it or moves
+          # the files into place under a prefix.
           cat > dist/sand <<'SAND_EOF'
           #!/bin/sh
           SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-          exec "$SCRIPT_DIR/praia" "$SCRIPT_DIR/lib/praia/sand/main.praia" "$@"
+          for candidate in "$SCRIPT_DIR/lib/praia/sand" "$SCRIPT_DIR/../lib/praia/sand"; do
+              if [ -f "$candidate/main.praia" ]; then
+                  exec "$SCRIPT_DIR/praia" "$candidate/main.praia" "$@"
+              fi
+          done
+          echo "sand: lib/praia/sand/main.praia not found near $SCRIPT_DIR" >&2
+          exit 1
           SAND_EOF
           chmod 755 dist/sand
           mkdir -p dist/lib/praia/include
@@ -216,11 +224,92 @@ jobs:
         run: |
           cd dist && tar czf ../praia-${{ matrix.target }}.tar.gz *
 
+      - name: Install-smoke test
+        # Extract the tarball, install to /usr/local (the path baked into
+        # PRAIA_LIBDIR), and exercise every shipped surface: the binary,
+        # stdlib grain resolution, the sand wrapper, and the plugin
+        # headers + dlopen path. Catches breakage in the staging step
+        # (missing files, wrong layout, broken wrapper) *before* the
+        # artifact reaches a user. We install rather than running
+        # in-place because the release binary's grain resolver only
+        # checks the baked LIBDIR — the same path users follow when
+        # they extract a tarball with `sudo tar -C /usr/local -xzf …`.
+        run: |
+          set -euo pipefail
+          SMOKE=$(mktemp -d -t praia-smoke.XXXXXX)
+          tar xzf praia-${{ matrix.target }}.tar.gz -C "$SMOKE"
+
+          echo "── installing to /usr/local ──"
+          sudo install -d /usr/local/bin /usr/local/lib/praia
+          sudo install -m 0755 "$SMOKE/praia" /usr/local/bin/praia
+          sudo install -m 0755 "$SMOKE/sand"  /usr/local/bin/sand
+          sudo cp -R "$SMOKE/lib/praia/." /usr/local/lib/praia/
+          cd "$SMOKE"
+
+          echo "── 1/4: praia binary ──"
+          /usr/local/bin/praia -v | grep -i "praia"
+
+          echo "── 2/4: stdlib grain resolution ──"
+          cat > smoke.praia <<'PRAIA_EOF'
+          use "testing"
+          testing.test("smoke", lam{ in
+              testing.assertEqual(1 + 1, 2, nil)
+          })
+          testing.done()
+          PRAIA_EOF
+          /usr/local/bin/praia smoke.praia | grep "1 passed"
+
+          echo "── 3/4: sand wrapper ──"
+          /usr/local/bin/sand --version | grep -i "sand"
+
+          echo "── 4/4: plugin headers + dlopen ──"
+          INC=$(/usr/local/bin/praia --include-path)
+          test -f "$INC/praia_plugin.h" || { echo "missing praia_plugin.h at $INC"; exit 1; }
+          # Inline a minimal plugin that exercises Value + PraiaMap.
+          cat > smoke_plugin.cpp <<'CPP_EOF'
+          #include "praia_plugin.h"
+          extern "C" void praia_register(PraiaMap* module) {
+              module->entries[Value(std::string("ok"))] = Value(std::string("yes"));
+          }
+          CPP_EOF
+          case "$(uname -s)" in
+            Darwin) EXT=dylib; LDF='-undefined dynamic_lookup' ;;
+            *)      EXT=so;    LDF='' ;;
+          esac
+          # Mirror the in-tree `make plugin` invocation so the smoke
+          # test compiles plugins the same way we tell users to.
+          c++ -std=c++20 -Wno-deprecated-declarations \
+              -D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE \
+              -shared -fPIC -I"$INC" $LDF \
+              -o "smoke_plugin.$EXT" smoke_plugin.cpp
+          cat > plugin_smoke.praia <<'PRAIA_EOF'
+          let p = loadNative("./smoke_plugin")
+          if (p.ok != "yes") { print("plugin load failed:", p); sys.exit(1) }
+          print("plugin ok")
+          PRAIA_EOF
+          /usr/local/bin/praia plugin_smoke.praia | grep "plugin ok"
+
+          echo "── install-smoke test passed ──"
+
+      - name: SHA-256 sidecar
+        # One-line file per tarball in the standard `sha256sum -c` format.
+        # Aggregated into SHA256SUMS by the release job below.
+        run: |
+          if command -v sha256sum >/dev/null; then
+            sha256sum praia-${{ matrix.target }}.tar.gz > praia-${{ matrix.target }}.tar.gz.sha256
+          else
+            # macOS shipped shasum predates sha256sum.
+            shasum -a 256 praia-${{ matrix.target }}.tar.gz > praia-${{ matrix.target }}.tar.gz.sha256
+          fi
+          cat praia-${{ matrix.target }}.tar.gz.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: praia-${{ matrix.target }}
-          path: praia-${{ matrix.target }}.tar.gz
+          path: |
+            praia-${{ matrix.target }}.tar.gz
+            praia-${{ matrix.target }}.tar.gz.sha256
 
   release:
     needs: build
@@ -232,8 +321,23 @@ jobs:
         with:
           path: artifacts
 
+      - name: Aggregate SHA256SUMS
+        # Combine each per-platform sidecar into one SHA256SUMS file that
+        # downloaders can verify with `sha256sum -c SHA256SUMS`. Strips
+        # the artifact subdirectory prefix that download-artifact adds
+        # so the paths match the files attached to the release.
+        run: |
+          set -euo pipefail
+          cd artifacts
+          cat */*.tar.gz.sha256 | sed 's| .*/| |' > ../SHA256SUMS
+          cd ..
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.tar.gz
+          files: |
+            artifacts/**/*.tar.gz
+            SHA256SUMS
           generate_release_notes: true
