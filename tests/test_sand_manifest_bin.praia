@@ -1,0 +1,163 @@
+use "testing"
+use "../sand/grains/manifest"
+use "../sand/grains/bin"
+
+// ── bin: field round-trip ─────────────────────────────────────
+
+testing.test("manifest round-trips bin: entries", lam{ in
+    let dir = testing.tempDir(nil)
+    let m = manifest.create("prscan")
+    m.bin = {prscan: "bin/prscan.praia", helper: "bin/helper.praia"}
+    manifest.write(dir, m)
+    let r = manifest.read(dir)
+    testing.assertEqual(r.bin.prscan, "bin/prscan.praia", nil)
+    testing.assertEqual(r.bin.helper, "bin/helper.praia", nil)
+})
+
+testing.test("manifest write skips empty bin: map", lam{ in
+    let dir = testing.tempDir(nil)
+    let m = manifest.create("nobin")
+    // no m.bin field — write shouldn't emit a bin: section
+    manifest.write(dir, m)
+    let written = fs.read(path.join(dir, "grain.yaml"))
+    testing.assert(!written.contains("bin:"), "no bin: section without entries")
+})
+
+// ── validators ────────────────────────────────────────────────
+
+testing.test("bin name validator: alphanumeric, _, -", lam{ in
+    testing.assertEqual(manifest.isValidBinName("prscan"), true, nil)
+    testing.assertEqual(manifest.isValidBinName("prscan-cli"), true, nil)
+    testing.assertEqual(manifest.isValidBinName("pr_scan"), true, nil)
+})
+
+testing.test("bin name validator rejects unsafe forms", lam{ in
+    testing.assertEqual(manifest.isValidBinName(""), false, nil)
+    testing.assertEqual(manifest.isValidBinName("../escape"), false, nil)
+    testing.assertEqual(manifest.isValidBinName("foo/bar"), false, nil)
+    testing.assertEqual(manifest.isValidBinName(".hidden"), false, "leading dot")
+    testing.assertEqual(manifest.isValidBinName("-flag"), false, "leading dash")
+})
+
+testing.test("bin path validator: relative .praia files only", lam{ in
+    testing.assertEqual(manifest.isValidBinPath("bin/foo.praia"), true, nil)
+    testing.assertEqual(manifest.isValidBinPath("main.praia"), true, nil)
+})
+
+testing.test("bin path validator rejects unsafe forms", lam{ in
+    testing.assertEqual(manifest.isValidBinPath("/abs/path.praia"), false, nil)
+    testing.assertEqual(manifest.isValidBinPath("a/../b.praia"), false, nil)
+    testing.assertEqual(manifest.isValidBinPath("x.txt"), false, "wrong extension")
+    testing.assertEqual(manifest.isValidBinPath(""), false, nil)
+})
+
+testing.test("manifest.read throws on invalid bin name", lam{ in
+    let dir = testing.tempDir(nil)
+    // Write a manifest with a malicious bin name directly; can't go
+    // through manifest.write because the validator there would reject.
+    fs.write(path.join(dir, "grain.yaml"),
+        "name: bad\nversion: 0.1.0\nbin:\n  ../escape: bin/x.praia\n")
+    testing.assertThrows(
+        lam{ in manifest.read(dir) },
+        "rejected: bad bin name")
+})
+
+testing.test("manifest.read throws on invalid bin path", lam{ in
+    let dir = testing.tempDir(nil)
+    fs.write(path.join(dir, "grain.yaml"),
+        "name: bad\nversion: 0.1.0\nbin:\n  x: /etc/passwd\n")
+    testing.assertThrows(
+        lam{ in manifest.read(dir) },
+        "rejected: absolute path")
+})
+
+// ── wrapper byte-format invariant ─────────────────────────────
+//
+// The Makefile bootstraps the sand wrapper inline via printf. That
+// format MUST match what bin.wrapperContent() produces so a future
+// `sand install -g sand@<ver>` regenerates a byte-identical wrapper.
+
+testing.test("bin.wrapperContent format matches the Makefile bootstrap", lam{ in
+    let w = bin.wrapperContent("sand",
+                                "/usr/local/bin/praia",
+                                "/usr/local/lib/praia/ext_grains/sand/main.praia")
+    // Hand-build the same string the Makefile's printf produces (PR 2
+    // updates the Makefile to include the same sentinel comment).
+    let expected = "#!/bin/sh\n" +
+                   "# sand-managed wrapper for sand\n" +
+                   "exec \"/usr/local/bin/praia\" " +
+                   "\"/usr/local/lib/praia/ext_grains/sand/main.praia\" \"$@\"\n"
+    testing.assertEqual(w, expected, "wrapper byte-identical to bootstrap form")
+})
+
+testing.test("bin.isReserved blocks praia and sand only", lam{ in
+    testing.assertEqual(bin.isReserved("praia"), true, nil)
+    testing.assertEqual(bin.isReserved("sand"), true, nil)
+    testing.assertEqual(bin.isReserved("prscan"), false, nil)
+    testing.assertEqual(bin.isReserved(""), false, nil)
+})
+
+// ── install / remove cycle, in-memory only (no PATH side effects) ──
+
+testing.test("bin.install writes wrappers, bin.remove cleans up", lam{ in
+    let grainDir = testing.tempDir(nil)
+    let binDir = testing.tempDir(nil)
+    fs.mkdir(path.join(grainDir, "bin"))
+    fs.write(path.join(grainDir, "bin", "ok.praia"), "print(\"ok\")\n")
+
+    let m = {name: "demo", version: "0.1.0", bin: {ok: "bin/ok.praia"}}
+    let written = bin.install(grainDir, m, binDir)
+    testing.assertEqual(len(written), 1, "one wrapper written")
+    testing.assert(fs.exists(written[0]), "wrapper exists on disk")
+    testing.assert(bin.isSandManaged(written[0]), "wrapper carries sentinel")
+
+    bin.remove(m, binDir)
+    testing.assert(!fs.exists(written[0]), "wrapper removed")
+})
+
+testing.test("bin.install rejects reserved names without allowReserved", lam{ in
+    let grainDir = testing.tempDir(nil)
+    let binDir = testing.tempDir(nil)
+    fs.mkdir(path.join(grainDir, "bin"))
+    fs.write(path.join(grainDir, "bin", "x.praia"), "print(\"x\")\n")
+    let m = {name: "evil", version: "0.1.0", bin: {sand: "bin/x.praia"}}
+    testing.assertThrows(
+        lam{ in bin.install(grainDir, m, binDir) },
+        "reserved name rejected")
+})
+
+testing.test("bin.install rolls back partial writes on failure", lam{ in
+    // First entry valid, second entry references a missing file —
+    // the partially-written first wrapper must be removed.
+    let grainDir = testing.tempDir(nil)
+    let binDir = testing.tempDir(nil)
+    fs.mkdir(path.join(grainDir, "bin"))
+    fs.write(path.join(grainDir, "bin", "a.praia"), "print(\"a\")\n")
+    let m = {
+        name: "demo", version: "0.1.0",
+        bin: {a: "bin/a.praia", b: "bin/missing.praia"}
+    }
+    testing.assertThrows(
+        lam{ in bin.install(grainDir, m, binDir) },
+        "throws on missing script")
+    testing.assert(!fs.exists(path.join(binDir, "a")),
+                    "first wrapper was rolled back")
+})
+
+testing.test("bin.install refuses to overwrite foreign files", lam{ in
+    let grainDir = testing.tempDir(nil)
+    let binDir = testing.tempDir(nil)
+    fs.mkdir(path.join(grainDir, "bin"))
+    fs.write(path.join(grainDir, "bin", "ok.praia"), "print(\"ok\")\n")
+    // Plant a hand-written script with the same name as our bin entry.
+    fs.write(path.join(binDir, "ok"), "#!/bin/sh\necho not ours\n")
+    let m = {name: "demo", version: "0.1.0", bin: {ok: "bin/ok.praia"}}
+    testing.assertThrows(
+        lam{ in bin.install(grainDir, m, binDir) },
+        "foreign file protected")
+    // Foreign file untouched.
+    testing.assertEqual(fs.read(path.join(binDir, "ok")),
+                         "#!/bin/sh\necho not ours\n", nil)
+})
+
+testing.done()
