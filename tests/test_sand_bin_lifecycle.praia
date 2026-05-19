@@ -70,8 +70,12 @@ testing.test("sand init generates grain.yaml with a discoverable bin: section", 
     let projectDir = path.join(fixtureRoot, "init-fixture")
     fs.mkdir(projectDir)
     // sand init reads cwd; sys.exec respects cd via a sh trampoline.
-    let r = sys.exec(["sh", "-c",
-        "cd " + projectDir + " && " + praiaBin + " " + sandMain + " init"])
+    // Use `sh -c '...' sh <cwd> <argv...>` form so paths with spaces
+    // or shell metacharacters in $praiaBin / $sandMain (e.g. a repo
+    // checkout at "/My Projects/Praia") don't get word-split or
+    // glob-expanded by the trampoline.
+    let r = sys.exec(["sh", "-c", "cd \"$1\" && shift && exec \"$@\"",
+                       "sh", projectDir, praiaBin, sandMain, "init"])
     testing.assertEqual(r.exitCode, 0, "init exit 0: " + r.stderr)
 
     let yaml = fs.read(path.join(projectDir, "grain.yaml"))
@@ -82,8 +86,8 @@ testing.test("sand init generates grain.yaml with a discoverable bin: section", 
     // Test plugin variant too — same hint should appear.
     let pluginDir = path.join(fixtureRoot, "init-plugin-fixture")
     fs.mkdir(pluginDir)
-    let r2 = sys.exec(["sh", "-c",
-        "cd " + pluginDir + " && " + praiaBin + " " + sandMain + " init --plugin"])
+    let r2 = sys.exec(["sh", "-c", "cd \"$1\" && shift && exec \"$@\"",
+                        "sh", pluginDir, praiaBin, sandMain, "init", "--plugin"])
     testing.assertEqual(r2.exitCode, 0, "init --plugin exit 0: " + r2.stderr)
     let pyaml = fs.read(path.join(pluginDir, "grain.yaml"))
     testing.assert(pyaml.contains("\nbin:\n"),

@@ -200,6 +200,12 @@ testing.test("bin.install restores prior sand-managed wrapper on rollback", lam{
                     "prior wrapper restored (not unlinked)")
     testing.assertEqual(fs.read(target), prior,
                          "prior wrapper bytes restored exactly")
+    // Catch chmod regressions in the rollback path — bytes alone
+    // don't tell us if the file became unexecutable. Mask to 0o777
+    // because fs.stat may report setuid/setgid/sticky bits we don't
+    // care about here.
+    testing.assertEqual(fs.stat(target).mode & 0o777, 0o755,
+                         "prior wrapper mode (0o755) restored exactly")
 })
 
 testing.test("bin.install refuses to overwrite foreign files", lam{ in

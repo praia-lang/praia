@@ -38,12 +38,16 @@ let _ = sys.exec(["sh", "-c",
     "git -c user.email=t@t -c user.name=t commit -q -m mirror"])
 
 func runSandWithCwd(args, cwd) {
-    let cmd = ["env", "HOME=" + sandHome, praiaBin, sandMain]
+    // sys.exec doesn't accept a cwd, so we route through `sh -c` with
+    // positional parameters: $1 is the target cwd, the rest is the
+    // argv to exec. `shift` drops cwd then `exec "$@"` runs the
+    // remaining argv literally — no manual quoting needed, so paths
+    // containing single quotes or other shell metachars still work.
+    let cmd = ["sh", "-c", "cd \"$1\" && shift && exec \"$@\"",
+               "sh", cwd,
+               "env", "HOME=" + sandHome, praiaBin, sandMain]
     for (a in args) { cmd.push(a) }
-    // sys.exec doesn't accept a cwd; use a shell trampoline.
-    let quoted = ""
-    for (c in cmd) { quoted = quoted + "'" + c + "' " }
-    return sys.exec(["sh", "-c", "cd " + cwd + " && " + quoted])
+    return sys.exec(cmd)
 }
 
 func runSand(args) {
