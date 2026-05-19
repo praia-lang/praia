@@ -3718,6 +3718,18 @@ Interpreter::Interpreter() {
         sysMap->entries[Value("libdir")] = Value();
     }
 
+    // sys.executable — canonical path of the running praia binary.
+    // Captured at main() startup so it survives chdir; used by sand
+    // to bake the right `exec <praia>` line into installed bin wrappers,
+    // and by anyone else who needs to invoke a child interpreter at
+    // the same version. nil only if main() failed to resolve it
+    // (very unlikely in practice).
+    if (!g_praiaExecPath.empty()) {
+        sysMap->entries[Value("executable")] = Value(g_praiaExecPath);
+    } else {
+        sysMap->entries[Value("executable")] = Value();
+    }
+
     sysMap->entries[Value("stdout")] = Value(makeNative("sys.stdout", 1,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isString())
