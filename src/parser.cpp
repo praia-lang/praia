@@ -1297,6 +1297,11 @@ ExprPtr Parser::primary() {
         arr->column = lnCol;
         if (!check(TokenType::RBRACKET)) {
             do {
+                // Trailing comma: a `,` right before `]` is allowed.
+                // We only see this on the iteration *after* parsing a
+                // real element + comma, so leading `[,...]` still
+                // hits the "Expected expression" path below.
+                if (check(TokenType::RBRACKET)) break;
                 if (match(TokenType::SPREAD)) {
                     auto spread = std::make_unique<SpreadExpr>();
                     spread->line = previous().line;
@@ -1417,6 +1422,8 @@ ExprPtr Parser::primary() {
         map->column = lnCol;
         if (!check(TokenType::RBRACE)) {
             do {
+                // Trailing comma: a `,` right before `}` is allowed.
+                if (check(TokenType::RBRACE)) break;
                 // Spread: {...other}
                 if (match(TokenType::SPREAD)) {
                     auto spread = std::make_unique<SpreadExpr>();

@@ -57,8 +57,5 @@ No dedicated hash set. Workarounds:
 
 A native `Set` type with `.add()`, `.has()`, `.delete()`, `.union()`, `.intersection()` would be cleaner.
 
-### Trailing commas in arrays and maps
-Allow trailing commas in arrays/map literals.
-
 ### Slice syntax
 No `arr[1:3]` or `arr[::2]` syntax. The `.slice(start, end)` method works but is more verbose. Slice syntax would require parser changes for the `[start:end:step]` form inside index expressions.
