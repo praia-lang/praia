@@ -65,6 +65,22 @@ class YamlParser {
         return indent;
     }
 
+    // Column of `pos` in its line — i.e. the count of characters from the
+    // previous '\n' (or start-of-input) to `pos`. Unlike `currentIndent()`
+    // this works from any position on the line, not just the start. The
+    // inline-mapping case inside a sequence item (`- key: value`) needs
+    // this: after we've consumed `  - `, the next key starts at the column
+    // where `key` lives, and sibling keys on subsequent lines must align
+    // there. Pre-fix, the inline mapping was parsed with indent=0, so
+    // anything indented (which is everything) failed the indent check
+    // and the mapping ended after one entry.
+    int colAtPos() const {
+        int col = 0;
+        size_t i = pos;
+        while (i > 0 && src[i - 1] != '\n') { --i; ++col; }
+        return col;
+    }
+
     std::string readLine() {
         std::string line;
         while (pos < src.size() && src[pos] != '\n') line += src[pos++];
@@ -171,7 +187,10 @@ class YamlParser {
             if (src[pos + curIndent] != '-') break;
 
             pos += curIndent + 1; // skip spaces + '-'
-            if (pos < src.size() && src[pos] == ' ') pos++; // skip space after -
+            // Skip any whitespace after the dash. YAML allows multiple
+            // spaces (`-     foo`) and aligns the value's column at the
+            // first non-space.
+            while (pos < src.size() && src[pos] == ' ') pos++;
 
             // Check if inline value or nested block
             skipBlankLines();
@@ -179,18 +198,20 @@ class YamlParser {
                 pos++;
                 arr->elements.push_back(parseValue(indent + 2));
             } else {
-                int valIndent = currentIndent();
                 // Inline: read rest of line, could be a scalar or start of nested mapping
                 size_t saved = pos;
+                int valCol = colAtPos();
                 std::string rest = readLine();
                 auto c = rest.find(": ");
                 if (c == std::string::npos && !rest.empty() && rest.back() == ':')
                     c = rest.size() - 1;
 
                 if (c != std::string::npos) {
-                    // Inline mapping start — reparse
+                    // Inline mapping start — reparse the first key (and any
+                    // sibling keys on the following lines that align at
+                    // valCol, the column of the first key's name).
                     pos = saved;
-                    arr->elements.push_back(parseMapping(valIndent >= 0 ? valIndent : indent + 2));
+                    arr->elements.push_back(parseMapping(valCol));
                 } else {
                     arr->elements.push_back(parseScalar(rest));
                 }
@@ -205,11 +226,19 @@ class YamlParser {
         // a sequence item) doesn't increment depth, but the next nesting
         // level inevitably reaches parseValue which does.
         auto map = gcNew<PraiaMap>();
+        // The inline-mapping-in-sequence path enters here mid-line, with
+        // pos sitting at the first key character — no leading whitespace
+        // to count, so currentIndent() returns 0 even though we're at
+        // the intended column. Skip the indent check on the first
+        // iteration; subsequent iterations always start at the head of
+        // a line and check normally.
+        bool first = true;
         while (!atEnd()) {
             skipBlankLines();
             if (atEnd()) break;
             int curIndent = currentIndent();
-            if (curIndent != indent) break;
+            if (!first && curIndent != indent) break;
+            first = false;
 
             skipSpaces();
             std::string line = readLine();
@@ -232,8 +261,20 @@ class YamlParser {
                 map->entries[Value(key)] = parseValue(indent + 1);
             } else {
                 std::string val = line.substr(colonPos + 2);
-                // Check for inline flow sequence [a, b]
-                if (!val.empty() && val.front() == '[' && val.back() == ']') {
+                // Block scalar indicator. `|` = literal (keep newlines),
+                // `>` = folded (single \n → ' ', \n\n → \n). Chomping
+                // suffix (-/+) is parsed but only the default ("clip" —
+                // single trailing \n) is currently honored; +/- get
+                // mapped onto that for now. Without this, `run: |` and
+                // its multi-line body parsed as the literal string "|"
+                // and the body was attributed to the parent — silently
+                // losing whole script blocks in CI workflows.
+                bool isBlock = !val.empty() && (val[0] == '|' || val[0] == '>');
+                if (isBlock) {
+                    char style = val[0];
+                    map->entries[Value(key)] = parseBlockScalar(indent, style);
+                } else if (!val.empty() && val.front() == '[' && val.back() == ']') {
+                    // Inline flow sequence [a, b]
                     auto arr = gcNew<PraiaArray>();
                     std::string inner = val.substr(1, val.size() - 2);
                     std::istringstream ss(inner);
@@ -250,6 +291,84 @@ class YamlParser {
             }
         }
         return Value(map);
+    }
+
+    // Read a block scalar — the text following a `|` or `>` indicator.
+    // `parentIndent` is the indent of the line that carried the indicator;
+    // body lines must be more indented than that. The *content* indent is
+    // taken from the first non-blank body line, and that many leading
+    // characters are stripped from every line (blank lines included).
+    Value parseBlockScalar(int parentIndent, char style) {
+        std::string out;
+        int contentIndent = -1;
+        // parseMapping's readLine() has already consumed through the
+        // newline that terminated `key: |`, so pos is at the start of
+        // the first body line — no extra newline-eating to do here.
+
+        while (!atEnd()) {
+            size_t lineStart = pos;
+            // Measure the leading spaces without consuming them.
+            int lead = 0;
+            size_t scan = pos;
+            while (scan < src.size() && src[scan] == ' ') { scan++; lead++; }
+            bool blank = (scan >= src.size() || src[scan] == '\n');
+
+            if (!blank) {
+                if (contentIndent < 0) {
+                    if (lead <= parentIndent) { pos = lineStart; break; }
+                    contentIndent = lead;
+                } else if (lead < contentIndent) {
+                    pos = lineStart; break;
+                }
+            }
+
+            // Skip `contentIndent` (or `lead` if shorter) leading spaces,
+            // then read the remainder of the line.
+            int skip = (contentIndent < 0) ? lead
+                     : (blank ? std::min(lead, contentIndent) : contentIndent);
+            pos = lineStart + skip;
+            std::string body;
+            while (pos < src.size() && src[pos] != '\n') body += src[pos++];
+            if (pos < src.size()) pos++; // consume \n
+
+            if (style == '|') {
+                out += body;
+                out += '\n';
+            } else {
+                // Folded: blank → newline, otherwise join consecutive
+                // non-blank lines with spaces. We don't have direct
+                // access to "previous line was blank?", so we encode
+                // intermediate newlines and fix up at the end.
+                out += body;
+                out += '\n';
+            }
+        }
+
+        if (style == '>') {
+            // Convert single \n → ' ', double \n → single \n.
+            std::string folded;
+            for (size_t i = 0; i < out.size(); i++) {
+                if (out[i] == '\n') {
+                    // Count consecutive newlines.
+                    int run = 1;
+                    while (i + 1 < out.size() && out[i+1] == '\n') { run++; i++; }
+                    if (i + 1 >= out.size()) {
+                        // Trailing newlines — preserve one.
+                        folded += '\n';
+                    } else {
+                        if (run == 1) folded += ' ';
+                        else for (int k = 0; k < run - 1; k++) folded += '\n';
+                    }
+                } else folded += out[i];
+            }
+            out = folded;
+        }
+
+        // Default chomping (clip): exactly one trailing \n if the block
+        // is non-empty. Strip extras.
+        while (out.size() >= 2 && out[out.size()-1] == '\n' && out[out.size()-2] == '\n')
+            out.pop_back();
+        return Value(out);
     }
 
 public:

@@ -39,4 +39,59 @@ testing.test("yaml roundtrip", lam{ in
     testing.assertEqual(result.z, true, nil)
 })
 
+// ── list of maps with multiple sibling keys per item ────────────
+// Regression: parseSequence's inline-mapping path passed indent=0
+// (currentIndent at mid-line) to parseMapping, so the second key
+// `b: 2` (at column 4) didn't match and parseMapping bailed after
+// `a: 1`. After the fix, the column-of-pos is used and sibling
+// keys at the correct indent are accepted.
+
+testing.test("yaml list-of-maps with multiple keys per item", lam{ in
+    let data = yaml.parse("items:\n  - a: 1\n    b: 2\n  - a: 3\n    b: 4")
+    testing.assertEqual(len(data.items), 2, "two items")
+    testing.assertEqual(data.items[0].a, 1, nil)
+    testing.assertEqual(data.items[0].b, 2, "sibling key on item 1")
+    testing.assertEqual(data.items[1].a, 3, nil)
+    testing.assertEqual(data.items[1].b, 4, "sibling key on item 2")
+})
+
+testing.test("yaml list-of-maps survives commented-out items", lam{ in
+    let src = "items:\n  - a: 1\n  #- a: 99\n  - a: 2"
+    let data = yaml.parse(src)
+    testing.assertEqual(len(data.items), 2, nil)
+    testing.assertEqual(data.items[1].a, 2, nil)
+})
+
+testing.test("yaml deeply nested then sibling keys at parent level", lam{ in
+    let src = "jobs:\n  build:\n    strategy:\n      matrix:\n        include:\n          - os: x\n            target: y\n    runs-on: foo\n    steps:\n      - name: hello"
+    let data = yaml.parse(src)
+    testing.assertEqual(data.jobs.build.strategy.matrix.include[0].target, "y", nil)
+    testing.assertEqual(data.jobs.build["runs-on"], "foo", "sibling key after deep nesting")
+    testing.assertEqual(data.jobs.build.steps[0].name, "hello", nil)
+})
+
+// ── block scalars (| literal and > folded) ────────────────────
+// Regression: `key: |` parsed as the literal string "|" and the
+// body lines were attributed to the parent map, silently dropping
+// whole script blocks in CI workflows.
+
+testing.test("yaml literal block scalar preserves newlines", lam{ in
+    let src = "script: |\n  line1\n  line2\n  line3"
+    let data = yaml.parse(src)
+    testing.assertEqual(data.script, "line1\nline2\nline3\n", nil)
+})
+
+testing.test("yaml folded block scalar joins lines with spaces", lam{ in
+    let src = "msg: >\n  hello\n  world"
+    let data = yaml.parse(src)
+    testing.assertEqual(data.msg, "hello world\n", nil)
+})
+
+testing.test("yaml block scalar ends at out-of-indent line", lam{ in
+    let src = "a: |\n  inside\nb: 2"
+    let data = yaml.parse(src)
+    testing.assertEqual(data.a, "inside\n", nil)
+    testing.assertEqual(data.b, 2, "sibling key after block scalar")
+})
+
 testing.done()
