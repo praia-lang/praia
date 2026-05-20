@@ -199,5 +199,68 @@ testing.test("update keeps bin wrappers working through failure", lam{ in
     testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
+testing.test("failed transitive dep install preserves the prior grain dir AND wrapper", lam{ in
+    // Regression specific to dep failures: install v1, then push a v2
+    // that declares a dependency on something that won't clone. The
+    // atomic swap completes for v2, bin wrappers go in, lockfile gets
+    // written — and *then* the dep clone fails, throwing into the
+    // outer catch. Pre-fix, the catch found bakDir already removed
+    // (the cleanup happened right after wrapper install) and treated
+    // the rollback as a fresh-install rollback: it deleted the just-
+    // swapped destDir and left the user with neither v1 nor v2. Also
+    // unlinked the bin wrapper without restoring v1's bytes.
+    let g = makeGrain("depfail",
+        "let v = 1\nexport { v }\n",
+        "bin:\n  depfail: bin/depfail.praia\n",
+        {"bin/depfail.praia": "print(\"depfail v1\")\n"})
+    let r1 = runSand(["install", "-g", "file://" + g])
+    testing.assertEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
+
+    let grainDir = path.join(sandHome, ".praia", "ext_grains", "depfail")
+    let binPath  = path.join(sandHome, ".praia", "bin", "depfail")
+    let mainBefore   = fs.read(path.join(grainDir, "main.praia"))
+    let binBefore    = fs.read(binPath)
+    let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
+    let lockBefore = fs.read(lockPath)
+
+    // v2: content changes, AND it declares a dep that won't clone.
+    fs.write(path.join(g, "main.praia"),
+        "let v = 2\nexport { v }\n")
+    fs.write(path.join(g, "bin", "depfail.praia"),
+        "print(\"depfail v2\")\n")
+    fs.write(path.join(g, "grain.yaml"),
+        "name: depfail\nversion: 0.2.0\nmain: main.praia\nbin:\n" +
+        "  depfail: bin/depfail.praia\n" +
+        "dependencies:\n  doesnotexist: https://example.invalid/nope/nope\n")
+    commitInGrain(g, "v2 with bad dep")
+
+    let r2 = runSand(["update", "-g", "depfail"])
+    testing.assert(r2.exitCode != 0,
+        "update must fail when dep clone fails (exit=" + str(r2.exitCode) + ")")
+
+    // The whole point: rollback must have restored everything from
+    // before the swap, *not* just deleted the new dir.
+    testing.assert(fs.exists(grainDir),
+        "grain dir survives failed update (wasn't deleted by buggy rollback)")
+    testing.assertEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
+        "grain dir restored to v1 content")
+    testing.assert(fs.exists(binPath),
+        "bin wrapper survives failed update")
+    testing.assertEqual(fs.read(binPath), binBefore,
+        "bin wrapper restored to v1 bytes")
+    testing.assertEqual(fs.read(lockPath), lockBefore,
+        "lockfile restored to v1 entry")
+
+    // And the wrapper still runs.
+    let probe = sys.exec([binPath])
+    testing.assertEqual(probe.exitCode, 0,
+        "wrapper still executable after rollback: " + probe.stderr)
+    testing.assert(probe.stdout.contains("depfail v1"),
+        "wrapper runs v1 content: " + probe.stdout)
+
+    let cleanup = runSand(["remove", "-g", "-y", "depfail"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
 sys.exec(["rm", "-rf", sandHome, fixtureRoot])
 testing.done()

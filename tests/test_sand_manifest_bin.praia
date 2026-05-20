@@ -135,13 +135,15 @@ testing.test("bin.install writes wrappers, bin.remove cleans up", lam{ in
     fs.write(path.join(grainDir, "bin", "ok.praia"), "print(\"ok\")\n")
 
     let m = {name: "demo", version: "0.1.0", bin: {ok: "bin/ok.praia"}}
-    let written = bin.install(grainDir, m, binDir)
-    testing.assertEqual(len(written), 1, "one wrapper written")
-    testing.assert(fs.exists(written[0]), "wrapper exists on disk")
-    testing.assert(bin.isSandManaged(written[0]), "wrapper carries sentinel")
+    let result = bin.install(grainDir, m, binDir)
+    testing.assertEqual(len(result.written), 1, "one wrapper written")
+    testing.assert(fs.exists(result.written[0]), "wrapper exists on disk")
+    testing.assert(bin.isSandManaged(result.written[0]), "wrapper carries sentinel")
+    testing.assertEqual(len(result.restorable), 0,
+        "fresh install has nothing to restore (no prior wrappers overwritten)")
 
     bin.remove(m, binDir)
-    testing.assert(!fs.exists(written[0]), "wrapper removed")
+    testing.assert(!fs.exists(result.written[0]), "wrapper removed")
 })
 
 testing.test("bin.install rejects reserved names without allowReserved", lam{ in
