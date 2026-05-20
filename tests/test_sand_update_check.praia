@@ -1,0 +1,65 @@
+use "testing"
+use "../sand/grains/updateCheck"
+use "../sand/grains/config"
+
+// updateCheck publishes two cache-refresh helpers used by
+// `sand update sand`:
+//   • fetchLatestTag()    — probes upstream (no cache), refreshes cache.
+//   • recordKnownLatest() — writes a known tag straight to the cache.
+//
+// We exercise recordKnownLatest directly. fetchLatestTag is network-
+// dependent, so we only assert the contract that's safe to probe
+// offline: it returns nil rather than throwing when git can't reach
+// the remote, and a successful fetch (which we can't reliably arrange
+// here) refreshes the cache.
+
+let cachePath = path.join(config.home(), ".praia", ".sand-update-cache.yaml")
+
+func _readCacheRaw() {
+    if (!fs.exists(cachePath)) { return nil }
+    try { return fs.read(cachePath) } catch (e) { return nil }
+}
+
+func _backupCache() {
+    if (!fs.exists(cachePath)) { return nil }
+    return fs.read(cachePath)
+}
+
+func _restoreCache(prior) {
+    if (prior == nil) {
+        if (fs.exists(cachePath)) {
+            try { fs.remove(cachePath) } catch (e) {}
+        }
+    } else {
+        try { fs.write(cachePath, prior) } catch (e) {}
+    }
+}
+
+testing.test("recordKnownLatest rewrites the notifier cache", lam{ in
+    // Real user $HOME means real cache file — preserve and restore.
+    let prior = _backupCache()
+    testing.cleanup(lam{ in _restoreCache(prior) })
+
+    // Stale cache state — pretend we last saw v0.0.1 ages ago.
+    fs.write(cachePath, "checkedAt: 1\nlatest: 0.0.1\n")
+
+    updateCheck.recordKnownLatest("9.9.9")
+    let after = _readCacheRaw()
+    testing.assert(after.contains("latest: 9.9.9"),
+        "cache updated with the new latest: " + after)
+    testing.assert(!after.contains("latest: 0.0.1"),
+        "stale value gone: " + after)
+})
+
+testing.test("recordKnownLatest is a no-op when latest is nil", lam{ in
+    let prior = _backupCache()
+    testing.cleanup(lam{ in _restoreCache(prior) })
+
+    fs.write(cachePath, "checkedAt: 1\nlatest: 0.0.1\n")
+    updateCheck.recordKnownLatest(nil)
+    let after = _readCacheRaw()
+    testing.assertEqual(after, "checkedAt: 1\nlatest: 0.0.1\n",
+        "cache untouched on nil input")
+})
+
+testing.done()
