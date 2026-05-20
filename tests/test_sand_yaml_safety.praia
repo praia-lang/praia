@@ -120,6 +120,41 @@ testing.test("registry load rejects grains: <scalar>", lam{ in
         "'grains:' must be a YAML mapping")
 })
 
+testing.test("registry load rejects grains: false (not coerced to empty)", lam{ in
+    // Truthiness coercion used to swallow `grains: false` here:
+    // `!data.grains` was true, so the loader silently rewrote the
+    // value to `{}` and reported zero grains. After the fix the
+    // check is key-presence-then-type, so explicit non-nil scalars
+    // hit the type error.
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains: false\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "grains: false rejected, not silently treated as empty")
+})
+
+testing.test("registry load rejects grains: 0 (not coerced to empty)", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains: 0\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "grains: 0 rejected, not silently treated as empty")
+})
+
+testing.test("registry load accepts grains: with no value (explicit empty)", lam{ in
+    // YAML `grains:` followed by nothing parses as nil at that key.
+    // That's the canonical "I have a lockfile but no installed
+    // grains" shape — distinct from `grains: false`.
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains:\n")
+    let r = registry.load(lockPath)
+    testing.assertEqual(len(keys(r.grains)), 0,
+        "explicit-nil grains: normalizes to empty map")
+})
+
 testing.test("registry load rejects grains: <list>", lam{ in
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
