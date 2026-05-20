@@ -13,6 +13,20 @@ testing.test("interpolation", lam{ in
     testing.assertEqual("%{1 + 1}", "2", nil)
 })
 
+testing.test("interpolation: quotes inside an interpolation don't need escaping", lam{ in
+    // The interpolation collector is brace-balanced, not quote-balanced.
+    // The inner `", "` is correctly recognized as a string without the
+    // user having to write `\", \"`.
+    let xs = ["a", "b", "c"]
+    testing.assertEqual("joined: %{xs.join(", ")}", "joined: a, b, c", nil)
+    // Same form, single-quoted outer string.
+    testing.assertEqual('joined: %{xs.join(", ")}', "joined: a, b, c", nil)
+    // Literal `"` in an inner string (legitimate `\"` escape) still
+    // works — this is the case that constrains the lexer from
+    // unconditionally stripping backslashes inside interpolations.
+    testing.assertEqual("opener: %{"\""}", "opener: \"", nil)
+})
+
 testing.test("case conversion", lam{ in
     testing.assertEqual("Hello".upper(), "HELLO", nil)
     testing.assertEqual("HELLO".lower(), "hello", nil)

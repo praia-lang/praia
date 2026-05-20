@@ -340,6 +340,22 @@ void Lexer::string(char quote) {
 
                 if (ch == '/' && next == '/') { inLineComment = true; expr += advance(); expr += advance(); continue; }
                 if (ch == '/' && next == '*') { inBlockComment = true; expr += advance(); expr += advance(); continue; }
+                // Catch the most common user error: writing `\"` inside
+                // `%{...}` thinking the outer string needs the escape.
+                // The interpolation collector is brace-balanced, so
+                // quotes inside are tracked correctly without escaping.
+                // The user's `\"` would either (a) silently change the
+                // expression semantics or (b) blow up further down with
+                // an unhelpful "Unterminated string" because the inner
+                // pair-handling interacts badly with the outer string's
+                // closing quote — point them at the simple fix loudly
+                // and early.
+                if (ch == '\\' && (next == '"' || next == '\'')) {
+                    error("Don't escape quotes inside %{...} — the interpolation "
+                          "is brace-balanced, so quotes work unescaped. "
+                          "Write `\"text\"` as just `\"text\"` (drop the backslashes).");
+                    return;
+                }
                 if (ch == '"' || ch == '\'') { stringQuote = ch; expr += advance(); continue; }
 
                 if (ch == '{') depth++;
@@ -515,6 +531,14 @@ void Lexer::tripleString(char quote) {
 
                 if (ch == '/' && next == '/') { inLineComment = true; expr += advance(); expr += advance(); continue; }
                 if (ch == '/' && next == '*') { inBlockComment = true; expr += advance(); expr += advance(); continue; }
+                // Same friendly error as the regular-string collector
+                // — see the parallel block above for the rationale.
+                if (ch == '\\' && (next == '"' || next == '\'')) {
+                    error("Don't escape quotes inside %{...} — the interpolation "
+                          "is brace-balanced, so quotes work unescaped. "
+                          "Write `\"text\"` as just `\"text\"` (drop the backslashes).");
+                    return;
+                }
                 if (ch == '"' || ch == '\'') { stringQuote = ch; expr += advance(); continue; }
 
                 if (ch == '{') depth++;
