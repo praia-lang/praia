@@ -15,6 +15,7 @@
 #include "../builtins.h"      // callSafe
 #include "../vm/vm.h"         // VM::current, callWithVM
 
+#include <cassert>
 #include <cstdint>
 
 namespace praia {
@@ -26,10 +27,18 @@ constexpr uintptr_t kTagVm  = 1;
 
 void* currentExecutor() {
     if (VM* vm = VM::current()) {
+        // The tag-bit trick requires both engine types to be at
+        // least 2-aligned so bit 0 is always clear in a real
+        // pointer. Both VM and Interpreter have vtables, so
+        // alignof >= sizeof(void*) >= 4 on every platform Praia
+        // targets — assert to catch any future struct redesign
+        // that would break this assumption.
+        assert((reinterpret_cast<uintptr_t>(vm) & kTagBit) == 0);
         return reinterpret_cast<void*>(
             reinterpret_cast<uintptr_t>(vm) | kTagVm);
     }
     if (g_currentInterp) {
+        assert((reinterpret_cast<uintptr_t>(g_currentInterp) & kTagBit) == 0);
         // Tag bit already clear — interpreter pointers stay as-is.
         return reinterpret_cast<void*>(g_currentInterp);
     }

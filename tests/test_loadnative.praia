@@ -87,7 +87,8 @@ testing.test("ABI version: missing declaration is rejected", lam{ in
     // loadNative refuses it with a clear "rebuild" diagnostic.
     // Compiles only if praia --include-path is wired up (set by
     // make install / the release tarball), so skip otherwise.
-    let inc = sys.exec(["./praia", "--include-path"]).stdout.strip()
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let inc = sys.exec([praiaBin, "--include-path"]).stdout.strip()
     if (!fs.exists(path.join(inc, "praia_plugin.h"))) {
         print("(skipping: --include-path not pointing at shipped headers)")
         return
