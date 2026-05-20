@@ -22,6 +22,10 @@ void GcHeap::track(const std::shared_ptr<PraiaMap>& p) {
     entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Map});
     allocsSinceGc_++;
 }
+void GcHeap::track(const std::shared_ptr<PraiaSet>& p) {
+    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Set});
+    allocsSinceGc_++;
+}
 void GcHeap::track(const std::shared_ptr<PraiaInstance>& p) {
     entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Instance});
     allocsSinceGc_++;
@@ -89,6 +93,8 @@ void GcHeap::markValue(const Value& v) {
         markTagged(v.asTagged().get());
     } else if (v.isMap()) {
         markMap(v.asMap().get());
+    } else if (v.isSet()) {
+        markSet(v.asSet().get());
     } else if (v.isInstance()) {
         markInstance(v.asInstance().get());
     } else if (v.isCallable()) {
@@ -114,6 +120,12 @@ void GcHeap::markMap(PraiaMap* map) {
     if (!map) return;
     if (!marked_.insert(static_cast<void*>(map)).second) return;
     for (auto& [k, v] : map->entries) { markValue(k); markValue(v); }
+}
+
+void GcHeap::markSet(PraiaSet* set) {
+    if (!set) return;
+    if (!marked_.insert(static_cast<void*>(set)).second) return;
+    for (auto& e : set->elements) markValue(e);
 }
 
 void GcHeap::markInstance(PraiaInstance* inst) {
@@ -224,6 +236,9 @@ void GcHeap::sweep() {
                 break;
             case GcType::Map:
                 static_cast<PraiaMap*>(item.rawPtr)->entries.clear();
+                break;
+            case GcType::Set:
+                static_cast<PraiaSet*>(item.rawPtr)->elements.clear();
                 break;
             case GcType::Instance: {
                 auto* inst = static_cast<PraiaInstance*>(item.rawPtr);

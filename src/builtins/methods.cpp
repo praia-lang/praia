@@ -831,3 +831,106 @@ Value getMapMethod(std::shared_ptr<PraiaMap> map,
     }
     throw RuntimeError("Map has no method '" + name + "'", line);
 }
+
+// Set methods. Membership tests use the same ValueHash/ValueKeyEqual
+// predicates as PraiaMap keys, so numeric semantics match (3 == 3.0,
+// NaN compares equal to NaN here). Element insertion validates
+// isHashable so users can't sneak unhashable values (arrays, maps,
+// other sets, instances) in through .add().
+Value getSetMethod(std::shared_ptr<PraiaSet> set,
+                   const std::string& name, int line) {
+    if (name == "add") {
+        return Value(makeNative("add", 1, [set](const std::vector<Value>& args) -> Value {
+            if (!isHashable(args[0]))
+                throw RuntimeError("set.add(): element must be a primitive (nil, bool, number, string)", 0);
+            auto [_, inserted] = set->elements.insert(args[0]);
+            return Value(inserted);  // true if newly added, false if already present
+        }));
+    }
+    if (name == "remove") {
+        return Value(makeNative("remove", 1, [set](const std::vector<Value>& args) -> Value {
+            return Value(set->elements.erase(args[0]) > 0);
+        }));
+    }
+    if (name == "has") {
+        return Value(makeNative("has", 1, [set](const std::vector<Value>& args) -> Value {
+            return Value(set->elements.find(args[0]) != set->elements.end());
+        }));
+    }
+    if (name == "size") {
+        return Value(makeNative("size", 0, [set](const std::vector<Value>&) -> Value {
+            return Value(static_cast<int64_t>(set->elements.size()));
+        }));
+    }
+    if (name == "clear") {
+        return Value(makeNative("clear", 0, [set](const std::vector<Value>&) -> Value {
+            set->elements.clear();
+            return Value();
+        }));
+    }
+    if (name == "toArray") {
+        return Value(makeNative("toArray", 0, [set](const std::vector<Value>&) -> Value {
+            auto arr = gcNew<PraiaArray>();
+            arr->elements.reserve(set->elements.size());
+            for (auto& e : set->elements) arr->elements.push_back(e);
+            return Value(arr);
+        }));
+    }
+    if (name == "clone") {
+        return Value(makeNative("clone", 0, [set](const std::vector<Value>&) -> Value {
+            auto copy = gcNew<PraiaSet>();
+            copy->elements = set->elements;
+            return Value(copy);
+        }));
+    }
+    // Set-algebra. All produce a NEW set; the receiver isn't mutated.
+    if (name == "union") {
+        return Value(makeNative("union", 1, [set](const std::vector<Value>& args) -> Value {
+            if (!args[0].isSet())
+                throw RuntimeError("set.union(): argument must be a set", 0);
+            auto result = gcNew<PraiaSet>();
+            result->elements = set->elements;
+            for (auto& e : args[0].asSet()->elements) result->elements.insert(e);
+            return Value(result);
+        }));
+    }
+    if (name == "intersection") {
+        return Value(makeNative("intersection", 1, [set](const std::vector<Value>& args) -> Value {
+            if (!args[0].isSet())
+                throw RuntimeError("set.intersection(): argument must be a set", 0);
+            auto result = gcNew<PraiaSet>();
+            auto& other = args[0].asSet()->elements;
+            // Iterate the smaller for fewer lookups.
+            auto& smaller = (set->elements.size() <= other.size())
+                              ? set->elements : other;
+            auto& larger  = (set->elements.size() <= other.size())
+                              ? other : set->elements;
+            for (auto& e : smaller)
+                if (larger.find(e) != larger.end()) result->elements.insert(e);
+            return Value(result);
+        }));
+    }
+    if (name == "difference") {
+        return Value(makeNative("difference", 1, [set](const std::vector<Value>& args) -> Value {
+            if (!args[0].isSet())
+                throw RuntimeError("set.difference(): argument must be a set", 0);
+            auto result = gcNew<PraiaSet>();
+            auto& other = args[0].asSet()->elements;
+            for (auto& e : set->elements)
+                if (other.find(e) == other.end()) result->elements.insert(e);
+            return Value(result);
+        }));
+    }
+    if (name == "isSubset") {
+        return Value(makeNative("isSubset", 1, [set](const std::vector<Value>& args) -> Value {
+            if (!args[0].isSet())
+                throw RuntimeError("set.isSubset(): argument must be a set", 0);
+            auto& other = args[0].asSet()->elements;
+            if (set->elements.size() > other.size()) return Value(false);
+            for (auto& e : set->elements)
+                if (other.find(e) == other.end()) return Value(false);
+            return Value(true);
+        }));
+    }
+    throw RuntimeError("Set has no method '" + name + "'", line);
+}

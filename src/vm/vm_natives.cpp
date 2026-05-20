@@ -146,7 +146,9 @@ void vmRegisterNatives(VM& vm) {
 #endif
             if (args[0].isMap())
                 return Value(static_cast<int64_t>(args[0].asMap()->entries.size()));
-            throw RuntimeError("len() requires an array, string, or map", 0);
+            if (args[0].isSet())
+                return Value(static_cast<int64_t>(args[0].asSet()->elements.size()));
+            throw RuntimeError("len() requires an array, string, map, or set", 0);
         }));
 
     // Override print() — checks __str/toString on instances
@@ -385,6 +387,15 @@ void vmRegisterNatives(VM& vm) {
                     entry->entries[Value("value")] = val;
                     arr->elements.push_back(Value(entry));
                 }
+                return Value(arr);
+            }
+            if (v.isSet()) {
+                // Snapshot the set to an array — iteration order is
+                // unspecified (matches the tree-walker's behavior),
+                // but each element appears exactly once.
+                auto arr = gcNew<PraiaArray>();
+                arr->elements.reserve(v.asSet()->elements.size());
+                for (auto& e : v.asSet()->elements) arr->elements.push_back(e);
                 return Value(arr);
             }
             if (v.isString()) {

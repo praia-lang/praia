@@ -49,13 +49,5 @@ Only `type()` and `is` exist. No `dir()`, `getattr()`, `hasattr()`, `inspect`. C
 ### Tuple type (immutable arrays)
 No immutable sequence type. Arrays are always mutable. Workaround: just don't mutate them (convention). A frozen/immutable array could be useful for map keys and function return values that shouldn't be modified.
 
-### Set type
-No dedicated hash set. Workarounds:
-- `arr |> unique` for deduplication
-- Map with dummy values (`{[item]: true}`) for O(1) membership testing
-- `.has()` on maps works as a set membership check
-
-A native `Set` type with `.add()`, `.has()`, `.delete()`, `.union()`, `.intersection()` would be cleaner.
-
 ### Slice syntax
 No `arr[1:3]` or `arr[::2]` syntax. The `.slice(start, end)` method works but is more verbose. Slice syntax would require parser changes for the `[start:end:step]` form inside index expressions.

@@ -94,6 +94,9 @@ enum class OpCode : uint8_t {
     // ── Collections ──
     OP_BUILD_ARRAY,     // [count:16]
     OP_BUILD_MAP,       // [count:16] (count key-value pairs)
+    OP_BUILD_SET,       // [count:16]
+    OP_SET_INSERT,      // pop value + set, insert value; push set
+    OP_SET_SPREAD,      // pop iterable + set, insert each elem; push set
     OP_INDEX_GET,
     OP_INDEX_GET_OPT,   // nil if object is nil
     OP_INDEX_SET,

@@ -18,6 +18,7 @@
 struct Callable;
 struct PraiaArray;
 struct PraiaMap;
+struct PraiaSet;
 struct PraiaInstance;
 struct PraiaFuture;
 struct PraiaGenerator;
@@ -50,6 +51,7 @@ struct Value {
         std::shared_ptr<Callable>,
         std::shared_ptr<PraiaArray>,
         std::shared_ptr<PraiaMap>,
+        std::shared_ptr<PraiaSet>,
         std::shared_ptr<PraiaInstance>,
         std::shared_ptr<PraiaFuture>,
         std::shared_ptr<PraiaGenerator>,
@@ -70,6 +72,7 @@ struct Value {
     Value(std::shared_ptr<Callable> c) : data(std::move(c)) {}
     Value(std::shared_ptr<PraiaArray> a) : data(std::move(a)) {}
     Value(std::shared_ptr<PraiaMap> m) : data(std::move(m)) {}
+    Value(std::shared_ptr<PraiaSet> s) : data(std::move(s)) {}
     Value(std::shared_ptr<PraiaInstance> i) : data(std::move(i)) {}
     Value(std::shared_ptr<PraiaFuture> f) : data(std::move(f)) {}
     Value(std::shared_ptr<PraiaGenerator> g) : data(std::move(g)) {}
@@ -84,6 +87,7 @@ struct Value {
     bool isCallable() const { return std::holds_alternative<std::shared_ptr<Callable>>(data); }
     bool isArray()    const { return std::holds_alternative<std::shared_ptr<PraiaArray>>(data); }
     bool isMap()      const { return std::holds_alternative<std::shared_ptr<PraiaMap>>(data); }
+    bool isSet()      const { return std::holds_alternative<std::shared_ptr<PraiaSet>>(data); }
     bool isInstance() const { return std::holds_alternative<std::shared_ptr<PraiaInstance>>(data); }
     bool isFuture()   const { return std::holds_alternative<std::shared_ptr<PraiaFuture>>(data); }
     bool isGenerator() const { return std::holds_alternative<std::shared_ptr<PraiaGenerator>>(data); }
@@ -107,6 +111,7 @@ struct Value {
     std::shared_ptr<Callable>   asCallable() const { return std::get<std::shared_ptr<Callable>>(data); }
     std::shared_ptr<PraiaArray> asArray()    const { return std::get<std::shared_ptr<PraiaArray>>(data); }
     std::shared_ptr<PraiaMap>      asMap()      const { return std::get<std::shared_ptr<PraiaMap>>(data); }
+    std::shared_ptr<PraiaSet>      asSet()      const { return std::get<std::shared_ptr<PraiaSet>>(data); }
     std::shared_ptr<PraiaInstance> asInstance() const { return std::get<std::shared_ptr<PraiaInstance>>(data); }
     std::shared_ptr<PraiaFuture>   asFuture()   const { return std::get<std::shared_ptr<PraiaFuture>>(data); }
     std::shared_ptr<PraiaGenerator> asGenerator() const { return std::get<std::shared_ptr<PraiaGenerator>>(data); }
@@ -247,6 +252,16 @@ struct PraiaMap {
     std::unordered_map<Value, Value, ValueHash, ValueKeyEqual> entries;
 };
 
+// Hash set of Praia values. Storage uses the same ValueHash +
+// ValueKeyEqual predicates that PraiaMap uses for its keys, so
+// membership semantics match (NaN==NaN, numeric coercion via
+// numbersEqualHelper, etc.). Elements must be `isHashable` —
+// nested sets/maps/arrays are rejected at insertion time, matching
+// the existing rule for map keys.
+struct PraiaSet {
+    std::unordered_set<Value, ValueHash, ValueKeyEqual> elements;
+};
+
 struct PraiaFuture {
     std::shared_future<Value> future;
 };
@@ -368,6 +383,22 @@ inline std::string valueToStringRec(const Value& v, std::unordered_set<const voi
         visited.erase(key);
         return o.str();
     }
+    if (v.isSet()) {
+        const void* key = static_cast<const void*>(v.asSet().get());
+        if (!visited.insert(key).second) return "#{...}";
+        std::ostringstream o;
+        o << "#{";
+        bool first = true;
+        for (auto& e : v.asSet()->elements) {
+            if (!first) o << ", ";
+            first = false;
+            if (e.isString()) o << "\"" << valueToStringRec(e, visited) << "\"";
+            else o << valueToStringRec(e, visited);
+        }
+        o << "}";
+        visited.erase(key);
+        return o.str();
+    }
     if (v.isTagged()) {
         const auto& t = v.asTagged();
         const void* key = static_cast<const void*>(t.get());
@@ -414,6 +445,15 @@ inline bool Value::operator==(const Value& o) const {
             auto it = b.find(k);
             if (it == b.end() || it->second != v) return false;
         }
+        return true;
+    }
+    if (isSet() && o.isSet()) {
+        if (asSet().get() == o.asSet().get()) return true;
+        auto& a = asSet()->elements;
+        auto& b = o.asSet()->elements;
+        if (a.size() != b.size()) return false;
+        for (auto& e : a)
+            if (b.find(e) == b.end()) return false;
         return true;
     }
     // Instances: reference equality

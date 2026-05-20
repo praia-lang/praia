@@ -966,8 +966,17 @@ VM::Result VM::execute(int baseFrameCount_) {
                 for (auto& [k, v] : b.asMap()->entries) r->entries[k] = v; // b overrides a
                 push(Value(r)); break;
             }
+            // Set + set = union. Used both at the language level
+            // (`#{1, 2} + #{3, 4}`) and by the compiler's spread-
+            // lowering for `#{1, ...other}`.
+            if (a.isSet() && b.isSet()) {
+                auto r = gcNew<PraiaSet>();
+                r->elements = a.asSet()->elements;
+                for (auto& e : b.asSet()->elements) r->elements.insert(e);
+                push(Value(r)); break;
+            }
             if (a.isString() || b.isString()) { push(Value(a.toString() + b.toString())); break; }
-            RUNTIME_ERR("Operands of '+' must be numbers, strings, or arrays");
+            RUNTIME_ERR("Operands of '+' must be numbers, strings, arrays, maps, or sets");
         }
         case OpCode::OP_SUBTRACT: {
             Value b = pop(), a = pop();
@@ -1104,6 +1113,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 else if (tn == "string")    result = left.isString();
                 else if (tn == "array")     result = left.isArray();
                 else if (tn == "map")       result = left.isMap();
+                else if (tn == "set")       result = left.isSet();
                 else if (tn == "function")  result = left.isCallable();
                 else if (tn == "instance")  result = left.isInstance();
                 else if (tn == "tagged")    result = left.isTagged();
@@ -1727,6 +1737,16 @@ VM::Result VM::execute(int baseFrameCount_) {
                 }
                 break;
             }
+            if (obj.isSet()) {
+                try {
+                    push(getSetMethod(obj.asSet(), name, CURRENT_LINE()));
+                } catch (const RuntimeError& err) {
+                    if (tryHandleError(Value(std::string(err.what())))) break;
+                    runtimeError(err.what(), CURRENT_LINE());
+                    return Result::RUNTIME_ERROR;
+                }
+                break;
+            }
 
             // Static methods on classes
             if (obj.isCallable()) {
@@ -1841,6 +1861,72 @@ VM::Result VM::execute(int baseFrameCount_) {
             arr->elements.resize(count);
             for (int i = count - 1; i >= 0; i--) arr->elements[i] = pop();
             push(Value(arr));
+            break;
+        }
+
+        case OpCode::OP_BUILD_SET: {
+            uint16_t count = READ_U16();
+            auto set = gcNew<PraiaSet>();
+            // Pop N values off the stack into a temporary so we can
+            // insert in source order (matches tree-walker iteration
+            // order for `#{1, 2, 3}` despite the unordered_set's
+            // unspecified iteration order — important only for the
+            // first insert that determines internal bucket layout
+            // when sizes are very small).
+            std::vector<Value> tmp(count);
+            for (int i = count - 1; i >= 0; i--) tmp[i] = pop();
+            for (auto& v : tmp) {
+                if (!isHashable(v)) { RUNTIME_ERR("Unhashable type used as set element"); }
+                set->elements.insert(std::move(v));
+            }
+            push(Value(set));
+            break;
+        }
+
+        case OpCode::OP_SET_INSERT: {
+            // Stack: [..., set, value] → [..., set] with `value`
+            // inserted in place. Used by compileSetLiteralExpr's
+            // spread path so static elements get inserted directly
+            // into the accumulator instead of routing through
+            // OP_BUILD_SET-of-pending + OP_ADD-as-union, which
+            // allocated a temp set and copied the accumulator on
+            // every batch boundary.
+            Value v = pop();
+            Value setVal = pop();
+            if (!setVal.isSet()) { RUNTIME_ERR("OP_SET_INSERT: expected set on stack"); }
+            if (!isHashable(v)) { RUNTIME_ERR("Unhashable type used as set element"); }
+            setVal.asSet()->elements.insert(std::move(v));
+            push(setVal);
+            break;
+        }
+
+        case OpCode::OP_SET_SPREAD: {
+            // Stack: [..., set, iterable] → [..., set] with every
+            // element of `iterable` inserted into `set`. Used by
+            // compileSetLiteralExpr to lower `#{1, ...other}` without
+            // routing through a name-resolvable global (which a user
+            // could shadow with `let __toSet = ...` and silently
+            // change set-literal semantics under the VM). The set
+            // operand is freshly-allocated by the emitting code path
+            // (`OP_BUILD_SET 0` + a chain of `OP_SET_INSERT` /
+            // `OP_SET_SPREAD` instructions), so in-place mutation is
+            // safe — nothing else holds a reference.
+            Value iterable = pop();
+            Value setVal = pop();
+            if (!setVal.isSet()) { RUNTIME_ERR("OP_SET_SPREAD: expected set on stack"); }
+            auto& dest = setVal.asSet()->elements;
+            if (iterable.isSet()) {
+                for (auto& e : iterable.asSet()->elements) dest.insert(e);
+            } else if (iterable.isArray()) {
+                for (auto& e : iterable.asArray()->elements) {
+                    if (!isHashable(e))
+                        { RUNTIME_ERR("Spread into set: element must be hashable"); }
+                    dest.insert(e);
+                }
+            } else {
+                RUNTIME_ERR("Spread into set literal requires a set or array");
+            }
+            push(setVal);
             break;
         }
 

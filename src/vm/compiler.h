@@ -96,6 +96,7 @@ private:
     void compileLambdaExpr(const LambdaExpr* expr);
     void compileArrayLiteralExpr(const ArrayLiteralExpr* expr);
     void compileMapLiteralExpr(const MapLiteralExpr* expr);
+    void compileSetLiteralExpr(const SetLiteralExpr* expr);
     void compileIndexExpr(const IndexExpr* expr);
     void compileIndexAssignExpr(const IndexAssignExpr* expr);
     void compileDotExpr(const DotExpr* expr);

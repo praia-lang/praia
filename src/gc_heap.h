@@ -7,7 +7,7 @@
 
 class Environment; // forward declaration
 
-enum class GcType { Array, Tagged, Map, Instance, Class, Generator, Environment };
+enum class GcType { Array, Tagged, Map, Set, Instance, Class, Generator, Environment };
 
 class GcHeap {
 public:
@@ -16,6 +16,7 @@ public:
     // Track container objects (called by gcNew)
     void track(const std::shared_ptr<PraiaArray>& p);
     void track(const std::shared_ptr<PraiaMap>& p);
+    void track(const std::shared_ptr<PraiaSet>& p);
     void track(const std::shared_ptr<PraiaInstance>& p);
     void track(const std::shared_ptr<PraiaClass>& p);
     void track(const std::shared_ptr<PraiaGenerator>& p);
@@ -59,6 +60,7 @@ private:
     void markArray(PraiaArray* arr);
     void markTagged(PraiaTagged* tag);
     void markMap(PraiaMap* map);
+    void markSet(PraiaSet* set);
     void markInstance(PraiaInstance* inst);
     void markClass(PraiaClass* cls);
     void markGenerator(PraiaGenerator* gen);
