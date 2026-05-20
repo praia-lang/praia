@@ -82,4 +82,40 @@ testing.test("non-string throws", lam{ in
     testing.assertThrows(lam{ in loadNative(42) }, nil)
 })
 
+testing.test("ABI version: missing declaration is rejected", lam{ in
+    // Build a tiny plugin without PRAIA_DECLARE_ABI() and verify
+    // loadNative refuses it with a clear "rebuild" diagnostic.
+    // Compiles only if praia --include-path is wired up (set by
+    // make install / the release tarball), so skip otherwise.
+    let inc = sys.exec(["./praia", "--include-path"]).stdout.strip()
+    if (!fs.exists(path.join(inc, "praia_plugin.h"))) {
+        print("(skipping: --include-path not pointing at shipped headers)")
+        return
+    }
+    let dir = testing.tempDir(nil)
+    let src = path.join(dir, "noabi.cpp")
+    let out = path.join(dir, "noabi" + ext)
+    fs.write(src,
+        "#include \"praia_plugin.h\"\n" +
+        "extern \"C\" void praia_register(PraiaMap* m) {\n" +
+        "    m->entries[\"x\"] = Value(int64_t(1));\n" +
+        "}\n")
+    let ldFlags = ""
+    if (sys.platform == "darwin") { ldFlags = "-undefined dynamic_lookup" }
+    let cmd = "c++ -std=c++20 -Wno-deprecated-declarations " +
+              "-D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE " +
+              "-shared -fPIC -I" + inc + " " + ldFlags + " " +
+              "-o " + out + " " + src
+    let r = sys.exec(["sh", "-c", cmd])
+    if (r.exitCode != 0) {
+        print("(skipping: c++ compile failed: " + r.stderr.strip() + ")")
+        return
+    }
+    let err = nil
+    try { loadNative(out) } catch (e) { err = str(e) }
+    testing.assert(err != nil, "loadNative must reject the no-ABI plugin")
+    testing.assert(err.contains("ABI"),
+        "error message mentions ABI: " + str(err))
+})
+
 testing.done()

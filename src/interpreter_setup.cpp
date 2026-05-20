@@ -3,6 +3,7 @@
 #include "gc_heap.h"
 #include "grain_resolve.h"
 #include "interpreter.h"
+#include "praia_plugin.h"  // PRAIA_PLUGIN_ABI_VERSION for loadNative
 #include "unicode.h"
 #include "url.h"
 #include "vm/vm.h"
@@ -4120,6 +4121,38 @@ Interpreter::Interpreter() {
             if (!handle) {
                 std::string err = dlerror();
                 throw RuntimeError("loadNative(): failed to load '" + path + "': " + err, 0);
+            }
+
+            // ABI version check — refuse plugins whose
+            // PRAIA_DECLARE_ABI()-recorded version doesn't match this
+            // praia. Same dlclose-safety as below: no plugin code has
+            // run yet, so we can cleanly unload on mismatch. A missing
+            // praia_abi_version symbol means the plugin was built
+            // against pre-versioning headers (or forgot
+            // PRAIA_DECLARE_ABI()) — either way, refuse so we don't
+            // silently load something whose Value/PraiaMap layout we
+            // can't vouch for.
+            using AbiFn = int (*)();
+            dlerror();
+            auto abiFn = reinterpret_cast<AbiFn>(dlsym(handle, "praia_abi_version"));
+            if (!abiFn) {
+                dlclose(handle);
+                throw RuntimeError(
+                    "loadNative(): plugin '" + path +
+                    "' does not declare an ABI version. Add "
+                    "PRAIA_DECLARE_ABI(); at file scope and rebuild "
+                    "(this praia expects ABI version " +
+                    std::to_string(PRAIA_PLUGIN_ABI_VERSION) + ").", 0);
+            }
+            int pluginAbi = abiFn();
+            if (pluginAbi != PRAIA_PLUGIN_ABI_VERSION) {
+                dlclose(handle);
+                throw RuntimeError(
+                    "loadNative(): plugin '" + path +
+                    "' declares ABI version " + std::to_string(pluginAbi) +
+                    " but this praia expects version " +
+                    std::to_string(PRAIA_PLUGIN_ABI_VERSION) +
+                    ". Rebuild the plugin against the current headers.", 0);
             }
 
             // dlsym for the entry point. If this fails or returns null, no

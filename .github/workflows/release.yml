@@ -387,6 +387,7 @@ jobs:
           # Inline a minimal plugin that exercises Value + PraiaMap.
           cat > smoke_plugin.cpp <<'CPP_EOF'
           #include "praia_plugin.h"
+          PRAIA_DECLARE_ABI();
           extern "C" void praia_register(PraiaMap* module) {
               module->entries[Value(std::string("ok"))] = Value(std::string("yes"));
           }

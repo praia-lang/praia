@@ -1,13 +1,15 @@
 // Praia Native Plugin API
 //
 // Include this single header in your plugin source file.
-// Your plugin must export:
-//
-//   extern "C" void praia_register(PraiaMap* module);
+// Every plugin must:
+//   1. Declare its ABI version via PRAIA_DECLARE_ABI()
+//   2. Export `extern "C" void praia_register(PraiaMap* module)`
 //
 // Example:
 //
 //   #include "praia_plugin.h"
+//
+//   PRAIA_DECLARE_ABI();
 //
 //   extern "C" void praia_register(PraiaMap* module) {
 //       module->entries["double"] = Value(makeNative("mymod.double", 1,
@@ -21,6 +23,8 @@
 // Build:
 //   make plugin SRC=myplugin.cpp OUT=myplugin.dylib   # macOS
 //   make plugin SRC=myplugin.cpp OUT=myplugin.so      # Linux
+// (or use the `praia --include-path` manual snippet from PLUGINS.md
+//  if you're not building from a Praia source checkout)
 //
 // Use in Praia:
 //   let mymod = loadNative("./myplugin")  // extension auto-detected
@@ -32,6 +36,27 @@
 #include "gc_heap.h"        // gcNew<T>()
 #include "builtins.h"       // makeNative()
 #include "praia_runtime.h"  // praia::currentExecutor, praia::invokeExecutor
+
+// ── Plugin ABI version ─────────────────────────────────────────
+//
+// Bumped whenever the C++ surface this header re-exports changes
+// in a way that would silently misbehave for plugins built against
+// the old surface (Value variant layout, PraiaMap key type, the
+// praia_runtime.h ABI). Plugins MUST invoke PRAIA_DECLARE_ABI()
+// once at file scope so loadNative() can verify the plugin was
+// built against this praia version before invoking
+// praia_register. A mismatch (or a missing declaration) refuses
+// the load with a clear "rebuild required" message rather than
+// crashing later from a layout mismatch.
+//
+// History:
+//   1 — initial versioned ABI (Praia 0.4+)
+#define PRAIA_PLUGIN_ABI_VERSION 1
+
+#define PRAIA_DECLARE_ABI()                                             \
+    extern "C" int praia_abi_version() {                                \
+        return PRAIA_PLUGIN_ABI_VERSION;                                \
+    }
 
 namespace praia {
 

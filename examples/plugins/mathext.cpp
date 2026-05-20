@@ -1,6 +1,8 @@
 #include "praia_plugin.h"
 #include <cmath>
 
+PRAIA_DECLARE_ABI();
+
 extern "C" void praia_register(PraiaMap* module) {
     // mathext.gcd(a, b) — greatest common divisor
     module->entries["gcd"] = Value(makeNative("mathext.gcd", 2,

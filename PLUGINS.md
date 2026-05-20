@@ -9,6 +9,8 @@ Praia supports loading native C++ modules at runtime via `loadNative()`. This le
 ```cpp
 #include "praia_plugin.h"
 
+PRAIA_DECLARE_ABI();
+
 extern "C" void praia_register(PraiaMap* module) {
     module->entries["double"] = Value(makeNative("mymodule.double", 1,
         [](const std::vector<Value>& args) -> Value {
@@ -18,6 +20,8 @@ extern "C" void praia_register(PraiaMap* module) {
         }));
 }
 ```
+
+`PRAIA_DECLARE_ABI()` is required — see [ABI versioning](#abi-versioning) below.
 
 **2. Build it:**
 
@@ -32,6 +36,22 @@ make plugin SRC=mymodule.cpp OUT=mymodule.so      # Linux
 let mod = loadNative("./mymodule")
 print(mod.double(21))  // 42
 ```
+
+## ABI versioning
+
+The plugin API is versioned. Every plugin must invoke `PRAIA_DECLARE_ABI()` once at file scope:
+
+```cpp
+#include "praia_plugin.h"
+
+PRAIA_DECLARE_ABI();
+
+// ... your praia_register etc.
+```
+
+`loadNative()` checks the declared version against the running praia binary's compiled-in version (`PRAIA_PLUGIN_ABI_VERSION` in `praia_plugin.h`) and refuses plugins that don't match — with a clear "rebuild the plugin against the current headers" error rather than crashing later from a layout mismatch. Plugins that omit `PRAIA_DECLARE_ABI()` are refused for the same reason.
+
+When the ABI changes (e.g. `Value`'s variant layout or `PraiaMap`'s key type), the version bumps. Existing plugins continue working at the older praia release; rebuilding picks up the new version automatically.
 
 ## Plugin API
 
