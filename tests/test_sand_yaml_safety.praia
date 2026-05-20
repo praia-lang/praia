@@ -1,0 +1,202 @@
+use "testing"
+use "../sand/grains/manifest"
+use "../sand/grains/registry"
+
+// Regression: sand's grain.yaml / sand-lock.yaml writers used to do
+// unquoted string interpolation, so a description with a `:` or `#`,
+// or a URL with a leading `-`, could produce malformed YAML that the
+// permissive parser would then silently re-interpret as a *different*
+// document. registry.load also silently treated a corrupted (non-
+// parseable) lockfile as an empty registry — quietly dropping every
+// previously-installed grain.
+
+testing.test("manifest write quotes values with YAML metacharacters", lam{ in
+    let dir = testing.tempDir(nil)
+    let m = manifest.create("hazard")
+    // These are values that would have broken the old unquoted writer.
+    m.description = "A test: with a colon and #hash"
+    m.author = "true"  // would collide with the YAML keyword
+    m.bin = { tool: "bin/tool.praia" }
+    m.dependencies = { "weird-dep": "github.com/x/y" }
+
+    manifest.write(dir, m)
+    let r = manifest.read(dir)
+    testing.assertEqual(r.description, "A test: with a colon and #hash",
+        "colon + hash survive round-trip")
+    testing.assertEqual(r.author, "true",
+        "ambiguous boolean-like author survives as string")
+    testing.assertEqual(r.bin.tool, "bin/tool.praia", nil)
+    testing.assertEqual(r.dependencies["weird-dep"], "github.com/x/y", nil)
+})
+
+testing.test("manifest read throws on a comment-only grain.yaml", lam{ in
+    // Exercises the "parser returned nil but the file isn't empty"
+    // branch — used to silently produce a missing-manifest behavior
+    // downstream. Comment-only is the practical way to hit that
+    // branch (the YAML parser is otherwise extremely lenient).
+    let dir = testing.tempDir(nil)
+    fs.write(path.join(dir, "grain.yaml"),
+        "# I forgot to write the actual manifest\n")
+    testing.assertThrows(
+        lam{ in manifest.read(dir) },
+        "not valid YAML")
+})
+
+testing.test("manifest read accepts a literally empty grain.yaml", lam{ in
+    // Edge case: a file that exists but is empty. That's a degenerate
+    // manifest, not a parse failure. The old code returned nil and
+    // callers handled it; we preserve that.
+    let dir = testing.tempDir(nil)
+    fs.write(path.join(dir, "grain.yaml"), "")
+    testing.assertEqual(manifest.read(dir), nil,
+        "empty manifest reads as nil, not an error")
+})
+
+testing.test("registry write quotes commit/integrity/installed safely", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    let info = {
+        source: "github.com/x/y",
+        version: "v1.0",
+        url: "https://github.com/x/y.git",
+        commit: "abc123",
+        integrity: "sha256-deadbeef",
+        installed: "2026-05-20",
+    }
+    registry.add(lockPath, "thing", info)
+    let r = registry.get(lockPath, "thing")
+    testing.assertEqual(r.commit,    "abc123", nil)
+    testing.assertEqual(r.integrity, "sha256-deadbeef", nil)
+    testing.assertEqual(r.installed, "2026-05-20", nil)
+})
+
+testing.test("registry load throws on a non-parseable lockfile", lam{ in
+    // The whole point of the lockfile is reproducibility; quietly
+    // forgetting it on a parse failure would silently regenerate
+    // every entry from upstream (potentially picking up new commits
+    // for `version: latest` pins). Be loud about corruption.
+    //
+    // Comment-only is what we have to use here: the YAML parser is
+    // very permissive and coerces most "obviously broken" input into
+    // *some* document. Comments-with-no-content reproduce the
+    // exact code path the bug report named: file has non-whitespace
+    // content but parse returns nil.
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "# was a lockfile, got nuked by a merge\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "not valid YAML")
+})
+
+testing.test("registry load rejects a scalar top-level document", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "42\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "top-level must be a YAML mapping")
+})
+
+testing.test("registry load rejects a sequence top-level document", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "- a\n- b\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "top-level must be a YAML mapping")
+})
+
+testing.test("registry load rejects grains: <scalar>", lam{ in
+    // The classic shape error: someone hand-edits the lockfile and
+    // leaves `grains: nope` instead of `grains:` followed by entries.
+    // Pre-fix this loaded with `data.grains = "nope"` and exploded
+    // later as "string has no field 'source'".
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains: nope\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "'grains:' must be a YAML mapping")
+})
+
+testing.test("registry load rejects grains: false (not coerced to empty)", lam{ in
+    // Truthiness coercion used to swallow `grains: false` here:
+    // `!data.grains` was true, so the loader silently rewrote the
+    // value to `{}` and reported zero grains. After the fix the
+    // check is key-presence-then-type, so explicit non-nil scalars
+    // hit the type error.
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains: false\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "grains: false rejected, not silently treated as empty")
+})
+
+testing.test("registry load rejects grains: 0 (not coerced to empty)", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains: 0\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "grains: 0 rejected, not silently treated as empty")
+})
+
+testing.test("registry load accepts grains: with no value (explicit empty)", lam{ in
+    // YAML `grains:` followed by nothing parses as nil at that key.
+    // That's the canonical "I have a lockfile but no installed
+    // grains" shape — distinct from `grains: false`.
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains:\n")
+    let r = registry.load(lockPath)
+    testing.assertEqual(len(keys(r.grains)), 0,
+        "explicit-nil grains: normalizes to empty map")
+})
+
+testing.test("registry load rejects grains: <list>", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains:\n  - first\n  - second\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "'grains:' must be a YAML mapping")
+})
+
+testing.test("registry load rejects an entry that isn't a mapping", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains:\n  thing: scalar-not-map\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "entry 'thing' must be a YAML mapping")
+})
+
+testing.test("registry load accepts an empty lockfile as no-grains", lam{ in
+    // Bootstrap state — `make install` writes the dir but not the
+    // lockfile, so an empty file (or one that doesn't yet exist) is
+    // the expected steady-state of a fresh install.
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "")
+    let r = registry.load(lockPath)
+    testing.assertEqual(len(keys(r.grains)), 0,
+        "empty lockfile loads as empty registry")
+})
+
+testing.test("manifest survives a description containing only spaces", lam{ in
+    // Regression: YAML plain scalars strip leading/trailing whitespace
+    // on parse, so a value of " " (single space) round-tripped as
+    // nil. yaml.stringify now quotes any string with whitespace at
+    // either end so the parser keeps the bytes intact.
+    let dir = testing.tempDir(nil)
+    let m = manifest.create("spaces")
+    m.description = " "
+    manifest.write(dir, m)
+    let r = manifest.read(dir)
+    testing.assertEqual(r.description, " ",
+        "single-space description survives the YAML round-trip")
+})
+
+testing.done()

@@ -1,0 +1,59 @@
+use "testing"
+use "../sand/grains/integrity"
+
+// Regression: integrity.compute documented that it rejected symlinks
+// to keep out-of-tree content out of the integrity sum, but used
+// fs.stat (which follows symlinks). A `link → real-file` symlink got
+// reported as type="file" and hashed normally, defeating the guard.
+
+testing.test("compute rejects a symlink under the grain dir", lam{ in
+    let root = testing.tempDir(nil)
+    let grain = path.join(root, "grain")
+    let external = path.join(root, "external-secret.txt")
+    fs.mkdir(grain)
+    fs.write(path.join(grain, "main.praia"), "let v = 1\n")
+    fs.write(external, "should never be part of any integrity hash\n")
+    // sys.exec — fs doesn't have a symlink-create builtin, but `ln -s`
+    // is universally available on the platforms praia targets.
+    let r = sys.exec(["ln", "-s", external, path.join(grain, "leak.praia")])
+    testing.assertEqual(r.exitCode, 0, "ln -s setup: " + r.stderr)
+
+    testing.assertThrows(
+        lam{ in integrity.compute(grain) },
+        "symlink in grain dir is rejected (no transparent follow)")
+})
+
+testing.test("compute accepts a grain with only regular files and dirs", lam{ in
+    // Sanity check that the lstat switch didn't break the happy path.
+    let grain = testing.tempDir(nil)
+    fs.write(path.join(grain, "main.praia"), "let v = 1\n")
+    fs.mkdir(path.join(grain, "sub"))
+    fs.write(path.join(grain, "sub", "nested.praia"), "let n = 2\n")
+    let h = integrity.compute(grain)
+    testing.assert(h.startsWith("sha256-"),
+        "returns the expected prefixed hash: " + h)
+})
+
+testing.test("compute reports the same hash for the same content twice", lam{ in
+    let root = testing.tempDir(nil)
+    let a = path.join(root, "a")
+    let b = path.join(root, "b")
+    fs.mkdir(a)
+    fs.mkdir(b)
+    fs.write(path.join(a, "x.praia"), "let v = 1\n")
+    fs.write(path.join(b, "x.praia"), "let v = 1\n")
+    testing.assertEqual(integrity.compute(a), integrity.compute(b),
+        "identical content → identical hash")
+})
+
+testing.test("compute reports a different hash when file content changes", lam{ in
+    let grain = testing.tempDir(nil)
+    fs.write(path.join(grain, "main.praia"), "let v = 1\n")
+    let h1 = integrity.compute(grain)
+    fs.write(path.join(grain, "main.praia"), "let v = 2\n")
+    let h2 = integrity.compute(grain)
+    testing.assertNotEqual(h1, h2,
+        "content change must change the hash")
+})
+
+testing.done()

@@ -399,9 +399,17 @@ static std::string yamlStringifyRec(const Value& val, int depth,
     if (val.isNumber()) { std::ostringstream o; o << val.asNumber(); return o.str(); }
     if (val.isString()) {
         auto& s = val.asString();
+        // Leading/trailing whitespace (including a string consisting
+        // entirely of whitespace) must be quoted — YAML's plain-scalar
+        // parser strips surrounding whitespace, so a value like " " or
+        // "  hi  " would lose its bookends on re-read.
+        bool boundaryWS = !s.empty() &&
+            (s.front() == ' ' || s.front() == '\t' ||
+             s.back()  == ' ' || s.back()  == '\t');
         bool needsQuote = s.empty() || s.find(": ") != std::string::npos ||
                           s.find('#') != std::string::npos || s.find('\n') != std::string::npos ||
-                          s == "true" || s == "false" || s == "null";
+                          s == "true" || s == "false" || s == "null" ||
+                          boundaryWS;
         if (needsQuote) {
             std::string r = "\"";
             for (char c : s) {
