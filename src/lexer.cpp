@@ -353,7 +353,7 @@ void Lexer::string(char quote) {
                 if (ch == '\\' && (next == '"' || next == '\'')) {
                     error("Don't escape quotes inside %{...} — the interpolation "
                           "is brace-balanced, so quotes work unescaped. "
-                          "Write `\"text\"` as just `\"text\"` (drop the backslashes).");
+                          "Write `\\\"text\\\"` as just `\"text\"` (drop the backslashes).");
                     return;
                 }
                 if (ch == '"' || ch == '\'') { stringQuote = ch; expr += advance(); continue; }
@@ -536,7 +536,7 @@ void Lexer::tripleString(char quote) {
                 if (ch == '\\' && (next == '"' || next == '\'')) {
                     error("Don't escape quotes inside %{...} — the interpolation "
                           "is brace-balanced, so quotes work unescaped. "
-                          "Write `\"text\"` as just `\"text\"` (drop the backslashes).");
+                          "Write `\\\"text\\\"` as just `\"text\"` (drop the backslashes).");
                     return;
                 }
                 if (ch == '"' || ch == '\'') { stringQuote = ch; expr += advance(); continue; }

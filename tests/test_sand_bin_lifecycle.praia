@@ -237,8 +237,12 @@ testing.test("sand remove aborts on `n` and leaves everything in place", lam{ in
         fs.exists(path.join(sandHome, ".praia", "ext_grains", "depB2")),
         "depB2 survived")
 
-    // Cleanup for subsequent tests.
-    runSand(["remove", "-g", "-y", "depB2"])
+    // Cleanup for subsequent tests — assert success so a silent
+    // cleanup failure can't leave depA2/depB2 around to corrupt later
+    // assertions that share `sandHome`.
+    let cleanup = runSand(["remove", "-g", "-y", "depB2"])
+    testing.assertEqual(cleanup.exitCode, 0,
+                         "cleanup remove succeeded: " + cleanup.stderr)
 })
 
 testing.test("update -g rewrites wrappers and cleans up renamed bins", lam{ in
