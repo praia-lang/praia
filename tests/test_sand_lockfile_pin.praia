@@ -1,0 +1,155 @@
+use "testing"
+
+// Regression: sand-lock.yaml used to only record `source`, `version`,
+// `url`, and `installed`. A grain pinned with `version: main` or any
+// moving tag would silently move forward on the next `sand install`,
+// because there was nothing in the lockfile that named a specific
+// revision. The fix introduces:
+//   • `commit:` — full SHA captured at install time
+//   • `integrity:` — content hash of the installed tree
+// Restore checks out the pinned SHA and verifies the integrity match
+// before reporting success.
+
+let _gitProbe = sys.exec(["which", "git"])
+if (_gitProbe.exitCode != 0) {
+    print("(skipping: git not available)")
+    testing.done()
+    sys.exit(0)
+}
+
+let praiaBin = path.join(sys.cwd(), "praia")
+let sandMain = path.join(sys.cwd(), "sand", "main.praia")
+let _mk = lam{ in
+    return sys.exec(["mktemp", "-d"]).stdout.strip()
+}
+let sandHome = _mk()
+let fixtureRoot = _mk()
+
+func runSand(args) {
+    let cmd = ["env", "HOME=" + sandHome, praiaBin, sandMain]
+    for (a in args) { cmd.push(a) }
+    return sys.exec(cmd)
+}
+
+// Build a git-tracked grain with the given file contents. Returns
+// (grainDir, headSha).
+func makeGrain(name, mainBody) {
+    let grain = path.join(fixtureRoot, name)
+    if (fs.exists(grain)) { fs.remove(grain) }
+    fs.mkdir(grain)
+    fs.write(path.join(grain, "main.praia"), mainBody)
+    fs.write(path.join(grain, "grain.yaml"),
+        "name: %{name}\nversion: 0.1.0\nmain: main.praia\n")
+    sys.exec(["git", "init", "-q", grain])
+    sys.exec(["git", "-C", grain, "add", "-A"])
+    sys.exec(["git", "-C", grain,
+              "-c", "user.email=t@t", "-c", "user.name=t",
+              "commit", "-q", "-m", "init"])
+    let sha = sys.exec(["git", "-C", grain, "rev-parse", "HEAD"]).stdout.strip()
+    return [grain, sha]
+}
+
+// Append a new commit to an existing grain so the branch tip moves.
+func bumpGrain(grain, newBody) {
+    fs.write(path.join(grain, "main.praia"), newBody)
+    sys.exec(["git", "-C", grain, "add", "-A"])
+    sys.exec(["git", "-C", grain,
+              "-c", "user.email=t@t", "-c", "user.name=t",
+              "commit", "-q", "-m", "bump"])
+    return sys.exec(["git", "-C", grain, "rev-parse", "HEAD"]).stdout.strip()
+}
+
+testing.test("install records commit SHA and integrity in the lockfile", lam{ in
+    let [grain, sha] = makeGrain("pinme", "let v = 1\nexport { v }\n")
+
+    let r = runSand(["install", "-g", "file://" + grain])
+    testing.assertEqual(r.exitCode, 0, "install: " + r.stderr)
+
+    let lock = fs.read(path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml"))
+    testing.assert(lock.contains("commit: %{sha}"),
+        "lockfile records the full HEAD SHA: " + lock)
+    testing.assert(lock.contains("integrity: sha256-"),
+        "lockfile records an sha256 integrity hash: " + lock)
+
+    let cleanup = runSand(["remove", "-g", "-y", "pinme"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
+testing.test("restore from lockfile re-installs the pinned commit, not the branch tip", lam{ in
+    // Install at v1, capture lock contents.
+    let [grain, sha1] = makeGrain("driftless", "let v = 1\nexport { v }\n")
+    let r1 = runSand(["install", "-g", "file://" + grain])
+    testing.assertEqual(r1.exitCode, 0, "install: " + r1.stderr)
+
+    let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
+    let lockBefore = fs.read(lockPath)
+    testing.assert(lockBefore.contains("commit: %{sha1}"),
+        "lockfile pins v1's SHA")
+
+    // Source repo moves forward. Without a SHA pin, a restore would
+    // silently install the new revision.
+    let sha2 = bumpGrain(grain, "let v = 2\nexport { v }\n")
+    testing.assert(sha1 != sha2, "bump produced a new commit")
+
+    // Tear down the local install — but keep the lockfile, which is
+    // what `sand install` (no args) restores from.
+    let grainDir = path.join(sandHome, ".praia", "ext_grains", "driftless")
+    fs.remove(grainDir)
+
+    let r2 = runSand(["install", "-g"])
+    testing.assertEqual(r2.exitCode, 0, "restore: " + r2.stderr)
+
+    // Content must be v1 (pinned), not v2 (current branch tip).
+    let restoredMain = fs.read(path.join(grainDir, "main.praia"))
+    testing.assertEqual(restoredMain, "let v = 1\nexport { v }\n",
+        "restore brought back the pinned content")
+
+    // And the lockfile entry — including commit and integrity — must
+    // be unchanged across the restore. The pin is what made the
+    // restore deterministic; a successful restore that mutated the
+    // lock would defeat the whole point.
+    let lockAfter = fs.read(lockPath)
+    testing.assertEqual(lockAfter, lockBefore,
+        "lockfile is byte-identical after a clean restore")
+
+    let cleanup = runSand(["remove", "-g", "-y", "driftless"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
+testing.test("restore aborts when integrity does not match", lam{ in
+    let [grain, sha] = makeGrain("verifyme", "let v = 1\nexport { v }\n")
+    let r = runSand(["install", "-g", "file://" + grain])
+    testing.assertEqual(r.exitCode, 0, "install: " + r.stderr)
+
+    // Corrupt the recorded integrity hash. The pinned SHA still
+    // points to valid content, so the only thing protecting us from
+    // accepting whatever the repo serves up is the post-install
+    // integrity verify.
+    let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
+    let lock = fs.read(lockPath)
+    let mangled = lock.replace("integrity: sha256-",
+                                "integrity: sha256-deadbeef")
+    testing.assert(mangled != lock, "managed to corrupt integrity line")
+    fs.write(lockPath, mangled)
+
+    let grainDir = path.join(sandHome, ".praia", "ext_grains", "verifyme")
+    fs.remove(grainDir)
+
+    let r2 = runSand(["install", "-g"])
+    testing.assert(r2.exitCode != 0,
+        "restore must fail when integrity check fails (exit=" + str(r2.exitCode) + ")")
+    testing.assert((r2.stdout + r2.stderr).contains("integrity"),
+        "error mentions integrity: " + r2.stdout + r2.stderr)
+
+    // Roll the lockfile back so subsequent tests have a clean state.
+    fs.write(lockPath, lock)
+    // Clean up the (potentially partially-installed) directory.
+    if (fs.exists(grainDir)) { fs.remove(grainDir) }
+    let cleanup = runSand(["remove", "-g", "-y", "verifyme"])
+    // Don't assert here — depending on where the integrity check
+    // fired, the lockfile entry may or may not still exist. We just
+    // want sandHome clean for the next test.
+})
+
+sys.exec(["rm", "-rf", sandHome, fixtureRoot])
+testing.done()
