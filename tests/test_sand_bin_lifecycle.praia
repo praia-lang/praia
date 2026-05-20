@@ -151,6 +151,100 @@ testing.test("install rolls back wrappers when the grain fails to register", lam
         "grain dir rolled back")
 })
 
+testing.test("sand remove warns and cascade-removes dependents with -y", lam{ in
+    // Regression: `sand remove depB` used to silently orphan depA
+    // (which still imported `use "depB"`) — the user discovered the
+    // broken state at the next program run. Now sand finds the
+    // dependents (transitively), warns, and either prompts or
+    // honors --yes to cascade-remove them.
+    let depB = path.join(fixtureRoot, "depB")
+    let depA = path.join(fixtureRoot, "depA")
+    if (fs.exists(depB)) { fs.remove(depB) }
+    if (fs.exists(depA)) { fs.remove(depA) }
+    fs.mkdir(depB)
+    fs.write(path.join(depB, "main.praia"), "print(\"B\")\n")
+    fs.write(path.join(depB, "grain.yaml"),
+        "name: depB\nversion: 0.1.0\nmain: main.praia\n")
+    sys.exec(["sh", "-c", "cd \"$1\" && git init -q && git add -A && " +
+              "git -c user.email=t@t -c user.name=t commit -q -m init",
+              "sh", depB])
+
+    fs.mkdir(depA)
+    fs.write(path.join(depA, "main.praia"), "use \"depB\"\n")
+    fs.write(path.join(depA, "grain.yaml"),
+        "name: depA\nversion: 0.1.0\nmain: main.praia\n" +
+        "dependencies:\n  depB: file://" + depB + "\n")
+    sys.exec(["sh", "-c", "cd \"$1\" && git init -q && git add -A && " +
+              "git -c user.email=t@t -c user.name=t commit -q -m init",
+              "sh", depA])
+
+    // Install depA — pulls depB transitively.
+    let r = runSand(["install", "-g", "file://" + depA])
+    testing.assertEqual(r.exitCode, 0, "install: " + r.stderr)
+
+    // -y bypasses the prompt and cascades the removal.
+    let rm = runSand(["remove", "-g", "-y", "depB"])
+    testing.assertEqual(rm.exitCode, 0, "remove -y: " + rm.stderr)
+    testing.assert(rm.stdout.contains("will also remove these dependents: depA"),
+                    "warned about dependent: " + rm.stdout)
+    testing.assert(rm.stdout.contains("Removed depA") &&
+                    rm.stdout.contains("Removed depB"),
+                    "both grains removed: " + rm.stdout)
+    testing.assert(
+        !fs.exists(path.join(sandHome, ".praia", "ext_grains", "depA")),
+        "depA dir gone")
+    testing.assert(
+        !fs.exists(path.join(sandHome, ".praia", "ext_grains", "depB")),
+        "depB dir gone")
+})
+
+testing.test("sand remove aborts on `n` and leaves everything in place", lam{ in
+    let depB = path.join(fixtureRoot, "depB2")
+    let depA = path.join(fixtureRoot, "depA2")
+    if (fs.exists(depB)) { fs.remove(depB) }
+    if (fs.exists(depA)) { fs.remove(depA) }
+    fs.mkdir(depB)
+    fs.write(path.join(depB, "main.praia"), "print(\"B\")\n")
+    fs.write(path.join(depB, "grain.yaml"),
+        "name: depB2\nversion: 0.1.0\nmain: main.praia\n")
+    sys.exec(["sh", "-c", "cd \"$1\" && git init -q && git add -A && " +
+              "git -c user.email=t@t -c user.name=t commit -q -m init",
+              "sh", depB])
+    fs.mkdir(depA)
+    fs.write(path.join(depA, "main.praia"), "use \"depB2\"\n")
+    fs.write(path.join(depA, "grain.yaml"),
+        "name: depA2\nversion: 0.1.0\nmain: main.praia\n" +
+        "dependencies:\n  depB2: file://" + depB + "\n")
+    sys.exec(["sh", "-c", "cd \"$1\" && git init -q && git add -A && " +
+              "git -c user.email=t@t -c user.name=t commit -q -m init",
+              "sh", depA])
+
+    let r = runSand(["install", "-g", "file://" + depA])
+    testing.assertEqual(r.exitCode, 0, "install: " + r.stderr)
+
+    // Pipe "n\n" through stdin to answer the prompt with No.
+    let rm = sys.exec(["sh", "-c",
+        "echo n | env HOME=\"$1\" \"$2\" \"$3\" remove -g depB2",
+        "sh", sandHome, praiaBin, sandMain])
+    testing.assertEqual(rm.exitCode, 0, "no-confirm exits cleanly")
+    testing.assert(rm.stdout.contains("Aborted"),
+                    "abort message: " + rm.stdout)
+    // Both still installed.
+    testing.assert(
+        fs.exists(path.join(sandHome, ".praia", "ext_grains", "depA2")),
+        "depA2 survived")
+    testing.assert(
+        fs.exists(path.join(sandHome, ".praia", "ext_grains", "depB2")),
+        "depB2 survived")
+
+    // Cleanup for subsequent tests — assert success so a silent
+    // cleanup failure can't leave depA2/depB2 around to corrupt later
+    // assertions that share `sandHome`.
+    let cleanup = runSand(["remove", "-g", "-y", "depB2"])
+    testing.assertEqual(cleanup.exitCode, 0,
+                         "cleanup remove succeeded: " + cleanup.stderr)
+})
+
 testing.test("update -g rewrites wrappers and cleans up renamed bins", lam{ in
     // v1: bin: { foo: bin/foo.praia }
     let grain = makeFixture("renamer", {foo: "bin/foo.praia"})
