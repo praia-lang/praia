@@ -625,6 +625,22 @@ void Interpreter::execute(const Stmt* stmt) {
                     catch (const ContinueSignal&) {}
                 }
             } catch (const BreakSignal&) {}
+        } else if (iterable.isSet()) {
+            // Snapshot elements to protect against mutation during
+            // iteration (set elements are immutable values; the
+            // snapshot is just defensive against .add/.remove inside
+            // the loop body). Order is unspecified — same as map.
+            std::vector<Value> snapshot(
+                iterable.asSet()->elements.begin(),
+                iterable.asSet()->elements.end());
+            try {
+                for (const auto& elem : snapshot) {
+                    auto iterEnv = gcNew<Environment>(env);
+                    defineLoopVar(iterEnv, elem);
+                    try { executeBlock(bodyBlock, iterEnv); }
+                    catch (const ContinueSignal&) {}
+                }
+            } catch (const BreakSignal&) {}
         } else if (iterable.isString()) {
             try {
 #ifdef HAVE_UTF8PROC
@@ -1034,9 +1050,16 @@ Value Interpreter::evaluate(const Expr* expr) {
                 for (auto& [k, v] : right.asMap()->entries) result->entries[k] = v;
                 return Value(result);
             }
+            // Set + set = union (parallels array concat and map merge).
+            if (left.isSet() && right.isSet()) {
+                auto result = gcNew<PraiaSet>();
+                result->elements = left.asSet()->elements;
+                for (auto& e : right.asSet()->elements) result->elements.insert(e);
+                return Value(result);
+            }
             if (left.isString() || right.isString())
                 return Value(left.toString() + right.toString());
-            throw RuntimeError("Operands of '+' must be numbers, strings, or arrays", e->line, e->column);
+            throw RuntimeError("Operands of '+' must be numbers, strings, arrays, maps, or sets", e->line, e->column);
         case TokenType::MINUS:
             if (left.isInt() && right.isInt()) {
                 int64_t result;
@@ -1233,6 +1256,42 @@ Value Interpreter::evaluate(const Expr* expr) {
             }
         }
         return Value(arr);
+    }
+
+    // ── Set literal ──
+    //
+    // #{a, b, c} → PraiaSet with each element evaluated and inserted
+    // via the hash-set's unique-insert semantics (so `#{1, 1, 2}` is
+    // `#{1, 2}`). Each element must be hashable; nested sets/maps/
+    // arrays are rejected via the same isHashable predicate that
+    // gates map keys. Spread (`...other`) accepts either a set
+    // (insert each element) or an array (insert each element).
+    case ExprType::SetLiteral: {
+        auto* e = static_cast<const SetLiteralExpr*>(expr);
+        auto set = gcNew<PraiaSet>();
+        for (const auto& elem : e->elements) {
+            if (elem->type == ExprType::Spread) {
+                auto* spread = static_cast<const SpreadExpr*>(elem.get());
+                Value val = evaluate(spread->expr.get());
+                if (val.isSet()) {
+                    for (auto& item : val.asSet()->elements) set->elements.insert(item);
+                } else if (val.isArray()) {
+                    for (auto& item : val.asArray()->elements) {
+                        if (!isHashable(item))
+                            throw RuntimeError("Set element must be a primitive (nil, bool, number, string)", spread->line);
+                        set->elements.insert(item);
+                    }
+                } else {
+                    throw RuntimeError("Spread into set requires a set or array", spread->line);
+                }
+            } else {
+                Value v = evaluate(elem.get());
+                if (!isHashable(v))
+                    throw RuntimeError("Set element must be a primitive (nil, bool, number, string)", elem->line);
+                set->elements.insert(std::move(v));
+            }
+        }
+        return Value(set);
     }
 
     // ── Ternary ──
@@ -1866,6 +1925,8 @@ Value Interpreter::evaluate(const Expr* expr) {
             return getStringMethod(obj.asString(), e->field, e->line);
         if (obj.isArray())
             return getArrayMethod(obj.asArray(), e->field, e->line, this);
+        if (obj.isSet())
+            return getSetMethod(obj.asSet(), e->field, e->line);
 
         throw RuntimeError("Cannot access field '" + e->field + "' on this type", e->line, e->column);
     }

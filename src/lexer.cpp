@@ -167,6 +167,14 @@ void Lexer::scanToken() {
 
         case '@': addToken(TokenType::AT); break;
 
+        // `#{` opens a set literal (#{1, 2, 3}). A bare `#` is not a
+        // valid token — fall through to the default error so typos
+        // like `# comment` (Praia uses `//`) don't silently parse.
+        case '#':
+            if (match('{')) { addToken(TokenType::HASH_LBRACE); break; }
+            error("Unexpected character '#' (did you mean '#{' for a set literal, or '//' for a comment?)");
+            break;
+
         default:
             if (std::isdigit(c)) {
                 number();

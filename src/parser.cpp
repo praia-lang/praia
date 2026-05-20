@@ -1317,6 +1317,36 @@ ExprPtr Parser::primary() {
         return arr;
     }
 
+    // Set literal: #{1, 2, 3}. The HASH_LBRACE token is emitted by
+    // the lexer for the literal sequence `#{`, so we know the opener
+    // already; just parse a comma-separated list of expressions
+    // (spread allowed for `#{1, ...other}`) terminated by `}`. Empty
+    // `#{}` is the empty set. Trailing comma is allowed for the same
+    // ergonomic reasons as arrays/maps.
+    if (match(TokenType::HASH_LBRACE)) {
+        int ln = previous().line;
+        int lnCol = previous().column;
+        auto set = std::make_unique<SetLiteralExpr>();
+        set->line = ln;
+        set->column = lnCol;
+        if (!check(TokenType::RBRACE)) {
+            do {
+                if (check(TokenType::RBRACE)) break;
+                if (match(TokenType::SPREAD)) {
+                    auto spread = std::make_unique<SpreadExpr>();
+                    spread->line = previous().line;
+                    spread->column = previous().column;
+                    spread->expr = expression();
+                    set->elements.push_back(std::move(spread));
+                } else {
+                    set->elements.push_back(expression());
+                }
+            } while (match(TokenType::COMMA));
+        }
+        consume(TokenType::RBRACE, "Expected '}' after set elements");
+        return set;
+    }
+
     if (match(TokenType::LAM)) {
         int ln = previous().line;
         int lnCol = previous().column;

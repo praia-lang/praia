@@ -1,0 +1,257 @@
+use "testing"
+
+// `#{...}` set literals + the set value type. Runs on both engines
+// (VM and tree-walker) so any divergence in OP_BUILD_SET vs the
+// interpreter's SetLiteral path surfaces here.
+
+// ── Literal parsing ────────────────────────────────────────────
+
+testing.test("set literal: dedup on construction", lam{ in
+    let s = #{1, 2, 3, 2, 1}
+    testing.assertEqual(len(s), 3, "duplicate inserts collapse")
+    testing.assert(s.has(1), nil)
+    testing.assert(s.has(2), nil)
+    testing.assert(s.has(3), nil)
+})
+
+testing.test("empty set literal", lam{ in
+    let s = #{}
+    testing.assertEqual(len(s), 0, nil)
+    testing.assertEqual(type(s), "set", "type() reports 'set'")
+})
+
+testing.test("set literal: trailing comma allowed", lam{ in
+    let s = #{1, 2, 3,}
+    testing.assertEqual(len(s), 3, nil)
+})
+
+testing.test("set literal: mixed primitive types", lam{ in
+    let s = #{1, "two", true, nil, 3.14}
+    testing.assertEqual(len(s), 5, nil)
+    testing.assert(s.has("two"), nil)
+    testing.assert(s.has(true), nil)
+    testing.assert(s.has(nil), nil)
+})
+
+testing.test("set literal: expressions are evaluated", lam{ in
+    let x = 5
+    let s = #{x, x + 1, x * 2}
+    testing.assertEqual(len(s), 3, nil)
+    testing.assert(s.has(5), nil)
+    testing.assert(s.has(6), nil)
+    testing.assert(s.has(10), nil)
+})
+
+testing.test("set literal: unhashable element rejected", lam{ in
+    testing.assertThrows(
+        lam{ in #{[1, 2]} },
+        "arrays aren't hashable, so they can't be set elements")
+})
+
+// ── Spread in set literals ────────────────────────────────────
+//
+// Regression: the VM compiler used to throw at compile time on any
+// spread inside #{...}, which propagated as an uncaught RuntimeError
+// and aborted the process. Spread is now lowered to an OP_BUILD_SET 0
+// accumulator followed by per-element OP_SET_INSERT / OP_SET_SPREAD
+// instructions — one allocation total, every operation mutates the
+// accumulator in place.
+
+testing.test("set literal: spread another set", lam{ in
+    let a = #{1, 2}
+    let s = #{0, ...a}
+    testing.assertEqual(s, #{0, 1, 2}, nil)
+})
+
+testing.test("set literal: spread an array", lam{ in
+    let s = #{0, ...[1, 2, 3]}
+    testing.assertEqual(s, #{0, 1, 2, 3}, nil)
+})
+
+testing.test("set literal: multiple spreads interleaved with literals", lam{ in
+    let a = #{1, 2}
+    let b = #{4, 5}
+    testing.assertEqual(#{0, ...a, 3, ...b}, #{0, 1, 2, 3, 4, 5}, nil)
+})
+
+testing.test("set literal: pure spread (no static elements)", lam{ in
+    let a = #{1, 2}
+    testing.assertEqual(#{...a}, a, "spread of set roundtrips")
+})
+
+testing.test("set literal: spread dedups against static elements", lam{ in
+    // 1 is in both the spread and the literal — set semantics dedup.
+    testing.assertEqual(#{1, ...#{1, 2}}, #{1, 2}, nil)
+})
+
+testing.test("set + set = union", lam{ in
+    testing.assertEqual(#{1, 2} + #{3, 4}, #{1, 2, 3, 4}, nil)
+    testing.assertEqual(#{1, 2} + #{2, 3}, #{1, 2, 3}, "overlapping deduped")
+    testing.assertEqual(#{} + #{1}, #{1}, nil)
+})
+
+testing.test("spread accumulator mutates in place across interleaved batches", lam{ in
+    // Regression: the VM lowering used to flush each batch of static
+    // elements via OP_BUILD_SET + OP_ADD (a fresh union), which
+    // copied the accumulator at every batch boundary. The new
+    // lowering uses OP_SET_INSERT / OP_SET_SPREAD against a single
+    // accumulator allocated by OP_BUILD_SET 0 — verify a heavily
+    // interleaved literal still produces the right set without any
+    // missing elements or duplicates leaking through.
+    let a = #{10, 11}
+    let b = #{20, 21}
+    let c = #{30, 31}
+    let r = #{0, ...a, 1, ...b, 2, ...c, 3}
+    testing.assertEqual(r, #{0, 1, 2, 3, 10, 11, 20, 21, 30, 31}, nil)
+})
+
+testing.test("set spread doesn't go through a name-resolvable global", lam{ in
+    // Regression: the VM used to lower `#{...other}` to
+    // `OP_GET_GLOBAL __toSet + OP_CALL + OP_ADD`. A user defining
+    // `let __toSet = ...` could then silently change set-literal
+    // semantics on VM while tree-walker stayed correct. The fix is
+    // a dedicated OP_SET_SPREAD opcode that operates directly on
+    // the stack — no name lookup involved.
+    let __toSet = lam{ x in #{9999} }
+    testing.assertEqual(#{...#{1, 2}}, #{1, 2},
+                        "spread ignores user-defined __toSet")
+    testing.assertEqual(#{0, ...[1, 2]}, #{0, 1, 2},
+                        "array spread also ignores user-defined __toSet")
+})
+
+// ── Equality ──────────────────────────────────────────────────
+
+testing.test("set equality: order-independent", lam{ in
+    testing.assertEqual(#{1, 2, 3}, #{3, 2, 1}, "same elements, any order")
+    testing.assertEqual(#{}, #{}, "empty sets are equal")
+})
+
+testing.test("set inequality: different elements", lam{ in
+    testing.assertNotEqual(#{1, 2}, #{1, 2, 3}, nil)
+    testing.assertNotEqual(#{1, 2}, #{1, 3}, nil)
+})
+
+testing.test("set vs map are not equal", lam{ in
+    testing.assertNotEqual(#{1, 2}, {[1]: true, [2]: true}, "different types")
+})
+
+// ── Mutating methods ──────────────────────────────────────────
+
+testing.test("set.add returns true for new, false for existing", lam{ in
+    let s = #{1, 2}
+    testing.assertEqual(s.add(3), true, "new element returns true")
+    testing.assertEqual(s.add(1), false, "existing element returns false")
+    testing.assertEqual(len(s), 3, nil)
+})
+
+testing.test("set.remove returns true if present, false otherwise", lam{ in
+    let s = #{1, 2, 3}
+    testing.assertEqual(s.remove(2), true, nil)
+    testing.assertEqual(s.remove(99), false, "absent returns false")
+    testing.assertEqual(len(s), 2, nil)
+    testing.assert(!s.has(2), nil)
+})
+
+testing.test("set.clear empties the set", lam{ in
+    let s = #{1, 2, 3}
+    s.clear()
+    testing.assertEqual(len(s), 0, nil)
+    testing.assert(!s.has(1), nil)
+})
+
+testing.test("set.add rejects unhashable", lam{ in
+    let s = #{}
+    testing.assertThrows(lam{ in s.add([1, 2]) }, "array unhashable")
+})
+
+// ── Read methods ──────────────────────────────────────────────
+
+testing.test("set.size matches len()", lam{ in
+    let s = #{1, 2, 3, 4}
+    testing.assertEqual(s.size(), len(s), nil)
+})
+
+testing.test("set.toArray returns all elements", lam{ in
+    let s = #{1, 2, 3}
+    let arr = s.toArray()
+    testing.assertEqual(type(arr), "array", nil)
+    testing.assertEqual(len(arr), 3, nil)
+    // Order is unspecified — sort for deterministic comparison.
+    let sorted = arr.sort()
+    testing.assertEqual(sorted, [1, 2, 3], nil)
+})
+
+testing.test("set.clone produces an independent copy", lam{ in
+    let s = #{1, 2, 3}
+    let c = s.clone()
+    c.add(99)
+    testing.assert(!s.has(99), "original not mutated")
+    testing.assertEqual(len(s), 3, nil)
+    testing.assertEqual(len(c), 4, nil)
+})
+
+// ── Set algebra ───────────────────────────────────────────────
+
+testing.test("set.union", lam{ in
+    let a = #{1, 2, 3}
+    let b = #{3, 4, 5}
+    testing.assertEqual(a.union(b), #{1, 2, 3, 4, 5}, nil)
+    // Both operands unmodified.
+    testing.assertEqual(a, #{1, 2, 3}, nil)
+    testing.assertEqual(b, #{3, 4, 5}, nil)
+})
+
+testing.test("set.intersection", lam{ in
+    let a = #{1, 2, 3}
+    let b = #{2, 3, 4}
+    testing.assertEqual(a.intersection(b), #{2, 3}, nil)
+    testing.assertEqual(#{1, 2}.intersection(#{3, 4}), #{}, "disjoint sets give empty")
+})
+
+testing.test("set.difference", lam{ in
+    let a = #{1, 2, 3}
+    let b = #{2, 3, 4}
+    testing.assertEqual(a.difference(b), #{1}, nil)
+    testing.assertEqual(b.difference(a), #{4}, "not commutative")
+})
+
+testing.test("set.isSubset", lam{ in
+    testing.assertEqual(#{1, 2}.isSubset(#{1, 2, 3}), true, nil)
+    testing.assertEqual(#{1, 2, 3}.isSubset(#{1, 2}), false, nil)
+    testing.assertEqual(#{}.isSubset(#{1, 2, 3}), true, "empty is subset of everything")
+    testing.assertEqual(#{1, 2}.isSubset(#{1, 2}), true, "set is subset of itself")
+})
+
+testing.test("set.union rejects non-set arg", lam{ in
+    testing.assertThrows(lam{ in #{1}.union([1, 2]) }, "argument must be a set")
+})
+
+// ── for-in iteration ──────────────────────────────────────────
+
+testing.test("for-in over a set visits each element exactly once", lam{ in
+    let s = #{10, 20, 30}
+    let seen = []
+    for (x in s) { seen.push(x) }
+    testing.assertEqual(len(seen), 3, nil)
+    // Order is unspecified — sort for comparison.
+    testing.assertEqual(seen.sort(), [10, 20, 30], nil)
+})
+
+testing.test("for-in over empty set is a no-op", lam{ in
+    let count = 0
+    for (x in #{}) { count = count + 1 }
+    testing.assertEqual(count, 0, nil)
+})
+
+// ── toString rendering ───────────────────────────────────────
+
+testing.test("set.toString uses #{...} syntax", lam{ in
+    let s = #{1}
+    testing.assertEqual(s.toString(), "#{1}", nil)
+})
+
+testing.test("empty set renders as #{}", lam{ in
+    testing.assertEqual(#{}.toString(), "#{}", nil)
+})
+
+testing.done()

@@ -21,6 +21,7 @@ void Compiler::compileExpr(const Expr* expr) {
     case ExprType::Lambda:    compileLambdaExpr(static_cast<const LambdaExpr*>(expr)); break;
     case ExprType::ArrayLiteral: compileArrayLiteralExpr(static_cast<const ArrayLiteralExpr*>(expr)); break;
     case ExprType::MapLiteral:compileMapLiteralExpr(static_cast<const MapLiteralExpr*>(expr)); break;
+    case ExprType::SetLiteral: compileSetLiteralExpr(static_cast<const SetLiteralExpr*>(expr)); break;
     case ExprType::Index:     compileIndexExpr(static_cast<const IndexExpr*>(expr)); break;
     case ExprType::IndexAssign:compileIndexAssignExpr(static_cast<const IndexAssignExpr*>(expr)); break;
     case ExprType::Dot:       compileDotExpr(static_cast<const DotExpr*>(expr)); break;
@@ -462,6 +463,48 @@ void Compiler::compileArrayLiteralExpr(const ArrayLiteralExpr* expr) {
         emit(OpCode::OP_BUILD_ARRAY, expr->line, expr->column);
         emitU16(static_cast<uint16_t>(pending), expr->line, expr->column);
         emit(OpCode::OP_ADD, expr->line, expr->column);
+    }
+}
+
+void Compiler::compileSetLiteralExpr(const SetLiteralExpr* expr) {
+    // Two patterns:
+    //
+    // No spreads (the common case): emit OP_BUILD_SET with the exact
+    // count. One allocation, N inserts in the VM handler.
+    //
+    // With spreads: emit a single OP_BUILD_SET 0 accumulator, then
+    // for each element either OP_SET_INSERT (single value, in place)
+    // or OP_SET_SPREAD (iterable, in place). One allocation total,
+    // every operation mutates the accumulator. The earlier version
+    // batched literals via OP_BUILD_SET-of-pending + OP_ADD-as-union,
+    // which allocated a temp set and copied the accumulator at every
+    // batch boundary — fine for short literals but O(n²)-ish when
+    // many spreads interleave with many literals.
+    bool hasSpreads = false;
+    for (auto& elem : expr->elements) {
+        if (elem->type == ExprType::Spread) { hasSpreads = true; break; }
+    }
+
+    if (!hasSpreads) {
+        for (auto& elem : expr->elements) compileExpr(elem.get());
+        emit(OpCode::OP_BUILD_SET, expr->line, expr->column);
+        emitU16(static_cast<uint16_t>(expr->elements.size()), expr->line, expr->column);
+        return;
+    }
+
+    // Empty accumulator that every subsequent op mutates in place.
+    emit(OpCode::OP_BUILD_SET, expr->line, expr->column);
+    emitU16(0, expr->line, expr->column);
+
+    for (auto& elem : expr->elements) {
+        if (elem->type == ExprType::Spread) {
+            auto* spread = static_cast<const SpreadExpr*>(elem.get());
+            compileExpr(spread->expr.get());
+            emit(OpCode::OP_SET_SPREAD, spread->line, spread->column);
+        } else {
+            compileExpr(elem.get());
+            emit(OpCode::OP_SET_INSERT, elem->line, elem->column);
+        }
     }
 }
 

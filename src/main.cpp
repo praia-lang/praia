@@ -180,6 +180,13 @@ static void printExpr(const Expr* expr, int level) {
             printExpr(elem.get(), level + 1);
         break;
     }
+    case ExprType::SetLiteral: {
+        auto* e = static_cast<const SetLiteralExpr*>(expr);
+        printIndent(level); std::cout << "SetLiteral\n";
+        for (const auto& elem : e->elements)
+            printExpr(elem.get(), level + 1);
+        break;
+    }
     case ExprType::Index: {
         auto* e = static_cast<const IndexExpr*>(expr);
         printIndent(level); std::cout << "Index\n";
@@ -1090,14 +1097,7 @@ int main(int argc, char* argv[]) {
                   << "  --tree           Use tree-walker interpreter instead of VM\n"
                   << "  --tokens         Print lexer tokens and exit\n"
                   << "  --ast            Print parse tree and exit\n"
-                  << "  --include-path   Print the header path for native plugins\n"
-                  << "\n"
-                  << "Exit codes:\n"
-                  << "  0  success\n"
-                  << "  1  usage error (bad args, file not found)\n"
-                  << "  2  compile error (syntax / parse)\n"
-                  << "  3  runtime error\n"
-                  << "  N  sys.exit(N) — user-defined\n";
+                  << "  --include-path   Print the header path for native plugins\n";
         return ExitCode::Success;
     }
 

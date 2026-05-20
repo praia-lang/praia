@@ -92,6 +92,7 @@ enum class TokenType {
     QUESTION_DOT,   // ?.
     NIL_COALESCE,   // ??
     AT,         // @
+    HASH_LBRACE, // #{   — set literal opener
 
     // Delimiters
     LPAREN,     // (
@@ -195,6 +196,7 @@ inline std::string tokenTypeToString(TokenType type) {
         case TokenType::QUESTION_DOT:return "QUESTION_DOT";
         case TokenType::NIL_COALESCE:return "NIL_COALESCE";
         case TokenType::AT:          return "AT";
+        case TokenType::HASH_LBRACE: return "HASH_LBRACE";
         case TokenType::LPAREN:      return "LPAREN";
         case TokenType::RPAREN:      return "RPAREN";
         case TokenType::LBRACE:      return "LBRACE";

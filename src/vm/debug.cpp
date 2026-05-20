@@ -206,6 +206,9 @@ int disassembleInstruction(const Chunk& chunk, int offset) {
         // Collections
         case OpCode::OP_BUILD_ARRAY:    return u16Instruction("OP_BUILD_ARRAY", chunk, offset);
         case OpCode::OP_BUILD_MAP:      return u16Instruction("OP_BUILD_MAP", chunk, offset);
+        case OpCode::OP_BUILD_SET:      return u16Instruction("OP_BUILD_SET", chunk, offset);
+        case OpCode::OP_SET_INSERT:     return simpleInstruction("OP_SET_INSERT", offset);
+        case OpCode::OP_SET_SPREAD:     return simpleInstruction("OP_SET_SPREAD", offset);
         case OpCode::OP_INDEX_GET:      return simpleInstruction("OP_INDEX_GET", offset);
         case OpCode::OP_INDEX_GET_OPT:  return simpleInstruction("OP_INDEX_GET_OPT", offset);
         case OpCode::OP_INDEX_SET:      return simpleInstruction("OP_INDEX_SET", offset);

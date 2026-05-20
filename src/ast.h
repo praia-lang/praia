@@ -16,7 +16,7 @@ enum class ExprType {
     Number, String, Bool, Nil, Identifier,
     Unary, Binary, Postfix, Assign, Call,
     InterpolatedString, Lambda, Ternary, Spread,
-    ArrayLiteral, Index, IndexAssign, MapLiteral,
+    ArrayLiteral, Index, IndexAssign, MapLiteral, SetLiteral,
     Dot, DotAssign, Pipe, PipeTry, Async, Await, Yield,
     This, Super
 };
@@ -147,6 +147,11 @@ struct MapLiteralExpr : Expr {
     MapLiteralExpr() : Expr(ExprType::MapLiteral) {}
     std::vector<ExprPtr> keys;   // StringExpr for name:/string, expression for [expr]:, nullptr for spread
     std::vector<ExprPtr> values;
+};
+
+struct SetLiteralExpr : Expr {
+    SetLiteralExpr() : Expr(ExprType::SetLiteral) {}
+    std::vector<ExprPtr> elements; // may contain SpreadExpr nodes
 };
 
 struct DotExpr : Expr {

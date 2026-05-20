@@ -174,7 +174,9 @@ Interpreter::Interpreter() {
 #endif
             if (args[0].isMap())
                 return Value(static_cast<int64_t>(args[0].asMap()->entries.size()));
-            throw RuntimeError("len() requires an array, string, or map", 0);
+            if (args[0].isSet())
+                return Value(static_cast<int64_t>(args[0].asSet()->elements.size()));
+            throw RuntimeError("len() requires an array, string, map, or set", 0);
         })));
 
     globals->define("push", Value(makeNative("push", 2,
@@ -207,6 +209,7 @@ Interpreter::Interpreter() {
             if (v.isString())   return Value("string");
             if (v.isArray())    return Value("array");
             if (v.isMap())      return Value("map");
+            if (v.isSet())      return Value("set");
             if (v.isInstance()) return Value("instance");
             if (v.isTagged())   return Value("tagged");
             if (v.isFuture())   return Value("future");
@@ -258,6 +261,7 @@ Interpreter::Interpreter() {
                                  : args[0].isNil()      ? "nil"
                                  : args[0].isArray()    ? "array"
                                  : args[0].isMap()      ? "map"
+                                 : args[0].isSet()      ? "set"
                                  : args[0].isInstance() ? "instance"
                                  : args[0].isCallable() ? "function"
                                                         : "unknown") + ") to a number", 0);
@@ -331,6 +335,7 @@ Interpreter::Interpreter() {
                                    v.isNil()      ? "nil"
                                  : v.isArray()    ? "array"
                                  : v.isMap()      ? "map"
+                                 : v.isSet()      ? "set"
                                  : v.isInstance() ? "instance"
                                  : v.isCallable() ? "function"
                                                   : "unknown") + ") to int", 0);
