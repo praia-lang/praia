@@ -1,0 +1,69 @@
+use "testing"
+
+// Regression: two grains that each define a module-level `let` with the
+// same name used to collide on the VM (the loader merged grain globals
+// into the parent's flat name->slot table and skipped colliding names,
+// so the second grain's value silently lost to the first). The tree-
+// walker was already correct because each grain has its own scope.
+// After the fix, both engines isolate module-level state per grain.
+
+func writeGrain(dir, name, body) {
+    fs.write(path.join(dir, name + ".praia"), body)
+}
+
+testing.test("two grains with same `let` name stay isolated", lam{ in
+    let dir = testing.tempDir(nil)
+
+    writeGrain(dir, "ga", "let state = \"a\"\nfunc get() { return state }\nexport { get }\n")
+    writeGrain(dir, "gb", "let state = \"b\"\nfunc get() { return state }\nexport { get }\n")
+    writeGrain(dir, "main",
+        "use \"./ga\"\nuse \"./gb\"\nprint(ga.get() + \"/\" + gb.get())\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
+    testing.assertEqual(r.exitCode, 0, r.stderr)
+    testing.assertEqual(r.stdout.strip(), "a/b",
+        "VM grain globals must not collide on name")
+})
+
+testing.test("class with same name in two grains stays isolated", lam{ in
+    // Same shape, but the module-level binding is a class — exercises
+    // OP_TAG_OR_CALL's home-VM resolution path (capitalized identifiers
+    // route through a separate opcode).
+    let dir = testing.tempDir(nil)
+
+    writeGrain(dir, "ga",
+        "class Box { func init() { this.v = \"a\" } }\nfunc make() { return Box() }\nexport { make }\n")
+    writeGrain(dir, "gb",
+        "class Box { func init() { this.v = \"b\" } }\nfunc make() { return Box() }\nexport { make }\n")
+    writeGrain(dir, "main",
+        "use \"./ga\"\nuse \"./gb\"\nprint(ga.make().v + \"/\" + gb.make().v)\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
+    testing.assertEqual(r.exitCode, 0, r.stderr)
+    testing.assertEqual(r.stdout.strip(), "a/b",
+        "Grain-scoped class names must not collide across grains")
+})
+
+testing.test("mutating a grain's module state doesn't leak across grains", lam{ in
+    let dir = testing.tempDir(nil)
+
+    writeGrain(dir, "ga",
+        "let n = 0\nfunc bump() { n = n + 1; return n }\nexport { bump }\n")
+    writeGrain(dir, "gb",
+        "let n = 100\nfunc bump() { n = n + 1; return n }\nexport { bump }\n")
+    writeGrain(dir, "main",
+        "use \"./ga\"\nuse \"./gb\"\n" +
+        "ga.bump()\nga.bump()\nlet a = ga.bump()\n" +
+        "let b = gb.bump()\n" +
+        "print(str(a) + \"/\" + str(b))\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
+    testing.assertEqual(r.exitCode, 0, r.stderr)
+    testing.assertEqual(r.stdout.strip(), "3/101",
+        "OP_SET_GLOBAL must write through to the grain's own slots")
+})
+
+testing.done()

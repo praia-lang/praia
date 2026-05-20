@@ -761,8 +761,14 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     auto script = compiler.compile(program);
     if (!script) { runtimeError("Compile error in grain: " + importPath, line); return Value(); }
 
-    // Execute in a fresh VM with only builtins (not user globals)
-    VM grainVm;
+    // Execute in a persistent per-grain VM with only builtins (not user
+    // globals). The grain VM outlives this function — it's stashed in
+    // `grainVMs` so its `globals[]` keep holding the module's `let`
+    // bindings. Exported closures resolve their OP_*_GLOBAL through
+    // Chunk::homeVm = &grainVm (set below), so two grains that both
+    // define `let state = ...` see independent values.
+    auto grainVmPtr = std::make_unique<VM>();
+    VM& grainVm = *grainVmPtr;
     for (auto& name : builtinNames_) {
         int parentSlot = findGlobalSlot(name);
         if (parentSlot >= 0) {
@@ -773,10 +779,32 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     grainVm.builtinNames_ = builtinNames_;
     grainVm.currentFile = resolved;
 
+    // Tag every CompiledFunction reachable from the grain's script (the
+    // top-level chunk and any nested function constants) so all of the
+    // grain's bytecode resolves globals against grainVm — including
+    // closures that escape into parent globals via the export map.
+    std::function<void(CompiledFunction*, std::unordered_set<CompiledFunction*>&)> tagHome;
+    tagHome = [&](CompiledFunction* fn, std::unordered_set<CompiledFunction*>& seen) {
+        if (!fn || !seen.insert(fn).second) return;
+        fn->chunk.homeVm = &grainVm;
+        for (auto& c : fn->chunk.constants) {
+            if (c.isCallable()) {
+                auto* vmcc = dynamic_cast<VMClosureCallable*>(c.asCallable().get());
+                if (vmcc && vmcc->closure && vmcc->closure->function)
+                    tagHome(vmcc->closure->function.get(), seen);
+            }
+        }
+    };
+    {
+        std::unordered_set<CompiledFunction*> seen;
+        tagHome(script.get(), seen);
+    }
+
     grainVm.allClosures.push_back(std::make_unique<ObjClosure>(script));
     auto* grainClosure = grainVm.allClosures.back().get();
 
     auto wrapper = std::make_shared<VMClosureCallable>(grainClosure);
+    wrapper->vm = &grainVm;
     grainVm.push(Value(std::static_pointer_cast<Callable>(wrapper)));
 
     grainVm.frames[0].closure = grainClosure;
@@ -797,46 +825,14 @@ Value VM::loadGrain(const std::string& importPath, int line) {
         exports = Value(gcNew<PraiaMap>()); // empty exports
     }
 
-    // Keep the grain's ASTs, closures, and upvalues alive
+    // Keep the grain's AST alive (chunks reference its string storage).
     grainAsts.push_back(std::move(program));
 
-    // Transfer ownership of closures and upvalues to the parent VM
-    for (auto& c : grainVm.allClosures) allClosures.push_back(std::move(c));
-    grainVm.allClosures.clear();
-    for (auto& u : grainVm.allUpvalues) allUpvalues.push_back(std::move(u));
-    grainVm.allUpvalues.clear();
-
-    // Copy grain's globals to parent VM so exported closures can access
-    // their module-level variables (which were compiled as globals)
-    for (auto& [k, grainSlot] : grainVm.globalIndices) {
-        // Don't overwrite existing builtins or user globals
-        if (findGlobalSlot(k) < 0) {
-            int parentSlot = ensureGlobalSlot(k);
-            globals[parentSlot] = grainVm.globals[grainSlot];
-        }
-    }
-
-    // Recursively fix up VM pointers on all grain closures — they were created
-    // in grainVm which is about to be destroyed.
-    std::function<void(Value&)> fixupValue;
-    fixupValue = [this, &grainVm, &fixupValue](Value& v) {
-        if (v.isCallable()) {
-            auto* vmcc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
-            if (vmcc && (vmcc->vm == &grainVm || vmcc->vm == nullptr))
-                vmcc->vm = this;
-        }
-        if (v.isMap()) {
-            for (auto& [k, mv] : v.asMap()->entries) fixupValue(mv);
-        }
-        if (v.isArray()) {
-            for (auto& el : v.asArray()->elements) fixupValue(el);
-        }
-        if (v.isInstance()) {
-            for (auto& [k, fv] : v.asInstance()->fields) fixupValue(fv);
-        }
-    };
-    for (auto& v : globals) fixupValue(v);
-    fixupValue(exports);
+    // Hand the grain VM off to the parent. It (and all of its closures,
+    // upvalues, and globals) lives as long as the parent does. Chunks
+    // already point at &grainVm via homeVm; the unique_ptr below is just
+    // the lifetime anchor.
+    grainVMs.push_back(std::move(grainVmPtr));
 
     grainCache[resolved] = exports;
     return exports;
@@ -1172,45 +1168,52 @@ VM::Result VM::execute(int baseFrameCount_) {
         // a per-call-site inline cache: -1 on first hit, the resolved slot
         // thereafter, so subsequent accesses skip the string hash and go
         // straight to `globals[slot]`.
+        //
+        // For chunks owned by a grain (chunk.homeVm != nullptr), all
+        // resolution goes through the grain's VM so module-level lets
+        // stay isolated across grains — see VM::loadGrain.
         case OpCode::OP_DEFINE_GLOBAL: {
             uint16_t constIdx = READ_U16();
             auto& chunk = FRAME.chunk();
+            VM* gvm = chunk.homeVm ? chunk.homeVm : this;
             int slot = chunk.globalSlotCache[constIdx];
             if (slot < 0) {
-                slot = ensureGlobalSlot(chunk.constants[constIdx].asString());
+                slot = gvm->ensureGlobalSlot(chunk.constants[constIdx].asString());
                 chunk.globalSlotCache[constIdx] = slot;
             }
-            globals[slot] = pop();
+            gvm->globals[slot] = pop();
             // Overwrite wins over any pending lazy snapshot — mark loaded.
-            if (isTaskVm_) loadedMask_[slot] = 1;
+            if (gvm->isTaskVm_) gvm->loadedMask_[slot] = 1;
             break;
         }
         case OpCode::OP_GET_GLOBAL: {
             uint16_t constIdx = READ_U16();
             auto& chunk = FRAME.chunk();
+            VM* gvm = chunk.homeVm ? chunk.homeVm : this;
             int slot = chunk.globalSlotCache[constIdx];
             if (slot < 0) {
                 const std::string& n = chunk.constants[constIdx].asString();
-                slot = findGlobalSlot(n);
+                slot = gvm->findGlobalSlot(n);
                 if (slot < 0) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
                 chunk.globalSlotCache[constIdx] = slot;
             }
-            if (isTaskVm_ && !loadedMask_[slot]) lazyLoadGlobal(slot);
-            push(globals[slot]);
+            if (gvm->isTaskVm_ && !gvm->loadedMask_[slot]) gvm->lazyLoadGlobal(slot);
+            push(gvm->globals[slot]);
             break;
         }
         case OpCode::OP_SET_GLOBAL: {
             uint16_t constIdx = READ_U16();
             auto& chunk = FRAME.chunk();
+            VM* gvm = chunk.homeVm ? chunk.homeVm : this;
             int slot = chunk.globalSlotCache[constIdx];
             if (slot < 0) {
                 const std::string& n = chunk.constants[constIdx].asString();
-                slot = findGlobalSlot(n);
+                slot = gvm->findGlobalSlot(n);
                 if (slot < 0) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
                 chunk.globalSlotCache[constIdx] = slot;
             }
-            globals[slot] = peek();
-            if (isTaskVm_) loadedMask_[slot] = 1;
+            gvm->globals[slot] = peek();
+            if (gvm->isTaskVm_) gvm->loadedMask_[slot] = 1;
             break;
         }
         case OpCode::OP_GET_LOCAL: { uint16_t slot = READ_U16(); push(stack[FRAME.baseSlot + slot]); break; }
@@ -1251,15 +1254,16 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_POST_DEC_GLOBAL: {
             uint16_t constIdx = READ_U16();
             auto& chunk = FRAME.chunk();
+            VM* gvm = chunk.homeVm ? chunk.homeVm : this;
             int slot = chunk.globalSlotCache[constIdx];
             if (slot < 0) {
                 const std::string& n = chunk.constants[constIdx].asString();
-                slot = findGlobalSlot(n);
+                slot = gvm->findGlobalSlot(n);
                 if (slot < 0) { RUNTIME_ERR("Undefined variable '" + n + "'"); }
                 chunk.globalSlotCache[constIdx] = slot;
             }
-            if (isTaskVm_ && !loadedMask_[slot]) lazyLoadGlobal(slot);
-            Value& val = globals[slot];
+            if (gvm->isTaskVm_ && !gvm->loadedMask_[slot]) gvm->lazyLoadGlobal(slot);
+            Value& val = gvm->globals[slot];
             if (!val.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
             push(val);
             bool inc = static_cast<OpCode>(instruction) == OpCode::OP_POST_INC_GLOBAL;
@@ -2101,18 +2105,26 @@ VM::Result VM::execute(int baseFrameCount_) {
             // Stack has [arg0, arg1, ...] — NO callee on stack.
             // Look up tagName as a global. If callable (class), call it.
             // Otherwise, build a tagged value.
+            //
+            // Honors Chunk::homeVm so a grain method like `this._d = Deque()`
+            // resolves Deque against the grain's own globals, not whatever
+            // VM happens to be running this frame. Without this, Deque
+            // wouldn't be found in the parent VM and would silently fall
+            // through to constructing a tagged value named "Deque" — see
+            // the cross-grain isolation regression in tests.
             std::string tagName = READ_STRING();
             uint8_t argc = READ_BYTE();
-            int gslot = findGlobalSlot(tagName);
-            if (gslot >= 0 && isTaskVm_ && !loadedMask_[gslot]) lazyLoadGlobal(gslot);
-            if (gslot >= 0 && globals[gslot].isCallable()) {
+            VM* gvm = FRAME.chunk().homeVm ? FRAME.chunk().homeVm : this;
+            int gslot = gvm->findGlobalSlot(tagName);
+            if (gslot >= 0 && gvm->isTaskVm_ && !gvm->loadedMask_[gslot]) gvm->lazyLoadGlobal(gslot);
+            if (gslot >= 0 && gvm->globals[gslot].isCallable()) {
                 // Global class/function — insert callee below args and call
                 // Shift args up by 1 to make room for callee
                 push(Value()); // make space
                 for (int i = 0; i < argc; i++)
                     stack[stackTop - 1 - i] = stack[stackTop - 2 - i];
-                stack[stackTop - argc - 1] = globals[gslot];
-                if (!callValue(globals[gslot], argc, CURRENT_LINE()))
+                stack[stackTop - argc - 1] = gvm->globals[gslot];
+                if (!callValue(gvm->globals[gslot], argc, CURRENT_LINE()))
                     return Result::RUNTIME_ERROR;
             } else {
                 auto tagged = gcNew<PraiaTagged>();
@@ -2648,4 +2660,11 @@ void VM::gcMarkRoots(GcHeap& heap) {
                 for (auto& v : *sp) heap.markValue(v);
         }
     }
+
+    // Persistent grain VMs — their globals, upvalues, and constant pools
+    // hold values created by grain code that exported closures (now
+    // reachable through *this* VM's globals) still depend on. Recurse so
+    // a sub-grain loaded transitively by an outer grain is also marked.
+    for (auto& gvm : grainVMs)
+        gvm->gcMarkRoots(heap);
 }

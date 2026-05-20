@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+class VM;
+
 struct Chunk {
     std::vector<uint8_t> code;
     std::vector<Value> constants;
@@ -24,6 +26,13 @@ struct Chunk {
     // atomic on every supported architecture (x86, ARM); the worst case
     // is duplicate resolution work.
     std::vector<int> globalSlotCache;
+
+    // The VM whose `globals[]` holds this chunk's module-level state.
+    // Set to a grain's persistent VM after grain compile (see VM::loadGrain).
+    // Null for main-script / REPL chunks, which resolve against the
+    // currently-executing VM. Set once before any execution; never mutated
+    // afterward, so the slot cache above stays internally consistent.
+    VM* homeVm = nullptr;
 
     // Run-length encoded line info
     struct LineEntry { int line; int count; };
