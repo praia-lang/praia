@@ -217,5 +217,61 @@ testing.test("restore tolerates an old-format lockfile with @version embedded in
     testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
+testing.test("update short-circuits when the remote SHA matches the lockfile", lam{ in
+    // Regression: `sand update` used to re-clone and re-install every
+    // grain pinned to "latest" even when the remote hadn't moved.
+    // After the fix, an ls-remote probe compares the remote HEAD
+    // against `info.commit` and skips the install when they match.
+    let g = makeGrain("nochange", "let v = 1\nexport { v }\n")
+    let grain = g[0]
+    let r1 = runSand(["install", "-g", "file://" + grain])
+    testing.assertEqual(r1.exitCode, 0, "install: " + r1.stderr)
+
+    let grainDir = path.join(sandHome, ".praia", "ext_grains", "nochange")
+    let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
+    let mainBefore = fs.read(path.join(grainDir, "main.praia"))
+    let lockBefore = fs.read(lockPath)
+
+    // No remote change between install and update.
+    let r2 = runSand(["update", "-g", "nochange"])
+    testing.assertEqual(r2.exitCode, 0, "update no-op: " + r2.stderr)
+    testing.assert(r2.stdout.contains("up to date"),
+        "update reports no-op: " + r2.stdout)
+    // Nothing on disk should change.
+    testing.assertEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
+        "grain content untouched on no-op update")
+    testing.assertEqual(fs.read(lockPath), lockBefore,
+        "lockfile untouched on no-op update")
+
+    let cleanup = runSand(["remove", "-g", "-y", "nochange"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
+testing.test("update still re-installs when the remote has moved", lam{ in
+    // Counter-test: when the remote DOES have a new commit, update
+    // must actually run (and record the new SHA in the lockfile).
+    let g = makeGrain("moved", "let v = 1\nexport { v }\n")
+    let grain = g[0]
+    let r1 = runSand(["install", "-g", "file://" + grain])
+    testing.assertEqual(r1.exitCode, 0, "install: " + r1.stderr)
+
+    let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
+    let lockBefore = fs.read(lockPath)
+    let newSha = bumpGrain(grain, "let v = 2\nexport { v }\n")
+
+    let r2 = runSand(["update", "-g", "moved"])
+    testing.assertEqual(r2.exitCode, 0, "update: " + r2.stderr)
+    testing.assert(!r2.stdout.contains("up to date"),
+        "remote-moved update is not skipped: " + r2.stdout)
+    let lockAfter = fs.read(lockPath)
+    testing.assert(lockAfter != lockBefore,
+        "lockfile updated when remote moves")
+    testing.assert(lockAfter.contains("commit: " + newSha),
+        "new commit SHA recorded: " + lockAfter)
+
+    let cleanup = runSand(["remove", "-g", "-y", "moved"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
 sys.exec(["rm", "-rf", sandHome, fixtureRoot])
 testing.done()
