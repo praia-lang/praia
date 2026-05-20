@@ -288,4 +288,30 @@ testing.test("set literal inside lambda body doesn't confuse hasIn scan", lam{ i
     testing.assertEqual(f(9), false, nil)
 })
 
+testing.test("shebang lines still work, including with #{...} in the body", lam{ in
+    // Regression sentinel: the lexer's `case '#':` for set literals
+    // mustn't break the existing shebang skip. The skip happens
+    // BEFORE tokenization, gated on `source[0..1] == "#!"`, so plain
+    // `#{...}` at the start of a file is correctly tokenized as a
+    // set literal, and a real shebang is correctly skipped — but it
+    // would be easy for a future refactor to break either path.
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let f = sys.exec(["mktemp", "/tmp/praia-shebang-test.XXXXXX"]).stdout.strip()
+    // Plain shebang + set literal in the body.
+    fs.write(f, "#!/usr/bin/env praia\nprint(#{1, 2, 3})\n")
+    let r = sys.exec([praiaBin, f])
+    testing.assertEqual(r.exitCode, 0, "shebang script ran: " + r.stderr)
+    testing.assert(r.stdout.contains("#{"), "output is a set: " + r.stdout)
+
+    // Mid-file `#!` should NOT be treated as a shebang and should
+    // produce a lex error (the friendly "did you mean '#{'" hint).
+    fs.write(f, "let x = 1\n#! not a shebang\n")
+    let r2 = sys.exec([praiaBin, f])
+    testing.assertNotEqual(r2.exitCode, 0, "mid-file #! rejected")
+    testing.assert(r2.stderr.contains("Unexpected character '#'"),
+                    "lexer error: " + r2.stderr)
+
+    sys.exec(["rm", "-f", f])
+})
+
 testing.done()
