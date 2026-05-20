@@ -1,0 +1,88 @@
+use "testing"
+
+// Regression: `sand update sand` used to short-circuit with "No
+// grains installed" before reaching the registryGetOrSynth lookup,
+// so a fresh `make install` left the user with no way to self-update
+// short of editing the lockfile by hand.
+//
+// Two regressions in one fix:
+//   • cmdUpdate's empty-lockfile guard now only fires when the user
+//     passed no names (there's nothing for synth to rescue in that
+//     case). Named-args fall through to registryGetOrSynth.
+//   • synthSandEntry now checks the system-global install location
+//     (PRAIA_LIBDIR/ext_grains/sand) in addition to the user-scoped
+//     ~/.praia/ext_grains/sand. A non-root user running against a
+//     system-installed sand reaches the downstream "re-run with
+//     sudo" message instead of a misleading "not installed".
+
+let _gitProbe = sys.exec(["which", "git"])
+if (_gitProbe.exitCode != 0) {
+    print("(skipping: git not available)")
+    testing.done()
+    sys.exit(0)
+}
+
+let praiaBin = path.join(sys.cwd(), "praia")
+let sandMain = path.join(sys.cwd(), "sand", "main.praia")
+let sandSourceDir = path.join(sys.cwd(), "sand")
+
+testing.test("update sand from a user-global install with an empty lockfile", lam{ in
+    // Plant sand under ~/.praia/ext_grains/sand and clear the
+    // lockfile. cmdUpdate must reach updateOne via the synth path
+    // — *not* bail with "No grains installed".
+    let sandHome = sys.exec(["mktemp", "-d"]).stdout.strip()
+    fs.mkdir(path.join(sandHome, ".praia"))
+    fs.mkdir(path.join(sandHome, ".praia", "ext_grains"))
+    fs.copy(sandSourceDir, path.join(sandHome, ".praia", "ext_grains", "sand"))
+
+    // Run with a short timeout — we don't care whether the github
+    // clone succeeds; only that we got past the early-bail. A
+    // timeout-exited process still flushes spinner text to stderr,
+    // and the markers we're checking print well before any network
+    // I/O begins.
+    let r = sys.exec(
+        ["env", "HOME=" + sandHome, praiaBin, sandMain, "update", "sand"],
+        5000)
+    let out = r.stdout + r.stderr
+    testing.assert(!out.contains("No grains installed"),
+        "update sand must not short-circuit on empty lockfile: " + out)
+    testing.assert(out.contains("Updating sand"),
+        "update sand must reach updateOne: " + out)
+
+    sys.exec(["rm", "-rf", sandHome])
+})
+
+testing.test("synth sees a system-installed sand (PRAIA_LIBDIR) even as non-root", lam{ in
+    // This is the specific layout `make install PREFIX=/usr/local`
+    // produces. The current test binary's sys.libdir may or may not
+    // point somewhere useful, so we probe sys.libdir; if it isn't
+    // set we skip (a dev-tree build).
+    let libdir = sys.libdir
+    if (!libdir) {
+        print("(skipping: praia built without PRAIA_LIBDIR — sys.libdir is nil)")
+        return
+    }
+    let systemSandDir = path.join(libdir, "ext_grains", "sand")
+    if (!fs.exists(path.join(systemSandDir, "grain.yaml"))) {
+        print("(skipping: no sand at " + systemSandDir + " — release-built praia required)")
+        return
+    }
+
+    // Fresh HOME so user-global is empty; only the system-global
+    // sand at sys.libdir exists. synth must find it there.
+    let sandHome = sys.exec(["mktemp", "-d"]).stdout.strip()
+    let r = sys.exec(
+        ["env", "HOME=" + sandHome, praiaBin, sandMain, "update", "sand"],
+        5000)
+    let out = r.stdout + r.stderr
+    testing.assert(!out.contains("No grains installed"),
+        "system-installed sand must be reachable via synth: " + out)
+    testing.assert(!out.contains("not installed"),
+        "synth must return a valid entry for system-installed sand: " + out)
+    testing.assert(out.contains("Updating sand"),
+        "update sand must reach updateOne: " + out)
+
+    sys.exec(["rm", "-rf", sandHome])
+})
+
+testing.done()
