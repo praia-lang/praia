@@ -89,6 +89,55 @@ testing.test("registry load throws on a non-parseable lockfile", lam{ in
         "not valid YAML")
 })
 
+testing.test("registry load rejects a scalar top-level document", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "42\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "top-level must be a YAML mapping")
+})
+
+testing.test("registry load rejects a sequence top-level document", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "- a\n- b\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "top-level must be a YAML mapping")
+})
+
+testing.test("registry load rejects grains: <scalar>", lam{ in
+    // The classic shape error: someone hand-edits the lockfile and
+    // leaves `grains: nope` instead of `grains:` followed by entries.
+    // Pre-fix this loaded with `data.grains = "nope"` and exploded
+    // later as "string has no field 'source'".
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains: nope\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "'grains:' must be a YAML mapping")
+})
+
+testing.test("registry load rejects grains: <list>", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains:\n  - first\n  - second\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "'grains:' must be a YAML mapping")
+})
+
+testing.test("registry load rejects an entry that isn't a mapping", lam{ in
+    let dir = testing.tempDir(nil)
+    let lockPath = path.join(dir, ".sand-lock.yaml")
+    fs.write(lockPath, "grains:\n  thing: scalar-not-map\n")
+    testing.assertThrows(
+        lam{ in registry.load(lockPath) },
+        "entry 'thing' must be a YAML mapping")
+})
+
 testing.test("registry load accepts an empty lockfile as no-grains", lam{ in
     // Bootstrap state — `make install` writes the dir but not the
     // lockfile, so an empty file (or one that doesn't yet exist) is
