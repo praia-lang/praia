@@ -157,6 +157,7 @@ jobs:
           chmod 755 dist/sand
           mkdir -p dist/lib/praia/include
           cp src/praia_plugin.h \
+             src/praia_runtime.h \
              src/value.h \
              src/builtins.h \
              src/interpreter.h \
