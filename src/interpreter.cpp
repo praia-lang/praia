@@ -89,6 +89,7 @@ static bool checkIs(const Value& subject, const Value& typeVal, int line, int co
         if (tn == "string")    return subject.isString();
         if (tn == "array")     return subject.isArray();
         if (tn == "map")       return subject.isMap();
+        if (tn == "set")       return subject.isSet();
         if (tn == "function")  return subject.isCallable();
         if (tn == "instance")  return subject.isInstance();
         if (tn == "tagged")    return subject.isTagged();
@@ -684,7 +685,7 @@ void Interpreter::execute(const Stmt* stmt) {
                 }
             } catch (const BreakSignal&) {}
         } else {
-            throw RuntimeError("for-in requires an array, map, string, or generator", s->line, s->column);
+            throw RuntimeError("for-in requires an array, map, set, string, or generator", s->line, s->column);
         }
         break;
     }

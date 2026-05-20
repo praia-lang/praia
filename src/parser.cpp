@@ -501,6 +501,7 @@ StmtPtr Parser::returnStatement() {
         case TokenType::LPAREN:
         case TokenType::LBRACKET:
         case TokenType::LBRACE:
+        case TokenType::HASH_LBRACE:
         case TokenType::LAM:
         case TokenType::ASYNC:
         case TokenType::AWAIT:
@@ -1251,6 +1252,7 @@ ExprPtr Parser::primary() {
             if (t == TokenType::NUMBER || t == TokenType::STRING ||
                 t == TokenType::IDENTIFIER || t == TokenType::LPAREN ||
                 t == TokenType::LBRACKET || t == TokenType::LBRACE ||
+                t == TokenType::HASH_LBRACE ||
                 t == TokenType::MINUS || t == TokenType::NOT ||
                 t == TokenType::BIT_NOT ||
                 t == TokenType::TRUE || t == TokenType::FALSE ||
@@ -1362,7 +1364,12 @@ ExprPtr Parser::primary() {
             int braceDepth = 1, parenDepth = 0, bracketDepth = 0;
             for (int look = current; look < static_cast<int>(tokens.size()); look++) {
                 auto t = tokens[look].type;
-                if      (t == TokenType::LBRACE)   braceDepth++;
+                // `#{` is a single token that opens a set literal — its
+                // matching `}` is an RBRACE, so track it as a brace
+                // opener so a `lam{ ... #{...} ... in body }` doesn't
+                // get the inner set's `}` parsed as the lambda closer.
+                if      (t == TokenType::LBRACE ||
+                         t == TokenType::HASH_LBRACE) braceDepth++;
                 else if (t == TokenType::RBRACE)   { braceDepth--; if (braceDepth == 0) break; }
                 else if (t == TokenType::LPAREN)   parenDepth++;
                 else if (t == TokenType::RPAREN)   parenDepth--;

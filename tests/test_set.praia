@@ -254,4 +254,38 @@ testing.test("empty set renders as #{}", lam{ in
     testing.assertEqual(#{}.toString(), "#{}", nil)
 })
 
+// ── Type introspection + parser lookahead ────────────────────
+
+testing.test("`value is \"set\"` works on both engines", lam{ in
+    // Regression: VM and tree-walker each had their own checkIs
+    // implementations; neither initially knew about the new
+    // PraiaSet type, so `#{1, 2} is "set"` threw "Unknown type
+    // name 'set'" under the VM.
+    testing.assertEqual(#{1, 2} is "set", true, nil)
+    testing.assertEqual([1, 2] is "set", false, "array isn't a set")
+    testing.assertEqual({a: 1} is "set", false, "map isn't a set")
+    testing.assertEqual(nil is "set", false, nil)
+})
+
+testing.test("set literal usable in return / yield position", lam{ in
+    // Regression: ReturnStmt's "can next token start an expression?"
+    // lookahead listed LBRACE but not HASH_LBRACE, so `return #{...}`
+    // produced an empty return + parse error on the trailing literal.
+    func mkSet() { return #{1, 2, 3} }
+    testing.assertEqual(mkSet(), #{1, 2, 3}, nil)
+})
+
+testing.test("set literal inside lambda body doesn't confuse hasIn scan", lam{ in
+    // Regression: the lambda's `hasIn` scan tracked brace depth via
+    // LBRACE only. A set literal inside the body opens via HASH_LBRACE
+    // and closes with RBRACE — without the fix, the closing brace
+    // of #{...} prematurely closed the lambda.
+    let f = lam{ x in
+        let s = #{1, 2, 3}
+        return s.has(x)
+    }
+    testing.assertEqual(f(2), true, nil)
+    testing.assertEqual(f(9), false, nil)
+})
+
 testing.done()

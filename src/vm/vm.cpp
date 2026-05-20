@@ -1113,6 +1113,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 else if (tn == "string")    result = left.isString();
                 else if (tn == "array")     result = left.isArray();
                 else if (tn == "map")       result = left.isMap();
+                else if (tn == "set")       result = left.isSet();
                 else if (tn == "function")  result = left.isCallable();
                 else if (tn == "instance")  result = left.isInstance();
                 else if (tn == "tagged")    result = left.isTagged();
