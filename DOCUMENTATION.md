@@ -13,6 +13,7 @@ Praia is a dynamically typed, interpreted programming language built in C++.
 - [Strings](#strings)
 - [Arrays](#arrays)
 - [Maps](#maps)
+- [Sets](#sets)
 - [Integers and Numbers](#integers-and-numbers)
 - [Enums](#enums)
 - [Control Flow](#control-flow)
@@ -180,6 +181,18 @@ let config = {...defaults, ...overrides}
 
 Later spreads override earlier keys (like `Object.assign` in JavaScript).
 
+### Set spread
+
+Spread accepts a set or an array — elements from the source go into
+the resulting set, with the usual dedup-on-insert.
+
+```
+let a = #{1, 2, 3}
+let combined = #{0, ...a, 4}        // #{0, 1, 2, 3, 4}
+let fromArr  = #{0, ...[1, 2, 3]}   // #{0, 1, 2, 3}
+let dedup    = #{1, ...#{1, 2}}     // #{1, 2}
+```
+
 ### Spread in function calls
 
 Spread an array as arguments to a function:
@@ -218,6 +231,7 @@ see at runtime; use them with the `is` operator (`x is "int"`, `x is MyClass`).
 | `string`    | `"hello"`                           | UTF-8, supports interpolation, escape sequences, and Unicode (`\u{...}`). |
 | `array`     | `[1, 2, 3]`                         | Ordered, mixed-type, reference semantics. |
 | `map`       | `{name: "Ada", [42]: "answer"}`     | Hash map. Reference semantics. Keys can be any hashable value: `nil`, bool, int, float, string, or tagged value. Bare-identifier keys (`name`) desugar to string keys; bracket-expression keys (`[42]`) take the evaluated value. |
+| `set`       | `#{1, 2, 3}`                        | Unordered collection of unique values. Reference semantics. Elements must be hashable (same rules as map keys). Literal syntax `#{...}` distinguishes from map `{...}`; empty set is `#{}`. |
 | `function`  | `func add(a, b) { ... }`            | First-class, supports closures. Includes user `func` / `lam` and built-in natives. |
 | `instance`  | `MyClass(...)`                      | Instance of a user-defined `class`. Use `x is MyClass` to check class identity (walks the `extends` chain). |
 | `tagged`    | `Ok(42)`, `Err("nope")`             | Tagged values from a `CapitalizedName(args...)` constructor call on an undefined identifier. Used for sum types / result-like patterns; see the `match` section. |
@@ -605,6 +619,98 @@ let m2 = {a: 1}.merge({b: 2, a: 99})  // {a: 99, b: 2}
 ```
 
 Note: map entries named `has`, `get`, `delete`, or `merge` shadow the methods.
+
+---
+
+## Sets
+
+Sets hold an unordered collection of unique values. Elements must be hashable: `nil`, bool, int, float, string, or tagged values — the same rule as map keys. Arrays, maps, instances, and other sets cannot be elements (they aren't hashable).
+
+```
+let primes = #{2, 3, 5, 7, 11}
+let mixed  = #{1, "two", true, nil, 3.14}
+let empty  = #{}
+```
+
+Literal syntax: `#{...}`. The `#` distinguishes the set from a map literal — `{}` is an empty map, `#{}` is an empty set. Set literals dedup on construction: `#{1, 1, 2}` is `#{1, 2}` (size 2).
+
+### Set equality
+
+Two sets are equal when they contain the same elements regardless of insertion order:
+
+```
+#{1, 2, 3} == #{3, 2, 1}     // true
+#{1, 2} == #{1, 2, 3}        // false
+```
+
+### Iteration
+
+`for-in` over a set visits each element exactly once. Order is unspecified (matches map iteration).
+
+```
+let s = #{10, 20, 30}
+for (x in s) { print(x) }
+```
+
+### Set Methods
+
+| Method | Description |
+|--------|-------------|
+| `.add(x)` | Inserts `x`. Returns `true` if newly added, `false` if already present. |
+| `.remove(x)` | Removes `x`. Returns `true` if it was present, `false` otherwise. |
+| `.has(x)` | Returns `true` if `x` is in the set. |
+| `.size()` | Returns the number of elements (same as `len(s)`). |
+| `.clear()` | Removes every element. |
+| `.toArray()` | Returns a new array of the elements (order unspecified). |
+| `.clone()` | Returns a new set with the same elements (independent copy). |
+| `.union(other)` | New set with every element of `self` or `other`. |
+| `.intersection(other)` | New set with elements present in both. |
+| `.difference(other)` | New set with elements in `self` but not in `other`. |
+| `.isSubset(other)` | `true` if every element of `self` is in `other` (the empty set is a subset of everything). |
+
+```
+let a = #{1, 2, 3}
+let b = #{2, 3, 4}
+
+a.union(b)         // #{1, 2, 3, 4}
+a.intersection(b)  // #{2, 3}
+a.difference(b)    // #{1}
+a.isSubset(#{1, 2, 3, 4})  // true
+
+a.add(99)          // true; a is now #{1, 2, 3, 99}
+a.has(2)           // true
+a.size()           // 4
+```
+
+### Set Union via `+`
+
+For parity with arrays (`+` concatenates) and maps (`+` merges), the `+` operator on two sets returns the union — same as `.union()`:
+
+```
+#{1, 2} + #{3, 4}    // #{1, 2, 3, 4}
+#{1, 2} + #{2, 3}    // #{1, 2, 3}   — dedup
+```
+
+### Set ↔ Array
+
+Use `.toArray()` to convert a set to an array. To go the other way, spread into a set literal or build incrementally with `.add`:
+
+```
+let arr = [1, 2, 2, 3]
+let s = #{...arr}    // #{1, 2, 3}
+arr = s.toArray()    // [1, 2, 3] (order unspecified)
+```
+
+### Reference semantics
+
+Sets, like arrays and maps, use reference semantics:
+
+```
+let a = #{1, 2}
+let b = a
+b.add(3)
+print(a)             // #{1, 2, 3}
+```
 
 ---
 
@@ -1040,6 +1146,17 @@ for ({key, value} in config) {
 // Without destructuring
 for (entry in config) {
     print("%{entry.key}: %{entry.value}")
+}
+```
+
+### for-in (sets)
+
+Iterating a set yields each element exactly once. Order is unspecified.
+
+```
+let primes = #{2, 3, 5, 7}
+for (p in primes) {
+    print(p)
 }
 ```
 
@@ -1684,10 +1801,10 @@ print(Dog.type())    // "dog"
 | Function | Description |
 |----------|-------------|
 | `print(args...)` | Print values separated by spaces, followed by a newline |
-| `len(value)` | Length of an array, string, or map |
+| `len(value)` | Length of an array, string, map, or set |
 | `push(array, value)` | Append a value to an array |
 | `pop(array)` | Remove and return the last element of an array |
-| `type(value)` | Return the type as a string: `"nil"`, `"bool"`, `"int"`, `"float"`, `"string"`, `"array"`, `"map"`, `"function"` |
+| `type(value)` | Return the type as a string: `"nil"`, `"bool"`, `"int"`, `"float"`, `"string"`, `"array"`, `"map"`, `"set"`, `"function"` |
 | `str(value)` | Convert any value to a string |
 | `num(value)` | Convert a string or number to a number |
 | `filter(arr, fn)` | Keep elements where fn returns truthy |
