@@ -66,4 +66,52 @@ testing.test("mutating a grain's module state doesn't leak across grains", lam{ 
         "OP_SET_GLOBAL must write through to the grain's own slots")
 })
 
+testing.test("a transitive grain is only executed once across siblings", lam{ in
+    // Two grains import the same dependency. The dependency's top-level
+    // body must run exactly once — otherwise side effects (here: a
+    // `print`) duplicate. Before the fix, each child grain VM had its
+    // own empty grainCache so sibling imports re-executed shared deps.
+    let dir = testing.tempDir(nil)
+
+    writeGrain(dir, "c",
+        "print(\"load c\")\nlet x = 1\nexport { x }\n")
+    writeGrain(dir, "a",
+        "use \"./c\"\nlet val = c.x\nexport { val }\n")
+    writeGrain(dir, "b",
+        "use \"./c\"\nlet val = c.x\nexport { val }\n")
+    writeGrain(dir, "main",
+        "use \"./a\"\nuse \"./b\"\nprint(a.val + b.val)\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
+    testing.assertEqual(r.exitCode, 0, r.stderr)
+    testing.assertEqual(r.stdout.strip(), "load c\n2",
+        "Shared grain dep must execute exactly once")
+})
+
+testing.test("shared grain dep returns the same export value to both importers", lam{ in
+    // Stronger than counting prints: the cache must return the *same*
+    // exports map, so any state initialized in the dep is observable by
+    // both importers. Mutating it via one importer changes what the
+    // other sees (intentional — modules are singletons).
+    let dir = testing.tempDir(nil)
+
+    writeGrain(dir, "c",
+        "let counter = {n: 0}\nfunc bump() { counter.n = counter.n + 1; return counter.n }\nexport { bump, counter }\n")
+    writeGrain(dir, "a",
+        "use \"./c\"\nfunc step() { return c.bump() }\nexport { step }\n")
+    writeGrain(dir, "b",
+        "use \"./c\"\nfunc step() { return c.bump() }\nexport { step }\n")
+    writeGrain(dir, "main",
+        "use \"./a\"\nuse \"./b\"\n" +
+        "let s1 = a.step()\nlet s2 = b.step()\nlet s3 = a.step()\n" +
+        "print(str(s1) + \"/\" + str(s2) + \"/\" + str(s3))\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
+    testing.assertEqual(r.exitCode, 0, r.stderr)
+    testing.assertEqual(r.stdout.strip(), "1/2/3",
+        "Both importers must observe the same singleton dep")
+})
+
 testing.done()

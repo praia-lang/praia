@@ -737,8 +737,14 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     }
     importedInCurrentFile.insert(resolved);
 
-    auto cached = grainCache.find(resolved);
-    if (cached != grainCache.end()) return cached->second;
+    // Cache lookup goes through the root VM so two sibling grains
+    // importing the same dependency share one execution. Without this,
+    // each child grain VM has a fresh cache and the dependency runs
+    // once per importer — visible as duplicate side effects (e.g. a
+    // top-level `print` firing twice).
+    auto& cache = rootVm().grainCache;
+    auto cached = cache.find(resolved);
+    if (cached != cache.end()) return cached->second;
 
     // Read source
     std::ifstream f(resolved);
@@ -769,6 +775,7 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     // define `let state = ...` see independent values.
     auto grainVmPtr = std::make_unique<VM>();
     VM& grainVm = *grainVmPtr;
+    grainVm.parentVm_ = this;
     for (auto& name : builtinNames_) {
         int parentSlot = findGlobalSlot(name);
         if (parentSlot >= 0) {
@@ -834,7 +841,7 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     // the lifetime anchor.
     grainVMs.push_back(std::move(grainVmPtr));
 
-    grainCache[resolved] = exports;
+    rootVm().grainCache[resolved] = exports;
     return exports;
 }
 

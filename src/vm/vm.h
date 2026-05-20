@@ -216,6 +216,10 @@ private:
 
     // Module system
     std::string currentFile;
+    // Authoritative grain cache lives on the root VM only. Child grain
+    // VMs leave this empty and reach the root's cache through parentVm_
+    // (see rootVm() / loadGrain) so that two sibling grains importing
+    // the same dependency share a single execution.
     std::unordered_map<std::string, Value> grainCache;
     std::set<std::string> importedInCurrentFile;
     std::vector<std::vector<StmtPtr>> grainAsts;
@@ -230,6 +234,12 @@ private:
     // own transitive imports — so the lifetime chain is main → grain →
     // sub-grain.
     std::vector<std::unique_ptr<VM>> grainVMs;
+
+    // Set by VM::loadGrain when this VM is created as a child grain VM.
+    // Null on the process's root VM. Used to walk back up to the root
+    // for cross-grain state like the shared grain cache.
+    VM* parentVm_ = nullptr;
+    VM& rootVm() { return parentVm_ ? parentVm_->rootVm() : *this; }
 
     Value loadGrain(const std::string& path, int line);
     std::string resolveGrainPath(const std::string& path, int line);
