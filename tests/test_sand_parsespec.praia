@@ -77,6 +77,12 @@ testing.test("multi-segment branch name in pin is rejected (use SHA or tag)", la
     // surprise the old code produced.
     testing.assertEqual(r.version, nil,
         "branch-with-/ does not silently parse as version")
+    // And the @feature/x suffix is preserved in the URL — the spec
+    // falls through whole instead of getting carved up. That's what
+    // makes the later "Invalid grain URL" error clearer than the old
+    // "Invalid grain version" misdiagnosis.
+    testing.assert(r.url.contains("@feature/x"),
+        "URL still carries the @feature/x suffix verbatim: " + r.url)
 })
 
 testing.done()

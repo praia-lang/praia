@@ -89,6 +89,36 @@ testing.test("a transitive grain is only executed once across siblings", lam{ in
         "Shared grain dep must execute exactly once")
 })
 
+testing.test("async tasks observe a COW snapshot of a grain's module globals", lam{ in
+    // Regression: when a grain closure was dispatched via `async`,
+    // OP_*_GLOBAL routed through the closure's live grain VM
+    // (chunk.homeVm), bypassing the task VM's COW snapshot. Two
+    // concurrent tasks then raced on the same counter and parent
+    // saw their mutations leak back. The fix routes through `this`
+    // inside task VMs and seeds the task's snapshot from the grain's
+    // globals when the dispatched closure is grain-owned.
+    let dir = testing.tempDir(nil)
+    writeGrain(dir, "g",
+        "let n = 0\nfunc bump() { n = n + 1; return n }\n" +
+        "func read() { return n }\nexport { bump, read }\n")
+    writeGrain(dir, "main",
+        "use \"./g\"\n" +
+        "g.bump()\ng.bump()\n" +              // parent state: n=2
+        "let t1 = async g.bump()\n" +
+        "let t2 = async g.bump()\n" +
+        "let r1 = await t1\n" +
+        "let r2 = await t2\n" +
+        "print(str(r1) + \"/\" + str(r2) + \"/\" + str(g.read()))\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
+    testing.assertEqual(r.exitCode, 0, r.stderr)
+    // Both tasks see their own COW snapshot of n=2 → bump to 3.
+    // Parent's n stays at 2 because task mutations don't leak back.
+    testing.assertEqual(r.stdout.strip(), "3/3/2",
+        "async grain tasks must observe COW snapshots, not live grain state")
+})
+
 testing.test("shared grain dep returns the same export value to both importers", lam{ in
     // Stronger than counting prints: the cache must return the *same*
     // exports map, so any state initialized in the dep is observable by

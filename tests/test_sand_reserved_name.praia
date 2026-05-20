@@ -1,4 +1,5 @@
 use "testing"
+use "../sand/grains/config"
 
 // Regression: sand used to allow any repo whose `grain.yaml` declared
 // `name: sand` to claim the reserved `sand` install directory and bin
@@ -7,10 +8,57 @@ use "testing"
 // would run attacker code. The fix locks the reserved name to the
 // canonical upstream (or a local file:// mirror, which already
 // implies local code execution).
+//
+// The first three tests exercise the policy directly via the
+// extracted `config.isAllowedSandSource` predicate — that gives
+// deterministic gate coverage without needing the install to clone.
+// The end-to-end tests below then verify the CLI surfaces the gate
+// for both the allowed file:// case (succeeds) and the
+// rename-via-manifest attack (no sand dir planted).
+
+testing.test("isAllowedSandSource accepts the canonical upstream", lam{ in
+    testing.assertEqual(
+        config.isAllowedSandSource(config.SAND_REPO_URL), true,
+        "canonical SAND_REPO_URL is allowed")
+})
+
+testing.test("isAllowedSandSource accepts any file:// URL", lam{ in
+    testing.assertEqual(
+        config.isAllowedSandSource("file:///tmp/sand"), true,
+        "file:// is allowed (local trust)")
+    testing.assertEqual(
+        config.isAllowedSandSource("file:///home/user/forks/sand"), true,
+        nil)
+})
+
+testing.test("isAllowedSandSource rejects any other URL", lam{ in
+    // Lookalike + completely unrelated + scheme variations.
+    testing.assertEqual(
+        config.isAllowedSandSource("https://github.com/attacker/sand.git"),
+        false, "remote fork rejected")
+    testing.assertEqual(
+        config.isAllowedSandSource("https://github.com/praia-lang/sand"),
+        false, "https without .git suffix doesn't match the canonical URL")
+    testing.assertEqual(
+        config.isAllowedSandSource("http://github.com/praia-lang/sand.git"),
+        false, "http (no s) is not the canonical URL")
+    testing.assertEqual(
+        config.isAllowedSandSource("git@github.com:praia-lang/sand.git"),
+        false, "ssh form not allowed for the reserved name")
+    testing.assertEqual(
+        config.isAllowedSandSource("ssh://git@github.com/praia-lang/sand.git"),
+        false, "ssh:// form not allowed for the reserved name")
+    testing.assertEqual(
+        config.isAllowedSandSource(""), false, "empty rejected")
+    testing.assertEqual(
+        config.isAllowedSandSource(nil), false, "nil rejected")
+})
+
+// ── End-to-end CLI coverage ─────────────────────────────────────
 
 let _gitProbe = sys.exec(["git", "--version"])
 if (_gitProbe.exitCode != 0) {
-    print("(skipping: git not available)")
+    print("(skipping CLI tests: git not available)")
     testing.done()
     sys.exit(0)
 }
@@ -24,93 +72,54 @@ func runSand(home, args) {
     return sys.exec(cmd)
 }
 
+// Build a fixture grain whose grain.yaml claims `name: sand`. Each
+// git step asserts exit=0 immediately so a fixture setup failure
+// fails the test loudly instead of producing a confusing
+// "wrapper missing" error pages later.
 func makeEvilSand(root) {
     let g = path.join(root, "evil")
     fs.mkdir(g)
     fs.write(path.join(g, "main.praia"), "print(\"evil sand pwned\")\n")
     fs.write(path.join(g, "grain.yaml"),
         "name: sand\nversion: 999.0\nmain: main.praia\nbin:\n  sand: main.praia\n")
-    sys.exec(["git", "init", "-q", g])
-    sys.exec(["git", "-C", g, "add", "-A"])
-    sys.exec(["git", "-C", g,
+    let r1 = sys.exec(["git", "init", "-q", g])
+    testing.assertEqual(r1.exitCode, 0, "git init: " + r1.stderr)
+    let r2 = sys.exec(["git", "-C", g, "add", "-A"])
+    testing.assertEqual(r2.exitCode, 0, "git add: " + r2.stderr)
+    let r3 = sys.exec(["git", "-C", g,
               "-c", "user.email=t@t", "-c", "user.name=t",
               "commit", "-q", "-m", "init"])
+    testing.assertEqual(r3.exitCode, 0, "git commit: " + r3.stderr)
     return g
 }
 
 testing.test("file:// fork claiming name: sand can still install (local trust)", lam{ in
-    // file:// already implies the user has local fs access, so this
-    // path stays open for testing/mirror use. Verifies the carve-out
-    // hasn't accidentally been removed.
-    let sandHome = sys.exec(["mktemp", "-d"]).stdout.strip()
-    let fixtureRoot = sys.exec(["mktemp", "-d"]).stdout.strip()
+    let sandHome = testing.tempDir(nil)
+    let fixtureRoot = testing.tempDir(nil)
     let evil = makeEvilSand(fixtureRoot)
 
     let r = runSand(sandHome, ["install", "-g", "file://" + evil])
     testing.assertEqual(r.exitCode, 0,
         "file:// install of name: sand succeeds: " + r.stderr)
-
-    sys.exec(["rm", "-rf", sandHome, fixtureRoot])
 })
 
-testing.test("remote URL claiming name: sand is rejected", lam{ in
-    // Spoof a remote source by using a non-file:// URL that points at
-    // the fixture. git supports `http://` for local servers, but the
-    // *gate* only looks at the URL scheme, so we just use a recognizably
-    // remote-looking https path. The clone will fail later (no server)
-    // but the reserved-name gate fires first.
-    let sandHome = sys.exec(["mktemp", "-d"]).stdout.strip()
-    let fixtureRoot = sys.exec(["mktemp", "-d"]).stdout.strip()
-    makeEvilSand(fixtureRoot)
-
-    // Use any non-canonical https URL. The check fires post-clone,
-    // post-manifest-read; even though the clone would fail in practice,
-    // we test the gate by constructing a manifest that renames to sand.
-    // To do that without a real remote, use a file:// URL but then
-    // rewrite the parsed.url through the spec mechanism. Easiest:
-    // build a fake "remote" by symlinking the fixture to a path that
-    // doesn't look like file://. Instead just verify directly with
-    // the canonical url check by passing a non-praia-lang https URL —
-    // git clone will fail with a network error, but only after the
-    // gate has run.
-    //
-    // We accept either outcome: gate rejection (clean error message)
-    // OR clone failure (the gate would have rejected anyway, just
-    // never got the chance). Both prove the attack is blocked.
-    let r = runSand(sandHome,
-        ["install", "-g", "https://github.com/definitely-not-praia-lang/sand"])
-    testing.assert(r.exitCode != 0,
-        "remote fork install must fail (exit=" + str(r.exitCode) + ")")
-    // No sand wrapper planted under HOME.
-    testing.assert(
-        !fs.exists(path.join(sandHome, ".praia", "bin", "sand")),
-        "no sand wrapper after rejected install")
-    testing.assert(
-        !fs.exists(path.join(sandHome, ".praia", "ext_grains", "sand")),
-        "no sand dir after rejected install")
-
-    sys.exec(["rm", "-rf", sandHome, fixtureRoot])
-})
-
-testing.test("rename-via-manifest attack: spec=evil but grain.yaml says sand", lam{ in
-    // The realistic attack: user types a benign-looking URL, but the
-    // attacker's grain.yaml renames it to "sand" mid-install. The
-    // gate runs *after* the manifest is read, so this gets caught.
-    // Use a non-file:// URL via http; git over a non-existent http
-    // host fails the clone but the gate path is still exercised
-    // because we'd want the gate to fire even if the clone succeeded.
-    //
-    // Cleanest probe: spoof via a normal-looking https URL, capture
-    // the rejection or failure, then verify state is clean. Either
-    // way — the attack must not result in an installed sand.
-    let sandHome = sys.exec(["mktemp", "-d"]).stdout.strip()
+testing.test("rename-via-manifest attack leaves no sand dir or wrapper", lam{ in
+    // The CLI counterpart to the unit tests above: a non-file:// spec
+    // pointing at *anything* with `name: sand` in its manifest must
+    // not produce an installed sand. We can't easily make the clone
+    // succeed (would require a local git server), but the outcome
+    // we care about is "no sand on disk" — same end result whether
+    // the gate fires or the clone fails first.
+    let sandHome = testing.tempDir(nil)
     let r = runSand(sandHome,
         ["install", "-g", "https://example.invalid/me/innocent-looking-grain"])
     testing.assert(r.exitCode != 0, "install must fail")
     testing.assert(
         !fs.exists(path.join(sandHome, ".praia", "ext_grains", "sand")),
         "no sand dir planted by rejected install")
-    sys.exec(["rm", "-rf", sandHome])
+    testing.assert(
+        !fs.exists(path.join(sandHome, ".praia", "bin", "sand")),
+        "no sand bin wrapper planted by rejected install")
 })
 
 testing.done()

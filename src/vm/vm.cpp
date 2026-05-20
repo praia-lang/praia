@@ -1182,7 +1182,13 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_DEFINE_GLOBAL: {
             uint16_t constIdx = READ_U16();
             auto& chunk = FRAME.chunk();
-            VM* gvm = chunk.homeVm ? chunk.homeVm : this;
+            // Grain-owned chunks normally resolve through their owning
+            // grain VM. Inside a task VM we instead route through `this`
+            // (the task) so the task's COW snapshot of grain globals is
+            // observed instead of the grain's live globals — preserves
+            // async isolation. OP_ASYNC seeds the task with the grain's
+            // slot layout when the dispatched closure is grain-owned.
+            VM* gvm = (chunk.homeVm && !isTaskVm_) ? chunk.homeVm : this;
             int slot = chunk.globalSlotCache[constIdx];
             if (slot < 0) {
                 slot = gvm->ensureGlobalSlot(chunk.constants[constIdx].asString());
@@ -1196,7 +1202,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_GET_GLOBAL: {
             uint16_t constIdx = READ_U16();
             auto& chunk = FRAME.chunk();
-            VM* gvm = chunk.homeVm ? chunk.homeVm : this;
+            VM* gvm = (chunk.homeVm && !isTaskVm_) ? chunk.homeVm : this;
             int slot = chunk.globalSlotCache[constIdx];
             if (slot < 0) {
                 const std::string& n = chunk.constants[constIdx].asString();
@@ -1211,7 +1217,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_SET_GLOBAL: {
             uint16_t constIdx = READ_U16();
             auto& chunk = FRAME.chunk();
-            VM* gvm = chunk.homeVm ? chunk.homeVm : this;
+            VM* gvm = (chunk.homeVm && !isTaskVm_) ? chunk.homeVm : this;
             int slot = chunk.globalSlotCache[constIdx];
             if (slot < 0) {
                 const std::string& n = chunk.constants[constIdx].asString();
@@ -1261,7 +1267,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_POST_DEC_GLOBAL: {
             uint16_t constIdx = READ_U16();
             auto& chunk = FRAME.chunk();
-            VM* gvm = chunk.homeVm ? chunk.homeVm : this;
+            VM* gvm = (chunk.homeVm && !isTaskVm_) ? chunk.homeVm : this;
             int slot = chunk.globalSlotCache[constIdx];
             if (slot < 0) {
                 const std::string& n = chunk.constants[constIdx].asString();
@@ -2121,7 +2127,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             // the cross-grain isolation regression in tests.
             std::string tagName = READ_STRING();
             uint8_t argc = READ_BYTE();
-            VM* gvm = FRAME.chunk().homeVm ? FRAME.chunk().homeVm : this;
+            VM* gvm = (FRAME.chunk().homeVm && !isTaskVm_) ? FRAME.chunk().homeVm : this;
             int gslot = gvm->findGlobalSlot(tagName);
             if (gslot >= 0 && gvm->isTaskVm_ && !gvm->loadedMask_[gslot]) gvm->lazyLoadGlobal(gslot);
             if (gslot >= 0 && gvm->globals[gslot].isCallable()) {
@@ -2291,29 +2297,37 @@ VM::Result VM::execute(int baseFrameCount_) {
                         " " + argStr(arity) + " but got " + std::to_string(args.size()));
                 }
 
-                // Lazy/COW globals: build a shallow snapshot of the parent's
-                // globals (just shared_ptr increments — no deep-copy). The
-                // task VM will deep-copy a slot only the first time it
+                // Lazy/COW globals: build a shallow snapshot of the source
+                // VM's globals (just shared_ptr increments — no deep-copy).
+                // The task VM will deep-copy a slot only the first time it
                 // reads or writes it (see VM::lazyLoadGlobal). A task that
                 // touches only `sys` pays 1 deepCopy instead of N.
                 //
-                // Nested async: if THIS VM is itself a task, slots we
-                // haven't loaded yet still hold Value() in `globals` —
-                // fall through to OUR snapshot so the child task sees the
-                // value the grand-parent had, not nil.
+                // Snapshot source: for a grain-owned closure we copy from
+                // its owning grain VM so the task gets the grain's slot
+                // layout (mirrors what op handlers expect inside a task —
+                // see chunk.homeVm + isTaskVm_ logic in OP_GET_GLOBAL).
+                // Without this the task VM would have parent's indices
+                // and the closure's grain-slot references would miss.
+                //
+                // Nested async: if the source VM is itself a task, slots
+                // it hasn't loaded yet still hold Value() in `globals` —
+                // fall through to ITS snapshot so the child task sees
+                // the value the grand-parent had, not nil.
                 //
                 // Indices map is copied verbatim (not rebuilt) so slot
-                // numbering matches between parent and task — the chunk's
+                // numbering matches between source and task — the chunk's
                 // shared globalSlotCache is correct in both VMs.
+                VM* snapVm = fn->chunk.homeVm ? fn->chunk.homeVm : this;
                 std::vector<Value> globalsCopy;
-                globalsCopy.reserve(globals.size());
-                for (size_t s = 0; s < globals.size(); s++) {
-                    if (isTaskVm_ && !loadedMask_[s])
-                        globalsCopy.push_back(globalsSnapshot_[s]);
+                globalsCopy.reserve(snapVm->globals.size());
+                for (size_t s = 0; s < snapVm->globals.size(); s++) {
+                    if (snapVm->isTaskVm_ && !snapVm->loadedMask_[s])
+                        globalsCopy.push_back(snapVm->globalsSnapshot_[s]);
                     else
-                        globalsCopy.push_back(globals[s]);
+                        globalsCopy.push_back(snapVm->globals[s]);
                 }
-                auto indicesCopy = globalIndices;
+                auto indicesCopy = snapVm->globalIndices;
 
                 // Snapshot upvalues and deep-copy so captured arrays/maps/instances
                 // are isolated from the caller

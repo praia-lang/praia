@@ -26,11 +26,24 @@ let praiaBin = path.join(sys.cwd(), "praia")
 let sandMain = path.join(sys.cwd(), "sand", "main.praia")
 let sandSourceDir = path.join(sys.cwd(), "sand")
 
+// Wrap mktemp -d behind testing.cleanup so the dir is removed even
+// when an assertion fails midway through the test body (testing.tempDir
+// can't be used here — sand bakes wrappers with absolute paths and
+// expects HOME to be a stable shape, so we keep mktemp's bare path
+// without testing's "praia-test-" prefix logic).
+func _makeSandHome() {
+    let dir = sys.exec(["mktemp", "-d"]).stdout.strip()
+    testing.cleanup(lam{ in
+        try { sys.exec(["rm", "-rf", dir]) } catch (e) {}
+    })
+    return dir
+}
+
 testing.test("update sand from a user-global install with an empty lockfile", lam{ in
     // Plant sand under ~/.praia/ext_grains/sand and clear the
     // lockfile. cmdUpdate must reach updateOne via the synth path
     // — *not* bail with "No grains installed".
-    let sandHome = sys.exec(["mktemp", "-d"]).stdout.strip()
+    let sandHome = _makeSandHome()
     fs.mkdir(path.join(sandHome, ".praia"))
     fs.mkdir(path.join(sandHome, ".praia", "ext_grains"))
     fs.copy(sandSourceDir, path.join(sandHome, ".praia", "ext_grains", "sand"))
@@ -48,8 +61,6 @@ testing.test("update sand from a user-global install with an empty lockfile", la
         "update sand must not short-circuit on empty lockfile: " + out)
     testing.assert(out.contains("Updating sand"),
         "update sand must reach updateOne: " + out)
-
-    sys.exec(["rm", "-rf", sandHome])
 })
 
 testing.test("synth sees a system-installed sand (PRAIA_LIBDIR) even as non-root", lam{ in
@@ -70,7 +81,7 @@ testing.test("synth sees a system-installed sand (PRAIA_LIBDIR) even as non-root
 
     // Fresh HOME so user-global is empty; only the system-global
     // sand at sys.libdir exists. synth must find it there.
-    let sandHome = sys.exec(["mktemp", "-d"]).stdout.strip()
+    let sandHome = _makeSandHome()
     let r = sys.exec(
         ["env", "HOME=" + sandHome, praiaBin, sandMain, "update", "sand"],
         5000)
@@ -81,8 +92,6 @@ testing.test("synth sees a system-installed sand (PRAIA_LIBDIR) even as non-root
         "synth must return a valid entry for system-installed sand: " + out)
     testing.assert(out.contains("Updating sand"),
         "update sand must reach updateOne: " + out)
-
-    sys.exec(["rm", "-rf", sandHome])
 })
 
 testing.done()

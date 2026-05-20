@@ -186,17 +186,17 @@ testing.test("registry load accepts an empty lockfile as no-grains", lam{ in
 })
 
 testing.test("manifest survives a description containing only spaces", lam{ in
-    // Defensive: leading/trailing whitespace is stripped by the YAML
-    // parser unless quoted. yaml.stringify is what's doing the
-    // quoting here, so we just confirm the round-trip doesn't lose
-    // *meaningful* content (a description of a single space is
-    // pathological; we don't promise to preserve it byte-for-byte).
+    // Regression: YAML plain scalars strip leading/trailing whitespace
+    // on parse, so a value of " " (single space) round-tripped as
+    // nil. yaml.stringify now quotes any string with whitespace at
+    // either end so the parser keeps the bytes intact.
     let dir = testing.tempDir(nil)
     let m = manifest.create("spaces")
-    m.description = "normal description"
+    m.description = " "
     manifest.write(dir, m)
     let r = manifest.read(dir)
-    testing.assertEqual(r.description, "normal description", nil)
+    testing.assertEqual(r.description, " ",
+        "single-space description survives the YAML round-trip")
 })
 
 testing.done()
