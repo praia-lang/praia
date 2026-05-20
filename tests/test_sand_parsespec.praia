@@ -1,0 +1,82 @@
+use "testing"
+use "../sand/grains/git" as gitmod
+
+// Regression: parseSpec used to treat the @ in SCP-style SSH URLs
+// (`git@host:user/repo`) as a version pin, leaving the URL part as
+// just "git" and the "version" as everything past the @. That broke
+// every documented SSH spec form. The fix detects version pins by
+// matching a tag-like trailing token, so SSH user@host @ stays put.
+
+testing.test("SCP-style SSH without a version pin", lam{ in
+    let r = gitmod.parseSpec("git@github.com:user/repo")
+    testing.assertEqual(r.url, "git@github.com:user/repo.git",
+        "URL preserved verbatim with .git appended")
+    testing.assertEqual(r.name, "repo", nil)
+    testing.assertEqual(r.version, nil, "no spurious version pin")
+})
+
+testing.test("SCP-style SSH already ending in .git", lam{ in
+    let r = gitmod.parseSpec("git@github.com:user/repo.git")
+    testing.assertEqual(r.url, "git@github.com:user/repo.git",
+        ".git not double-appended")
+    testing.assertEqual(r.name, "repo", nil)
+    testing.assertEqual(r.version, nil, nil)
+})
+
+testing.test("SCP-style SSH with a version pin", lam{ in
+    let r = gitmod.parseSpec("git@github.com:user/repo@v1.2.3")
+    testing.assertEqual(r.url, "git@github.com:user/repo.git",
+        "version stripped from URL")
+    testing.assertEqual(r.version, "v1.2.3",
+        "tag-like suffix recognized as the pin")
+    testing.assertEqual(r.name, "repo", nil)
+})
+
+testing.test("ssh:// URL with user", lam{ in
+    let r = gitmod.parseSpec("ssh://git@github.com/user/repo")
+    testing.assertEqual(r.url, "ssh://git@github.com/user/repo.git", nil)
+    testing.assertEqual(r.name, "repo", nil)
+    testing.assertEqual(r.version, nil,
+        "ssh:// user@host @ isn't mistaken for a version separator")
+})
+
+testing.test("ssh:// URL with user and version pin", lam{ in
+    let r = gitmod.parseSpec("ssh://git@github.com/user/repo@v2")
+    testing.assertEqual(r.url, "ssh://git@github.com/user/repo.git", nil)
+    testing.assertEqual(r.version, "v2", nil)
+})
+
+testing.test("regression hold: previously-working https forms still parse", lam{ in
+    let cases = [
+        ["https://github.com/user/repo", "https://github.com/user/repo.git", nil, "repo"],
+        ["https://github.com/user/repo@v1.2", "https://github.com/user/repo.git", "v1.2", "repo"],
+        ["github.com/user/repo", "https://github.com/user/repo.git", nil, "repo"],
+        ["github.com/user/repo@v1.2", "https://github.com/user/repo.git", "v1.2", "repo"],
+        ["praia-lang/sand", "https://praia-lang/sand.git", nil, "sand"],
+        ["file:///tmp/repo", "file:///tmp/repo", nil, "repo"],
+        ["file:///tmp/repo@v1", "file:///tmp/repo", "v1", "repo"],
+    ]
+    for (c in cases) {
+        let r = gitmod.parseSpec(c[0])
+        testing.assertEqual(r.url,     c[1], "url for " + c[0])
+        testing.assertEqual(r.version, c[2], "version for " + c[0])
+        testing.assertEqual(r.name,    c[3], "name for " + c[0])
+    }
+})
+
+testing.test("multi-segment branch name in pin is rejected (use SHA or tag)", lam{ in
+    // The new "tag-like trailing token" rule excludes `/` in version
+    // pins, so `feature/x` doesn't get interpreted as a version. The
+    // whole spec falls through as-is (no split), and the validator
+    // downstream rejects the resulting URL with an embedded `/`. The
+    // user-visible effect: a clearer "Invalid grain URL" error rather
+    // than a confusing "Invalid grain version".
+    let r = gitmod.parseSpec("github.com/user/repo@feature/x")
+    // No version split — everything past the @ stays in the URL,
+    // which won't be a valid clone target but isn't the security
+    // surprise the old code produced.
+    testing.assertEqual(r.version, nil,
+        "branch-with-/ does not silently parse as version")
+})
+
+testing.done()
