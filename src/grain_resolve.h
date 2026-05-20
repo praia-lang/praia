@@ -47,7 +47,14 @@ inline std::string containedCanonical(const fs::path& file, const fs::path& base
 
 // Check if a directory is a grain with a grain.yaml.
 // Returns the resolved entry file path, or empty string if not a grain directory.
-inline std::string resolveGrainDir(const fs::path& dir, const fs::path& base) {
+//
+// Containment is checked against `dir` (the grain's own directory),
+// not `base` (the ext_grains parent). A `main:` value of
+// `../victim/main.praia` resolves into a sibling grain's directory —
+// `base`-scoped containment would accept it and silently load a
+// different grain's code under the requested grain's name. A
+// dir-scoped check pins each grain's entry file inside its own root.
+inline std::string resolveGrainDir(const fs::path& dir, const fs::path& /*base*/) {
     if (!fs::is_directory(dir)) return "";
 
     // Look for grain.yaml to find the main entry file
@@ -66,18 +73,21 @@ inline std::string resolveGrainDir(const fs::path& dir, const fs::path& base) {
                 if (end != std::string::npos) mainFile = mainFile.substr(0, end + 1);
                 if (!mainFile.empty()) {
                     auto entry = dir / mainFile;
-                    if (fs::exists(entry)) return containedCanonical(entry, base);
+                    if (fs::exists(entry)) return containedCanonical(entry, dir);
                 }
             }
         }
     }
 
-    // Fallback: main.praia, then index.praia
+    // Fallback: main.praia, then index.praia. These can't be `..`-typed
+    // out, but a symlink at dir/main.praia could point elsewhere — so
+    // we still check containment against `dir` rather than trusting
+    // the literal path.
     auto mainFile = dir / "main.praia";
-    if (fs::exists(mainFile)) return containedCanonical(mainFile, base);
+    if (fs::exists(mainFile)) return containedCanonical(mainFile, dir);
 
     auto indexFile = dir / "index.praia";
-    if (fs::exists(indexFile)) return containedCanonical(indexFile, base);
+    if (fs::exists(indexFile)) return containedCanonical(indexFile, dir);
 
     return "";
 }

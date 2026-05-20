@@ -1,0 +1,76 @@
+use "testing"
+
+// Regression: a grain's grain.yaml `main:` value used to be allowed to
+// reference any path inside the ext_grains/ parent — so a grain at
+// `ext_grains/evil/` with `main: ../victim/main.praia` would silently
+// load the *victim* grain's code under the requested name. The
+// containment check was scoped to the wrong directory.
+
+func writeFile(p, body) {
+    let d = path.dirname(p)
+    if (!fs.exists(d)) { fs.mkdir(d) }
+    fs.write(p, body)
+}
+
+testing.test("grain.yaml main: cannot point outside the grain directory", lam{ in
+    let root = testing.tempDir(nil)
+    // Two sibling grains under ext_grains/. `evil`'s manifest tries to
+    // claim the entry file of `victim`.
+    writeFile(path.join(root, "ext_grains", "evil", "grain.yaml"),
+        "name: evil\nversion: 0.1.0\nmain: ../victim/main.praia\n")
+    writeFile(path.join(root, "ext_grains", "victim", "main.praia"),
+        "let v = \"stolen\"\nexport { v }\n")
+    writeFile(path.join(root, "main.praia"),
+        "use \"evil\"\nprint(evil.v)\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(root, "main.praia")])
+    testing.assert(r.exitCode != 0,
+        "import must fail (exit=%{str(r.exitCode)}): " + r.stdout + r.stderr)
+    testing.assert(!r.stdout.contains("stolen"),
+        "victim's exports must not be visible: " + r.stdout)
+    // Defensive — the error message comes through the standard
+    // "grain not found" path. Don't pin exact wording; just confirm
+    // that the runtime tells the user something went wrong.
+    testing.assert((r.stderr + r.stdout).contains("evil"),
+        "error mentions the grain name: " + r.stderr + r.stdout)
+})
+
+testing.test("victim grain is still loadable directly under its own name", lam{ in
+    // Sanity check that the dir-scoped containment didn't accidentally
+    // break legitimate imports — the victim, named `victim`, must
+    // still resolve from its own directory.
+    let root = testing.tempDir(nil)
+    writeFile(path.join(root, "ext_grains", "victim", "main.praia"),
+        "let v = \"ok\"\nexport { v }\n")
+    writeFile(path.join(root, "main.praia"),
+        "use \"victim\"\nprint(victim.v)\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(root, "main.praia")])
+    testing.assertEqual(r.exitCode, 0, r.stderr)
+    testing.assertEqual(r.stdout.strip(), "ok",
+        "victim still loads from its own directory")
+})
+
+testing.test("grain.yaml main: cannot reach upward via deeper paths", lam{ in
+    // Variant: nested ../ traversal, plus extension games.
+    let root = testing.tempDir(nil)
+    writeFile(path.join(root, "ext_grains", "trickster", "grain.yaml"),
+        "name: trickster\nversion: 0.1.0\nmain: sub/../../host/main.praia\n")
+    writeFile(path.join(root, "ext_grains", "trickster", "sub", "placeholder"),
+        "")
+    writeFile(path.join(root, "ext_grains", "host", "main.praia"),
+        "let h = \"oops\"\nexport { h }\n")
+    writeFile(path.join(root, "main.praia"),
+        "use \"trickster\"\nprint(trickster.h)\n")
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let r = sys.exec([praiaBin, path.join(root, "main.praia")])
+    testing.assert(r.exitCode != 0,
+        "nested traversal must fail (exit=%{str(r.exitCode)}): " + r.stderr)
+    testing.assert(!r.stdout.contains("oops"),
+        "must not expose host's exports: " + r.stdout)
+})
+
+testing.done()

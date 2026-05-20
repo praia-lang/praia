@@ -1,0 +1,203 @@
+use "testing"
+
+// Regression: update and restore used to remove the existing install
+// (grain dir + bin wrappers + lockfile entry) BEFORE attempting the
+// re-fetch. A clone, copy, integrity, or bin-install failure then left
+// the user with neither the prior install nor a record of how to get
+// it back.
+//
+// Fix: stage the new content alongside the existing dir, atomically
+// rename, restore from a sibling backup on failure. Bin wrappers are
+// planted only after the swap. Lockfile entry is preserved across
+// rollback.
+
+let _gitProbe = sys.exec(["which", "git"])
+if (_gitProbe.exitCode != 0) {
+    print("(skipping: git not available)")
+    testing.done()
+    sys.exit(0)
+}
+
+let praiaBin = path.join(sys.cwd(), "praia")
+let sandMain = path.join(sys.cwd(), "sand", "main.praia")
+let _mk = lam{ in
+    return sys.exec(["mktemp", "-d"]).stdout.strip()
+}
+let sandHome = _mk()
+let fixtureRoot = _mk()
+
+func runSand(args) {
+    let cmd = ["env", "HOME=" + sandHome, praiaBin, sandMain]
+    for (a in args) { cmd.push(a) }
+    return sys.exec(cmd)
+}
+
+// Build a git-tracked grain with the given files. `extraBin` is a map
+// of relative path → file content for any bin/ entries.
+func makeGrain(name, mainBody, manifestExtra, extraFiles) {
+    let g = path.join(fixtureRoot, name)
+    if (fs.exists(g)) { fs.remove(g) }
+    fs.mkdir(g)
+    fs.write(path.join(g, "main.praia"), mainBody)
+    fs.write(path.join(g, "grain.yaml"),
+        "name: %{name}\nversion: 0.1.0\nmain: main.praia\n%{manifestExtra}")
+    let keys2 = keys(extraFiles)
+    for (rel in keys2) {
+        let abs = path.join(g, rel)
+        let d = path.dirname(abs)
+        if (!fs.exists(d)) { fs.mkdir(d) }
+        fs.write(abs, extraFiles[rel])
+    }
+    sys.exec(["git", "init", "-q", g])
+    sys.exec(["git", "-C", g, "add", "-A"])
+    sys.exec(["git", "-C", g,
+              "-c", "user.email=t@t", "-c", "user.name=t",
+              "commit", "-q", "-m", "init"])
+    return g
+}
+
+func commitInGrain(g, msg) {
+    sys.exec(["git", "-C", g, "add", "-A"])
+    sys.exec(["git", "-C", g,
+              "-c", "user.email=t@t", "-c", "user.name=t",
+              "commit", "-q", "-m", msg])
+}
+
+testing.test("failed update preserves the prior install and lock entry", lam{ in
+    // v1: install a working grain.
+    let g = makeGrain("survivor",
+        "let n = 1\nfunc which() { return n }\nexport { which }\n",
+        "bin:\n  survivor: bin/survivor.praia\n",
+        {"bin/survivor.praia": "print(\"survivor v1:\", sys.args)\n"})
+    let r1 = runSand(["install", "-g", "file://" + g])
+    testing.assertEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
+
+    let grainDir = path.join(sandHome, ".praia", "ext_grains", "survivor")
+    let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
+    let binPath  = path.join(sandHome, ".praia", "bin", "survivor")
+
+    let mainBefore  = fs.read(path.join(grainDir, "main.praia"))
+    let lockBefore  = fs.read(lockPath)
+    let binBefore   = fs.read(binPath)
+
+    // v2: a manifest that references a bin/ script that doesn't
+    // exist. installGrain's bin.install step will throw — but only
+    // AFTER clone, stage, and atomic-swap.
+    fs.write(path.join(g, "grain.yaml"),
+        "name: survivor\nversion: 0.2.0\nmain: main.praia\nbin:\n" +
+        "  survivor: bin/survivor.praia\n" +
+        "  doesnotexist: bin/missing.praia\n")
+    fs.write(path.join(g, "main.praia"),
+        "let n = 2\nfunc which() { return n }\nexport { which }\n")
+    commitInGrain(g, "broken v2")
+
+    let r2 = runSand(["update", "-g", "survivor"])
+    testing.assert(r2.exitCode != 0,
+        "update with missing bin script must fail (exit=" + str(r2.exitCode) + ")")
+
+    // Everything must look like the failure never happened.
+    testing.assertEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
+        "grain dir restored to v1 content after failed update")
+    testing.assertEqual(fs.read(lockPath), lockBefore,
+        "lockfile restored to v1 entry after failed update")
+    testing.assertEqual(fs.read(binPath), binBefore,
+        "bin wrapper preserved after failed update")
+
+    let cleanup = runSand(["remove", "-g", "-y", "survivor"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
+testing.test("failed restore preserves the lockfile entry for retry", lam{ in
+    // Install v1 cleanly, then corrupt the LOCKED integrity hash and
+    // remove the dir. Restore must:
+    //   • fail (integrity mismatch — already covered by another test)
+    //   • leave the lockfile entry intact so the user can retry after
+    //     fixing whatever caused the mismatch.
+    let g = makeGrain("retryable",
+        "let v = 1\nexport { v }\n", "", {})
+    let r1 = runSand(["install", "-g", "file://" + g])
+    testing.assertEqual(r1.exitCode, 0, r1.stderr)
+
+    let grainDir = path.join(sandHome, ".praia", "ext_grains", "retryable")
+    let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
+    let lockBefore = fs.read(lockPath)
+    fs.remove(grainDir)
+
+    // Mangle integrity in the lockfile (so restore fails) without
+    // touching anything else. The pre-fix code removed the entry up
+    // front and never put it back; now it should survive intact.
+    let mangled = lockBefore.replace("integrity: sha256-",
+                                      "integrity: sha256-deadbeef")
+    fs.write(lockPath, mangled)
+
+    let r2 = runSand(["install", "-g"])
+    testing.assert(r2.exitCode != 0, "restore should fail on integrity mismatch")
+
+    // Lockfile entry survives: the user can roll back the corrupted
+    // integrity field, re-`sand install`, and recover.
+    let lockAfter = fs.read(lockPath)
+    testing.assert(lockAfter.contains("retryable:"),
+        "lockfile still has the entry after failed restore: " + lockAfter)
+    testing.assert(lockAfter.contains("source:"),
+        "lockfile entry still names the source for retry: " + lockAfter)
+
+    // Put the good integrity back and verify retry works.
+    fs.write(lockPath, lockBefore)
+    let r3 = runSand(["install", "-g"])
+    testing.assertEqual(r3.exitCode, 0,
+        "retry succeeds after fixing integrity: " + r3.stderr)
+    testing.assert(fs.exists(grainDir), "grain reinstalled on retry")
+
+    let cleanup = runSand(["remove", "-g", "-y", "retryable"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
+testing.test("update keeps bin wrappers working through failure", lam{ in
+    // Install v1 with a bin wrapper, then attempt an update that
+    // fails. The bin wrapper must keep pointing at content the user
+    // can run — not be unlinked or replaced with a wrapper for a
+    // dir we never installed.
+    let g = makeGrain("keepbin",
+        "let v = 1\nexport { v }\n",
+        "bin:\n  keepbin: bin/keepbin.praia\n",
+        {"bin/keepbin.praia": "print(\"keepbin v1:\", sys.args)\n"})
+    let r1 = runSand(["install", "-g", "file://" + g])
+    testing.assertEqual(r1.exitCode, 0, r1.stderr)
+
+    let binPath = path.join(sandHome, ".praia", "bin", "keepbin")
+    testing.assert(fs.exists(binPath), "v1 wrapper planted")
+
+    // Verify the wrapper actually runs the v1 main *now*, before we
+    // attempt the failed update. This is the property the rollback
+    // is responsible for preserving.
+    let probe1 = sys.exec([binPath, "hello"])
+    testing.assertEqual(probe1.exitCode, 0, "v1 wrapper runs: " + probe1.stderr)
+    testing.assert(probe1.stdout.contains("keepbin v1:"),
+        "v1 wrapper prints v1 marker: " + probe1.stdout)
+
+    // Push a manifest referencing a missing bin script. installGrain
+    // will fail at bin.install, *after* the atomic swap.
+    fs.write(path.join(g, "grain.yaml"),
+        "name: keepbin\nversion: 0.2.0\nmain: main.praia\nbin:\n" +
+        "  keepbin: bin/keepbin.praia\n" +
+        "  vanished: bin/vanished.praia\n")
+    commitInGrain(g, "broken v2")
+
+    let r2 = runSand(["update", "-g", "keepbin"])
+    testing.assert(r2.exitCode != 0, "update fails")
+
+    // Wrapper file still exists and still runs v1.
+    testing.assert(fs.exists(binPath),
+        "wrapper still on PATH after failed update")
+    let probe2 = sys.exec([binPath, "world"])
+    testing.assertEqual(probe2.exitCode, 0,
+        "wrapper still runnable after failed update: " + probe2.stderr)
+    testing.assert(probe2.stdout.contains("keepbin v1:"),
+        "wrapper still runs v1 content after failed update: " + probe2.stdout)
+
+    let cleanup = runSand(["remove", "-g", "-y", "keepbin"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
+sys.exec(["rm", "-rf", sandHome, fixtureRoot])
+testing.done()
