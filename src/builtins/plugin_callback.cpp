@@ -49,8 +49,14 @@ Value invokeExecutor(void* exec,
                      const std::shared_ptr<Callable>& fn,
                      const std::vector<Value>& args) {
     if (!exec) {
+        // Different wording from the praia::call inline wrapper so
+        // stack traces distinguish "wrapper saw no executor on this
+        // thread" from "caller bypassed the wrapper and passed a
+        // null token here". Bypassing the wrapper is unusual — it
+        // happens only when a plugin checks currentExecutor()
+        // explicitly and then calls invokeExecutor() directly.
         throw RuntimeError(
-            "praia::call invoked with no active Praia executor on this thread", 0);
+            "praia::invokeExecutor called with a null executor token", 0);
     }
     auto raw = reinterpret_cast<uintptr_t>(exec);
     if ((raw & kTagBit) == kTagVm) {

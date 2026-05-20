@@ -76,6 +76,11 @@ extern "C" void praia_register(PraiaMap* module) {
     // mathext.filter(array, predicate) — keep elements where the
     // user-supplied predicate returns truthy. Demonstrates calling
     // back into Praia code from a native plugin via praia::call.
+    //
+    // We snapshot the input array's elements before iterating so a
+    // predicate that mutates the source (e.g. pushes/pops on it via
+    // a closed-over reference) doesn't invalidate our iterator or
+    // race with the std::vector reallocating mid-loop.
     module->entries["filter"] = Value(makeNative("mathext.filter", 2,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())
@@ -83,8 +88,9 @@ extern "C" void praia_register(PraiaMap* module) {
             if (!args[1].isCallable())
                 throw RuntimeError("mathext.filter(): second argument must be a function", 0);
             auto pred = args[1].asCallable();
+            std::vector<Value> snapshot = args[0].asArray()->elements;
             auto out = gcNew<PraiaArray>();
-            for (auto& elem : args[0].asArray()->elements) {
+            for (auto& elem : snapshot) {
                 Value keep = praia::call(pred, {elem});
                 if (keep.isTruthy()) out->elements.push_back(elem);
             }

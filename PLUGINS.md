@@ -218,6 +218,8 @@ Plugins are `.cpp` files, but can wrap any C library. For example, wrapping C's 
 #include "praia_plugin.h"
 #include <cstdlib>
 
+PRAIA_DECLARE_ABI();
+
 extern "C" void praia_register(PraiaMap* module) {
     module->entries["parseBase"] = Value(makeNative("mymod.parseBase", 2,
         [](const std::vector<Value>& args) -> Value {
@@ -227,6 +229,8 @@ extern "C" void praia_register(PraiaMap* module) {
         }));
 }
 ```
+
+(`PRAIA_DECLARE_ABI();` is required in every plugin source file — `loadNative()` refuses any plugin that omits it. See [ABI versioning](#abi-versioning).)
 
 See [`examples/plugins/strutil.cpp`](examples/plugins/strutil.cpp) for a full example wrapping C standard library functions.
 

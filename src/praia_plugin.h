@@ -84,6 +84,10 @@ inline Value call(const std::shared_ptr<Callable>& fn,
                   const std::vector<Value>& args = {}) {
     void* exec = currentExecutor();
     if (!exec) {
+        // Distinct from invokeExecutor's "null executor token" so a
+        // stack trace makes clear that the wrapper detected the
+        // missing context (the common case), not a caller that
+        // bypassed the wrapper and passed nullptr to invokeExecutor.
         throw RuntimeError(
             "praia::call invoked with no active Praia executor on this thread", 0);
     }
