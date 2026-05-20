@@ -151,5 +151,71 @@ testing.test("restore aborts when integrity does not match", lam{ in
     // want sandHome clean for the next test.
 })
 
+testing.test("install with @version stores bare source (no double-pin on restore)", lam{ in
+    // Regression: when the user installed `<url>@v1`, the lockfile
+    // saved `source: <url>@v1` verbatim, then restore appended
+    // `@v1` again, producing `<url>@v1@v1`. parseSpec then derived
+    // a name like `repo@v1` from the last segment, which failed
+    // isValidName, and the whole restore aborted.
+    let g = makeGrain("pinned", "let v = 1\nexport { v }\n")
+    let grain = g[0]
+    sys.exec(["git", "-C", grain, "tag", "v1"])
+
+    let r1 = runSand(["install", "-g", "file://" + grain + "@v1"])
+    testing.assertEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
+
+    let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
+    let lock = fs.read(lockPath)
+    testing.assert(lock.contains("source: " + "file://" + grain + "\n"),
+        "source stored without @version suffix: " + lock)
+    testing.assert(lock.contains("version: v1"),
+        "version recorded separately: " + lock)
+
+    // Tear down the local install and restore from the lockfile.
+    let grainDir = path.join(sandHome, ".praia", "ext_grains", "pinned")
+    fs.remove(grainDir)
+
+    let r2 = runSand(["install", "-g"])
+    testing.assertEqual(r2.exitCode, 0,
+        "restore (no double-pin) succeeds: " + r2.stderr)
+    testing.assert(fs.exists(grainDir),
+        "grain reinstalled at the pinned version")
+
+    let cleanup = runSand(["remove", "-g", "-y", "pinned"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
+testing.test("restore tolerates an old-format lockfile with @version embedded in source", lam{ in
+    // Defensive: lockfiles written by older sand versions stored the
+    // version pin inside `source`. After the fix, restore guards
+    // against appending the version a second time, so old lockfiles
+    // keep working without manual editing.
+    let g = makeGrain("migrate", "let v = 1\nexport { v }\n")
+    let grain = g[0]
+    sys.exec(["git", "-C", grain, "tag", "v1"])
+
+    // Hand-write an old-format lockfile.
+    let extGrains = path.join(sandHome, ".praia", "ext_grains")
+    fs.mkdir(extGrains)
+    let lockPath = path.join(extGrains, ".sand-lock.yaml")
+    fs.write(lockPath,
+        "grains:\n" +
+        "  migrate:\n" +
+        "    source: file://" + grain + "@v1\n" +
+        "    version: v1\n" +
+        "    url: file://" + grain + "\n" +
+        "    installed: 2026-05-20\n")
+
+    let r = runSand(["install", "-g"])
+    testing.assertEqual(r.exitCode, 0,
+        "restore from old-format lockfile succeeds: " + r.stderr)
+    let grainDir = path.join(extGrains, "migrate")
+    testing.assert(fs.exists(grainDir),
+        "old-format lockfile restored without double-pin")
+
+    let cleanup = runSand(["remove", "-g", "-y", "migrate"])
+    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+})
+
 sys.exec(["rm", "-rf", sandHome, fixtureRoot])
 testing.done()
