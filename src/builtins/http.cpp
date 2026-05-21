@@ -37,6 +37,11 @@ struct SocketConn {
     SSL* ssl = nullptr;
     SSL_CTX* ctx = nullptr;
 #endif
+    // Cumulative bytes successfully read from the peer. The session
+    // retry path checks whether this advanced during a failed request
+    // to decide if the request is replayable on a fresh socket — see
+    // doOneHttpRequestImpl's catch block.
+    size_t bytesRead = 0;
 
     SocketConn() = default;
     // Resource-owning: disable copy/move so a stray copy can't lead
@@ -57,9 +62,15 @@ struct SocketConn {
 
     ssize_t read(void* buf, size_t len) {
 #ifdef HAVE_OPENSSL
-        if (ssl) return SSL_read(ssl, buf, static_cast<int>(len));
+        if (ssl) {
+            ssize_t n = SSL_read(ssl, buf, static_cast<int>(len));
+            if (n > 0) bytesRead += static_cast<size_t>(n);
+            return n;
+        }
 #endif
-        return ::recv(fd, buf, len, 0);
+        ssize_t n = ::recv(fd, buf, len, 0);
+        if (n > 0) bytesRead += static_cast<size_t>(n);
+        return n;
     }
 
     void shutdown_close() {
@@ -781,6 +792,12 @@ static std::string resolveLocation(const std::string& baseUrl,
 // Validate the parts of a request that are about to hit the wire. Runs
 // BEFORE any DNS / TCP / TLS work so garbage input fails fast and with
 // a useful error rather than after a 30-second handshake timeout.
+//
+// Also rejects caller-supplied versions of headers the client manages
+// itself (Host, Connection, Content-Length, Transfer-Encoding, Upgrade).
+// doOneHttpRequestImpl always emits these from its own computed values;
+// a duplicate caller version would either be ignored, conflict, or
+// produce header-smuggling-class behavior on lenient servers.
 static void validateRequestParts(
     const std::string& method, const ParsedUrl& p,
     const std::unordered_map<std::string, std::string>& headers) {
@@ -790,10 +807,31 @@ static void validateRequestParts(
         throw RuntimeError("Invalid URL path: contains CR/LF/NUL", 0);
     for (char c : p.host) if (c == '\r' || c == '\n' || c == '\0')
         throw RuntimeError("Invalid host: contains CR/LF/NUL", 0);
+
+    auto eqIgnoreCase = [](const std::string& a, const char* b) {
+        size_t n = std::strlen(b);
+        if (a.size() != n) return false;
+        for (size_t i = 0; i < n; i++) {
+            char lhs = static_cast<char>(std::tolower(static_cast<unsigned char>(a[i])));
+            char rhs = static_cast<char>(std::tolower(static_cast<unsigned char>(b[i])));
+            if (lhs != rhs) return false;
+        }
+        return true;
+    };
+    static const char* kReservedHeaders[] = {
+        "host", "connection", "content-length", "transfer-encoding", "upgrade",
+    };
+
     for (auto& [k, v] : headers) {
         if (!headerFieldSafe(k, v))
             throw RuntimeError("Invalid request header \"" + k +
                                "\": contains CR/LF/NUL (header injection)", 0);
+        for (const char* reserved : kReservedHeaders) {
+            if (eqIgnoreCase(k, reserved))
+                throw RuntimeError("Header \"" + k +
+                    "\" is reserved (set by the http client). "
+                    "Remove it from your headers map.", 0);
+        }
     }
 }
 
@@ -900,6 +938,18 @@ static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
 // stateless wrapper never sees it (always passes isFreshSocket=true).
 struct HttpRetryOnFresh {};
 
+// RFC 7231 §4.2.2 — request methods whose intended effect is the same
+// whether the request fires once or many times. The retry path uses
+// this to decide whether replaying a request on a fresh socket is safe
+// when an error fires AFTER the server may have already processed it.
+// Non-idempotent methods (POST, PATCH, ...) are still retried when no
+// response bytes were observed — that's a different signal entirely
+// (the server can't have reacted yet).
+static bool isIdempotentMethod(const std::string& m) {
+    return m == "GET" || m == "HEAD" || m == "OPTIONS" ||
+           m == "PUT" || m == "TRACE";
+}
+
 struct OneRequestResult {
     Value response;
     bool keepalive;   // true if the socket may be returned to a pool
@@ -948,16 +998,25 @@ static OneRequestResult doOneHttpRequestImpl(
     std::shared_ptr<SocketConn> connPtr(&conn, [](SocketConn*){});
     ResponseHeaderFields fields;
     std::string respBody;
+    // SocketConn::bytesRead is cumulative; capture its value before the
+    // read so the catch block can tell whether the failure happened
+    // before any response bytes arrived (= server didn't react) vs
+    // after (= server may have started a response). The distinction
+    // gates whether a non-idempotent retry is safe.
+    size_t bytesBefore = conn.bytesRead;
     try {
         auto pair = readFramedResponse(conn, connPtr, method);
         fields   = std::move(pair.first);
         respBody = std::move(pair.second);
     } catch (...) {
-        // First-recv-on-reused-socket EOF / read error looks identical to
-        // a stale peer that hung up since pool storage. Retry once on a
-        // fresh socket; if that retry also fails, the wrapper will let
-        // the real error propagate.
-        if (!isFreshSocket) throw HttpRetryOnFresh{};
+        bool responseStarted = conn.bytesRead > bytesBefore;
+        // Retry on a reused socket only when replay is safe:
+        //   - method is idempotent → replaying changes nothing, OR
+        //   - no response bytes were observed → server can't have reacted
+        // Otherwise propagate; the caller (often a POST/PATCH) must not
+        // be replayed when the server might have already committed.
+        if (!isFreshSocket && (isIdempotentMethod(method) || !responseStarted))
+            throw HttpRetryOnFresh{};
         throw;
     }
 
@@ -1015,8 +1074,25 @@ struct HttpSession {
 };
 static constexpr const char* kHttpSessionTypeTag = "http.session";
 
-static std::string sessionPoolKey(const ParsedUrl& p) {
-    return (p.tls ? "https://" : "http://") + p.host + ":" + std::to_string(p.port);
+// Pool key. scheme/host/port locates the peer; insecure + caBundle
+// segregate connections by TLS-handshake identity so a per-call override
+// like `{insecure: true}` can't accidentally pick up a strictly-verified
+// pooled socket (or vice versa). Default values (insecure=false, empty
+// caBundle) keep the key shape unchanged for the common case.
+static std::string sessionPoolKey(const ParsedUrl& p, const HttpOptions& opts) {
+    std::string key = (p.tls ? "https://" : "http://") +
+                      p.host + ":" + std::to_string(p.port);
+    if (p.tls) {
+        // Suffix only for TLS where the knobs matter. The caBundle path
+        // identifies a distinct trust store; we don't hash its contents
+        // (the file may rotate without invalidating in-flight sessions —
+        // hashing would defeat the cache more often than it'd help).
+        key += "|insecure=";
+        key += opts.insecure ? "1" : "0";
+        key += "|ca=";
+        key += opts.caBundle;   // empty string when system defaults
+    }
+    return key;
 }
 
 // Take an idle conn for `key` out of the pool, probing it for staleness
@@ -1127,7 +1203,7 @@ static Value httpSessionRequestOne(HttpSession& s, const std::string& method,
                                    const HttpOptions& opts) {
     auto p = parseUrl(url);
     validateRequestParts(method, p, headers);
-    std::string key = sessionPoolKey(p);
+    std::string key = sessionPoolKey(p, opts);
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         auto conn = sessionTakeIdle(s, key);
@@ -1135,6 +1211,12 @@ static Value httpSessionRequestOne(HttpSession& s, const std::string& method,
         if (!conn) {
             conn = std::make_unique<SocketConn>();
             openSocketAndTls(*conn, p, opts);
+        } else {
+            // Reused socket — refresh recv/send timeouts so per-call
+            // readTimeoutMs overrides take effect on this attempt
+            // instead of inheriting the value baked in when the conn
+            // was first opened.
+            setSocketTimeouts(conn->fd, opts.readTimeoutMs);
         }
         try {
             auto r = doOneHttpRequestImpl(*conn, isFresh,

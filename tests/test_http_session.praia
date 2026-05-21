@@ -223,6 +223,35 @@ testing.test("server Connection: close opts out of the pool", lam{ in
     http.close(s)
 })
 
+// ── Reserved-header rejection ─────────────────────────────────
+
+testing.test("client-managed headers (Host/Connection/...) are rejected", lam{ in
+    // The client sets these itself; a caller-supplied duplicate would
+    // either be ignored, conflict, or enable header-smuggling-class
+    // behavior on lenient servers. Case-insensitive match.
+    let s = http.session()
+    let names = ["Host", "Connection", "Content-Length", "Transfer-Encoding", "Upgrade"]
+    for (name in names) {
+        let err = nil
+        try {
+            // Computed key so `name` is the variable, not the literal "name".
+            http.request(s, {url: base + "/ping",
+                              headers: {[name]: "anything"}})
+        } catch (e) { err = str(e) }
+        testing.assert(err != nil, name + " must be rejected")
+        testing.assert(err.contains("reserved"),
+            "error mentions reserved: " + str(err))
+    }
+    // Case-insensitive check.
+    let err = nil
+    try {
+        http.request(s, {url: base + "/ping",
+                          headers: {"host": "evil.example"}})
+    } catch (e) { err = str(e) }
+    testing.assert(err != nil, "lowercase host also rejected")
+    http.close(s)
+})
+
 // ── Type tag checks ───────────────────────────────────────────
 
 testing.test("non-session first arg to http.get throws", lam{ in

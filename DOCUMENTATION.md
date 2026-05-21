@@ -82,7 +82,7 @@ make
 
 Hello world:
 
-```
+```praia
 print("Hello, World!")
 ```
 
@@ -92,7 +92,7 @@ print("Hello, World!")
 
 Declare variables with `let`. Uninitialized variables are `nil`.
 
-```
+```praia
 let name = "Ada"
 let age = 36
 let score              // nil
@@ -104,7 +104,7 @@ age = 37               // reassignment
 
 Use `UPPER_SNAKE_CASE` names for values that shouldn't change. Praia warns on reassignment:
 
-```
+```praia
 let MAX_RETRIES = 3
 let BASE_URL = "https://api.example.com"
 
@@ -121,7 +121,7 @@ Unpack arrays and maps into variables in a single `let` statement.
 
 ### Array destructuring
 
-```
+```praia
 let [a, b, c] = [1, 2, 3]
 print(a, b, c)              // 1 2 3
 
@@ -131,20 +131,20 @@ print(rest)                  // [2, 3, 4, 5]
 ```
 
 Missing elements become `nil`:
-```
+```praia
 let [x, y, z] = [1, 2]
 print(z)                     // nil
 ```
 
 ### Map destructuring
 
-```
+```praia
 let {name, age} = {name: "Ada", age: 36}
 print(name, age)             // Ada 36
 ```
 
 Rename with `key: varName`:
-```
+```praia
 let {name: userName, age: userAge} = {name: "Ada", age: 36}
 print(userName)              // Ada
 ```

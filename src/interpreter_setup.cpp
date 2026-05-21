@@ -1779,7 +1779,7 @@ Interpreter::Interpreter() {
         }));
 
     httpMap->entries[Value("post")] = Value(makeNative("http.post", -1,
-        [&applyHttpOpts, &layerHeaders](const std::vector<Value>& args) -> Value {
+        [applyHttpOpts, layerHeaders](const std::vector<Value>& args) -> Value {
             // http.post(url, body|opts)             → stateless
             // http.post(session, url, body|opts)    → session-bound
             auto parseBodyAndHeaders = [](const Value& v, std::string& body,
@@ -1821,7 +1821,7 @@ Interpreter::Interpreter() {
         }));
 
     httpMap->entries[Value("request")] = Value(makeNative("http.request", -1,
-        [&applyHttpOpts, &layerHeaders](const std::vector<Value>& args) -> Value {
+        [applyHttpOpts, layerHeaders](const std::vector<Value>& args) -> Value {
             // http.request(opts)              → stateless
             // http.request(session, opts)     → session-bound
             const Value* sessionArg = nullptr;
@@ -1864,7 +1864,7 @@ Interpreter::Interpreter() {
     // the first arg to http.get/post/request, and close with
     // http.close (or let the GC do it).
     httpMap->entries[Value("session")] = Value(makeNative("http.session", -1,
-        [&applyHttpOpts, &layerHeaders](const std::vector<Value>& args) -> Value {
+        [applyHttpOpts, layerHeaders](const std::vector<Value>& args) -> Value {
             if (args.size() > 1)
                 throw RuntimeError("http.session() takes 0 or 1 argument", 0);
             HttpOptions defaultOpts;
