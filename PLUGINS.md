@@ -133,7 +133,7 @@ The error messages match Praia's stdlib conventions exactly:
 - `requireArityRange(args, lo, hi, "fn")` → `"fn() expected LO-HI arguments but got M"`
 - `praia::error("msg")` — bare shorthand for `throw RuntimeError("msg", 0);` for cases the helpers don't cover.
 
-`requireInt` is strict — it rejects float values that happen to be whole numbers; use `requireNumber` (which returns a double, converting ints) when either form is acceptable. This matches the `asInt`/`asNumber` distinction in the [Value type](#the-value-type) pitfall callout above.
+`requireInt` is strict — it rejects float values that happen to be whole numbers; use `requireNumber` (which returns a double, converting ints) when either form is acceptable. This matches the `asInt`/`asNumber` distinction in the [Value type](#the-value-type) pitfall callout below.
 
 ### The Value type
 
