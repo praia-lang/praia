@@ -42,6 +42,12 @@ struct SocketConn {
     // to decide if the request is replayable on a fresh socket — see
     // doOneHttpRequestImpl's catch block.
     size_t bytesRead = 0;
+    // Set when read() returned 0 (clean EOF from the peer). Distinct
+    // from "read errored" — the retry path needs to know whether the
+    // failure was a confirmed peer-side closure (safe to retry even on
+    // POST when no response bytes had arrived) vs an ambiguous read
+    // timeout (never safe to retry on a non-idempotent method).
+    bool peerClosed = false;
 
     SocketConn() = default;
     // Resource-owning: disable copy/move so a stray copy can't lead
@@ -65,11 +71,13 @@ struct SocketConn {
         if (ssl) {
             ssize_t n = SSL_read(ssl, buf, static_cast<int>(len));
             if (n > 0) bytesRead += static_cast<size_t>(n);
+            else if (n == 0) peerClosed = true;
             return n;
         }
 #endif
         ssize_t n = ::recv(fd, buf, len, 0);
         if (n > 0) bytesRead += static_cast<size_t>(n);
+        else if (n == 0) peerClosed = true;
         return n;
     }
 
@@ -302,12 +310,19 @@ int connectToHost(const std::string& host, int port, int timeoutMs) {
 
 // Apply a per-operation receive/send timeout to a connected socket.
 // Both directions get the same value so a slow peer can't stall the
-// request half indefinitely. `ms <= 0` disables the timeout.
+// request half indefinitely. `ms <= 0` clears any prior timeout
+// (timeval{0,0} means "no timeout" to setsockopt) — important for
+// session-pool reuse where a previous call may have set a finite
+// timeout that the next call wants to disable.
 void setSocketTimeouts(int fd, int ms) {
-    if (ms <= 0) return;
     struct timeval tv;
-    tv.tv_sec  = ms / 1000;
-    tv.tv_usec = (ms % 1000) * 1000;
+    if (ms <= 0) {
+        tv.tv_sec  = 0;
+        tv.tv_usec = 0;
+    } else {
+        tv.tv_sec  = ms / 1000;
+        tv.tv_usec = (ms % 1000) * 1000;
+    }
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
@@ -947,7 +962,7 @@ struct HttpRetryOnFresh {};
 // (the server can't have reacted yet).
 static bool isIdempotentMethod(const std::string& m) {
     return m == "GET" || m == "HEAD" || m == "OPTIONS" ||
-           m == "PUT" || m == "TRACE";
+           m == "PUT" || m == "DELETE" || m == "TRACE";
 }
 
 struct OneRequestResult {
@@ -1009,13 +1024,21 @@ static OneRequestResult doOneHttpRequestImpl(
         fields   = std::move(pair.first);
         respBody = std::move(pair.second);
     } catch (...) {
-        bool responseStarted = conn.bytesRead > bytesBefore;
         // Retry on a reused socket only when replay is safe:
-        //   - method is idempotent → replaying changes nothing, OR
-        //   - no response bytes were observed → server can't have reacted
-        // Otherwise propagate; the caller (often a POST/PATCH) must not
-        // be replayed when the server might have already committed.
-        if (!isFreshSocket && (isIdempotentMethod(method) || !responseStarted))
+        //   - idempotent method → replay is safe by definition (RFC 7231), OR
+        //   - confirmed peer-side closure AND no response bytes observed →
+        //     server can't have reacted (read returned 0 before any bytes
+        //     arrived; classic stale-keepalive signature).
+        //
+        // The peerClosed flag is set only when read() returned exactly 0
+        // (clean EOF). An ambiguous read timeout / read error on a
+        // non-idempotent method falls through to the rethrow — replaying
+        // a POST whose response timed out could double-commit if the
+        // server actually received and processed the request.
+        bool responseStarted = conn.bytesRead > bytesBefore;
+        bool confirmedClosure = conn.peerClosed && !responseStarted;
+        if (!isFreshSocket &&
+            (isIdempotentMethod(method) || confirmedClosure))
             throw HttpRetryOnFresh{};
         throw;
     }

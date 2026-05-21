@@ -115,6 +115,21 @@ testing.test("basic GET via session returns 200", lam{ in
     http.close(s)
 })
 
+// ── Polymorphic dispatch: stateless still works ───────────────
+// Run early — before the network-heavy session tests below — so that
+// the simple stateless-path coverage doesn't depend on the cumulative
+// state any of those tests might leave behind.
+
+testing.test("stateless http.get unchanged (URL-only)", lam{ in
+    let r = http.get(base + "/ping")
+    testing.assertEqual(r.body, "pong", nil)
+})
+
+testing.test("stateless http.request unchanged (opts-map)", lam{ in
+    let r = http.request({url: base + "/ping"})
+    testing.assertEqual(r.body, "pong", nil)
+})
+
 // ── Default headers apply ─────────────────────────────────────
 
 testing.test("session default headers reach the server", lam{ in
@@ -225,7 +240,7 @@ testing.test("server Connection: close opts out of the pool", lam{ in
 
 // ── Reserved-header rejection ─────────────────────────────────
 
-testing.test("client-managed headers (Host/Connection/...) are rejected", lam{ in
+testing.test("client-managed headers (Host/Connection/...) are rejected (per-call)", lam{ in
     // The client sets these itself; a caller-supplied duplicate would
     // either be ignored, conflict, or enable header-smuggling-class
     // behavior on lenient servers. Case-insensitive match.
@@ -249,6 +264,30 @@ testing.test("client-managed headers (Host/Connection/...) are rejected", lam{ i
                           headers: {"host": "evil.example"}})
     } catch (e) { err = str(e) }
     testing.assert(err != nil, "lowercase host also rejected")
+    http.close(s)
+})
+
+testing.test("reserved headers in SESSION defaults are also rejected", lam{ in
+    // The defaults-merge path layers session headers under per-call
+    // headers, so a reserved name placed in session defaults must
+    // surface the same "reserved" error on first use. http.session()
+    // itself accepts the map (no early validation by design); the
+    // error fires when a request goes through the session.
+    let names = ["Host", "Connection", "Content-Length", "Transfer-Encoding", "Upgrade"]
+    for (name in names) {
+        let s = http.session({headers: {[name]: "x"}})
+        let err = nil
+        try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
+        testing.assert(err != nil, name + " (session default) must be rejected")
+        testing.assert(err.contains("reserved"),
+            "error mentions reserved: " + str(err))
+        http.close(s)
+    }
+    // Case-insensitive variant too.
+    let s = http.session({headers: {"host": "evil.example"}})
+    let err = nil
+    try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "lowercase host (session default) rejected")
     http.close(s)
 })
 
@@ -284,18 +323,6 @@ testing.test("use-after-close throws", lam{ in
     try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
     testing.assert(err != nil, "must throw")
     testing.assert(err.contains("closed"), str(err))
-})
-
-// ── Polymorphic dispatch: stateless still works ───────────────
-
-testing.test("stateless http.get unchanged (URL-only)", lam{ in
-    let r = http.get(base + "/ping")
-    testing.assertEqual(r.body, "pong", nil)
-})
-
-testing.test("stateless http.request unchanged (opts-map)", lam{ in
-    let r = http.request({url: base + "/ping"})
-    testing.assertEqual(r.body, "pong", nil)
 })
 
 // ── GC-driven close ───────────────────────────────────────────

@@ -150,7 +150,7 @@ print(userName)              // Ada
 ```
 
 Rest collects remaining keys:
-```
+```praia
 let {name, ...other} = {name: "Ada", age: 36, lang: "Praia"}
 print(other)                 // {age: 36, lang: "Praia"}
 ```
@@ -163,7 +163,7 @@ The `...` operator spreads arrays and maps into literals.
 
 ### Array spread
 
-```
+```praia
 let a = [1, 2, 3]
 let b = [4, 5, 6]
 let combined = [...a, ...b]       // [1, 2, 3, 4, 5, 6]
@@ -172,7 +172,7 @@ let withExtra = [0, ...a, 99]     // [0, 1, 2, 3, 99]
 
 ### Map spread
 
-```
+```praia
 let defaults = {host: "localhost", port: 8080}
 let overrides = {port: 3000, debug: true}
 let config = {...defaults, ...overrides}
@@ -186,7 +186,7 @@ Later spreads override earlier keys (like `Object.assign` in JavaScript).
 Spread accepts a set or an array — elements from the source go into
 the resulting set, with the usual dedup-on-insert.
 
-```
+```praia
 let a = #{1, 2, 3}
 let combined = #{0, ...a, 4}        // #{0, 1, 2, 3, 4}
 let fromArr  = #{0, ...[1, 2, 3]}   // #{0, 1, 2, 3}
@@ -197,7 +197,7 @@ let dedup    = #{1, ...#{1, 2}}     // #{1, 2}
 
 Spread an array as arguments to a function:
 
-```
+```praia
 func add(a, b, c) { return a + b + c }
 let args = [1, 2, 3]
 print(add(...args))       // 6
@@ -209,7 +209,7 @@ print(f(1, 2, ...[3, 4])) // [1, 2, 3, 4]
 
 This enables generic function wrappers:
 
-```
+```praia
 func wrapper(fn) {
     return lam{ ...args in fn(...args) }
 }
@@ -244,7 +244,7 @@ Classes themselves (the `class X { ... }` declaration value) are also `function`
 
 Integers support multiple bases and underscores as visual separators:
 
-```
+```praia
 42                // decimal
 0xFF              // hex
 0b1010            // binary
@@ -255,7 +255,7 @@ Integers support multiple bases and underscores as visual separators:
 
 Floats support decimal points and scientific notation:
 
-```
+```praia
 3.14              // decimal float
 1e3               // 1000.0 (scientific notation)
 2.5e-4            // 0.00025
@@ -268,7 +268,7 @@ Integer overflow automatically promotes to float rather than wrapping.
 
 Only `nil` and `false` are falsy. Everything else — including `0`, `""` (empty string), and `[]` (empty array) — is truthy.
 
-```
+```praia
 if (0)       { print("truthy") }   // prints (0 is truthy)
 if ("")      { print("truthy") }   // prints (empty string is truthy)
 if ([])      { print("truthy") }   // prints (empty array is truthy)
@@ -278,7 +278,7 @@ if (false)   { print("truthy") }   // does not print
 
 To check for empty strings or arrays, use `len()`:
 
-```
+```praia
 if (len(name) > 0) { print("has name") }
 if (len(items) > 0) { print("has items") }
 ```
@@ -289,7 +289,7 @@ if (len(items) > 0) { print("has items") }
 
 ### Arithmetic
 
-```
+```praia
 2 + 3       // 5
 10 - 4      // 6
 3 * 7       // 21
@@ -302,7 +302,7 @@ if (len(items) > 0) { print("has items") }
 
 Works on numbers and strings (lexicographic ordering).
 
-```
+```praia
 3 < 5           // true
 3 >= 5          // false
 "apple" < "banana"  // true
@@ -313,7 +313,7 @@ Works on numbers and strings (lexicographic ordering).
 
 Works on any types. Arrays and maps compare by value.
 
-```
+```praia
 1 == 1              // true
 "hi" == "hi"        // true
 [1, 2] == [1, 2]    // true
@@ -323,7 +323,7 @@ nil == nil           // true
 
 **Floating-point note:** `==` uses exact equality for numbers, like all major languages. Due to IEEE 754 representation, `0.1 + 0.2 != 0.3`. Use `math.approx()` for approximate comparison:
 
-```
+```praia
 0.1 + 0.2 == 0.3              // false (floating-point)
 math.approx(0.1 + 0.2, 0.3)   // true
 ```
@@ -332,7 +332,7 @@ math.approx(0.1 + 0.2, 0.3)   // true
 
 `&&` and `||` short-circuit and return the deciding value, not just `true`/`false`.
 
-```
+```praia
 true && "yes"       // "yes"
 false && "yes"      // false
 nil || "default"    // "default"
@@ -345,7 +345,7 @@ true || "other"     // true
 
 The `is` operator checks types and class hierarchy. Use a string for primitive types, or a class for instanceof checks.
 
-```
+```praia
 42 is "int"             // true
 "hello" is "string"     // true
 nil is "nil"            // true
@@ -364,7 +364,7 @@ Negate with `!`: `!(x is "string")`.
 
 ### Ternary
 
-```
+```praia
 let label = x > 5 ? "big" : "small"
 let grade = score >= 90 ? "A" : score >= 80 ? "B" : "C"   // nests right-to-left
 ```
@@ -373,7 +373,7 @@ let grade = score >= 90 ? "A" : score >= 80 ? "B" : "C"   // nests right-to-left
 
 `?.` accesses a property only if the object is non-nil. Returns `nil` if the object is `nil` or the field doesn't exist.
 
-```
+```praia
 let user = {address: {city: "Lisbon"}}
 print(user?.address?.city)    // "Lisbon"
 print(user?.phone?.number)    // nil (no error)
@@ -384,7 +384,7 @@ print(x?.name)                // nil
 
 `?[` does the same for index access:
 
-```
+```praia
 let arr = nil
 print(arr?[0])                // nil
 ```
@@ -393,7 +393,7 @@ print(arr?[0])                // nil
 
 `??` returns the left side if it's non-nil, otherwise evaluates and returns the right side. The right side is only evaluated if needed (short-circuit).
 
-```
+```praia
 let name = nil ?? "anonymous"      // "anonymous"
 let port = config?.port ?? 8080    // 8080 if port is nil
 let x = 0 ?? 42                   // 0 (not nil, so left wins)
@@ -402,13 +402,13 @@ let y = false ?? true              // false (not nil)
 
 Chains naturally with `?.`:
 
-```
+```praia
 let city = user?.address?.city ?? "unknown"
 ```
 
 ### Compound Assignment
 
-```
+```praia
 let x = 10
 x += 5              // x is now 15
 x -= 3              // x is now 12
@@ -419,7 +419,7 @@ x %= 4              // x is now 2
 
 ### Increment / Decrement
 
-```
+```praia
 let i = 0
 i++                 // i is now 1
 i--                 // i is now 0
@@ -429,7 +429,7 @@ i--                 // i is now 0
 
 `+` concatenates when either side is a string:
 
-```
+```praia
 "hello " + "world"  // "hello world"
 "count: " + 42      // "count: 42"
 ```
