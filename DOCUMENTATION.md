@@ -1021,13 +1021,13 @@ try {
 ```
 func processFile(path) {
     let db = sqlite.open("app.db")
-    defer db.close()
+    defer sqlite.close(db)
 
     let sock = net.connect("host", 80)
     defer net.close(sock)
 
     // ... use db and sock ...
-    // On function exit: net.close(sock) runs first, then db.close()
+    // On function exit: net.close(sock) runs first, then sqlite.close(db)
 }
 ```
 
@@ -2916,8 +2916,8 @@ let db = sqlite.open("counts.db")
 
 func increment() {
     lock.withLock(lam{ in
-        let row = db.query("SELECT n FROM c WHERE id = 1")
-        db.run("UPDATE c SET n = ? WHERE id = 1", [row[0].n + 1])
+        let row = sqlite.query(db, "SELECT n FROM c WHERE id = 1")
+        sqlite.run(db, "UPDATE c SET n = ? WHERE id = 1", [row[0].n + 1])
     })
 }
 
@@ -2944,8 +2944,8 @@ The lock is re-entrant (recursive) — the same thread can acquire it multiple t
 
 ```praia
 lock.withLock(lam{ in
-    let staged = computeNextState()   // may throw — nothing committed yet
-    db.run("UPDATE ...", [staged])    // commit
+    let staged = computeNextState()        // may throw — nothing committed yet
+    sqlite.run(db, "UPDATE ...", [staged]) // commit
 })
 ```
 
@@ -3462,7 +3462,7 @@ The server handles `SIGINT` (Ctrl-C) and `SIGTERM` (container stop) gracefully �
 server.listen(8080)
 // This runs after Ctrl-C or SIGTERM:
 print("Shutting down...")
-db.close()
+sqlite.close(db)
 ```
 
 #### Server-Sent Events (SSE)
@@ -4169,7 +4169,7 @@ Sessions are stored in memory — they're lost when the server restarts. For per
 
 ## SQLite
 
-Built-in SQLite database support. `sqlite.open()` returns a database object with `query`, `run`, and `close` methods. Available when built on a system with libsqlite3.
+Built-in SQLite database support. `sqlite.open()` returns an opaque connection handle that prints as `<external:sqlite.connection>`. Operations are exposed as free functions on the `sqlite` namespace that take the connection as their first argument. Available when built on a system with libsqlite3.
 
 ### Opening a database
 
@@ -4178,23 +4178,27 @@ let db = sqlite.open("myapp.db")       // file-based
 let db = sqlite.open(":memory:")       // in-memory
 ```
 
+The handle is automatically closed when the last reference drops (during the GC sweep). For deterministic cleanup, call `sqlite.close(db)` explicitly — or use `defer`.
+
 ### Queries
 
-`db.query(sql, params?)` executes a SELECT and returns an array of maps (one map per row):
+`sqlite.query(db, sql, params?)` executes a SELECT and returns an array of maps (one map per row):
 
 ```
-let users = db.query("SELECT * FROM users WHERE age > ?", [18])
+let users = sqlite.query(db, "SELECT * FROM users WHERE age > ?", [18])
 for (user in users) {
     print(user.name, user.age)
 }
 ```
 
+INTEGER columns are returned as Praia ints, preserving the full 64-bit range; REAL columns come back as floats; TEXT as strings; NULL as `nil`.
+
 ### Executing statements
 
-`db.run(sql, params?)` executes INSERT/UPDATE/DELETE and returns `{changes, lastId}`:
+`sqlite.run(db, sql, params?)` executes INSERT/UPDATE/DELETE/DDL and returns `{changes, lastId}`:
 
 ```
-let result = db.run("INSERT INTO users (name, age) VALUES (?, ?)", ["Ada", 36])
+let result = sqlite.run(db, "INSERT INTO users (name, age) VALUES (?, ?)", ["Ada", 36])
 print(result.lastId)      // auto-increment id
 print(result.changes)     // rows affected
 ```
@@ -4205,29 +4209,47 @@ Always use `?` placeholders — they prevent SQL injection:
 
 ```
 // Safe
-db.query("SELECT * FROM users WHERE name = ?", [name])
+sqlite.query(db, "SELECT * FROM users WHERE name = ?", [name])
 
 // Unsafe — never do this
-db.query("SELECT * FROM users WHERE name = '" + name + "'")
+sqlite.query(db, "SELECT * FROM users WHERE name = '" + name + "'")
 ```
 
-Parameters are bound by type: strings, numbers, bools, and nil are all handled automatically.
+Parameters are bound by type: strings, ints, floats, bools, and nil are all handled automatically.
+
+### Transactions
+
+`sqlite.run` also accepts transaction-control statements:
+
+```
+sqlite.run(db, "BEGIN")
+try {
+    sqlite.run(db, "UPDATE accounts SET balance = balance - 100 WHERE id = ?", [from])
+    sqlite.run(db, "UPDATE accounts SET balance = balance + 100 WHERE id = ?", [to])
+    sqlite.run(db, "COMMIT")
+} catch (e) {
+    sqlite.run(db, "ROLLBACK")
+    throw e
+}
+```
 
 ### Closing
 
+`sqlite.close(db)` is idempotent — calling it twice (or after the GC has already closed the handle) is a no-op, never a double-free:
+
 ```
-db.close()
+sqlite.close(db)
 ```
 
 ### Example: REST API with SQLite
 
 ```
 let db = sqlite.open(":memory:")
-db.run("CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT, done INT)")
+sqlite.run(db, "CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT, done INT)")
 
 let server = http.createServer(lam{ req in
     if (req.method == "GET" && req.path == "/todos") {
-        let todos = db.query("SELECT * FROM todos")
+        let todos = sqlite.query(db, "SELECT * FROM todos")
         return {
             status: 200,
             body: json.stringify(todos),
@@ -4236,7 +4258,7 @@ let server = http.createServer(lam{ req in
     }
     if (req.method == "POST" && req.path == "/todos") {
         let todo = json.parse(req.body)
-        db.run("INSERT INTO todos (title, done) VALUES (?, ?)", [todo.title, 0])
+        sqlite.run(db, "INSERT INTO todos (title, done) VALUES (?, ?)", [todo.title, 0])
         return {status: 201, body: json.stringify({ok: true})}
     }
     return {status: 404, body: "Not Found"}

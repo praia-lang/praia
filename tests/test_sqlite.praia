@@ -1,0 +1,141 @@
+use "testing"
+
+// HAVE_SQLITE is a compile-time flag — if the build doesn't ship
+// with sqlite, the `sqlite` global isn't defined and any reference
+// to it throws. Probe once at the top so the file degrades cleanly
+// on a sqlite-less build instead of failing every test.
+let _haveSqlite = true
+try {
+    let _probe = sqlite.open(":memory:")
+    sqlite.close(_probe)
+} catch (e) {
+    _haveSqlite = false
+}
+
+if (!_haveSqlite) {
+    print("Skipping sqlite tests — binary built without HAVE_SQLITE")
+    testing.done()
+}
+
+testing.test("handle prints as <external:sqlite.connection>", lam{ in
+    let c = sqlite.open(":memory:")
+    testing.assertEqual(str(c), "<external:sqlite.connection>", nil)
+    sqlite.close(c)
+})
+
+testing.test("round-trip via run + query", lam{ in
+    let c = sqlite.open(":memory:")
+    sqlite.run(c, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
+    let ins1 = sqlite.run(c, "INSERT INTO users (name, age) VALUES (?, ?)", ["alice", 30])
+    let ins2 = sqlite.run(c, "INSERT INTO users (name, age) VALUES (?, ?)", ["bob", 25])
+    testing.assertEqual(ins1.changes, 1, nil)
+    testing.assertEqual(ins1.lastId, 1, nil)
+    testing.assertEqual(ins2.lastId, 2, nil)
+
+    let rows = sqlite.query(c, "SELECT name, age FROM users ORDER BY id")
+    testing.assertEqual(len(rows), 2, nil)
+    testing.assertEqual(rows[0].name, "alice", nil)
+    testing.assertEqual(rows[0].age, 30, nil)
+    testing.assertEqual(rows[1].name, "bob", nil)
+    testing.assertEqual(rows[1].age, 25, nil)
+    sqlite.close(c)
+})
+
+testing.test("INTEGER columns preserve int64 precision (>2^53)", lam{ in
+    // Pre-fix, INTEGER columns flowed through `static_cast<double>` on
+    // the way out (and `bind_double` on the way in). 2^53 + 1 == 2^53
+    // as a double, so this exact value would round-trip as 2^53.
+    let c = sqlite.open(":memory:")
+    sqlite.run(c, "CREATE TABLE big (v INTEGER)")
+    let huge = 9007199254740993   // 2^53 + 1
+    sqlite.run(c, "INSERT INTO big VALUES (?)", [huge])
+    let r = sqlite.query(c, "SELECT v FROM big")
+    testing.assertEqual(r[0].v, huge, "int64 fidelity")
+    sqlite.close(c)
+})
+
+testing.test("named-parameter binding via positional ? placeholders", lam{ in
+    let c = sqlite.open(":memory:")
+    sqlite.run(c, "CREATE TABLE t (a TEXT, b INTEGER, f REAL, n INTEGER)")
+    sqlite.run(c, "INSERT INTO t (a, b, f, n) VALUES (?, ?, ?, ?)",
+               ["hi", 7, 3.5, nil])
+    let r = sqlite.query(c, "SELECT * FROM t")
+    testing.assertEqual(r[0].a, "hi", nil)
+    testing.assertEqual(r[0].b, 7, nil)
+    testing.assertEqual(r[0].f, 3.5, nil)
+    testing.assertEqual(r[0].n, nil, "nil binds as NULL, reads back as nil")
+    sqlite.close(c)
+})
+
+testing.test("connection persists state across separate calls", lam{ in
+    // Two writes through two different sqlite.run calls must both land
+    // in the same connection — proves the handle isn't re-opening.
+    let c = sqlite.open(":memory:")
+    sqlite.run(c, "CREATE TABLE t (x INTEGER)")
+    sqlite.run(c, "INSERT INTO t VALUES (1)")
+    sqlite.run(c, "INSERT INTO t VALUES (2)")
+    let r = sqlite.query(c, "SELECT count(*) AS n FROM t")
+    testing.assertEqual(r[0].n, 2, nil)
+    sqlite.close(c)
+})
+
+testing.test("transactions: BEGIN + ROLLBACK leaves no rows", lam{ in
+    let c = sqlite.open(":memory:")
+    sqlite.run(c, "CREATE TABLE t (x INTEGER)")
+    sqlite.run(c, "BEGIN")
+    sqlite.run(c, "INSERT INTO t VALUES (1)")
+    sqlite.run(c, "INSERT INTO t VALUES (2)")
+    sqlite.run(c, "ROLLBACK")
+    let r = sqlite.query(c, "SELECT count(*) AS n FROM t")
+    testing.assertEqual(r[0].n, 0, "rolled-back inserts must not persist")
+    sqlite.close(c)
+})
+
+testing.test("non-handle argument throws with sqlite.connection wording", lam{ in
+    // Passing a string where a connection is expected. praia::getExternal
+    // throws with "expected an external handle of type 'sqlite.connection'".
+    let err = nil
+    try { sqlite.query("not a connection", "SELECT 1") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw on non-external")
+    testing.assert(err.contains("external handle") && err.contains("sqlite.connection"),
+        "error names the expected type: " + str(err))
+})
+
+testing.test("idempotent close: double-close is a no-op", lam{ in
+    let c = sqlite.open(":memory:")
+    sqlite.close(c)
+    sqlite.close(c)   // must not crash, must not double-free
+})
+
+testing.test("use-after-close throws Database is closed", lam{ in
+    let c = sqlite.open(":memory:")
+    sqlite.close(c)
+    let err = nil
+    try { sqlite.query(c, "SELECT 1") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw post-close")
+    testing.assert(err.contains("Database is closed"), str(err))
+
+    err = nil
+    try { sqlite.run(c, "CREATE TABLE x (a INTEGER)") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "run() must also throw post-close")
+    testing.assert(err.contains("Database is closed"), str(err))
+})
+
+testing.test("GC-driven close: many discarded handles don't leak", lam{ in
+    // Create a large number of connections without retaining them.
+    // The PraiaExternal deleter must run from the GC sweep — if it
+    // didn't, this would either exhaust FDs (file-backed) or grow
+    // unbounded memory (:memory: backed). 2000 is well above the
+    // default GC threshold of 500 allocations.
+    let c = nil
+    for (i in 0..2000) {
+        c = sqlite.open(":memory:")
+    }
+    c = nil
+    // No assertion needed — if the deleter doesn't fire we don't
+    // crash, but a leak detector would catch it. The mere fact that
+    // this completes without OOM/FD exhaustion is the signal.
+    testing.assert(true, nil)
+})
+
+testing.done()

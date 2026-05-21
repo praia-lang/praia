@@ -3941,6 +3941,36 @@ Interpreter::Interpreter() {
     // ── sqlite namespace ──
 
 #ifdef HAVE_SQLITE
+    // The connection is exposed to Praia as an opaque PraiaExternal handle
+    // (see praia_plugin.h). Wrapping sqlite3* + a `closed` flag in a small
+    // struct lets explicit sqlite.close() and the GC-time deleter both be
+    // idempotent — close-then-GC and double-close are no-ops, not
+    // double-frees. This is the same pattern documented in PLUGINS.md;
+    // the sqlite builtin is the in-tree reference implementation.
+    struct SqliteConn {
+        sqlite3* conn = nullptr;
+        bool closed = false;
+    };
+    constexpr const char* kSqliteTypeTag = "sqlite.connection";
+
+    auto sqliteBind = [](sqlite3_stmt* stmt, const Value& paramsValue) {
+        if (!paramsValue.isArray()) return;
+        auto& params = paramsValue.asArray()->elements;
+        for (size_t i = 0; i < params.size(); i++) {
+            int idx = static_cast<int>(i + 1);
+            auto& p = params[i];
+            if (p.isNil()) sqlite3_bind_null(stmt, idx);
+            else if (p.isBool()) sqlite3_bind_int(stmt, idx, p.asBool() ? 1 : 0);
+            // Bind ints as int64 so values above 2^53 round-trip exactly.
+            // The original code coerced everything via sqlite3_bind_double,
+            // losing precision on the way in.
+            else if (p.isInt()) sqlite3_bind_int64(stmt, idx, p.asInt());
+            else if (p.isNumber()) sqlite3_bind_double(stmt, idx, p.asNumber());
+            else if (p.isString()) sqlite3_bind_text(stmt, idx, p.asString().c_str(), -1, SQLITE_TRANSIENT);
+            else sqlite3_bind_text(stmt, idx, p.toString().c_str(), -1, SQLITE_TRANSIENT);
+        }
+    };
+
     auto sqliteMap = gcNew<PraiaMap>();
 
     sqliteMap->entries[Value("open")] = Value(makeNative("sqlite.open", 1,
@@ -3948,134 +3978,121 @@ Interpreter::Interpreter() {
             if (!args[0].isString())
                 throw RuntimeError("sqlite.open() requires a path string", 0);
 
-            sqlite3* raw = nullptr;
-            int rc = sqlite3_open(args[0].asString().c_str(), &raw);
+            auto* w = new SqliteConn();
+            int rc = sqlite3_open(args[0].asString().c_str(), &w->conn);
             if (rc != SQLITE_OK) {
-                std::string err = sqlite3_errmsg(raw);
-                sqlite3_close(raw);
-                throw RuntimeError("Cannot open database: " + err, 0);
+                // sqlite3_open can leave w->conn NULL on OOM in older
+                // builds — guard before dereferencing.
+                std::string err = w->conn ? sqlite3_errmsg(w->conn) : "out of memory";
+                if (w->conn) sqlite3_close_v2(w->conn);
+                delete w;
+                throw RuntimeError("sqlite.open: " + err, 0);
+            }
+            return praia::makeExternal<SqliteConn>(w, kSqliteTypeTag,
+                [](SqliteConn* p) {
+                    if (!p->closed && p->conn) sqlite3_close_v2(p->conn);
+                    delete p;
+                });
+        }));
+
+    sqliteMap->entries[Value("query")] = Value(makeNative("sqlite.query", -1,
+        [sqliteBind](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || args.size() > 3)
+                throw RuntimeError("sqlite.query() expected (conn, sql, params?)", 0);
+            auto* w = praia::getExternal<SqliteConn>(args[0], kSqliteTypeTag);
+            if (w->closed)
+                throw RuntimeError("Database is closed", 0);
+            if (!args[1].isString())
+                throw RuntimeError("sqlite.query() argument 2 must be a string", 0);
+
+            sqlite3_stmt* stmt = nullptr;
+            int rc = sqlite3_prepare_v2(w->conn, args[1].asString().c_str(), -1, &stmt, nullptr);
+            if (rc != SQLITE_OK) {
+                std::string err = sqlite3_errmsg(w->conn);
+                throw RuntimeError("SQL error: " + err, 0);
             }
 
-            // Wrap in shared_ptr for automatic cleanup
-            auto db = std::make_shared<sqlite3*>(raw);
+            if (args.size() == 3) sqliteBind(stmt, args[2]);
 
-            auto dbMap = gcNew<PraiaMap>();
+            auto rows = gcNew<PraiaArray>();
+            int cols = sqlite3_column_count(stmt);
 
-            // db.query(sql, params?) → array of maps
-            dbMap->entries[Value("query")] = Value(makeNative("query", -1,
-                [db](const std::vector<Value>& args) -> Value {
-                    if (args.empty() || !args[0].isString())
-                        throw RuntimeError("query() requires a SQL string", 0);
-                    if (!*db)
-                        throw RuntimeError("Database is closed", 0);
-
-                    sqlite3_stmt* stmt = nullptr;
-                    int rc = sqlite3_prepare_v2(*db, args[0].asString().c_str(), -1, &stmt, nullptr);
-                    if (rc != SQLITE_OK) {
-                        std::string err = sqlite3_errmsg(*db);
-                        throw RuntimeError("SQL error: " + err, 0);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                auto row = gcNew<PraiaMap>();
+                for (int c = 0; c < cols; c++) {
+                    std::string name = sqlite3_column_name(stmt, c);
+                    int type = sqlite3_column_type(stmt, c);
+                    switch (type) {
+                        case SQLITE_NULL:
+                            row->entries[Value(name)] = Value();
+                            break;
+                        case SQLITE_INTEGER:
+                            // int64 preserves the full 64-bit range; the
+                            // prior code went through double and silently
+                            // collapsed values above 2^53.
+                            row->entries[Value(name)] = Value(static_cast<int64_t>(sqlite3_column_int64(stmt, c)));
+                            break;
+                        case SQLITE_FLOAT:
+                            row->entries[Value(name)] = Value(sqlite3_column_double(stmt, c));
+                            break;
+                        default:
+                            row->entries[Value(name)] = Value(std::string(
+                                reinterpret_cast<const char*>(sqlite3_column_text(stmt, c))));
+                            break;
                     }
+                }
+                rows->elements.push_back(Value(row));
+            }
 
-                    // Bind parameters
-                    if (args.size() > 1 && args[1].isArray()) {
-                        auto& params = args[1].asArray()->elements;
-                        for (size_t i = 0; i < params.size(); i++) {
-                            int idx = static_cast<int>(i + 1);
-                            auto& p = params[i];
-                            if (p.isNil()) sqlite3_bind_null(stmt, idx);
-                            else if (p.isBool()) sqlite3_bind_int(stmt, idx, p.asBool() ? 1 : 0);
-                            else if (p.isNumber()) sqlite3_bind_double(stmt, idx, p.asNumber());
-                            else if (p.isString()) sqlite3_bind_text(stmt, idx, p.asString().c_str(), -1, SQLITE_TRANSIENT);
-                            else sqlite3_bind_text(stmt, idx, p.toString().c_str(), -1, SQLITE_TRANSIENT);
-                        }
-                    }
+            sqlite3_finalize(stmt);
+            return Value(rows);
+        }));
 
-                    // Execute and collect rows
-                    auto rows = gcNew<PraiaArray>();
-                    int cols = sqlite3_column_count(stmt);
+    sqliteMap->entries[Value("run")] = Value(makeNative("sqlite.run", -1,
+        [sqliteBind](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || args.size() > 3)
+                throw RuntimeError("sqlite.run() expected (conn, sql, params?)", 0);
+            auto* w = praia::getExternal<SqliteConn>(args[0], kSqliteTypeTag);
+            if (w->closed)
+                throw RuntimeError("Database is closed", 0);
+            if (!args[1].isString())
+                throw RuntimeError("sqlite.run() argument 2 must be a string", 0);
 
-                    while (sqlite3_step(stmt) == SQLITE_ROW) {
-                        auto row = gcNew<PraiaMap>();
-                        for (int c = 0; c < cols; c++) {
-                            std::string name = sqlite3_column_name(stmt, c);
-                            int type = sqlite3_column_type(stmt, c);
-                            switch (type) {
-                                case SQLITE_NULL:
-                                    row->entries[Value(name)] = Value();
-                                    break;
-                                case SQLITE_INTEGER:
-                                    row->entries[Value(name)] = Value(static_cast<double>(sqlite3_column_int64(stmt, c)));
-                                    break;
-                                case SQLITE_FLOAT:
-                                    row->entries[Value(name)] = Value(sqlite3_column_double(stmt, c));
-                                    break;
-                                default:
-                                    row->entries[Value(name)] = Value(std::string(
-                                        reinterpret_cast<const char*>(sqlite3_column_text(stmt, c))));
-                                    break;
-                            }
-                        }
-                        rows->elements.push_back(Value(row));
-                    }
+            sqlite3_stmt* stmt = nullptr;
+            int rc = sqlite3_prepare_v2(w->conn, args[1].asString().c_str(), -1, &stmt, nullptr);
+            if (rc != SQLITE_OK) {
+                std::string err = sqlite3_errmsg(w->conn);
+                throw RuntimeError("SQL error: " + err, 0);
+            }
 
-                    sqlite3_finalize(stmt);
-                    return Value(rows);
-                }));
+            if (args.size() == 3) sqliteBind(stmt, args[2]);
 
-            // db.run(sql, params?) → {changes, lastId}
-            dbMap->entries[Value("run")] = Value(makeNative("run", -1,
-                [db](const std::vector<Value>& args) -> Value {
-                    if (args.empty() || !args[0].isString())
-                        throw RuntimeError("run() requires a SQL string", 0);
-                    if (!*db)
-                        throw RuntimeError("Database is closed", 0);
+            rc = sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
 
-                    sqlite3_stmt* stmt = nullptr;
-                    int rc = sqlite3_prepare_v2(*db, args[0].asString().c_str(), -1, &stmt, nullptr);
-                    if (rc != SQLITE_OK) {
-                        std::string err = sqlite3_errmsg(*db);
-                        throw RuntimeError("SQL error: " + err, 0);
-                    }
+            if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+                std::string err = sqlite3_errmsg(w->conn);
+                throw RuntimeError("SQL error: " + err, 0);
+            }
 
-                    // Bind parameters
-                    if (args.size() > 1 && args[1].isArray()) {
-                        auto& params = args[1].asArray()->elements;
-                        for (size_t i = 0; i < params.size(); i++) {
-                            int idx = static_cast<int>(i + 1);
-                            auto& p = params[i];
-                            if (p.isNil()) sqlite3_bind_null(stmt, idx);
-                            else if (p.isBool()) sqlite3_bind_int(stmt, idx, p.asBool() ? 1 : 0);
-                            else if (p.isNumber()) sqlite3_bind_double(stmt, idx, p.asNumber());
-                            else if (p.isString()) sqlite3_bind_text(stmt, idx, p.asString().c_str(), -1, SQLITE_TRANSIENT);
-                            else sqlite3_bind_text(stmt, idx, p.toString().c_str(), -1, SQLITE_TRANSIENT);
-                        }
-                    }
+            auto result = gcNew<PraiaMap>();
+            result->entries[Value("changes")] = Value(static_cast<int64_t>(sqlite3_changes(w->conn)));
+            result->entries[Value("lastId")] = Value(static_cast<int64_t>(sqlite3_last_insert_rowid(w->conn)));
+            return Value(result);
+        }));
 
-                    rc = sqlite3_step(stmt);
-                    sqlite3_finalize(stmt);
-
-                    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-                        std::string err = sqlite3_errmsg(*db);
-                        throw RuntimeError("SQL error: " + err, 0);
-                    }
-
-                    auto result = gcNew<PraiaMap>();
-                    result->entries[Value("changes")] = Value(static_cast<int64_t>(sqlite3_changes(*db)));
-                    result->entries[Value("lastId")] = Value(static_cast<int64_t>(sqlite3_last_insert_rowid(*db)));
-                    return Value(result);
-                }));
-
-            // db.close()
-            dbMap->entries[Value("close")] = Value(makeNative("close", 0,
-                [db](const std::vector<Value>&) -> Value {
-                    if (*db) {
-                        sqlite3_close(*db);
-                        *db = nullptr;
-                    }
-                    return Value();
-                }));
-
-            return Value(dbMap);
+    sqliteMap->entries[Value("close")] = Value(makeNative("sqlite.close", 1,
+        [](const std::vector<Value>& args) -> Value {
+            auto* w = praia::getExternal<SqliteConn>(args[0], kSqliteTypeTag);
+            if (!w->closed) {
+                // sqlite3_close_v2 (vs the v1 close) defers actual cleanup
+                // until outstanding prepared statements finalize, so we
+                // can mark closed unconditionally and never see BUSY.
+                if (w->conn) sqlite3_close_v2(w->conn);
+                w->conn = nullptr;
+                w->closed = true;
+            }
+            return Value();
         }));
 
     globals->define("sqlite", Value(sqliteMap));
