@@ -90,6 +90,19 @@ testing.test("require helpers produce canonical error wording", lam{ in
         "canonical wording: " + str(err))
 })
 
+testing.test("gcd rejects floats that don't safely cast to int64", lam{ in
+    // Plain static_cast<int64_t> on a double is UB for NaN, ±Inf,
+    // non-integer values, and values outside int64 range. gcd's
+    // toInt64 helper guards each case and throws a clean error.
+    testing.assertThrows(lam{ in mathext.gcd(3.5, 2) }, nil)
+    testing.assertThrows(lam{ in mathext.gcd(1e308, 2) }, nil)
+    // 9.22e18 ≈ 2^63 — exactly representable as a double, but one
+    // past INT64_MAX (which itself can't be represented). Must reject.
+    testing.assertThrows(lam{ in mathext.gcd(9223372036854775807, 2) }, nil)
+    // Integer-valued floats still cast cleanly.
+    testing.assertEqual(mathext.gcd(48.0, 18), 6, nil)
+})
+
 testing.test("A1 regression — isNumber-guarded plugin accepts floats", lam{ in
     // Pre-fix, the plugin example demoed `asInt()` after only
     // `isNumber()`, which threw `std::bad_variant_access` on a

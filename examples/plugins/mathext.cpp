@@ -8,14 +8,32 @@ PRAIA_PLUGIN_METADATA("mathext", "0.1.0",
 extern "C" void praia_register(PraiaMap* module) {
     // mathext.gcd(a, b) — greatest common divisor. Declares named
     // parameters so user code can call `mathext.gcd(a: 48, b: 18)`
-    // as well as positionally. Uses praia::requireNumber to validate
-    // input — same error wording as Praia's own builtins.
+    // as well as positionally. Uses praia::requireNumber to accept
+    // both ints and integer-valued floats; the toInt64 helper
+    // below validates the value is finite, has no fractional part,
+    // and fits in int64 before casting (a plain static_cast on
+    // NaN / ±Inf / out-of-range doubles is undefined behavior).
+    auto toInt64 = [](double d, const char* fn, size_t i) -> int64_t {
+        // 2^63 is the smallest positive value outside int64. It's
+        // exactly representable as a double; use it as the strict
+        // upper bound. -2^63 = INT64_MIN is also exactly
+        // representable and IS in range.
+        if (!std::isfinite(d) ||
+            d != std::trunc(d) ||
+            d < -9223372036854775808.0 ||
+            d >=  9223372036854775808.0) {
+            praia::error(std::string(fn) + " argument " +
+                         std::to_string(i + 1) +
+                         " must be an integer in int64 range");
+        }
+        return static_cast<int64_t>(d);
+    };
     module->entries["gcd"] = Value(makeNative("mathext.gcd", 2,
-        [](const std::vector<Value>& args) -> Value {
-            int64_t a = static_cast<int64_t>(
-                praia::requireNumber(args, 0, "mathext.gcd"));
-            int64_t b = static_cast<int64_t>(
-                praia::requireNumber(args, 1, "mathext.gcd"));
+        [toInt64](const std::vector<Value>& args) -> Value {
+            int64_t a = toInt64(praia::requireNumber(args, 0, "mathext.gcd"),
+                                "mathext.gcd", 0);
+            int64_t b = toInt64(praia::requireNumber(args, 1, "mathext.gcd"),
+                                "mathext.gcd", 1);
             while (b != 0) { int64_t t = b; b = a % b; a = t; }
             return Value(a < 0 ? -a : a);
         },

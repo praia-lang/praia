@@ -66,7 +66,7 @@ PRAIA_PLUGIN_METADATA("mymod", "1.2.0", "Does the thing");
 
 `loadNative()` exposes the values under a `_meta` key on the returned module map, so user code can do:
 
-```
+```praia
 let mod = loadNative("./mymod")
 print(mod._meta.name, mod._meta.version)
 ```
