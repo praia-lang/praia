@@ -1,6 +1,13 @@
 let mathext = loadNative("./examples/plugins/mathext")
 
+// Plugin metadata — populated via PRAIA_PLUGIN_METADATA() in the
+// .cpp. Surfaces under `_meta` on the module map.
+print("plugin:", mathext._meta.name, mathext._meta.version)
+
 print("gcd(48, 18) =", mathext.gcd(48, 18))
+// gcd declares paramNames {a, b}, so named args work too.
+print("gcd(a: 48, b: 18) =", mathext.gcd(a: 48, b: 18))
+
 print("lcm(12, 8) =", mathext.lcm(12, 8))
 print("fibonacci(10) =", mathext.fibonacci(10))
 print("hypot(3, 4) =", mathext.hypot(3, 4))

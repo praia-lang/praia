@@ -4190,6 +4190,31 @@ Interpreter::Interpreter() {
                     "' threw during registration: " + std::string(e.what()), 0);
             }
 
+            // Optional plugin metadata. Each symbol is dlsym'd
+            // independently so a plugin can declare any subset
+            // (e.g. version but no description). When at least one
+            // resolves to a non-null string, attach a `_meta`
+            // sub-map to the module. Plugins that don't invoke
+            // PRAIA_PLUGIN_METADATA() leave the module map exactly
+            // as praia_register populated it.
+            using MetaFn = const char* (*)();
+            auto metaProbe = [&](const char* sym) -> const char* {
+                dlerror();
+                auto fn = reinterpret_cast<MetaFn>(dlsym(handle, sym));
+                if (!fn) { dlerror(); return nullptr; }
+                return fn();
+            };
+            const char* metaName = metaProbe("praia_plugin_name");
+            const char* metaVer  = metaProbe("praia_plugin_version");
+            const char* metaDesc = metaProbe("praia_plugin_description");
+            if (metaName || metaVer || metaDesc) {
+                auto meta = gcNew<PraiaMap>();
+                if (metaName) meta->entries[Value("name")] = Value(std::string(metaName));
+                if (metaVer)  meta->entries[Value("version")] = Value(std::string(metaVer));
+                if (metaDesc) meta->entries[Value("description")] = Value(std::string(metaDesc));
+                moduleMap->entries[Value("_meta")] = Value(meta);
+            }
+
             // Success — cache the module
             g_pluginCache[absPath] = moduleMap;
 

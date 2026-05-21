@@ -106,6 +106,15 @@ struct NativeFunction : Callable {
     std::string funcName;
     int numArgs;  // -1 = variadic
     std::function<Value(const std::vector<Value>&)> fn;
+    // Optional parameter names — populated when the native opts in
+    // to named-argument calls via the trailing `paramNames` arg of
+    // `makeNative`. Empty means "no named-arg support"; the base
+    // class's `paramNames()` returns nullptr in that case and the
+    // engine raises the standard "Named arguments not supported"
+    // error. Defining the names here lets `mod.fn(x: 1, y: 2)`
+    // dispatch into plugin and stdlib natives just like it does
+    // into Praia-defined functions.
+    std::vector<std::string> paramNames_;
 
     Value call(Interpreter& interp, const std::vector<Value>& args) override {
         // Defense-in-depth: any C++ stdlib exception that escapes the
@@ -140,6 +149,9 @@ struct NativeFunction : Callable {
     }
     int arity() const override { return numArgs; }
     std::string name() const override { return funcName; }
+    const std::vector<std::string>* paramNames() const override {
+        return paramNames_.empty() ? nullptr : &paramNames_;
+    }
 };
 
 // A method bound to an instance

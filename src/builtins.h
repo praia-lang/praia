@@ -11,13 +11,21 @@
 inline std::string argStr(int n) { return n == 1 ? "argument" : "arguments"; }
 
 // Factory for native (C++) functions exposed as Praia callables.
+//
+// `paramNames` is optional. When provided, native calls support
+// named-argument syntax (`mod.fn(x: 1, y: 2)`); when omitted, the
+// engine throws the standard "Named arguments not supported" error
+// for any named-arg dispatch into this function — matches the
+// pre-existing behavior so callers that don't opt in are unaffected.
 inline std::shared_ptr<NativeFunction> makeNative(
     const std::string& name, int arity,
-    std::function<Value(const std::vector<Value>&)> fn) {
+    std::function<Value(const std::vector<Value>&)> fn,
+    std::vector<std::string> paramNames = {}) {
     auto f = std::make_shared<NativeFunction>();
     f->funcName = name;
     f->numArgs = arity;
     f->fn = std::move(fn);
+    f->paramNames_ = std::move(paramNames);
     return f;
 }
 

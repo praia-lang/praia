@@ -59,6 +59,50 @@ testing.test("filter — non-callable predicate throws cleanly", lam{ in
     testing.assertThrows(lam{ in mathext.filter([1, 2, 3], 42) }, nil)
 })
 
+testing.test("plugin metadata surfaces on _meta", lam{ in
+    // PRAIA_PLUGIN_METADATA() in mathext.cpp populates these.
+    // Plugins that don't declare metadata get no `_meta` key —
+    // tested implicitly by every other test that ignores it.
+    testing.assertEqual(mathext._meta.name, "mathext", nil)
+    testing.assertEqual(mathext._meta.version, "0.1.0", nil)
+    testing.assert(mathext._meta.description.contains("math"),
+        "description present: " + str(mathext._meta.description))
+})
+
+testing.test("native function accepts named arguments", lam{ in
+    // gcd declares paramNames {a, b} via the trailing arg of
+    // makeNative — without that, this call would fail with
+    // "Named arguments not supported for 'mathext.gcd'".
+    testing.assertEqual(mathext.gcd(a: 48, b: 18), 6, nil)
+    testing.assertEqual(mathext.gcd(b: 18, a: 48), 6,
+        "order-independent named call")
+    // Positional dispatch still works (back-compat).
+    testing.assertEqual(mathext.gcd(48, 18), 6, nil)
+})
+
+testing.test("require helpers produce canonical error wording", lam{ in
+    // praia::requireNumber throws "<fn>() argument N must be a
+    // number" — matches the wording the engine's own builtins use.
+    let err = nil
+    try { mathext.gcd("not a number", 5) } catch (e) { err = str(e) }
+    testing.assert(err != nil, "type mismatch must throw")
+    testing.assert(err.contains("mathext.gcd() argument 1 must be a number"),
+        "canonical wording: " + str(err))
+})
+
+testing.test("gcd rejects floats that don't safely cast to int64", lam{ in
+    // Plain static_cast<int64_t> on a double is UB for NaN, ±Inf,
+    // non-integer values, and values outside int64 range. gcd's
+    // toInt64 helper guards each case and throws a clean error.
+    testing.assertThrows(lam{ in mathext.gcd(3.5, 2) }, nil)
+    testing.assertThrows(lam{ in mathext.gcd(1e308, 2) }, nil)
+    // 9.22e18 ≈ 2^63 — exactly representable as a double, but one
+    // past INT64_MAX (which itself can't be represented). Must reject.
+    testing.assertThrows(lam{ in mathext.gcd(9223372036854775807, 2) }, nil)
+    // Integer-valued floats still cast cleanly.
+    testing.assertEqual(mathext.gcd(48.0, 18), 6, nil)
+})
+
 testing.test("A1 regression — isNumber-guarded plugin accepts floats", lam{ in
     // Pre-fix, the plugin example demoed `asInt()` after only
     // `isNumber()`, which threw `std::bad_variant_access` on a
