@@ -7,7 +7,15 @@ use "testing"
 // files. Async tasks get isolated globals, so the counter lives
 // inside the server task and reports back via X-Accepts.
 
-let TEST_PORT = 38914
+// Bind on the main thread BEFORE spawning the server task so:
+//   1. The OS-assigned ephemeral port (passed via 0) is known up front
+//      and read here via net.localAddr — no hardcoded port, no
+//      collisions between test runs.
+//   2. The listener is in the LISTEN state by the time async runs.
+//      Client connect() succeeds immediately (kernel queues the conn
+//      in the accept backlog), so no blind startup sleep is needed.
+let listener = net.listen(0)
+let TEST_PORT = net.localAddr(listener).port
 
 // Case-insensitive header lookup against the raw request bytes. Hoisted
 // out of the per-connection loop so it can't get re-defined per
@@ -24,7 +32,6 @@ let headerOf = lam{ req, name in
 }
 
 let _serverFuture = async lam{ in
-    let listener = net.listen(TEST_PORT)
     let acceptCount = 0
     while (true) {
         let c = net.accept(listener)
@@ -90,7 +97,9 @@ let _serverFuture = async lam{ in
         net.close(c)
     }
 }()
-time.sleep(200)
+// No startup sleep: the listener was bound on the main thread before
+// the async task spawned, so kernel-level readiness is already in place
+// by the time the first http.get fires.
 
 let base = "http://localhost:" + str(TEST_PORT)
 
@@ -288,6 +297,8 @@ testing.test("reserved headers in SESSION defaults are also rejected", lam{ in
     let err = nil
     try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
     testing.assert(err != nil, "lowercase host (session default) rejected")
+    testing.assert(err.contains("reserved"),
+        "lowercase host hit the reserved-headers validator: " + str(err))
     http.close(s)
 })
 

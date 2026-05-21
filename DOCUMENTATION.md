@@ -150,6 +150,7 @@ print(userName)              // Ada
 ```
 
 Rest collects remaining keys:
+
 ```praia
 let {name, ...other} = {name: "Ada", age: 36, lang: "Praia"}
 print(other)                 // {age: 36, lang: "Praia"}
@@ -459,7 +460,7 @@ Strings are enclosed in double quotes.
 
 `\u{...}` inserts any Unicode codepoint by its hex value:
 
-```
+```praia
 "\u{E9}"        // "e" (e-acute)
 "\u{1F600}"     // "😀"
 "\u{1F1F5}\u{1F1F9}"  // "🇵🇹" (flag)
@@ -469,7 +470,7 @@ Strings are enclosed in double quotes.
 
 Use `%{expression}` inside strings:
 
-```
+```praia
 let name = "Ada"
 let age = 36
 print("%{name} is %{age} years old")
@@ -483,7 +484,7 @@ print("2 + 2 = %{2 + 2}")
 
 Triple-quoted strings (`"""` or `'''`) span multiple lines. The first newline after the opening quotes is stripped.
 
-```
+```praia
 let html = """
 <html>
   <body>
@@ -499,7 +500,7 @@ Interpolation and escape sequences work inside triple-quoted strings.
 
 Strings are indexed by grapheme cluster (visible character), not by byte. This means emoji and accented characters work correctly.
 
-```
+```praia
 let s = "hello"
 print(s[0])         // h
 print(s[-1])        // o (negative = from end)
@@ -515,7 +516,7 @@ print(emoji[2])     // 👋
 
 Arrays are ordered, mixed-type collections with reference semantics.
 
-```
+```praia
 let nums = [1, 2, 3]
 let mixed = [1, "two", true, nil]
 let empty = []
@@ -523,7 +524,7 @@ let empty = []
 
 ### Index Access and Assignment
 
-```
+```praia
 let arr = [10, 20, 30]
 print(arr[0])       // 10
 print(arr[-1])      // 30
@@ -534,14 +535,14 @@ print(arr)          // [10, 99, 30]
 
 ### Nested Arrays
 
-```
+```praia
 let matrix = [[1, 2], [3, 4]]
 print(matrix[1][0]) // 3
 ```
 
 ### Reference Semantics
 
-```
+```praia
 let a = [1, 2, 3]
 let b = a           // b points to the same array
 b.push(4)
@@ -554,7 +555,7 @@ print(a)            // [1, 2, 3, 4]
 
 Maps hold key-value pairs. Keys can be any hashable value: strings, integers, floats, booleans, or nil.
 
-```
+```praia
 let person = {name: "Ada", age: 36}
 let config = {"api-key": "abc123"}
 let empty = {}
@@ -564,7 +565,7 @@ let empty = {}
 
 Use `[expr]` for computed or non-string keys in map literals:
 
-```
+```praia
 let m = {[42]: "answer", [true]: "yes", name: "Ada"}
 print(m[42])       // answer
 print(m[true])     // yes
@@ -575,7 +576,7 @@ Identifier keys like `name:` are sugar for the string key `"name":`.
 
 ### Access and Assignment
 
-```
+```praia
 // Dot notation (string keys only)
 print(person.name)          // Ada
 person.email = "ada@ex.com"
@@ -592,7 +593,7 @@ Arrays, maps, instances, and functions cannot be used as keys (they are not hash
 
 Maps, like arrays, use reference semantics:
 
-```
+```praia
 let a = {x: 1}
 let b = a
 b.y = 2
@@ -610,7 +611,7 @@ print(a)            // {x: 1, y: 2}
 | `.entries()` | Returns `[[key, value], ...]` array of all entries |
 | `.clear()` | Remove all entries from the map |
 
-```
+```praia
 let m = {a: 1, b: 2}
 m.has("a")           // true
 m.get("z", 0)        // 0
@@ -626,7 +627,7 @@ Note: map entries named `has`, `get`, `delete`, or `merge` shadow the methods.
 
 Sets hold an unordered collection of unique values. Elements must be hashable: `nil`, bool, int, float, string, or tagged values — the same rule as map keys. Arrays, maps, instances, and other sets cannot be elements (they aren't hashable).
 
-```
+```praia
 let primes = #{2, 3, 5, 7, 11}
 let mixed  = #{1, "two", true, nil, 3.14}
 let empty  = #{}
@@ -638,7 +639,7 @@ Literal syntax: `#{...}`. The `#` distinguishes the set from a map literal — `
 
 Two sets are equal when they contain the same elements regardless of insertion order:
 
-```
+```praia
 #{1, 2, 3} == #{3, 2, 1}     // true
 #{1, 2} == #{1, 2, 3}        // false
 ```
@@ -647,7 +648,7 @@ Two sets are equal when they contain the same elements regardless of insertion o
 
 `for-in` over a set visits each element exactly once. Order is unspecified (matches map iteration).
 
-```
+```praia
 let s = #{10, 20, 30}
 for (x in s) { print(x) }
 ```
@@ -668,7 +669,7 @@ for (x in s) { print(x) }
 | `.difference(other)` | New set with elements in `self` but not in `other`. |
 | `.isSubset(other)` | `true` if every element of `self` is in `other` (the empty set is a subset of everything). |
 
-```
+```praia
 let a = #{1, 2, 3}
 let b = #{2, 3, 4}
 
@@ -686,7 +687,7 @@ a.size()           // 4
 
 For parity with arrays (`+` concatenates) and maps (`+` merges), the `+` operator on two sets returns the union — same as `.union()`:
 
-```
+```praia
 #{1, 2} + #{3, 4}    // #{1, 2, 3, 4}
 #{1, 2} + #{2, 3}    // #{1, 2, 3}   — dedup
 ```
@@ -695,7 +696,7 @@ For parity with arrays (`+` concatenates) and maps (`+` merges), the `+` operato
 
 Use `.toArray()` to convert a set to an array. To go the other way, spread into a set literal or build incrementally with `.add`:
 
-```
+```praia
 let arr = [1, 2, 2, 3]
 let s = #{...arr}    // #{1, 2, 3}
 arr = s.toArray()    // [1, 2, 3] (order unspecified)
@@ -705,7 +706,7 @@ arr = s.toArray()    // [1, 2, 3] (order unspecified)
 
 Sets, like arrays and maps, use reference semantics:
 
-```
+```praia
 let a = #{1, 2}
 let b = a
 b.add(3)
@@ -718,7 +719,7 @@ print(a)             // #{1, 2, 3}
 
 Praia has two numeric types: 64-bit integers (`int`) and double-precision floats (`float`). Integer literals (no decimal point) create ints; decimal literals create floats.
 
-```
+```praia
 type(42)        // "int"
 type(3.14)      // "float"
 ```
@@ -729,7 +730,7 @@ type(3.14)      // "float"
 - Anything involving a double → double
 - `/` always returns double: `7 / 2` → `3.5` (like Python 3)
 
-```
+```praia
 42 + 8          // 50 (int)
 42 + 0.5        // 42.5 (number)
 7 / 2           // 3.5 (always double)
@@ -740,7 +741,7 @@ type(3.14)      // "float"
 
 Integers are 64-bit, so they're exact up to 2^63. No precision loss like doubles above 2^53:
 
-```
+```praia
 let big = 9007199254740993
 print(big + 1)     // 9007199254740994 (exact)
 ```
@@ -755,7 +756,7 @@ Ints and doubles compare by value: `42 == 42.0` is `true`.
 
 Enums create named constants with auto-incrementing integer values.
 
-```
+```praia
 enum Color { Red, Green, Blue }
 print(Color.Red)      // 0
 print(Color.Green)    // 1
@@ -764,7 +765,7 @@ print(Color.Blue)     // 2
 
 ### Custom values
 
-```
+```praia
 enum Status { Active = 1, Inactive = 0, Pending = 2 }
 
 if (status == Status.Active) {
@@ -774,7 +775,7 @@ if (status == Status.Active) {
 
 ### Auto-increment continues from the last value
 
-```
+```praia
 enum Level { Low = 10, Medium, High }
 print(Level.Medium)   // 11
 print(Level.High)     // 12
@@ -786,7 +787,7 @@ Enums are maps — you can pass them around, iterate their keys, etc.
 
 Tagged values are data-carrying variants — like Rust enums with data. Any capitalized function call to an undefined name creates a tagged value:
 
-```
+```praia
 let result = Ok(42)
 let error = Err("not found")
 let point = Point(1, 2)
@@ -802,7 +803,7 @@ print(result.values) // [42]
 
 Tagged values work with `match` for destructuring:
 
-```
+```praia
 match (result) {
     Ok(val) { print("success: " + str(val)) }
     Err(msg) { print("error: " + msg) }
@@ -821,7 +822,7 @@ match (RGB(255, 0, 128)) {
 
 Two tagged values are equal if their tag name and all values match:
 
-```
+```praia
 Ok(1) == Ok(1)     // true
 Ok(1) == Ok(2)     // false
 Ok(1) == Err(1)    // false
@@ -831,7 +832,7 @@ Ok(1) == Err(1)    // false
 
 Class constructors take priority. Tagged values only apply when the name isn't defined:
 
-```
+```praia
 class Foo {}
 let f = Foo()   // class instance
 let t = Bar(1)  // tagged value (Bar is not a class)
@@ -845,7 +846,7 @@ let t = Bar(1)  // tagged value (Bar is not a class)
 
 Conditions are always wrapped in parentheses. Bodies use braces.
 
-```
+```praia
 let score = 85
 
 if (score >= 90) {
@@ -861,7 +862,7 @@ if (score >= 90) {
 
 Truthiness check:
 
-```
+```praia
 let name = nil
 if (name) {
     print(name)
@@ -874,7 +875,7 @@ if (name) {
 
 Match a value against multiple cases. Cases are tested top-to-bottom; first match wins. Use `_` for the default case.
 
-```
+```praia
 let cmd = "stop"
 
 match (cmd) {
@@ -887,7 +888,7 @@ match (cmd) {
 
 Cases can be any expression (compared with `==`, which respects `__eq` operator overloading):
 
-```
+```praia
 let x = 10
 
 match (x) {
@@ -902,7 +903,7 @@ match (x) {
 
 Use `is` to match by type name or class:
 
-```
+```praia
 match (value) {
     is "int"    { print("integer") }
     is "string" { print("string") }
@@ -918,7 +919,7 @@ Type names: `"nil"`, `"bool"`, `"int"`, `"float"`, `"string"`, `"array"`, `"map"
 
 Use `when` for conditional matching:
 
-```
+```praia
 let score = 85
 
 match (score) {
@@ -934,7 +935,7 @@ match (score) {
 
 Equality, type, and guard patterns can be freely mixed in a single match:
 
-```
+```praia
 let x = -5
 
 match (x) {
@@ -954,7 +955,7 @@ If no case matches and there's no default, nothing happens.
 
 Wrap code that might fail in a `try` block. If an error occurs — either from `throw` or a runtime error — execution jumps to the `catch` block with the error value.
 
-```
+```praia
 try {
     let data = fs.read("config.txt")
     print(data)
@@ -967,7 +968,7 @@ try {
 
 Add a `finally` block for cleanup that always runs — whether the try succeeds, the catch runs, or an exception is re-thrown.
 
-```
+```praia
 let file = fs.read("data.txt")
 try {
     process(file)
@@ -982,7 +983,7 @@ try {
 
 Throw any value as an error. If not caught by a `try/catch`, the program terminates.
 
-```
+```praia
 func divide(a, b) {
     if (b == 0) {
         throw "division by zero"
@@ -999,13 +1000,13 @@ try {
 
 You can throw any value — strings, numbers, maps:
 
-```
+```praia
 throw {code: 404, message: "not found"}
 ```
 
 Runtime errors (type errors, index out of bounds, etc.) are also caught:
 
-```
+```praia
 try {
     let arr = [1, 2, 3]
     print(arr[99])
@@ -1018,7 +1019,7 @@ try {
 
 `defer` registers an expression to run when the enclosing function exits — whether by normal return, explicit `return`, or thrown exception. Multiple defers execute in LIFO order (last registered runs first).
 
-```
+```praia
 func processFile(path) {
     let db = sqlite.open("app.db")
     defer sqlite.close(db)
@@ -1033,7 +1034,7 @@ func processFile(path) {
 
 Defers run even if an exception is thrown:
 
-```
+```praia
 func f() {
     defer print("cleanup")
     throw "error"
@@ -1048,7 +1049,7 @@ If a defer itself throws, it doesn't prevent other defers from running.
 
 `ensure` is an early-exit guard (like Swift's `guard`). If the condition is falsy, the `else` block runs — which should exit the scope (typically `return` or `throw`).
 
-```
+```praia
 func greet(name) {
     ensure (name) else {
         print("no name provided")
@@ -1063,7 +1064,7 @@ greet(nil)      // no name provided
 
 `ensure` is useful for input validation at the top of functions:
 
-```
+```praia
 func processAge(age) {
     ensure (type(age) == "int") else {
         throw "age must be a number"
@@ -1079,7 +1080,7 @@ func processAge(age) {
 
 Pressing Ctrl+C throws `"Interrupted"`, which is catchable with `try/catch`:
 
-```
+```praia
 try {
     for (i in 0..999999999) {
         doWork(i)
@@ -1098,7 +1099,7 @@ Without a `try/catch`, Ctrl+C prints `Uncaught error: Interrupted` and exits. Th
 
 ### while
 
-```
+```praia
 let i = 0
 while (i < 5) {
     print(i)
@@ -1110,7 +1111,7 @@ while (i < 5) {
 
 `for (var in start..end)` — end is exclusive.
 
-```
+```praia
 for (i in 0..5) {
     print(i)            // 0, 1, 2, 3, 4
 }
@@ -1124,7 +1125,7 @@ for (i in 1..n + 1) {
 
 ### for-in (arrays)
 
-```
+```praia
 let names = ["alice", "bob", "charlie"]
 for (name in names) {
     print("hello %{name}")
@@ -1135,7 +1136,7 @@ for (name in names) {
 
 Iterating a map yields `{key, value}` entries. You can destructure directly in the loop:
 
-```
+```praia
 let config = {host: "localhost", port: 8080}
 
 // Destructuring (preferred)
@@ -1153,7 +1154,7 @@ for (entry in config) {
 
 Iterating a set yields each element exactly once. Order is unspecified.
 
-```
+```praia
 let primes = #{2, 3, 5, 7}
 for (p in primes) {
     print(p)
@@ -1164,7 +1165,7 @@ for (p in primes) {
 
 `break` exits the innermost loop. `continue` skips to the next iteration. Both work in `while`, `for`, and `for-in` loops.
 
-```
+```praia
 // Skip odd numbers
 for (i in 0..10) {
     if (i % 2 != 0) { continue }
@@ -1195,7 +1196,7 @@ In nested loops, `break` and `continue` only affect the innermost loop.
 
 Define functions with `func`. Functions are first-class values.
 
-```
+```praia
 func add(a, b) {
     return a + b
 }
@@ -1207,7 +1208,7 @@ print(add(2, 3))    // 5
 
 Parameters can have default values. Non-default parameters must come before default ones.
 
-```
+```praia
 func greet(name, greeting = "Hello") {
     print("%{greeting}, %{name}!")
 }
@@ -1218,7 +1219,7 @@ greet("Ada", "Welcome")   // Welcome, Ada!
 
 Defaults also work in lambdas and class methods:
 
-```
+```praia
 let inc = lam{ x, step = 1 in x + step }
 print(inc(10))       // 11
 print(inc(10, 5))    // 15
@@ -1234,7 +1235,7 @@ class Server {
 
 Use `...name` as the last parameter to collect all remaining arguments into an array:
 
-```
+```praia
 func log(level, ...messages) {
     print("[" + level + "]", messages.join(" "))
 }
@@ -1245,7 +1246,7 @@ log("INFO", "server", "started", "on", "8080")
 
 Rest parameters work in functions, lambdas, and class methods:
 
-```
+```praia
 let sum = lam{ ...nums in
     let total = 0
     for (n in nums) { total = total + n }
@@ -1265,7 +1266,7 @@ If no extra arguments are passed, the rest parameter is an empty array.
 
 Arguments can be passed by name using `name: value` syntax. Positional arguments must come first; once a named argument appears, all remaining arguments must be named.
 
-```
+```praia
 func createUser(name, age, role = "user") {
     return {name: name, age: age, role: role}
 }
@@ -1277,7 +1278,7 @@ createUser(name: "Ada", age: 36)            // all named, role uses default
 
 Named arguments work with lambdas, class constructors, and the pipe operator:
 
-```
+```praia
 let add = lam{ a, b in a + b }
 add(b: 10, a: 5)          // 15
 
@@ -1299,7 +1300,7 @@ Unknown parameter names and duplicate names throw a runtime error. Native built-
 
 Functions without an explicit `return` return `nil`.
 
-```
+```praia
 func greet(name) {
     print("hello %{name}")
 }
@@ -1309,7 +1310,7 @@ func greet(name) {
 
 Functions capture their enclosing scope:
 
-```
+```praia
 func makeCounter() {
     let count = 0
     func increment() {
@@ -1327,7 +1328,7 @@ print(counter())    // 3
 
 ### Recursion
 
-```
+```praia
 func fib(n) {
     if (n <= 1) { return n }
     return fib(n - 1) + fib(n - 2)
@@ -1337,7 +1338,7 @@ print(fib(10))      // 55
 
 ### Functions as Values
 
-```
+```praia
 func apply(f, x) {
     return f(x)
 }
@@ -1351,7 +1352,7 @@ print(apply(double, 21))   // 42
 
 Decorators wrap a function with another function using the `@` syntax. They are pure syntactic sugar — `@dec func f(){}` desugars to `func f(){}; f = dec(f)`.
 
-```
+```praia
 func log(fn) {
     return lam{ ...args in
         print("calling " + str(fn))
@@ -1367,7 +1368,7 @@ add(2, 3)   // prints "calling <function add>", returns 5
 
 Multiple decorators are applied bottom-up (innermost first):
 
-```
+```praia
 @auth
 @log
 func handler(req) { ... }
@@ -1376,7 +1377,7 @@ func handler(req) { ... }
 
 Decorators can take arguments by calling the decorator to produce the wrapper:
 
-```
+```praia
 func role(required) {
     return lam{ fn in
         return lam{ ...args in
@@ -1392,7 +1393,7 @@ func deleteUser(id) { ... }
 
 Decorators also work on class methods (both instance and static):
 
-```
+```praia
 func logged(fn) {
     return lam{ ...args in
         print("calling")
@@ -1417,7 +1418,7 @@ Lambdas are anonymous functions defined inline with `lam{ params in body }`.
 
 ### Single expression (auto-returned)
 
-```
+```praia
 let double = lam{ x in x * 2 }
 let add = lam{ a, b in a + b }
 
@@ -1429,7 +1430,7 @@ A single-expression lambda automatically returns its result — no `return` need
 
 ### Multi-line (explicit return)
 
-```
+```praia
 let process = lam{ x, y in
     let sum = x + y
     let product = x * y
@@ -1439,7 +1440,7 @@ let process = lam{ x, y in
 
 ### No parameters
 
-```
+```praia
 let sayHi = lam{ in print("hello!") }
 sayHi()
 ```
@@ -1448,7 +1449,7 @@ sayHi()
 
 Lambdas are ideal for callbacks, filters, and transforms:
 
-```
+```praia
 func filter(arr, predicate) {
     let result = []
     for (item in arr) {
@@ -1475,7 +1476,7 @@ print(squares)          // [1, 4, 9, 16, 25, 36, 49, 64, 81, 100]
 
 Lambdas capture their enclosing scope, just like named functions:
 
-```
+```praia
 func makeMultiplier(factor) {
     return lam{ x in x * factor }
 }
@@ -1486,7 +1487,7 @@ print(triple(5))        // 15
 
 ### Lambdas in maps
 
-```
+```praia
 let actions = {
     double: lam{ x in x * 2 },
     negate: lam{ x in -x }
@@ -1504,7 +1505,7 @@ No special keyword is needed — any function or lambda that uses `yield` become
 
 ### Basic usage
 
-```
+```praia
 func countdown(n) {
     while (n > 0) { yield n; n = n - 1 }
 }
@@ -1522,7 +1523,7 @@ print(g.next())   // {value: nil, done: true}
 
 Generators work directly with `for-in` loops. Iteration is lazy — values are produced one at a time, not materialized into an array.
 
-```
+```praia
 func range(n) {
     for (i in 0..n) { yield i }
 }
@@ -1534,7 +1535,7 @@ for (x in range(5)) { print(x) }   // 0 1 2 3 4
 
 Since generators are lazy, they can produce infinite sequences. Use `break` to stop.
 
-```
+```praia
 func naturals() {
     let n = 0
     while (true) { yield n; n = n + 1 }
@@ -1550,7 +1551,7 @@ for (x in naturals()) {
 
 `yield` is an expression that returns the value passed to `.next(arg)`. The first `.next()` call primes the generator (runs until the first yield); subsequent calls resume execution with the sent value.
 
-```
+```praia
 func accumulator() {
     let total = 0
     while (true) {
@@ -1570,7 +1571,7 @@ acc.next(25)            // {value: 40, done: false}
 
 Lambdas can be generators too.
 
-```
+```praia
 let squares = lam{ n in for (i in 0..n) { yield i * i } }
 
 for (x in squares(5)) { print(x) }   // 0 1 4 9 16
@@ -1580,7 +1581,7 @@ for (x in squares(5)) { print(x) }   // 0 1 4 9 16
 
 A `return` inside a generator sets `done: true` and the return value as the final `value`.
 
-```
+```praia
 func gen() {
     yield 1
     return 99
@@ -1605,7 +1606,7 @@ print(g.next())   // {value: 99, done: true}
 
 ### Defining a class
 
-```
+```praia
 class Animal {
     func init(name, sound) {
         this.name = name
@@ -1627,7 +1628,7 @@ class Animal {
 
 Call the class like a function — no `new` keyword:
 
-```
+```praia
 let cat = Animal("Whiskers", "meow")
 cat.speak()         // Whiskers says meow
 ```
@@ -1636,7 +1637,7 @@ cat.speak()         // Whiskers says meow
 
 Properties are set on `this` inside methods and accessed with dot notation:
 
-```
+```praia
 print(cat.name)     // Whiskers
 cat.name = "Luna"   // reassignment works
 cat.speak()         // Luna says meow
@@ -1646,7 +1647,7 @@ cat.speak()         // Luna says meow
 
 Use `extends` for single inheritance:
 
-```
+```praia
 class Dog extends Animal {
     func init(name) {
         super.init(name, "woof")
@@ -1667,7 +1668,7 @@ buddy.learn("sit")
 
 Use `super.method()` to call the parent class's version of a method:
 
-```
+```praia
 class Cat extends Animal {
     func init(name) {
         super.init(name, "meow")
@@ -1685,7 +1686,7 @@ class Cat extends Animal {
 
 Child classes can override parent methods. The child's version is used:
 
-```
+```praia
 class Animal {
     func describe() { return "an animal" }
 }
@@ -1703,7 +1704,7 @@ c.speak()              // still works (inherited from Animal)
 
 Classes are first-class — they can be stored in variables and passed around:
 
-```
+```praia
 let MyClass = Animal
 let a = MyClass("Rex", "woof")
 a.speak()
@@ -1713,7 +1714,7 @@ a.speak()
 
 Instances use reference equality:
 
-```
+```praia
 let a = Animal("Rex", "woof")
 let b = a
 print(a == b)       // true (same reference)
@@ -1726,7 +1727,7 @@ print(a == c)       // false (different instances)
 
 Classes can define special "dunder" methods to customize how operators work on instances.
 
-```
+```praia
 class Vec {
     func init(x, y) { this.x = x; this.y = y }
     func __add(other) { return Vec(this.x + other.x, this.y + other.y) }
@@ -1771,7 +1772,7 @@ Classes without operator overloads use default behavior (reference equality for 
 
 Define class-level methods with `static func`. Static methods are called on the class, not on instances, and don't receive `this`.
 
-```
+```praia
 class Point {
     func init(x, y) { this.x = x; this.y = y }
     static func origin() { return Point(0, 0) }
@@ -1784,7 +1785,7 @@ let q = Point.fromArray([3, 4]) // another factory
 
 Static methods are inherited by subclasses and can be overridden:
 
-```
+```praia
 class Animal {
     static func type() { return "animal" }
 }
@@ -1814,7 +1815,7 @@ print(Dog.type())    // "dog"
 | `keys(map)` | Return array of map keys |
 | `values(map)` | Return array of map values |
 
-```
+```praia
 print(len([1, 2, 3]))      // 3
 print(len("hello"))         // 5
 print(len({a: 1, b: 2}))   // 2
@@ -1840,7 +1841,7 @@ These work on any value type via dot notation.
 | `.toString()` | Convert any value to its string representation |
 | `.toNum()` | Convert to number — works on numbers (identity), bools (`true`=1, `false`=0), and numeric strings. Also handles `"true"`/`"false"` (case-insensitive). Throws on invalid strings. |
 
-```
+```praia
 42.toString()           // "42"
 true.toString()         // "true"
 [1, 2].toString()       // "[1, 2]"
@@ -1893,7 +1894,7 @@ Methods are called with dot notation on string values.
 
 All positional methods (`len`, indexing, `slice`, `split("")`, `indexOf`, `padStart`, `padEnd`) operate on **grapheme clusters** — visible characters, not bytes. This means emoji, accented characters, and flags all count as single units.
 
-```
+```praia
 "hello".upper()                  // "HELLO"
 "  hello  ".strip()              // "hello"
 "a,b,c".split(",")              // ["a", "b", "c"]
@@ -1938,7 +1939,7 @@ Regular expressions are available as string methods. When built with RE2 (the de
 
 ### test
 
-```
+```praia
 "hello123".test("[0-9]+")       // true
 "hello".test("[0-9]+")          // false
 ```
@@ -1947,7 +1948,7 @@ Regular expressions are available as string methods. When built with RE2 (the de
 
 Returns a map with the full match, capture groups, and position — or `nil` if no match:
 
-```
+```praia
 let m = "age: 25".match("(\\w+): (\\d+)")
 print(m.match)      // age: 25
 print(m.groups)     // ["age", "25"]
@@ -1960,7 +1961,7 @@ print(m.index)      // 0
 
 Returns an array of match maps:
 
-```
+```praia
 let nums = "abc123def456".matchAll("\\d+")
 for (m in nums) {
     print(m.match, "at", m.index)
@@ -1973,7 +1974,7 @@ for (m in nums) {
 
 Replaces all regex matches. Supports back-references (`$1`, `$2`):
 
-```
+```praia
 "hello   world".replacePattern("\\s+", " ")         // "hello world"
 "John Smith".replacePattern("(\\w+) (\\w+)", "$2, $1")  // "Smith, John"
 ```
@@ -1984,7 +1985,7 @@ Use `.replace()` for literal string replacement, `.replacePattern()` for regex.
 
 Invalid regex patterns throw a catchable error:
 
-```
+```praia
 try {
     "test".test("[invalid")
 } catch (err) {
@@ -1994,7 +1995,7 @@ try {
 
 ### Practical examples
 
-```
+```praia
 // Email validation
 let email = "ada@example.com"
 if (email.test("^[\\w.+-]+@[\\w-]+\\.[\\w.]+$")) {
@@ -2016,7 +2017,7 @@ print(clean)    // "too many spaces"
 
 The `re` grain provides named capture groups, regex split, and escape — features not available on the built-in string methods.
 
-```
+```praia
 use "re"
 ```
 
@@ -2035,7 +2036,7 @@ use "re"
 
 Use `(?<name>...)` syntax. Named groups appear in `m.named` as a map:
 
-```
+```praia
 let m = re.find("2026-04-22", "(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})")
 print(m.named.year)    // "2026"
 print(m.named.month)   // "04"
@@ -2047,7 +2048,7 @@ Named and unnamed groups can be mixed. Unnamed groups get `nil` in the name list
 
 ### matchAll with named groups
 
-```
+```praia
 let text = "name=Alice age=30 city=London"
 let matches = re.findAll(text, "(?<key>\\w+)=(?<val>\\w+)")
 for (m in matches) {
@@ -2060,7 +2061,7 @@ for (m in matches) {
 
 ### split
 
-```
+```praia
 re.split("one,,two,,,three", ",+")       // ["one", "two", "three"]
 re.split("hello world  foo", "\\s+")     // ["hello", "world", "foo"]
 re.split("a1b2c3", "\\d")                // ["a", "b", "c", ""]
@@ -2070,7 +2071,7 @@ re.split("a1b2c3", "\\d")                // ["a", "b", "c", ""]
 
 Escape user input for safe inclusion in a regex pattern:
 
-```
+```praia
 let literal = re.escape("file (1).txt")
 print(literal)                             // "file \\(1\\)\\.txt"
 re.test("file (1).txt", literal)          // true
@@ -2078,7 +2079,7 @@ re.test("file (1).txt", literal)          // true
 
 ### Practical: parsing log lines
 
-```
+```praia
 use "re"
 
 let log = "2026-04-22 ERROR [auth] Login failed user=admin"
@@ -2112,7 +2113,7 @@ Methods are called with dot notation on array values.
 | `.lastIndexOf(val)` | Find last index of element (-1 if not found) |
 | `.sort(comparator?)` | Return sorted copy. Optional: `lam{ a, b in a - b }` |
 
-```
+```praia
 let arr = [1, 2, 3]
 arr.push(4)                     // [1, 2, 3, 4]
 arr.pop()                       // returns 4
@@ -2131,7 +2132,7 @@ arr.reverse()                   // [3, 2, 1]
 
 Filesystem operations live on the `fs` namespace. (They used to live on `sys`; the old `sys.read` / `sys.write` / etc. still work but print a one-shot deprecation warning to stderr. Rename to `fs.*` at your convenience — the aliases will be removed at 1.0.)
 
-```
+```praia
 // Write a file
 fs.write("output.txt", "hello from praia")
 
@@ -2145,7 +2146,7 @@ fs.append("output.txt", "\nmore text")
 
 ### File System
 
-```
+```praia
 fs.mkdir("my/nested/dir")          // creates all parent dirs
 print(fs.exists("output.txt"))     // true
 fs.remove("output.txt")            // delete a file
@@ -2161,7 +2162,7 @@ let tmp = fs.tempDir("myapp")      // race-free mkdtemp under the system tmp
 
 `sys.exec(cmd, timeout?)` (also available as `sys.run(cmd, timeout?)`) runs a command and returns a map with `stdout`, `stderr`, and `exitCode`. Optional timeout in milliseconds — if the process exceeds the timeout, it's killed and `timedOut: true` is added to the result. Pass a string for shell execution, or an array for safe argument passing (no shell injection):
 
-```
+```praia
 // String form — runs through /bin/sh (supports pipes, redirects, etc.)
 let r = sys.exec("ls -la")
 print(r.stdout)
@@ -2182,7 +2183,7 @@ if (r3.exitCode != 0) {
 
 `sys.spawn(cmd)` launches a child process with piped stdin/stdout/stderr, returning a process handle for interactive communication. Pass a string for shell execution or an array for safe argument passing (no shell, no injection):
 
-```
+```praia
 // String form — runs via /bin/sh -c
 let proc = sys.spawn("cat -n")
 proc.write("hello\n")
@@ -2210,7 +2211,7 @@ let proc2 = sys.spawn(["ffmpeg", "-i", userPath, "-f", "mp3", "out.mp3"])
 
 #### Line-by-line reading
 
-```
+```praia
 let proc = sys.spawn("grep -i error")
 proc.write("INFO all good\n")
 proc.write("ERROR disk full\n")

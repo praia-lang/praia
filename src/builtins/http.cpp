@@ -37,18 +37,6 @@ struct SocketConn {
     SSL* ssl = nullptr;
     SSL_CTX* ctx = nullptr;
 #endif
-    // Cumulative bytes successfully read from the peer. The session
-    // retry path checks whether this advanced during a failed request
-    // to decide if the request is replayable on a fresh socket — see
-    // doOneHttpRequestImpl's catch block.
-    size_t bytesRead = 0;
-    // Set when read() returned 0 (clean EOF from the peer). Distinct
-    // from "read errored" — the retry path needs to know whether the
-    // failure was a confirmed peer-side closure (safe to retry even on
-    // POST when no response bytes had arrived) vs an ambiguous read
-    // timeout (never safe to retry on a non-idempotent method).
-    bool peerClosed = false;
-
     SocketConn() = default;
     // Resource-owning: disable copy/move so a stray copy can't lead
     // to a double shutdown_close in two destructors. Every code path
@@ -68,17 +56,9 @@ struct SocketConn {
 
     ssize_t read(void* buf, size_t len) {
 #ifdef HAVE_OPENSSL
-        if (ssl) {
-            ssize_t n = SSL_read(ssl, buf, static_cast<int>(len));
-            if (n > 0) bytesRead += static_cast<size_t>(n);
-            else if (n == 0) peerClosed = true;
-            return n;
-        }
+        if (ssl) return SSL_read(ssl, buf, static_cast<int>(len));
 #endif
-        ssize_t n = ::recv(fd, buf, len, 0);
-        if (n > 0) bytesRead += static_cast<size_t>(n);
-        else if (n == 0) peerClosed = true;
-        return n;
+        return ::recv(fd, buf, len, 0);
     }
 
     void shutdown_close() {
@@ -1013,32 +993,18 @@ static OneRequestResult doOneHttpRequestImpl(
     std::shared_ptr<SocketConn> connPtr(&conn, [](SocketConn*){});
     ResponseHeaderFields fields;
     std::string respBody;
-    // SocketConn::bytesRead is cumulative; capture its value before the
-    // read so the catch block can tell whether the failure happened
-    // before any response bytes arrived (= server didn't react) vs
-    // after (= server may have started a response). The distinction
-    // gates whether a non-idempotent retry is safe.
-    size_t bytesBefore = conn.bytesRead;
     try {
         auto pair = readFramedResponse(conn, connPtr, method);
         fields   = std::move(pair.first);
         respBody = std::move(pair.second);
     } catch (...) {
-        // Retry on a reused socket only when replay is safe:
-        //   - idempotent method → replay is safe by definition (RFC 7231), OR
-        //   - confirmed peer-side closure AND no response bytes observed →
-        //     server can't have reacted (read returned 0 before any bytes
-        //     arrived; classic stale-keepalive signature).
-        //
-        // The peerClosed flag is set only when read() returned exactly 0
-        // (clean EOF). An ambiguous read timeout / read error on a
-        // non-idempotent method falls through to the rethrow — replaying
-        // a POST whose response timed out could double-commit if the
-        // server actually received and processed the request.
-        bool responseStarted = conn.bytesRead > bytesBefore;
-        bool confirmedClosure = conn.peerClosed && !responseStarted;
-        if (!isFreshSocket &&
-            (isIdempotentMethod(method) || confirmedClosure))
+        // Retry on a reused socket only for idempotent methods. Even a
+        // confirmed peer-side EOF before any response bytes is ambiguous
+        // here: the server could have received the request, processed
+        // it, then hung up without responding — replaying a POST in
+        // that case would double-commit. We match Python requests'
+        // default policy: only the RFC-7231-idempotent verbs retry.
+        if (!isFreshSocket && isIdempotentMethod(method))
             throw HttpRetryOnFresh{};
         throw;
     }
