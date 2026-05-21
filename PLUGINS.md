@@ -105,8 +105,12 @@ extern "C" void praia_register(PraiaMap* module) {
             auto& path = praia::requireString(args, 0, "db.open");
             auto* w = new sqlite3_wrapper;
             if (sqlite3_open(path.c_str(), &w->conn) != SQLITE_OK) {
-                std::string msg = sqlite3_errmsg(w->conn);
-                sqlite3_close(w->conn);
+                // sqlite3_open can leave conn as NULL on OOM in
+                // older SQLite builds — guard before reading the
+                // error message or calling close on it.
+                std::string msg = w->conn ? sqlite3_errmsg(w->conn)
+                                          : "out of memory";
+                if (w->conn) sqlite3_close_v2(w->conn);
                 delete w;
                 praia::error("db.open: " + msg);
             }
@@ -114,7 +118,7 @@ extern "C" void praia_register(PraiaMap* module) {
                 [](sqlite3_wrapper* p) {
                     // GC-time cleanup: skip the close if `db.close`
                     // already ran. Either way, free the wrapper.
-                    if (!p->closed) sqlite3_close(p->conn);
+                    if (!p->closed) sqlite3_close_v2(p->conn);
                     delete p;
                 });
         }));
@@ -123,7 +127,14 @@ extern "C" void praia_register(PraiaMap* module) {
         [](const std::vector<Value>& args) -> Value {
             auto* w = praia::getExternal<sqlite3_wrapper>(args[0], "sqlite3.connection");
             if (w->closed) return Value();   // idempotent
-            sqlite3_close(w->conn);
+            // sqlite3_close_v2 (vs the v1 close) handles the busy
+            // case by deferring actual cleanup until any outstanding
+            // prepared statements and blob handles are finalized,
+            // rather than returning SQLITE_BUSY. So we can mark
+            // `closed` unconditionally — the GC deleter's
+            // `if (!p->closed)` guard will skip a second close,
+            // and SQLite handles the rest.
+            sqlite3_close_v2(w->conn);
             w->closed = true;
             return Value();
         }));
