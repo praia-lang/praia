@@ -3953,21 +3953,46 @@ Interpreter::Interpreter() {
     };
     constexpr const char* kSqliteTypeTag = "sqlite.connection";
 
-    auto sqliteBind = [](sqlite3_stmt* stmt, const Value& paramsValue) {
-        if (!paramsValue.isArray()) return;
+    // Binds params and validates: params must be an array; its length must
+    // match the prepared statement's placeholder count; each bind call's
+    // return code is checked so OOM / range errors surface. On any failure
+    // the helper finalizes `stmt` before throwing so the caller doesn't
+    // have to track partial cleanup.
+    auto sqliteBind = [](sqlite3_stmt* stmt, const Value& paramsValue,
+                         const char* fn) {
+        if (!paramsValue.isArray()) {
+            sqlite3_finalize(stmt);
+            throw RuntimeError(std::string(fn) +
+                "() params (argument 3) must be an array", 0);
+        }
         auto& params = paramsValue.asArray()->elements;
+        int expected = sqlite3_bind_parameter_count(stmt);
+        if (static_cast<int>(params.size()) != expected) {
+            sqlite3_finalize(stmt);
+            throw RuntimeError(std::string(fn) + "() expected " +
+                std::to_string(expected) + " bound parameter(s) but got " +
+                std::to_string(params.size()), 0);
+        }
         for (size_t i = 0; i < params.size(); i++) {
             int idx = static_cast<int>(i + 1);
             auto& p = params[i];
-            if (p.isNil()) sqlite3_bind_null(stmt, idx);
-            else if (p.isBool()) sqlite3_bind_int(stmt, idx, p.asBool() ? 1 : 0);
+            int rc;
+            if (p.isNil()) rc = sqlite3_bind_null(stmt, idx);
+            else if (p.isBool()) rc = sqlite3_bind_int(stmt, idx, p.asBool() ? 1 : 0);
             // Bind ints as int64 so values above 2^53 round-trip exactly.
             // The original code coerced everything via sqlite3_bind_double,
             // losing precision on the way in.
-            else if (p.isInt()) sqlite3_bind_int64(stmt, idx, p.asInt());
-            else if (p.isNumber()) sqlite3_bind_double(stmt, idx, p.asNumber());
-            else if (p.isString()) sqlite3_bind_text(stmt, idx, p.asString().c_str(), -1, SQLITE_TRANSIENT);
-            else sqlite3_bind_text(stmt, idx, p.toString().c_str(), -1, SQLITE_TRANSIENT);
+            else if (p.isInt()) rc = sqlite3_bind_int64(stmt, idx, p.asInt());
+            else if (p.isNumber()) rc = sqlite3_bind_double(stmt, idx, p.asNumber());
+            else if (p.isString()) rc = sqlite3_bind_text(stmt, idx, p.asString().c_str(), -1, SQLITE_TRANSIENT);
+            else rc = sqlite3_bind_text(stmt, idx, p.toString().c_str(), -1, SQLITE_TRANSIENT);
+            if (rc != SQLITE_OK) {
+                std::string err = sqlite3_errstr(rc);
+                sqlite3_finalize(stmt);
+                throw RuntimeError(std::string(fn) +
+                    "() bind error on parameter " + std::to_string(idx) +
+                    ": " + err, 0);
+            }
         }
     };
 
@@ -4012,12 +4037,21 @@ Interpreter::Interpreter() {
                 throw RuntimeError("SQL error: " + err, 0);
             }
 
-            if (args.size() == 3) sqliteBind(stmt, args[2]);
+            if (args.size() == 3) {
+                sqliteBind(stmt, args[2], "sqlite.query");
+            } else if (sqlite3_bind_parameter_count(stmt) != 0) {
+                int expected = sqlite3_bind_parameter_count(stmt);
+                sqlite3_finalize(stmt);
+                throw RuntimeError("sqlite.query() expected " +
+                    std::to_string(expected) +
+                    " bound parameter(s) but params argument was omitted", 0);
+            }
 
             auto rows = gcNew<PraiaArray>();
             int cols = sqlite3_column_count(stmt);
 
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int stepRc;
+            while ((stepRc = sqlite3_step(stmt)) == SQLITE_ROW) {
                 auto row = gcNew<PraiaMap>();
                 for (int c = 0; c < cols; c++) {
                     std::string name = sqlite3_column_name(stmt, c);
@@ -4044,6 +4078,15 @@ Interpreter::Interpreter() {
                 rows->elements.push_back(Value(row));
             }
 
+            // Non-DONE terminal rc (BUSY, ERROR, MISUSE, interrupted, ...)
+            // means the iteration aborted partway. Surface the error
+            // instead of returning silently truncated results — sqlite.run
+            // does the same check below.
+            if (stepRc != SQLITE_DONE) {
+                std::string err = sqlite3_errmsg(w->conn);
+                sqlite3_finalize(stmt);
+                throw RuntimeError("SQL error: " + err, 0);
+            }
             sqlite3_finalize(stmt);
             return Value(rows);
         }));
@@ -4065,7 +4108,15 @@ Interpreter::Interpreter() {
                 throw RuntimeError("SQL error: " + err, 0);
             }
 
-            if (args.size() == 3) sqliteBind(stmt, args[2]);
+            if (args.size() == 3) {
+                sqliteBind(stmt, args[2], "sqlite.run");
+            } else if (sqlite3_bind_parameter_count(stmt) != 0) {
+                int expected = sqlite3_bind_parameter_count(stmt);
+                sqlite3_finalize(stmt);
+                throw RuntimeError("sqlite.run() expected " +
+                    std::to_string(expected) +
+                    " bound parameter(s) but params argument was omitted", 0);
+            }
 
             rc = sqlite3_step(stmt);
             sqlite3_finalize(stmt);
