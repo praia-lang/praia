@@ -23,6 +23,7 @@ struct PraiaInstance;
 struct PraiaFuture;
 struct PraiaGenerator;
 struct PraiaTagged;
+struct PraiaExternal;
 class Interpreter;
 class Environment;
 
@@ -55,7 +56,8 @@ struct Value {
         std::shared_ptr<PraiaInstance>,
         std::shared_ptr<PraiaFuture>,
         std::shared_ptr<PraiaGenerator>,
-        std::shared_ptr<PraiaTagged>
+        std::shared_ptr<PraiaTagged>,
+        std::shared_ptr<PraiaExternal>
     >;
 
     Data data;
@@ -77,6 +79,7 @@ struct Value {
     Value(std::shared_ptr<PraiaFuture> f) : data(std::move(f)) {}
     Value(std::shared_ptr<PraiaGenerator> g) : data(std::move(g)) {}
     Value(std::shared_ptr<PraiaTagged> t) : data(std::move(t)) {}
+    Value(std::shared_ptr<PraiaExternal> e) : data(std::move(e)) {}
 
     bool isNil()      const { return std::holds_alternative<std::nullptr_t>(data); }
     bool isBool()     const { return std::holds_alternative<bool>(data); }
@@ -92,6 +95,7 @@ struct Value {
     bool isFuture()   const { return std::holds_alternative<std::shared_ptr<PraiaFuture>>(data); }
     bool isGenerator() const { return std::holds_alternative<std::shared_ptr<PraiaGenerator>>(data); }
     bool isTagged()   const { return std::holds_alternative<std::shared_ptr<PraiaTagged>>(data); }
+    bool isExternal() const { return std::holds_alternative<std::shared_ptr<PraiaExternal>>(data); }
 
     bool                        asBool()     const { return std::get<bool>(data); }
     int64_t                     asInt()      const { return std::get<int64_t>(data); }
@@ -116,6 +120,7 @@ struct Value {
     std::shared_ptr<PraiaFuture>   asFuture()   const { return std::get<std::shared_ptr<PraiaFuture>>(data); }
     std::shared_ptr<PraiaGenerator> asGenerator() const { return std::get<std::shared_ptr<PraiaGenerator>>(data); }
     std::shared_ptr<PraiaTagged>   asTagged()   const { return std::get<std::shared_ptr<PraiaTagged>>(data); }
+    std::shared_ptr<PraiaExternal> asExternal() const { return std::get<std::shared_ptr<PraiaExternal>>(data); }
 
     // Declared here, defined after PraiaArray/PraiaMap (needs complete types)
     bool isTruthy() const;
@@ -312,6 +317,40 @@ struct PraiaTagged {
     std::vector<Value> values;
 };
 
+// Opaque handle wrapping a C/C++ pointer plus a destructor.
+//
+// Plugins use this to return native resources (DB connections,
+// file handles, OS objects, etc.) to user code without exposing
+// the underlying layout. From Praia's perspective the value is
+// opaque — passable, identity-comparable, but the data inside
+// can only be read back through the plugin that produced it.
+//
+// `data` is the raw pointer. `typeName` is a stable tag the
+// plugin uses to type-check the unwrap (convention:
+// "module.type", e.g. "sqlite.connection"). `deleter` runs in
+// the destructor when the last reference drops, courtesy of the
+// GC sweep that releases the heap entry. Move-only: a
+// PraiaExternal owns its `data`, copying would double-free.
+struct PraiaExternal {
+    void* data = nullptr;
+    std::string typeName;
+    std::function<void(void*)> deleter;
+
+    PraiaExternal() = default;
+    PraiaExternal(const PraiaExternal&) = delete;
+    PraiaExternal& operator=(const PraiaExternal&) = delete;
+    // Defaulted moves so the struct is move-only rather than
+    // pinned. The user-declared destructor would otherwise
+    // suppress the implicit move ops alongside the explicitly
+    // deleted copy ones — leaving the type uncopyable AND
+    // unmovable, which is more restrictive than "unique
+    // ownership" implies and would block emplace/make_shared
+    // patterns that hand off ownership at construction.
+    PraiaExternal(PraiaExternal&&) = default;
+    PraiaExternal& operator=(PraiaExternal&&) = default;
+    ~PraiaExternal() { if (deleter && data) deleter(data); }
+};
+
 inline size_t ValueHash::hashTagged(const Value& v) {
     return std::hash<std::string>{}(v.asTagged()->tag);
 }
@@ -349,6 +388,10 @@ inline std::string valueToStringRec(const Value& v, std::unordered_set<const voi
     if (v.isInstance()) return "<instance>";
     if (v.isFuture()) return "<future>";
     if (v.isGenerator()) return "<generator>";
+    if (v.isExternal()) {
+        auto& tn = v.asExternal()->typeName;
+        return tn.empty() ? "<external>" : "<external:" + tn + ">";
+    }
     if (v.isArray()) {
         const void* key = static_cast<const void*>(v.asArray().get());
         if (!visited.insert(key).second) return "[...]";
@@ -468,6 +511,11 @@ inline bool Value::operator==(const Value& o) const {
             if (a->values[i] != b->values[i]) return false;
         return true;
     }
+    // Externals: pointer identity only. The wrapped data is opaque
+    // from Praia's perspective, so there's no meaningful deep
+    // comparison — two handles are equal iff they're the same handle.
+    if (isExternal() && o.isExternal())
+        return asExternal().get() == o.asExternal().get();
     return false;
 }
 

@@ -180,4 +180,78 @@ testing.test("ABI version: missing declaration is rejected", lam{ in
         "error message mentions ABI: " + str(err))
 })
 
+// ── Opaque-handle tests (counter plugin) ─────────────────────
+
+let counterPath = "examples/plugins/counter" + ext
+
+if (!fs.exists(counterPath)) {
+    print("(skipping opaque-handle tests — counter plugin not built)")
+    testing.done()
+}
+
+let counter = loadNative(counterPath)
+
+testing.test("opaque handle: round-trip via inc/value/reset", lam{ in
+    let h = counter.new()
+    testing.assertEqual(counter.value(h), 0, "fresh handle starts at 0")
+    counter.inc(h); counter.inc(h); counter.inc(h)
+    testing.assertEqual(counter.value(h), 3, "three inc steps land at 3")
+    counter.reset(h)
+    testing.assertEqual(counter.value(h), 0, "reset returns to 0")
+})
+
+testing.test("opaque handle: toString shows the type tag", lam{ in
+    let h = counter.new()
+    testing.assertEqual(str(h), "<external:counter.handle>",
+        "tag format includes type name")
+})
+
+testing.test("opaque handle: getExternal rejects non-external values", lam{ in
+    // Pass a string where a handle is expected. praia::getExternal
+    // throws with a clear "expected an external handle of type X".
+    let err = nil
+    try { counter.value("not a handle") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw on non-external")
+    testing.assert(err.contains("external handle") && err.contains("counter.handle"),
+        "error names the expected type: " + str(err))
+})
+
+testing.test("opaque handle: getExternal rejects int Values", lam{ in
+    let err = nil
+    try { counter.value(42) } catch (e) { err = str(e) }
+    testing.assert(err != nil, nil)
+    testing.assert(err.contains("external handle"), str(err))
+})
+
+testing.test("opaque handle: destructor fires when reference drops", lam{ in
+    // shared_ptr refcount hits zero on reassign-to-nil, which
+    // destroys the PraiaExternal, which runs the deleter (the
+    // counter plugin increments a process-global counter from
+    // there). No GC sweep needed for refcount-driven drops.
+    let before = counter._destructorCount()
+    let h = counter.new()
+    counter.inc(h)
+    h = nil
+    let after = counter._destructorCount()
+    testing.assertEqual(after - before, 1,
+        "exactly one destructor fired between create and drop")
+})
+
+testing.test("opaque handle: destructor fires under GC pressure", lam{ in
+    // Create handles in a tight loop without retaining references
+    // (each iteration overwrites the previous binding). The GC
+    // threshold should fire mid-loop; the cumulative destructor
+    // count after the loop should equal the number of handles
+    // we created.
+    let before = counter._destructorCount()
+    let h = nil
+    for (i in 0..600) {
+        h = counter.new()
+    }
+    h = nil   // drop the final retained handle too
+    let after = counter._destructorCount()
+    testing.assertEqual(after - before, 600,
+        "600 handles created, 600 destructors fired")
+})
+
 testing.done()

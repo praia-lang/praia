@@ -217,4 +217,67 @@ inline Value call(const std::shared_ptr<Callable>& fn,
     return invokeExecutor(exec, fn, args);
 }
 
+// ── Opaque handles ──────────────────────────────────────────────
+//
+// Wrap a C/C++ pointer as a Praia Value with a destructor that
+// fires when the last reference drops (during a GC sweep). Use
+// this for DB connections, file handles, OS resources — anything
+// with non-Praia state whose lifetime should track the Value's.
+//
+// `typeName` is a stable identifier the plugin uses to recognize
+// its own handles on the unwrap side. Convention: "module.type"
+// (e.g. "sqlite.connection", "myplugin.session"). The string is
+// stored verbatim and `getExternal<T>` compares for exact match.
+//
+// Lifetime ownership transfers to the resulting Value: don't
+// `delete ptr` yourself; the registered deleter does it. Pass
+// nullptr for `deleter` if `ptr` is statically allocated or
+// otherwise externally managed.
+//
+// Example (DB connection):
+//
+//   module->entries["open"] = Value(makeNative("db.open", 1,
+//       [](const std::vector<Value>& args) -> Value {
+//           sqlite3* conn = nullptr;
+//           sqlite3_open(praia::requireString(args, 0, "db.open").c_str(), &conn);
+//           return praia::makeExternal<sqlite3>(conn, "sqlite3.connection",
+//                                                [](sqlite3* c) { sqlite3_close(c); });
+//       }));
+//   module->entries["query"] = Value(makeNative("db.query", 2,
+//       [](const std::vector<Value>& args) -> Value {
+//           auto* conn = praia::getExternal<sqlite3>(args[0], "sqlite3.connection");
+//           // ... use conn ...
+//       }));
+template<typename T>
+inline Value makeExternal(T* ptr, const char* typeName,
+                          void (*deleter)(T*)) {
+    auto ext = gcNew<PraiaExternal>();
+    ext->data = static_cast<void*>(ptr);
+    ext->typeName = typeName ? typeName : "";
+    if (deleter) {
+        ext->deleter = [deleter](void* p) {
+            deleter(static_cast<T*>(p));
+        };
+    }
+    return Value(ext);
+}
+
+// Unwrap an external Value back to its T*. Throws RuntimeError
+// if the Value isn't an external, or if its typeName doesn't
+// match `typeName` — guards against type confusion when a plugin
+// receives a Value from user code claiming to be a handle but
+// isn't, or is a handle from a different plugin/type.
+template<typename T>
+inline T* getExternal(const Value& v, const char* typeName) {
+    const char* expected = typeName ? typeName : "";
+    if (!v.isExternal())
+        error(std::string("expected an external handle of type '") +
+              expected + "'");
+    auto ext = v.asExternal();
+    if (ext->typeName != expected)
+        error(std::string("external handle type mismatch: expected '") +
+              expected + "' but got '" + ext->typeName + "'");
+    return static_cast<T*>(ext->data);
+}
+
 }  // namespace praia
