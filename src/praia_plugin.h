@@ -14,9 +14,8 @@
 //   extern "C" void praia_register(PraiaMap* module) {
 //       module->entries["double"] = Value(makeNative("mymod.double", 1,
 //           [](const std::vector<Value>& args) -> Value {
-//               if (!args[0].isNumber())
-//                   throw RuntimeError("expected a number", 0);
-//               return Value(args[0].asNumber() * 2);
+//               double x = praia::requireNumber(args, 0, "mymod.double");
+//               return Value(x * 2);
 //           }));
 //   }
 //
@@ -58,7 +57,131 @@
         return PRAIA_PLUGIN_ABI_VERSION;                                \
     }
 
+// ── Optional plugin metadata ────────────────────────────────────
+//
+// Declares name/version/description as exported C symbols
+// loadNative() reads at load time. When present they surface as a
+// `_meta` sub-key on the returned module map, so user code can do:
+//
+//   let mod = loadNative("./mymod")
+//   print(mod._meta.version)
+//
+// Entirely optional — plugins that don't invoke this macro get no
+// `_meta` key on the module. Pairs with the ABI version system
+// above for diagnostic surfacing in `sand list` and similar tools.
+//
+// Place once at file scope alongside PRAIA_DECLARE_ABI():
+//
+//   PRAIA_PLUGIN_METADATA("mymod", "1.2.0", "Does the thing");
+#define PRAIA_PLUGIN_METADATA(NAME, VERSION, DESCRIPTION)                    \
+    extern "C" const char* praia_plugin_name()        { return NAME; }       \
+    extern "C" const char* praia_plugin_version()     { return VERSION; }    \
+    extern "C" const char* praia_plugin_description() { return DESCRIPTION; }
+
 namespace praia {
+
+// ── Argument validation helpers ─────────────────────────────────
+//
+// Compress the "check type, throw RuntimeError" boilerplate that
+// every native function would otherwise repeat. Each `require*`
+// throws RuntimeError on type/arity mismatch and returns the
+// unwrapped value on success, so a plugin can write:
+//
+//   auto& s = praia::requireString(args, 0, "mymod.foo");
+//   int64_t n = praia::requireInt(args, 1, "mymod.foo");
+//
+// Error wording matches the canonical pattern used by the engine's
+// own builtins ("<funcname>() argument N must be a <type>") so the
+// surface is consistent whether a call fails inside a plugin or a
+// stdlib native. Line is left as 0 — the engine overwrites it with
+// the call-site line in the user's Praia code.
+
+// Throw a RuntimeError with `msg`. The engine fills in the
+// call-site line; plugins should never try to compute one.
+[[noreturn]] inline void error(const std::string& msg) {
+    throw RuntimeError(msg, 0);
+}
+
+inline void requireArity(const std::vector<Value>& args, int n,
+                         const std::string& fn) {
+    int got = static_cast<int>(args.size());
+    if (got != n) {
+        error(fn + "() expected " + std::to_string(n) +
+              " argument(s) but got " + std::to_string(got));
+    }
+}
+
+inline void requireArityRange(const std::vector<Value>& args,
+                              int lo, int hi,
+                              const std::string& fn) {
+    int got = static_cast<int>(args.size());
+    if (got < lo || got > hi) {
+        error(fn + "() expected " + std::to_string(lo) + "-" +
+              std::to_string(hi) + " arguments but got " +
+              std::to_string(got));
+    }
+}
+
+namespace detail {
+[[noreturn]] inline void argTypeError(const std::string& fn, size_t i,
+                                      const char* type) {
+    error(fn + "() argument " + std::to_string(i + 1) +
+          " must be a " + type);
+}
+}
+
+inline const std::string& requireString(const std::vector<Value>& args,
+                                        size_t i, const std::string& fn) {
+    if (i >= args.size() || !args[i].isString())
+        detail::argTypeError(fn, i, "string");
+    return args[i].asString();
+}
+
+// Strict int — rejects floats. Use requireNumber when either is OK.
+inline int64_t requireInt(const std::vector<Value>& args,
+                          size_t i, const std::string& fn) {
+    if (i >= args.size() || !args[i].isInt())
+        detail::argTypeError(fn, i, "int");
+    return args[i].asInt();
+}
+
+// Accepts int OR float and returns a double (converts int).
+inline double requireNumber(const std::vector<Value>& args,
+                            size_t i, const std::string& fn) {
+    if (i >= args.size() || !args[i].isNumber())
+        detail::argTypeError(fn, i, "number");
+    return args[i].asNumber();
+}
+
+inline bool requireBool(const std::vector<Value>& args,
+                        size_t i, const std::string& fn) {
+    if (i >= args.size() || !args[i].isBool())
+        detail::argTypeError(fn, i, "bool");
+    return args[i].asBool();
+}
+
+inline std::shared_ptr<PraiaArray> requireArray(
+        const std::vector<Value>& args, size_t i, const std::string& fn) {
+    if (i >= args.size() || !args[i].isArray())
+        detail::argTypeError(fn, i, "array");
+    return args[i].asArray();
+}
+
+inline std::shared_ptr<PraiaMap> requireMap(
+        const std::vector<Value>& args, size_t i, const std::string& fn) {
+    if (i >= args.size() || !args[i].isMap())
+        detail::argTypeError(fn, i, "map");
+    return args[i].asMap();
+}
+
+inline std::shared_ptr<Callable> requireCallable(
+        const std::vector<Value>& args, size_t i, const std::string& fn) {
+    if (i >= args.size() || !args[i].isCallable())
+        detail::argTypeError(fn, i, "function");
+    return args[i].asCallable();
+}
+
+// ── Callback into Praia code ────────────────────────────────────
 
 // Invoke a Praia Callable received as a plugin argument. Use this
 // to call back into user code (e.g. when the plugin accepts a

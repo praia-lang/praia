@@ -53,6 +53,26 @@ PRAIA_DECLARE_ABI();
 
 When the ABI changes (e.g. `Value`'s variant layout or `PraiaMap`'s key type), the version bumps. Existing plugins continue working at the older praia release; rebuilding picks up the new version automatically.
 
+## Plugin metadata
+
+Optional. Declare a `name`, `version`, and `description` once at file scope:
+
+```cpp
+#include "praia_plugin.h"
+
+PRAIA_DECLARE_ABI();
+PRAIA_PLUGIN_METADATA("mymod", "1.2.0", "Does the thing");
+```
+
+`loadNative()` exposes the values under a `_meta` key on the returned module map, so user code can do:
+
+```
+let mod = loadNative("./mymod")
+print(mod._meta.name, mod._meta.version)
+```
+
+Plugins that don't declare metadata get no `_meta` key — backward-compatible and opt-in. The underscore prefix keeps it from colliding with normal module functions.
+
 ## Plugin API
 
 ### Entry point
@@ -79,6 +99,41 @@ module->entries["add"] = Value(makeNative("mymod.add", 2,
 - `name` — display name for error messages
 - `arity` — number of parameters, or `-1` for variadic
 - `fn` — `std::function<Value(const std::vector<Value>&)>`
+- `paramNames` (optional) — vector of parameter names. Pass it to let user code call your function with named arguments:
+
+  ```cpp
+  module->entries["add"] = Value(makeNative("mymod.add", 2,
+      [](const std::vector<Value>& args) -> Value {
+          return Value(args[0].asNumber() + args[1].asNumber());
+      },
+      {"x", "y"}));
+  ```
+
+  Praia code can then write `mod.add(x: 1, y: 2)` or `mod.add(y: 2, x: 1)`. Without `paramNames`, named-arg calls throw the standard "Named arguments not supported" error — same behavior as before, no impact on plain positional calls.
+
+### Argument validation
+
+Type and arity checks are repetitive and the wording matters for diagnostic uniformity. `praia_plugin.h` exports a family of inline helpers in the `praia` namespace that throw a `RuntimeError` with the canonical wording the rest of the engine uses:
+
+```cpp
+module->entries["substring"] = Value(makeNative("mymod.substring", 3,
+    [](const std::vector<Value>& args) -> Value {
+        auto& s = praia::requireString(args, 0, "mymod.substring");
+        int64_t start = praia::requireInt(args, 1, "mymod.substring");
+        int64_t end   = praia::requireInt(args, 2, "mymod.substring");
+        return Value(s.substr(start, end - start));
+    }));
+```
+
+The error messages match Praia's stdlib conventions exactly:
+
+- `requireString(args, i, "fn")` → `"fn() argument N must be a string"` (N is 1-based)
+- `requireInt`, `requireNumber`, `requireBool`, `requireArray`, `requireMap`, `requireCallable` — same shape, different type word.
+- `requireArity(args, n, "fn")` → `"fn() expected N argument(s) but got M"`
+- `requireArityRange(args, lo, hi, "fn")` → `"fn() expected LO-HI arguments but got M"`
+- `praia::error("msg")` — bare shorthand for `throw RuntimeError("msg", 0);` for cases the helpers don't cover.
+
+`requireInt` is strict — it rejects float values that happen to be whole numbers; use `requireNumber` (which returns a double, converting ints) when either form is acceptable. This matches the `asInt`/`asNumber` distinction in the [Value type](#the-value-type) pitfall callout above.
 
 ### The Value type
 
@@ -114,6 +169,8 @@ args[0].asCallable()  // returns shared_ptr<Callable>
 ```
 
 > **Pitfall.** `asInt()` is *only* safe after `isInt()` (`std::get` throws `bad_variant_access` on a double-holding Value). If you guard with `isNumber()` instead, use `asNumber()` — it returns a double and converts ints transparently.
+
+> **`std::string` doubles as Praia's bytes type.** Praia uses a single string type for both text and binary data, like Python's bytes objects. Plugins wrapping binary protocols can put raw bytes (including embedded NULs) into `Value(std::string)`; they round-trip through `asString()` byte-for-byte. Don't reach for `std::vector<uint8_t>` or invent a Bytes wrapper — the existing string accessors handle it.
 
 ### Creating arrays and maps
 

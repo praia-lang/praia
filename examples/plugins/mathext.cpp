@@ -2,18 +2,24 @@
 #include <cmath>
 
 PRAIA_DECLARE_ABI();
+PRAIA_PLUGIN_METADATA("mathext", "0.1.0",
+                     "Extra math functions: gcd, lcm, fibonacci, hypot, sum, filter");
 
 extern "C" void praia_register(PraiaMap* module) {
-    // mathext.gcd(a, b) — greatest common divisor
+    // mathext.gcd(a, b) — greatest common divisor. Declares named
+    // parameters so user code can call `mathext.gcd(a: 48, b: 18)`
+    // as well as positionally. Uses praia::requireNumber to validate
+    // input — same error wording as Praia's own builtins.
     module->entries["gcd"] = Value(makeNative("mathext.gcd", 2,
         [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isNumber() || !args[1].isNumber())
-                throw RuntimeError("mathext.gcd() requires two numbers", 0);
-            int64_t a = static_cast<int64_t>(args[0].asNumber());
-            int64_t b = static_cast<int64_t>(args[1].asNumber());
+            int64_t a = static_cast<int64_t>(
+                praia::requireNumber(args, 0, "mathext.gcd"));
+            int64_t b = static_cast<int64_t>(
+                praia::requireNumber(args, 1, "mathext.gcd"));
             while (b != 0) { int64_t t = b; b = a % b; a = t; }
             return Value(a < 0 ? -a : a);
-        }));
+        },
+        {"a", "b"}));
 
     // mathext.lcm(a, b) — least common multiple
     module->entries["lcm"] = Value(makeNative("mathext.lcm", 2,
@@ -83,17 +89,15 @@ extern "C" void praia_register(PraiaMap* module) {
     // race with the std::vector reallocating mid-loop.
     module->entries["filter"] = Value(makeNative("mathext.filter", 2,
         [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isArray())
-                throw RuntimeError("mathext.filter(): first argument must be an array", 0);
-            if (!args[1].isCallable())
-                throw RuntimeError("mathext.filter(): second argument must be a function", 0);
-            auto pred = args[1].asCallable();
-            std::vector<Value> snapshot = args[0].asArray()->elements;
+            auto arr  = praia::requireArray   (args, 0, "mathext.filter");
+            auto pred = praia::requireCallable(args, 1, "mathext.filter");
+            std::vector<Value> snapshot = arr->elements;
             auto out = gcNew<PraiaArray>();
             for (auto& elem : snapshot) {
                 Value keep = praia::call(pred, {elem});
                 if (keep.isTruthy()) out->elements.push_back(elem);
             }
             return Value(out);
-        }));
+        },
+        {"array", "predicate"}));
 }
