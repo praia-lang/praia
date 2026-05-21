@@ -1,5 +1,6 @@
 #include "../builtins.h"
 #include "../interpreter.h"
+#include "../praia_plugin.h"
 #include "../url.h"
 #include <algorithm>
 #include <atomic>
@@ -36,7 +37,6 @@ struct SocketConn {
     SSL* ssl = nullptr;
     SSL_CTX* ctx = nullptr;
 #endif
-
     SocketConn() = default;
     // Resource-owning: disable copy/move so a stray copy can't lead
     // to a double shutdown_close in two destructors. Every code path
@@ -290,12 +290,19 @@ int connectToHost(const std::string& host, int port, int timeoutMs) {
 
 // Apply a per-operation receive/send timeout to a connected socket.
 // Both directions get the same value so a slow peer can't stall the
-// request half indefinitely. `ms <= 0` disables the timeout.
+// request half indefinitely. `ms <= 0` clears any prior timeout
+// (timeval{0,0} means "no timeout" to setsockopt) — important for
+// session-pool reuse where a previous call may have set a finite
+// timeout that the next call wants to disable.
 void setSocketTimeouts(int fd, int ms) {
-    if (ms <= 0) return;
     struct timeval tv;
-    tv.tv_sec  = ms / 1000;
-    tv.tv_usec = (ms % 1000) * 1000;
+    if (ms <= 0) {
+        tv.tv_sec  = 0;
+        tv.tv_usec = 0;
+    } else {
+        tv.tv_sec  = ms / 1000;
+        tv.tv_usec = (ms % 1000) * 1000;
+    }
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
@@ -649,6 +656,12 @@ static std::pair<ResponseHeaderFields, std::string>
 readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
                    const std::string& method);
 
+// Forward declaration: is the response framed in a way that lets us
+// safely return its socket to a keepalive pool? Defined alongside
+// detectStreamMode so both share the same framing-mode classification.
+static bool responseAllowsKeepalive(const ResponseHeaderFields& fields,
+                                    const std::string& method);
+
 // ── Public API ───────────────────────────────────────────────
 
 // RFC 3986 §5.2.4 remove_dot_segments. Operates on an input path,
@@ -771,39 +784,58 @@ static std::string resolveLocation(const std::string& baseUrl,
     return out;
 }
 
-// Single HTTP request — one connect, one send, one parse. No redirect
-// handling; that's the caller's loop. `remainingTotalMs` is the
-// per-request cap derived from the overall budget (or the user's
-// readTimeoutMs if no overall budget was set); it's passed through
-// SO_RCVTIMEO/SO_SNDTIMEO so a slow server doesn't outlast the budget.
-static Value doOneHttpRequest(const std::string& method, const std::string& url,
-                              const std::string& body,
-                              const std::unordered_map<std::string, std::string>& extraHeaders,
-                              const HttpOptions& opts) {
-    auto p = parseUrl(url);
-    // Reject method/path/host/header CR/LF/NUL BEFORE any network I/O.
-    // Failing fast saves a DNS lookup + TCP/TLS handshake on garbage
-    // input and lets the user see the real error.
+// Validate the parts of a request that are about to hit the wire. Runs
+// BEFORE any DNS / TCP / TLS work so garbage input fails fast and with
+// a useful error rather than after a 30-second handshake timeout.
+//
+// Also rejects caller-supplied versions of headers the client manages
+// itself (Host, Connection, Content-Length, Transfer-Encoding, Upgrade).
+// doOneHttpRequestImpl always emits these from its own computed values;
+// a duplicate caller version would either be ignored, conflict, or
+// produce header-smuggling-class behavior on lenient servers.
+static void validateRequestParts(
+    const std::string& method, const ParsedUrl& p,
+    const std::unordered_map<std::string, std::string>& headers) {
     for (char c : method) if (c == '\r' || c == '\n' || c == '\0')
         throw RuntimeError("Invalid HTTP method: contains CR/LF/NUL", 0);
     for (char c : p.path) if (c == '\r' || c == '\n' || c == '\0')
         throw RuntimeError("Invalid URL path: contains CR/LF/NUL", 0);
     for (char c : p.host) if (c == '\r' || c == '\n' || c == '\0')
         throw RuntimeError("Invalid host: contains CR/LF/NUL", 0);
-    for (auto& [k, v] : extraHeaders) {
+
+    auto eqIgnoreCase = [](const std::string& a, const char* b) {
+        size_t n = std::strlen(b);
+        if (a.size() != n) return false;
+        for (size_t i = 0; i < n; i++) {
+            char lhs = static_cast<char>(std::tolower(static_cast<unsigned char>(a[i])));
+            char rhs = static_cast<char>(std::tolower(static_cast<unsigned char>(b[i])));
+            if (lhs != rhs) return false;
+        }
+        return true;
+    };
+    static const char* kReservedHeaders[] = {
+        "host", "connection", "content-length", "transfer-encoding", "upgrade",
+    };
+
+    for (auto& [k, v] : headers) {
         if (!headerFieldSafe(k, v))
             throw RuntimeError("Invalid request header \"" + k +
                                "\": contains CR/LF/NUL (header injection)", 0);
+        for (const char* reserved : kReservedHeaders) {
+            if (eqIgnoreCase(k, reserved))
+                throw RuntimeError("Header \"" + k +
+                    "\" is reserved (set by the http client). "
+                    "Remove it from your headers map.", 0);
+        }
     }
+}
 
-    // Stack-allocated, exactly as before. We hand a non-owning
-    // shared_ptr to HttpStreamState below — the streaming machinery
-    // expects shared ownership for the openStream path where the
-    // socket outlives the function frame, but here doOneHttpRequest
-    // explicitly drives shutdown_close, so a no-op deleter is the
-    // right shape and avoids extra heap-allocation and any lifetime
-    // change versus the previous readAll() version.
-    SocketConn conn;
+// Open a TCP socket + (for https) run the TLS handshake. Pulled out
+// of doOneHttpRequest so the keep-alive session path can call it
+// directly when its pool has no idle connection for the target host.
+// On any failure the conn's resources are cleaned up before throwing.
+static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
+                             const HttpOptions& opts) {
     conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs);
     // After connect, apply the read/write timeout to the socket so
     // subsequent recv()/send() calls (and the SSL_read/SSL_write
@@ -892,12 +924,53 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
         }
     }
 #endif
+}
 
-    // CR/LF/NUL validation already happened above before connect — trust
-    // these inputs here. Serialize straight to the wire.
+// File-local sentinel: thrown by doOneHttpRequestImpl when the request
+// fails in a way that *could* be the server having closed the keepalive
+// connection between when we last checked it and our send/recv. The
+// session wrapper catches this and retries once on a fresh socket; the
+// stateless wrapper never sees it (always passes isFreshSocket=true).
+struct HttpRetryOnFresh {};
+
+// RFC 7231 §4.2.2 — request methods whose intended effect is the same
+// whether the request fires once or many times. The retry path uses
+// this to decide whether replaying a request on a fresh socket is safe
+// when an error fires AFTER the server may have already processed it.
+// Non-idempotent methods (POST, PATCH, ...) are still retried when no
+// response bytes were observed — that's a different signal entirely
+// (the server can't have reacted yet).
+static bool isIdempotentMethod(const std::string& m) {
+    return m == "GET" || m == "HEAD" || m == "OPTIONS" ||
+           m == "PUT" || m == "DELETE" || m == "TRACE";
+}
+
+struct OneRequestResult {
+    Value response;
+    bool keepalive;   // true if the socket may be returned to a pool
+};
+
+// Drive one HTTP request on an already-open SocketConn. The caller
+// owns the socket; this function NEVER calls shutdown_close itself
+// — it only signals via return value (keepalive viability) and via
+// exceptions (caller's job to close on throw).
+//
+// `wantKeepalive=false` mirrors the legacy behavior: emit
+// "Connection: close", always returns keepalive=false. `wantKeepalive=true`
+// is the session path: emit "Connection: keep-alive", and the returned
+// flag reflects whether the framing + headers allow reuse.
+static OneRequestResult doOneHttpRequestImpl(
+    SocketConn& conn, bool isFreshSocket,
+    const std::string& method, const ParsedUrl& p,
+    const std::string& body,
+    const std::unordered_map<std::string, std::string>& extraHeaders,
+    bool wantKeepalive) {
+
+    // Serialize straight to the wire — header validation already ran in
+    // the caller (validateRequestParts) before any socket I/O.
     std::string req = method + " " + p.path + " HTTP/1.1\r\n";
     req += "Host: " + p.hostHeader + "\r\n";
-    req += "Connection: close\r\n";
+    req += wantKeepalive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
     for (auto& [k, v] : extraHeaders) req += k + ": " + v + "\r\n";
     if (!body.empty() && extraHeaders.find("Content-Type") == extraHeaders.end())
         req += "Content-Type: text/plain\r\n";
@@ -906,36 +979,334 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
     req += "\r\n" + body;
 
     if (conn.write(req.c_str(), req.size()) < 0) {
-        conn.shutdown_close();
+        // Reused-socket send failure is the classic stale-conn signature:
+        // peer closed between the pool's last probe and our write. Signal
+        // the wrapper to retry once on a fresh socket. Fresh-socket writes
+        // always surface as the original error.
+        if (!isFreshSocket) throw HttpRetryOnFresh{};
         throw RuntimeError("Failed to send HTTP request", 0);
     }
 
-    // Read the response through the framed streaming decoder rather than
-    // slurping until EOF. The old `readAll` would block until the peer
-    // closed — a server that respects HTTP/1.1 framing but ignores our
-    // `Connection: close` request header (or sends `keep-alive` back)
-    // would hang there until the socket timeout, even though the body
-    // was already fully on the wire. The helper stops at Content-Length
-    // or the chunked terminator.
-    //
-    // RAII scope guard so the socket/TLS state is released on every
-    // exit path — readFramedResponse can throw (truncated chunked,
-    // invalid hex, read timeouts) and we MUST not leak the fd or the
-    // OpenSSL context. shutdown_close is idempotent, so a redundant
-    // explicit call on the happy path would be safe too.
+    // shared_ptr-with-noop-deleter so readFramedResponse can take its
+    // shared ownership without forcing a heap allocation. The caller
+    // still owns the SocketConn's lifetime.
     std::shared_ptr<SocketConn> connPtr(&conn, [](SocketConn*){});
-    struct ConnCloseGuard {
-        SocketConn& c;
-        ~ConnCloseGuard() { c.shutdown_close(); }
-    } close_guard{conn};
-    auto [fields, respBody] = readFramedResponse(conn, connPtr, method);
+    ResponseHeaderFields fields;
+    std::string respBody;
+    try {
+        auto pair = readFramedResponse(conn, connPtr, method);
+        fields   = std::move(pair.first);
+        respBody = std::move(pair.second);
+    } catch (...) {
+        // Retry on a reused socket only for idempotent methods. Even a
+        // confirmed peer-side EOF before any response bytes is ambiguous
+        // here: the server could have received the request, processed
+        // it, then hung up without responding — replaying a POST in
+        // that case would double-commit. We match Python requests'
+        // default policy: only the RFC-7231-idempotent verbs retry.
+        if (!isFreshSocket && isIdempotentMethod(method))
+            throw HttpRetryOnFresh{};
+        throw;
+    }
+
+    // Keepalive viability is only computed when the caller asked for it.
+    bool keepalive = wantKeepalive && responseAllowsKeepalive(fields, method);
 
     auto result = gcNew<PraiaMap>();
     result->entries[Value("status")]  = Value(static_cast<double>(fields.status));
     result->entries[Value("body")]    = Value(std::move(respBody));
     result->entries[Value("headers")] = Value(fields.headers);
     result->entries[Value("cookies")] = Value(fields.cookies);
-    return Value(result);
+    return {Value(result), keepalive};
+}
+
+// Single HTTP request — one connect, one send, one parse. No redirect
+// handling; that's the caller's loop. Stateless: opens a fresh socket
+// per call, sends Connection: close, shuts the socket down on exit
+// regardless of outcome.
+static Value doOneHttpRequest(const std::string& method, const std::string& url,
+                              const std::string& body,
+                              const std::unordered_map<std::string, std::string>& extraHeaders,
+                              const HttpOptions& opts) {
+    auto p = parseUrl(url);
+    validateRequestParts(method, p, extraHeaders);
+
+    SocketConn conn;
+    openSocketAndTls(conn, p, opts);
+
+    // RAII close — non-session path always shuts down on exit. Mirrors
+    // the original behavior; doOneHttpRequestImpl never closes itself.
+    struct ConnCloseGuard {
+        SocketConn& c;
+        ~ConnCloseGuard() { c.shutdown_close(); }
+    } close_guard{conn};
+
+    auto r = doOneHttpRequestImpl(conn, /*isFreshSocket=*/true,
+                                  method, p, body, extraHeaders,
+                                  /*wantKeepalive=*/false);
+    return r.response;
+}
+
+// ── HTTP session: long-lived keepalive pool + default opts/headers ─
+
+// File-local session state. The struct stays here (rather than in
+// builtins.h) so it can hold the file-private SocketConn type and so
+// interpreter_setup.cpp sees only opaque accessors.
+struct HttpSession {
+    // Idle keep-alive sockets, one per "scheme://host:port". A more
+    // sophisticated pool (per-host queue, LRU, idle timeout) is a
+    // documented follow-up; v1 is intentionally minimal.
+    std::unordered_map<std::string, std::unique_ptr<SocketConn>> idle;
+    HttpOptions defaultOpts;
+    std::unordered_map<std::string, std::string> defaultHeaders;
+    bool closed = false;
+};
+static constexpr const char* kHttpSessionTypeTag = "http.session";
+
+// Pool key. scheme/host/port locates the peer; insecure + caBundle
+// segregate connections by TLS-handshake identity so a per-call override
+// like `{insecure: true}` can't accidentally pick up a strictly-verified
+// pooled socket (or vice versa). Default values (insecure=false, empty
+// caBundle) keep the key shape unchanged for the common case.
+static std::string sessionPoolKey(const ParsedUrl& p, const HttpOptions& opts) {
+    std::string key = (p.tls ? "https://" : "http://") +
+                      p.host + ":" + std::to_string(p.port);
+    if (p.tls) {
+        // Suffix only for TLS where the knobs matter. The caBundle path
+        // identifies a distinct trust store; we don't hash its contents
+        // (the file may rotate without invalidating in-flight sessions —
+        // hashing would defeat the cache more often than it'd help).
+        key += "|insecure=";
+        key += opts.insecure ? "1" : "0";
+        key += "|ca=";
+        key += opts.caBundle;   // empty string when system defaults
+    }
+    return key;
+}
+
+// Take an idle conn for `key` out of the pool, probing it for staleness
+// before returning. A zero-timeout poll() catches the easy case where
+// the peer closed since we stored the socket; the subtler case where
+// the peer closes between this probe and the next send is handled by
+// the once-and-only-once retry in httpSessionRequest.
+static std::unique_ptr<SocketConn> sessionTakeIdle(HttpSession& s,
+                                                   const std::string& key) {
+    auto it = s.idle.find(key);
+    if (it == s.idle.end()) return nullptr;
+    auto conn = std::move(it->second);
+    s.idle.erase(it);
+
+    struct pollfd pfd;
+    pfd.fd = conn->fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int r;
+    do { r = poll(&pfd, 1, 0); } while (r < 0 && errno == EINTR);
+    if (r < 0) {
+        conn->shutdown_close();
+        return nullptr;
+    }
+    if (r > 0) {
+        // POLLIN on an idle keep-alive socket means either the peer
+        // closed (recv would return 0) or sent something unsolicited
+        // (server-push, garbage). Both are reasons to discard — a
+        // well-behaved server is silent on an idle conn.
+        conn->shutdown_close();
+        return nullptr;
+    }
+    return conn;
+}
+
+// Return a freshly-used conn to the idle pool. If there's already a
+// stored conn for the same key, prefer the newer one — simpler than a
+// queue and good enough for the dominant "talk to the same host
+// repeatedly" workload that motivated sessions in the first place.
+static void sessionReturnIdle(HttpSession& s, const std::string& key,
+                              std::unique_ptr<SocketConn> conn) {
+    auto it = s.idle.find(key);
+    if (it != s.idle.end()) {
+        it->second->shutdown_close();
+        it->second = std::move(conn);
+    } else {
+        s.idle.emplace(key, std::move(conn));
+    }
+}
+
+static HttpSession* sessionFromValue(const Value& v) {
+    return praia::getExternal<HttpSession>(v, kHttpSessionTypeTag);
+}
+
+Value httpCreateSession(const HttpOptions& defaultOpts,
+                        const std::unordered_map<std::string, std::string>& defaultHeaders) {
+    auto* s = new HttpSession();
+    s->defaultOpts = defaultOpts;
+    s->defaultHeaders = defaultHeaders;
+    return praia::makeExternal<HttpSession>(s, kHttpSessionTypeTag,
+        [](HttpSession* p) {
+            // Drain the pool — every stored fd / SSL_CTX gets released.
+            for (auto& [_, conn] : p->idle) {
+                if (conn) conn->shutdown_close();
+            }
+            p->idle.clear();
+            delete p;
+        });
+}
+
+bool httpIsSession(const Value& v) {
+    if (!v.isExternal()) return false;
+    return v.asExternal()->typeName == kHttpSessionTypeTag;
+}
+
+const HttpOptions& httpSessionGetDefaultOpts(const Value& session) {
+    return sessionFromValue(session)->defaultOpts;
+}
+
+const std::unordered_map<std::string, std::string>&
+httpSessionGetDefaultHeaders(const Value& session) {
+    return sessionFromValue(session)->defaultHeaders;
+}
+
+void httpSessionClose(const Value& session) {
+    auto* s = sessionFromValue(session);
+    if (s->closed) return;
+    for (auto& [_, conn] : s->idle) {
+        if (conn) conn->shutdown_close();
+    }
+    s->idle.clear();
+    s->closed = true;
+}
+
+// Drive one HTTP request through the session's connection pool. The
+// caller has already layered session defaults under per-call values
+// for both headers and HttpOptions, so the merge is invisible here.
+//
+// Retry policy: at most one retry on a reused socket. If the first
+// attempt was on a reused conn and the impl signals HttpRetryOnFresh
+// (send / recv failed in a way that could be peer-side closure), we
+// open a fresh socket and try again. A fresh-socket failure always
+// surfaces — no retry on what's likely a real network error.
+static Value httpSessionRequestOne(HttpSession& s, const std::string& method,
+                                   const std::string& url,
+                                   const std::string& body,
+                                   const std::unordered_map<std::string, std::string>& headers,
+                                   const HttpOptions& opts) {
+    auto p = parseUrl(url);
+    validateRequestParts(method, p, headers);
+    std::string key = sessionPoolKey(p, opts);
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto conn = sessionTakeIdle(s, key);
+        bool isFresh = !conn;
+        if (!conn) {
+            conn = std::make_unique<SocketConn>();
+            openSocketAndTls(*conn, p, opts);
+        } else {
+            // Reused socket — refresh recv/send timeouts so per-call
+            // readTimeoutMs overrides take effect on this attempt
+            // instead of inheriting the value baked in when the conn
+            // was first opened.
+            setSocketTimeouts(conn->fd, opts.readTimeoutMs);
+        }
+        try {
+            auto r = doOneHttpRequestImpl(*conn, isFresh,
+                                          method, p, body, headers,
+                                          /*wantKeepalive=*/true);
+            if (r.keepalive) sessionReturnIdle(s, key, std::move(conn));
+            else conn->shutdown_close();
+            return r.response;
+        } catch (const HttpRetryOnFresh&) {
+            // Reused socket failure — discard and let the loop retry on
+            // a fresh socket. (isFresh==true never throws this.)
+            conn->shutdown_close();
+        } catch (...) {
+            // Any other failure mid-request: close the conn, propagate.
+            // We never return a half-used socket to the pool.
+            conn->shutdown_close();
+            throw;
+        }
+    }
+    // Unreachable: HttpRetryOnFresh only fires when isFresh==false, and
+    // the second iteration always uses isFresh==true.
+    throw RuntimeError("http session: retry exhausted", 0);
+}
+
+Value httpSessionRequest(const Value& session,
+                         const std::string& method,
+                         const std::string& url,
+                         const std::string& body,
+                         const std::unordered_map<std::string, std::string>& headers,
+                         const HttpOptions& opts) {
+    auto* s = sessionFromValue(session);
+    if (s->closed) throw RuntimeError("http session is closed", 0);
+
+    // Mirror doHttpRequest's redirect loop. Cross-host redirects pick
+    // up a different pool key automatically; same-host redirects reuse
+    // the existing idle conn.
+    auto deadline = (opts.totalTimeoutMs > 0)
+        ? std::chrono::steady_clock::now() +
+          std::chrono::milliseconds(opts.totalTimeoutMs)
+        : std::chrono::steady_clock::time_point::max();
+
+    std::string currentUrl    = url;
+    std::string currentMethod = method;
+    std::string currentBody   = body;
+    auto        currentHeaders = headers;
+    int         redirectCount = 0;
+
+    while (true) {
+        HttpOptions perReq = opts;
+        if (opts.totalTimeoutMs > 0) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0)
+                throw RuntimeError("HTTP total timeout exceeded", 0);
+            int remMs = static_cast<int>(remaining);
+            if (perReq.connectTimeoutMs <= 0 || perReq.connectTimeoutMs > remMs)
+                perReq.connectTimeoutMs = remMs;
+            if (perReq.readTimeoutMs    <= 0 || perReq.readTimeoutMs    > remMs)
+                perReq.readTimeoutMs    = remMs;
+        }
+
+        Value response = httpSessionRequestOne(
+            *s, currentMethod, currentUrl, currentBody, currentHeaders, perReq);
+
+        if (!opts.followRedirects) return response;
+
+        auto& respMap = response.asMap()->entries;
+        auto statusIt = respMap.find(Value("status"));
+        if (statusIt == respMap.end() || !statusIt->second.isNumber()) return response;
+        int status = static_cast<int>(statusIt->second.asNumber());
+        if (status < 300 || status >= 400) return response;
+
+        auto headersIt = respMap.find(Value("headers"));
+        if (headersIt == respMap.end() || !headersIt->second.isMap()) return response;
+        auto& respHeaders = headersIt->second.asMap()->entries;
+        auto locIt = respHeaders.find(Value("location"));
+        if (locIt == respHeaders.end() || !locIt->second.isString()) return response;
+        std::string location = locIt->second.asString();
+
+        if (redirectCount >= opts.maxRedirects)
+            throw RuntimeError("HTTP redirect limit exceeded (" +
+                               std::to_string(opts.maxRedirects) + ")", 0);
+
+        std::string newUrl = resolveLocation(currentUrl, location);
+
+        bool curIsTls = parseUrl(currentUrl).tls;
+        bool newIsTls = parseUrl(newUrl).tls;
+        if (curIsTls && !newIsTls)
+            throw RuntimeError("HTTP redirect: refusing https→http downgrade to " + newUrl, 0);
+
+        if (status == 303 ||
+            ((status == 301 || status == 302) &&
+              currentMethod != "GET" && currentMethod != "HEAD")) {
+            currentMethod = "GET";
+            currentBody.clear();
+            currentHeaders.erase("Content-Length");
+            currentHeaders.erase("Content-Type");
+        }
+        currentUrl = newUrl;
+        ++redirectCount;
+    }
 }
 
 Value doHttpRequest(const std::string& method, const std::string& url,
@@ -1300,6 +1671,32 @@ static void detectStreamMode(HttpStreamState& s, const std::string& method) {
     s.mode = HttpStreamState::Mode::Close;
 }
 
+// Decide whether the socket that produced `fields` can be returned to a
+// keepalive pool. Reuse needs two conditions:
+//   1. The response was framed (Content-Length or chunked), not
+//      read-until-EOF — Mode::Close means the server's only way to
+//      signal end-of-body is to close the socket.
+//   2. The server didn't include "close" as a Connection: token.
+// The header may carry multiple tokens (e.g. "keep-alive, close");
+// "close" anywhere in the value disables reuse.
+static bool responseAllowsKeepalive(const ResponseHeaderFields& fields,
+                                    const std::string& method) {
+    HttpStreamState tmp;
+    tmp.status     = fields.status;
+    tmp.headersMap = fields.headers;
+    detectStreamMode(tmp, method);
+    if (tmp.mode == HttpStreamState::Mode::Close) return false;
+
+    auto it = fields.headers->entries.find(Value(std::string("connection")));
+    if (it != fields.headers->entries.end() && it->second.isString()) {
+        std::string v = it->second.asString();
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](char c) { return (char)std::tolower((unsigned char)c); });
+        if (v.find("close") != std::string::npos) return false;
+    }
+    return true;
+}
+
 // Read raw bytes from the connection until "\r\n\r\n" appears, then
 // split into header text + body prefix. Throws on EOF before the
 // terminator (header truncation).
@@ -1376,6 +1773,14 @@ readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
                            "before 0-size terminator chunk", 0);
     }
 
+    // Release the conn from the local HttpStreamState so its destructor
+    // doesn't shutdown_close the socket — the caller (doOneHttpRequest
+    // for the stateless path, httpSessionRequestOne for the keepalive
+    // path) owns the SocketConn's lifetime past this return. Pre-session
+    // refactor this was harmless because the stateless path always
+    // closed via its ConnCloseGuard; with keepalive the close here would
+    // tear down a socket the session pool is about to store.
+    state.conn.reset();
     return {std::move(fields), std::move(body)};
 }
 
