@@ -5,3 +5,7 @@ print("lcm(12, 8) =", mathext.lcm(12, 8))
 print("fibonacci(10) =", mathext.fibonacci(10))
 print("hypot(3, 4) =", mathext.hypot(3, 4))
 print("sum([1,2,3,4,5]) =", mathext.sum([1, 2, 3, 4, 5]))
+
+// filter() takes a Praia lambda; the plugin calls back through
+// praia::call once per element to keep the truthy ones.
+print("filter([1..6], x > 3) =", mathext.filter([1, 2, 3, 4, 5, 6], lam{ x in x > 3 }))

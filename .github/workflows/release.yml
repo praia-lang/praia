@@ -157,6 +157,7 @@ jobs:
           chmod 755 dist/sand
           mkdir -p dist/lib/praia/include
           cp src/praia_plugin.h \
+             src/praia_runtime.h \
              src/value.h \
              src/builtins.h \
              src/interpreter.h \
@@ -386,6 +387,7 @@ jobs:
           # Inline a minimal plugin that exercises Value + PraiaMap.
           cat > smoke_plugin.cpp <<'CPP_EOF'
           #include "praia_plugin.h"
+          PRAIA_DECLARE_ABI();
           extern "C" void praia_register(PraiaMap* module) {
               module->entries[Value(std::string("ok"))] = Value(std::string("yes"));
           }

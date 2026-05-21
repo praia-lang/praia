@@ -41,6 +41,34 @@ testing.test("sum", lam{ in
     testing.assertEqual(mathext.sum([]), 0, nil)
 })
 
+testing.test("filter — plugin invokes a Praia callback via praia::call", lam{ in
+    // Exercises the praia::call helper: the native function takes
+    // a Callable, calls it once per element, and keeps the ones
+    // where the predicate returns truthy. If the helper or its
+    // engine-dispatch shim breaks, this fails.
+    let kept = mathext.filter([1, 2, 3, 4, 5, 6], lam{ x in x > 3 })
+    testing.assertEqual(kept, [4, 5, 6], nil)
+    // Empty input — predicate is never called.
+    testing.assertEqual(mathext.filter([], lam{ x in true }), [], nil)
+    // Named function (not just inline lambda).
+    func isEven(n) { return n % 2 == 0 }
+    testing.assertEqual(mathext.filter([1, 2, 3, 4, 5], isEven), [2, 4], nil)
+})
+
+testing.test("filter — non-callable predicate throws cleanly", lam{ in
+    testing.assertThrows(lam{ in mathext.filter([1, 2, 3], 42) }, nil)
+})
+
+testing.test("A1 regression — isNumber-guarded plugin accepts floats", lam{ in
+    // Pre-fix, the plugin example demoed `asInt()` after only
+    // `isNumber()`, which threw `std::bad_variant_access` on a
+    // float argument. mathext.gcd is similarly isNumber-guarded
+    // and now does `static_cast<int64_t>(asNumber())` — so a
+    // float-valued integer flows through without surprises.
+    testing.assertEqual(mathext.gcd(48.0, 18), 6, nil)
+    testing.assertEqual(mathext.hypot(3.0, 4.0), 5, nil)
+})
+
 testing.test("cached load returns same module", lam{ in
     let mathext2 = loadNative(pluginPath)
     testing.assertEqual(mathext2.gcd(100, 75), 25, nil)
@@ -52,6 +80,60 @@ testing.test("bad path throws", lam{ in
 
 testing.test("non-string throws", lam{ in
     testing.assertThrows(lam{ in loadNative(42) }, nil)
+})
+
+testing.test("ABI version: missing declaration is rejected", lam{ in
+    // Build a tiny plugin without PRAIA_DECLARE_ABI() and verify
+    // loadNative refuses it with a clear "rebuild" diagnostic.
+    // Two skip conditions: --include-path not pointing at shipped
+    // headers (no praia install on this machine), or no `c++`
+    // compiler available. Anything past those two should COMPILE
+    // — a compile failure is a real regression we want to see,
+    // not silently skip past.
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let inc = sys.exec([praiaBin, "--include-path"]).stdout.strip()
+    if (!fs.exists(path.join(inc, "praia_plugin.h"))) {
+        print("(skipping: --include-path not pointing at shipped headers)")
+        return
+    }
+    if (sys.exec(["c++", "--version"]).exitCode != 0) {
+        print("(skipping: c++ compiler not on PATH)")
+        return
+    }
+    let dir = testing.tempDir(nil)
+    let src = path.join(dir, "noabi.cpp")
+    let out = path.join(dir, "noabi" + ext)
+    fs.write(src,
+        "#include \"praia_plugin.h\"\n" +
+        "extern \"C\" void praia_register(PraiaMap* m) {\n" +
+        "    m->entries[\"x\"] = Value(int64_t(1));\n" +
+        "}\n")
+    // Arg array (not `sh -c <string>`) so quoting / spaces in
+    // paths can't bite us, and the compiler invocation is visible
+    // in process listings without shell layering.
+    let cmd = ["c++",
+               "-std=c++20", "-Wno-deprecated-declarations",
+               "-D_XOPEN_SOURCE=600", "-D_DARWIN_C_SOURCE",
+               "-shared", "-fPIC", "-I" + inc]
+    if (sys.platform == "darwin") {
+        cmd.push("-undefined")
+        cmd.push("dynamic_lookup")
+    }
+    cmd.push("-o")
+    cmd.push(out)
+    cmd.push(src)
+    let r = sys.exec(cmd)
+    // A compile failure here means a header/flag regression — surface
+    // both stdout and stderr instead of silently skipping past it.
+    testing.assertEqual(r.exitCode, 0,
+        "c++ compile of the no-ABI fixture failed:\n" +
+        "stderr: " + r.stderr + "\nstdout: " + r.stdout)
+
+    let err = nil
+    try { loadNative(out) } catch (e) { err = str(e) }
+    testing.assert(err != nil, "loadNative must reject the no-ABI plugin")
+    testing.assert(err.contains("ABI"),
+        "error message mentions ABI: " + str(err))
 })
 
 testing.done()

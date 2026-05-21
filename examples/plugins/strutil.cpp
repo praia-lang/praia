@@ -6,6 +6,8 @@
 #include <cstdlib>   // atoi, atof, strtol
 #include <cctype>    // isalpha, isdigit, etc.
 
+PRAIA_DECLARE_ABI();
+
 extern "C" void praia_register(PraiaMap* module) {
     // strutil.isAlpha(str) — true if all characters are alphabetic
     module->entries["isAlpha"] = Value(makeNative("strutil.isAlpha", 1,
