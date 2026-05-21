@@ -42,6 +42,10 @@ void GcHeap::track(const std::shared_ptr<PraiaTagged>& p) {
     entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Tagged});
     allocsSinceGc_++;
 }
+void GcHeap::track(const std::shared_ptr<PraiaExternal>& p) {
+    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::External});
+    allocsSinceGc_++;
+}
 void GcHeap::track(const std::shared_ptr<Environment>& p) {
     entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Environment});
     allocsSinceGc_++;
@@ -101,6 +105,11 @@ void GcHeap::markValue(const Value& v) {
         markCallable(v.asCallable().get());
     } else if (v.isGenerator()) {
         markGenerator(v.asGenerator().get());
+    } else if (v.isExternal()) {
+        // Externals are leaves — opaque void* + deleter, no Praia
+        // children to traverse. Marking is just identity insertion
+        // so the sweep knows it's reachable.
+        marked_.insert(static_cast<void*>(v.asExternal().get()));
     }
 }
 
@@ -269,6 +278,11 @@ void GcHeap::sweep() {
                 env->parent.reset();
                 break;
             }
+            case GcType::External:
+                // Leaf — no internal Praia refs to break. The
+                // deleter runs in PraiaExternal::~PraiaExternal()
+                // when toCollect.clear() drops the last shared_ptr.
+                break;
         }
     }
 

@@ -7,7 +7,7 @@
 
 class Environment; // forward declaration
 
-enum class GcType { Array, Tagged, Map, Set, Instance, Class, Generator, Environment };
+enum class GcType { Array, Tagged, Map, Set, Instance, Class, Generator, Environment, External };
 
 class GcHeap {
 public:
@@ -21,6 +21,7 @@ public:
     void track(const std::shared_ptr<PraiaClass>& p);
     void track(const std::shared_ptr<PraiaGenerator>& p);
     void track(const std::shared_ptr<PraiaTagged>& p);
+    void track(const std::shared_ptr<PraiaExternal>& p);
     void track(const std::shared_ptr<Environment>& p);
 
     // Mark API (called during root marking by VM/Interpreter)

@@ -73,6 +73,76 @@ print(mod._meta.name, mod._meta.version)
 
 Plugins that don't declare metadata get no `_meta` key — backward-compatible and opt-in. The underscore prefix keeps it from colliding with normal module functions.
 
+## Opaque handles
+
+For plugins wrapping a C/C++ resource — a DB connection, a file handle, an OS object — return a `praia::makeExternal<T>(ptr, typeName, deleter)` Value instead of squeezing the pointer into a map or string. The Value:
+
+- Holds the opaque pointer + a destructor that fires when the last reference drops (during the GC sweep).
+- Carries a `typeName` tag so the plugin can type-check on unwrap (`praia::getExternal<T>(value, typeName)`).
+- Prints as `<external:typeName>` and compares by pointer identity.
+- Can be passed through arrays, maps, function calls — but isn't hashable (can't be a map key).
+
+### Example: wrapping a SQLite connection
+
+```cpp
+#include "praia_plugin.h"
+#include <sqlite3.h>
+
+PRAIA_DECLARE_ABI();
+
+extern "C" void praia_register(PraiaMap* module) {
+    module->entries["open"] = Value(makeNative("db.open", 1,
+        [](const std::vector<Value>& args) -> Value {
+            auto& path = praia::requireString(args, 0, "db.open");
+            sqlite3* conn = nullptr;
+            if (sqlite3_open(path.c_str(), &conn) != SQLITE_OK)
+                praia::error("db.open: " + std::string(sqlite3_errmsg(conn)));
+            return praia::makeExternal<sqlite3>(conn, "sqlite3.connection",
+                                                [](sqlite3* c) { sqlite3_close(c); });
+        }));
+
+    module->entries["close"] = Value(makeNative("db.close", 1,
+        [](const std::vector<Value>& args) -> Value {
+            // Explicit close: unwrap, run the SQLite close, leave
+            // the deleter to no-op on GC. (For a fully idempotent
+            // close, store a `bool closed` flag inside a small
+            // wrapper struct and check it both here and in the
+            // deleter — same pattern Python's PEP 343 contextmgrs
+            // recommend.)
+            auto* conn = praia::getExternal<sqlite3>(args[0], "sqlite3.connection");
+            sqlite3_close(conn);
+            return Value();
+        }));
+}
+```
+
+User code:
+
+```praia
+let db = loadNative("./mydb")
+let conn = db.open(":memory:")
+// ... use conn ...
+// when `conn` goes out of scope (or is reassigned), sqlite3_close runs.
+```
+
+### TypeName convention
+
+Use `"module.type"` — e.g. `"sqlite.connection"`, `"prscan.scanner"`. The string is plugin-private; user code never sees it (it's a C++-side tag). Two different plugins using the same `typeName` for unrelated handles will accept each other's handles in `getExternal<T>` — choose a prefix that's unlikely to collide.
+
+### Lifetime
+
+The deleter runs in `PraiaExternal::~PraiaExternal()` when the last `shared_ptr<PraiaExternal>` drops:
+
+- Reassigning the last user-code variable: deleter runs immediately (refcount drop).
+- Going out of scope: same.
+- Held in a map / closed-over by a callable: stays alive until the container is itself dropped or GC-swept.
+
+If your wrapped resource holds back-references into Praia (e.g. a callback registered with a C library), don't let the C side outlive the handle — the deleter is your last chance to unregister.
+
+### What user code sees
+
+A Value that prints as `<external:typeName>`, passes through assignments / function calls / arrays / maps unchanged, and can't be used as a map key (the underlying pointer isn't hashable). Reading the typeName from Praia isn't supported — by design, it's a C++-side tag, not a public field.
+
 ## Plugin API
 
 ### Entry point

@@ -1,0 +1,15 @@
+let c = loadNative("./examples/plugins/counter")
+
+print("plugin:", c._meta.name, c._meta.version)
+
+let h = c.new()
+c.inc(h)
+c.inc(h)
+c.inc(h)
+print("after three inc:", c.value(h))   // 3
+
+c.reset(h)
+print("after reset:", c.value(h))       // 0
+
+// `<external:counter.handle>` shows the underlying type tag.
+print("handle prints as:", str(h))
