@@ -84,33 +84,47 @@ For plugins wrapping a C/C++ resource — a DB connection, a file handle, an OS 
 
 ### Example: wrapping a SQLite connection
 
+The handle wraps `sqlite3*` in a small struct alongside a `closed` flag, so explicit `db.close(conn)` and the GC-time deleter are both idempotent — running close twice (or close-then-GC) doesn't double-free.
+
 ```cpp
 #include "praia_plugin.h"
 #include <sqlite3.h>
 
 PRAIA_DECLARE_ABI();
 
+namespace {
+struct sqlite3_wrapper {
+    sqlite3* conn = nullptr;
+    bool closed = false;
+};
+}
+
 extern "C" void praia_register(PraiaMap* module) {
     module->entries["open"] = Value(makeNative("db.open", 1,
         [](const std::vector<Value>& args) -> Value {
             auto& path = praia::requireString(args, 0, "db.open");
-            sqlite3* conn = nullptr;
-            if (sqlite3_open(path.c_str(), &conn) != SQLITE_OK)
-                praia::error("db.open: " + std::string(sqlite3_errmsg(conn)));
-            return praia::makeExternal<sqlite3>(conn, "sqlite3.connection",
-                                                [](sqlite3* c) { sqlite3_close(c); });
+            auto* w = new sqlite3_wrapper;
+            if (sqlite3_open(path.c_str(), &w->conn) != SQLITE_OK) {
+                std::string msg = sqlite3_errmsg(w->conn);
+                sqlite3_close(w->conn);
+                delete w;
+                praia::error("db.open: " + msg);
+            }
+            return praia::makeExternal<sqlite3_wrapper>(w, "sqlite3.connection",
+                [](sqlite3_wrapper* p) {
+                    // GC-time cleanup: skip the close if `db.close`
+                    // already ran. Either way, free the wrapper.
+                    if (!p->closed) sqlite3_close(p->conn);
+                    delete p;
+                });
         }));
 
     module->entries["close"] = Value(makeNative("db.close", 1,
         [](const std::vector<Value>& args) -> Value {
-            // Explicit close: unwrap, run the SQLite close, leave
-            // the deleter to no-op on GC. (For a fully idempotent
-            // close, store a `bool closed` flag inside a small
-            // wrapper struct and check it both here and in the
-            // deleter — same pattern Python's PEP 343 contextmgrs
-            // recommend.)
-            auto* conn = praia::getExternal<sqlite3>(args[0], "sqlite3.connection");
-            sqlite3_close(conn);
+            auto* w = praia::getExternal<sqlite3_wrapper>(args[0], "sqlite3.connection");
+            if (w->closed) return Value();   // idempotent
+            sqlite3_close(w->conn);
+            w->closed = true;
             return Value();
         }));
 }
@@ -127,7 +141,7 @@ let conn = db.open(":memory:")
 
 ### TypeName convention
 
-Use `"module.type"` — e.g. `"sqlite.connection"`, `"prscan.scanner"`. The string is plugin-private; user code never sees it (it's a C++-side tag). Two different plugins using the same `typeName` for unrelated handles will accept each other's handles in `getExternal<T>` — choose a prefix that's unlikely to collide.
+Use `"module.type"` — e.g. `"sqlite.connection"`, `"prscan.scanner"`. The string isn't accessible via any Praia-side API or field, but it IS visible in string form: `str(handle)` and `print(handle)` show `<external:typeName>`. Treat it as a diagnostic-only label from Praia's perspective, and as the plugin's internal type tag from C++. Two different plugins using the same `typeName` for unrelated handles will accept each other's handles in `getExternal<T>` — choose a prefix that's unlikely to collide.
 
 ### Lifetime
 
@@ -141,7 +155,7 @@ If your wrapped resource holds back-references into Praia (e.g. a callback regis
 
 ### What user code sees
 
-A Value that prints as `<external:typeName>`, passes through assignments / function calls / arrays / maps unchanged, and can't be used as a map key (the underlying pointer isn't hashable). Reading the typeName from Praia isn't supported — by design, it's a C++-side tag, not a public field.
+A Value that prints as `<external:typeName>`, passes through assignments / function calls / arrays / maps unchanged, and can't be used as a map key (the underlying pointer isn't hashable). The typeName isn't accessible via any API or field — but it IS visible in string form (`str(h)`, `print(h)`, REPL output) as part of the `<external:...>` rendering. Treat that string output as a diagnostic label, not a stable contract; for type checks, use `praia::getExternal<T>` on the C++ side.
 
 ## Plugin API
 

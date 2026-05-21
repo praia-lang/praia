@@ -339,6 +339,15 @@ struct PraiaExternal {
     PraiaExternal() = default;
     PraiaExternal(const PraiaExternal&) = delete;
     PraiaExternal& operator=(const PraiaExternal&) = delete;
+    // Defaulted moves so the struct is move-only rather than
+    // pinned. The user-declared destructor would otherwise
+    // suppress the implicit move ops alongside the explicitly
+    // deleted copy ones — leaving the type uncopyable AND
+    // unmovable, which is more restrictive than "unique
+    // ownership" implies and would block emplace/make_shared
+    // patterns that hand off ownership at construction.
+    PraiaExternal(PraiaExternal&&) = default;
+    PraiaExternal& operator=(PraiaExternal&&) = default;
     ~PraiaExternal() { if (deleter && data) deleter(data); }
 };
 
