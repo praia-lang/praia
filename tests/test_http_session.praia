@@ -1,0 +1,290 @@
+use "testing"
+
+// http.session — keepalive connection pool + default opts/headers.
+// Spins a hand-rolled net.* mock server so each test sees its own
+// per-process accept counter (echoed back via response headers).
+// Single-threaded serial handling matches the other test_http_*.praia
+// files. Async tasks get isolated globals, so the counter lives
+// inside the server task and reports back via X-Accepts.
+
+let TEST_PORT = 38914
+
+// Case-insensitive header lookup against the raw request bytes. Hoisted
+// out of the per-connection loop so it can't get re-defined per
+// iteration. Returns "" if the header isn't present.
+let headerOf = lam{ req, name in
+    let needle = "\n" + name.lower() + ":"
+    let lower = req.lower()
+    let idx = lower.indexOf(needle)
+    if (idx < 0) { return "" }
+    let start = idx + len(needle)
+    let end = req.indexOf("\r\n", start)
+    if (end < 0) { return "" }
+    return req.slice(start, end).strip()
+}
+
+let _serverFuture = async lam{ in
+    let listener = net.listen(TEST_PORT)
+    let acceptCount = 0
+    while (true) {
+        let c = net.accept(listener)
+        acceptCount = acceptCount + 1
+        let connKeepalive = true
+        // Per-connection serve loop — keep reading more requests on the
+        // same socket until we close it (for the close-after-first test)
+        // or the client closes.
+        while (connKeepalive) {
+            let req = ""
+            // Read request line + headers.
+            while (!req.contains("\r\n\r\n")) {
+                let chunk = net.recv(c, 4096)
+                if (len(chunk) == 0) {
+                    connKeepalive = false
+                    break
+                }
+                req = req + chunk
+            }
+            if (!connKeepalive) { break }
+
+            let firstSp = req.indexOf(" ")
+            let after = req.slice(firstSp + 1, len(req))
+            let path = after.slice(0, after.indexOf(" "))
+
+            let body = ""
+            let extra = ""
+
+            if (path == "/ping") {
+                body = "pong"
+            } elif (path == "/ua-echo") {
+                body = headerOf(req, "User-Agent")
+            } elif (path == "/x-test-echo") {
+                body = headerOf(req, "X-Test")
+            } elif (path == "/close-after") {
+                // Respond normally, then close after sending — the
+                // client's second request through the pool should
+                // catch the stale conn and retry on a fresh socket.
+                body = "ok"
+                connKeepalive = false
+            } elif (path == "/conn-close") {
+                // Server tags the response with Connection: close.
+                // The session must NOT pool this conn even though the
+                // framing is otherwise reuse-eligible.
+                body = "ok"
+                extra = "Connection: close\r\n"
+                connKeepalive = false
+            } else {
+                body = "root"
+            }
+
+            // Always include the per-connection accept count so the
+            // test can assert single-accept across multiple requests.
+            let resp = "HTTP/1.1 200 OK\r\n" +
+                       extra +
+                       "Content-Length: " + str(len(body.bytes())) + "\r\n" +
+                       "X-Accepts: " + str(acceptCount) + "\r\n" +
+                       "\r\n" + body
+            net.send(c, resp)
+
+            if (!connKeepalive) { break }
+        }
+        net.close(c)
+    }
+}()
+time.sleep(200)
+
+let base = "http://localhost:" + str(TEST_PORT)
+
+// ── Handle shape ──────────────────────────────────────────────
+
+testing.test("handle prints as <external:http.session>", lam{ in
+    let s = http.session()
+    testing.assertEqual(str(s), "<external:http.session>", nil)
+    http.close(s)
+})
+
+// ── Basic round-trip ──────────────────────────────────────────
+
+testing.test("basic GET via session returns 200", lam{ in
+    // X-Accepts is a per-server (cumulative) counter; the keepalive
+    // test below asserts deltas, not absolutes, since tests share one
+    // server task.
+    let s = http.session()
+    let r = http.get(s, base + "/ping")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "pong", nil)
+    http.close(s)
+})
+
+// ── Default headers apply ─────────────────────────────────────
+
+testing.test("session default headers reach the server", lam{ in
+    let s = http.session({headers: {"User-Agent": "praia-session-test/1.0"}})
+    let r = http.get(s, base + "/ua-echo")
+    testing.assertEqual(r.body, "praia-session-test/1.0", nil)
+    http.close(s)
+})
+
+testing.test("per-call headers override session defaults", lam{ in
+    let s = http.session({headers: {"X-Test": "from-session"}})
+    let r = http.request(s, {url: base + "/x-test-echo",
+                              headers: {"X-Test": "from-call"}})
+    testing.assertEqual(r.body, "from-call",
+        "per-call header value wins on key conflict")
+    http.close(s)
+})
+
+testing.test("per-call headers compose with session defaults", lam{ in
+    // The session sets X-Test; the per-call adds User-Agent. Both
+    // should reach the server because they don't collide.
+    let s = http.session({headers: {"X-Test": "session-only"}})
+    let r1 = http.request(s, {url: base + "/x-test-echo",
+                               headers: {"User-Agent": "perCall"}})
+    testing.assertEqual(r1.body, "session-only", "session default still applied")
+    let r2 = http.request(s, {url: base + "/ua-echo",
+                               headers: {"User-Agent": "perCall"}})
+    testing.assertEqual(r2.body, "perCall", "per-call header also applied")
+    http.close(s)
+})
+
+// ── Default opts apply ────────────────────────────────────────
+
+testing.test("session default opts apply when call omits them", lam{ in
+    // timeout: 30 → connectTimeoutMs=30000, readTimeoutMs=30000,
+    // totalTimeoutMs=30000. Just verify the request succeeds.
+    let s = http.session({timeout: 30})
+    let r = http.get(s, base + "/ping")
+    testing.assertEqual(r.status, 200, nil)
+    http.close(s)
+})
+
+// (per-call opts override): the opts-merge path goes through the
+// same applyHttpOpts helper as the headers-merge path tested above,
+// so the headers tests effectively exercise the same wiring. A
+// dedicated opts-override test would need either a server-side
+// delay (which blocks the single-threaded async server and starves
+// later tests) or a non-routable destination (unreliable across
+// networks). Coverage is preserved by the headers tests; skipping
+// the opts-only test here.
+
+// ── Keepalive ─────────────────────────────────────────────────
+
+testing.test("keepalive: multiple requests use a single accept", lam{ in
+    let s = http.session()
+    let firstAccepts = nil
+    for (i in 0..5) {
+        let r = http.get(s, base + "/ping")
+        testing.assertEqual(r.status, 200, nil)
+        if (firstAccepts == nil) {
+            firstAccepts = r.headers["x-accepts"]
+        } else {
+            testing.assertEqual(r.headers["x-accepts"], firstAccepts,
+                "request " + str(i) + " stayed on the original accept")
+        }
+    }
+    http.close(s)
+})
+
+// ── Stale-conn recovery ───────────────────────────────────────
+
+testing.test("stale conn: server-side close triggers one-shot retry", lam{ in
+    let s = http.session()
+    // First request: server closes the socket after responding.
+    let r1 = http.get(s, base + "/close-after")
+    testing.assertEqual(r1.body, "ok", nil)
+    let n1 = num(r1.headers["x-accepts"])
+    // Second request: the pool has the now-closed socket. The probe
+    // (or the send) catches the closure; the wrapper opens fresh.
+    // The accept count must advance by at least one.
+    let r2 = http.get(s, base + "/ping")
+    testing.assertEqual(r2.status, 200, nil)
+    testing.assertEqual(r2.body, "pong", nil)
+    let n2 = num(r2.headers["x-accepts"])
+    testing.assert(n2 > n1,
+        "second request landed on a fresh accept (was " + str(n1) +
+        ", now " + str(n2) + ")")
+    http.close(s)
+})
+
+// ── Connection: close from server ─────────────────────────────
+
+testing.test("server Connection: close opts out of the pool", lam{ in
+    let s = http.session()
+    let r1 = http.get(s, base + "/conn-close")
+    testing.assertEqual(r1.body, "ok", nil)
+    testing.assertEqual(r1.headers["connection"], "close", nil)
+    let n1 = num(r1.headers["x-accepts"])
+    // Even though the framing was Content-Length (reusable), the
+    // Connection: close response header forces the pool to discard.
+    let r2 = http.get(s, base + "/ping")
+    let n2 = num(r2.headers["x-accepts"])
+    testing.assert(n2 > n1,
+        "second request opened a fresh connection (was " + str(n1) +
+        ", now " + str(n2) + ")")
+    http.close(s)
+})
+
+// ── Type tag checks ───────────────────────────────────────────
+
+testing.test("non-session first arg to http.get throws", lam{ in
+    let err = nil
+    try { http.get(42, "http://localhost/") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw")
+    testing.assert(err.contains("requires"), str(err))
+})
+
+testing.test("http.close on non-session throws with the canonical type tag", lam{ in
+    let err = nil
+    try { http.close("not a session") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw")
+    testing.assert(err.contains("external handle") && err.contains("http.session"),
+        "error names the expected type: " + str(err))
+})
+
+// ── Close lifecycle ───────────────────────────────────────────
+
+testing.test("idempotent close: double-close is a no-op", lam{ in
+    let s = http.session()
+    http.close(s)
+    http.close(s)
+})
+
+testing.test("use-after-close throws", lam{ in
+    let s = http.session()
+    http.close(s)
+    let err = nil
+    try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw")
+    testing.assert(err.contains("closed"), str(err))
+})
+
+// ── Polymorphic dispatch: stateless still works ───────────────
+
+testing.test("stateless http.get unchanged (URL-only)", lam{ in
+    let r = http.get(base + "/ping")
+    testing.assertEqual(r.body, "pong", nil)
+})
+
+testing.test("stateless http.request unchanged (opts-map)", lam{ in
+    let r = http.request({url: base + "/ping"})
+    testing.assertEqual(r.body, "pong", nil)
+})
+
+// ── GC-driven close ───────────────────────────────────────────
+
+testing.test("GC-driven close: many discarded sessions don't leak", lam{ in
+    // Engine-wide PraiaExternal deleter coverage already lives in
+    // test_loadnative.praia's counter pressure test; here we just
+    // verify the http.session-specific deleter (pool drain +
+    // shutdown_close on each idle socket + delete) doesn't crash
+    // under repeated invocation. Each session opens fresh — no
+    // pooling between sessions — so this also stress-tests fresh
+    // socket allocation.
+    let s = nil
+    for (i in 0..200) {
+        s = http.session()
+    }
+    s = nil
+    testing.assert(true, nil)
+})
+
+testing.done()

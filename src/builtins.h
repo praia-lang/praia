@@ -92,6 +92,49 @@ Value httpOpenStream(const std::string& method, const std::string& url,
 
 void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp);
 
+// ── HTTP client sessions (keepalive + default opts/headers) ──
+//
+// A session holds a pool of idle keep-alive sockets keyed by
+// "scheme://host:port", plus default HttpOptions and default headers
+// applied to every request made through it. Per-call values override
+// session defaults; the caller is responsible for that merge — both
+// the session accessors below are intentionally const-ref so the
+// caller can copy and layer in its own scope.
+//
+// User-facing wiring lives in interpreter_setup.cpp; the HttpSession
+// struct itself stays file-private in builtins/http.cpp so SocketConn
+// and the OpenSSL state never leak outside the module.
+
+Value httpCreateSession(const HttpOptions& defaultOpts,
+                        const std::unordered_map<std::string, std::string>& defaultHeaders);
+
+// Drive one request (with redirect handling) through the session's
+// pool. Caller has already layered session defaults under per-call
+// values for both headers and HttpOptions.
+Value httpSessionRequest(const Value& session,
+                         const std::string& method,
+                         const std::string& url,
+                         const std::string& body,
+                         const std::unordered_map<std::string, std::string>& headers,
+                         const HttpOptions& opts);
+
+// Idempotent explicit close — drains the pool. The GC-time deleter
+// (registered by httpCreateSession) does the same work on the
+// implicit-cleanup path.
+void httpSessionClose(const Value& session);
+
+// Type predicate for polymorphic dispatch in interpreter_setup.cpp's
+// http.get / http.post / http.request wrappers. Returns true iff the
+// Value is an external handle with the http.session type tag — used
+// to decide whether the first arg is a session or a stateless URL.
+bool httpIsSession(const Value& v);
+
+// Read-only accessors so the caller can layer session defaults under
+// per-call values without exposing HttpSession's definition.
+const HttpOptions& httpSessionGetDefaultOpts(const Value& session);
+const std::unordered_map<std::string, std::string>&
+httpSessionGetDefaultHeaders(const Value& session);
+
 // ── JSON (builtins/json.cpp) ─────────────────────────────────
 Value jsonParse(const std::string& src);
 std::string jsonStringify(const Value& val, int indent = 0, int depth = 0);

@@ -3313,6 +3313,74 @@ When `followRedirects` is `false`, the 3xx response is returned as-is with `Loca
 
 Connect against an unroutable IP throws "connect timed out after Nms" with an exact elapsed budget; read timeouts throw "HTTP read timed out".
 
+#### Sessions — `http.session`
+
+For scripts that issue multiple requests to the same host, an `http.session` reuses the underlying TCP/TLS connection across calls and applies session-default headers and options. This skips a fresh DNS lookup + TCP handshake + (for HTTPS) TLS handshake on every request beyond the first.
+
+```
+let s = http.session({
+    headers: {"User-Agent": "my-app/1.0"},
+    timeout: 30,
+})
+
+let r1 = http.get(s, "https://api.example.com/users")
+let r2 = http.get(s, "https://api.example.com/posts")  // reuses r1's socket
+http.close(s)
+```
+
+`http.session(opts?)` returns an opaque session handle that prints as `<external:http.session>`. Pass it as the first argument to any of `http.get` / `http.post` / `http.request`; the call shape stays the same otherwise:
+
+| Stateless | Session-bound |
+|-----------|---------------|
+| `http.get(url)` | `http.get(session, url)` |
+| `http.post(url, body)` | `http.post(session, url, body)` |
+| `http.request(opts)` | `http.request(session, opts)` |
+
+The connection pool is keyed by `scheme://host:port`, so requests to different hosts on the same session each get their own pooled connection.
+
+##### Defaults layering
+
+Session-default `headers` and options are applied as the base for every call through the session. Per-call values override them on key conflict:
+
+```
+let s = http.session({
+    headers: {"User-Agent": "my-app/1.0", "X-Trace-Id": "abc"},
+    timeout: 30,
+})
+
+http.request(s, {
+    url: "https://api.example.com/users",
+    // User-Agent inherited from session.
+    // X-Trace-Id overridden for this call.
+    headers: {"X-Trace-Id": "xyz"},
+    // Session timeout (30s) overridden to 5s.
+    timeout: 5,
+})
+```
+
+The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle` — minus `method`/`url`/`body`, which only make sense per-call.
+
+##### Connection reuse and stale-conn recovery
+
+The session pools at most one idle connection per host. Before reusing a pooled connection, a fast `poll()` probe checks whether the peer closed the socket since it was stored. If the probe passes but the first `send()` fails anyway (the classic stale-connection signature — the peer hung up between probe and send), the session transparently retries once on a fresh socket. From the caller's perspective: reused or fresh, the call returns the response.
+
+A response is **not** pooled if it sets `Connection: close`, or its body framing was read-until-EOF (no `Content-Length`, no `Transfer-Encoding: chunked`), or any I/O error fired during the request.
+
+##### Closing
+
+`http.close(session)` is idempotent — calling it twice (or after the GC has already reclaimed the handle) is a no-op, never a double-free:
+
+```
+http.close(s)
+```
+
+If the session goes out of scope without an explicit close, the GC's sweep runs the deleter and drains the pool. Explicit `http.close` is for deterministic cleanup (typical in scripts where the timing matters).
+
+##### What's not in this session yet
+
+- **No cookie jar.** Use the `cookie` grain's `Jar` class for client-side cookie tracking; the session response's `cookies` array still surfaces incoming `Set-Cookie` headers.
+- **No `http.openStream` integration.** Streaming responses always open a fresh connection. Session-pooled streaming would need pool-vs-stream lifetime mediation that wasn't worth landing alongside the buffered-request session.
+
 #### Streaming responses — `http.openStream`
 
 `http.request` slurps the response body into memory. `http.openStream` returns a stream handle instead — useful for downloads larger than RAM, NDJSON feeds, log tails, or anything you want to consume incrementally.

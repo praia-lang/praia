@@ -1709,92 +1709,180 @@ Interpreter::Interpreter() {
 
     auto httpMap = gcNew<PraiaMap>();
 
-    httpMap->entries[Value("get")] = Value(makeNative("http.get", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("http.get() requires a URL string", 0);
-            return doHttpRequest("GET", args[0].asString(), "", {});
-        }));
-
-    httpMap->entries[Value("post")] = Value(makeNative("http.post", 2,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("http.post() requires a URL string", 0);
-            std::string body;
-            std::unordered_map<std::string, std::string> headers;
-            if (args[1].isString()) {
-                body = args[1].asString();
-            } else if (args[1].isMap()) {
-                auto& e = args[1].asMap()->entries;
-                if (e.count("body")) body = e.at("body").toString();
-                if (e.count("headers") && e.at("headers").isMap()) {
-                    for (auto& [k, v] : e.at("headers").asMap()->entries)
-                        headers[k.toString()] = v.toString();
-                }
+    // Shared options-map parser: layers per-call options on top of a
+    // base HttpOptions in place (only overrides fields the user
+    // actually set). Used by http.request, http.session creation, and
+    // the session-bound request paths so all three share one schema.
+    // Generic lambda — `auto& m` accepts the full PraiaMap::entries
+    // type including its ValueHash / ValueKeyEqual template params
+    // without having to spell them.
+    auto applyHttpOpts = [](HttpOptions& opts, const auto& m) {
+        auto secsToMs = [](const Value& v) -> int {
+            if (!v.isNumber()) return -1;
+            double secs = v.asNumber();
+            if (secs <= 0) return -1;
+            return static_cast<int>(secs * 1000.0);
+        };
+        if (m.count("timeout")) {
+            // Shorthand: applies to all three axes simultaneously.
+            // Matches Python requests' `timeout=10` form.
+            int ms = secsToMs(m.at("timeout"));
+            if (ms > 0) {
+                opts.connectTimeoutMs = ms;
+                opts.readTimeoutMs    = ms;
+                opts.totalTimeoutMs   = ms;
             }
-            return doHttpRequest("POST", args[0].asString(), body, headers);
+        }
+        if (m.count("connectTimeout"))
+            opts.connectTimeoutMs = secsToMs(m.at("connectTimeout"));
+        if (m.count("readTimeout"))
+            opts.readTimeoutMs    = secsToMs(m.at("readTimeout"));
+        if (m.count("totalTimeout"))
+            opts.totalTimeoutMs   = secsToMs(m.at("totalTimeout"));
+        if (m.count("followRedirects") && m.at("followRedirects").isBool())
+            opts.followRedirects = m.at("followRedirects").asBool();
+        if (m.count("maxRedirects") && m.at("maxRedirects").isNumber())
+            opts.maxRedirects = static_cast<int>(m.at("maxRedirects").asNumber());
+        if (m.count("insecure") && m.at("insecure").isBool())
+            opts.insecure = m.at("insecure").asBool();
+        if (m.count("caBundle") && m.at("caBundle").isString())
+            opts.caBundle = m.at("caBundle").asString();
+    };
+
+    // Layer per-call headers on top of session defaults (or {} for
+    // stateless). Per-call values win on key conflict. Generic
+    // lambda for the same reason applyHttpOpts is.
+    auto layerHeaders = [](std::unordered_map<std::string, std::string> base,
+                           const auto& m) {
+        if (m.count("headers") && m.at("headers").isMap()) {
+            for (auto& [k, v] : m.at("headers").asMap()->entries)
+                base[k.toString()] = v.toString();
+        }
+        return base;
+    };
+
+    httpMap->entries[Value("get")] = Value(makeNative("http.get", -1,
+        [](const std::vector<Value>& args) -> Value {
+            // http.get(url)              → stateless
+            // http.get(session, url)     → session-bound
+            if (args.size() == 1 && args[0].isString()) {
+                return doHttpRequest("GET", args[0].asString(), "", {});
+            }
+            if (args.size() == 2 && httpIsSession(args[0]) && args[1].isString()) {
+                auto opts = httpSessionGetDefaultOpts(args[0]);
+                auto hdrs = httpSessionGetDefaultHeaders(args[0]);
+                return httpSessionRequest(args[0], "GET", args[1].asString(),
+                                          "", hdrs, opts);
+            }
+            throw RuntimeError(
+                "http.get() requires either (url) or (session, url)", 0);
         }));
 
-    httpMap->entries[Value("request")] = Value(makeNative("http.request", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isMap())
-                throw RuntimeError("http.request() requires an options map", 0);
-            auto& opts = args[0].asMap()->entries;
+    httpMap->entries[Value("post")] = Value(makeNative("http.post", -1,
+        [&applyHttpOpts, &layerHeaders](const std::vector<Value>& args) -> Value {
+            // http.post(url, body|opts)             → stateless
+            // http.post(session, url, body|opts)    → session-bound
+            auto parseBodyAndHeaders = [](const Value& v, std::string& body,
+                                          std::unordered_map<std::string, std::string>& headers) {
+                if (v.isString()) {
+                    body = v.asString();
+                } else if (v.isMap()) {
+                    auto& e = v.asMap()->entries;
+                    if (e.count("body")) body = e.at("body").toString();
+                    if (e.count("headers") && e.at("headers").isMap()) {
+                        for (auto& [k, vv] : e.at("headers").asMap()->entries)
+                            headers[k.toString()] = vv.toString();
+                    }
+                }
+            };
+            if (args.size() == 2 && args[0].isString()) {
+                std::string body;
+                std::unordered_map<std::string, std::string> headers;
+                parseBodyAndHeaders(args[1], body, headers);
+                return doHttpRequest("POST", args[0].asString(), body, headers);
+            }
+            if (args.size() == 3 && httpIsSession(args[0]) && args[1].isString()) {
+                std::string body;
+                std::unordered_map<std::string, std::string> headers;
+                parseBodyAndHeaders(args[2], body, headers);
+                // Layer session defaults under per-call values.
+                auto opts = httpSessionGetDefaultOpts(args[0]);
+                auto hdrs = httpSessionGetDefaultHeaders(args[0]);
+                for (auto& [k, v] : headers) hdrs[k] = v;
+                // body is fully user-specified; opts inherited from session
+                // (per-call timeout overrides aren't passed via the body-or-opts
+                // shorthand — use http.request for that).
+                (void)applyHttpOpts; (void)layerHeaders;   // not used here
+                return httpSessionRequest(args[0], "POST", args[1].asString(),
+                                          body, hdrs, opts);
+            }
+            throw RuntimeError(
+                "http.post() requires either (url, body|opts) or (session, url, body|opts)", 0);
+        }));
+
+    httpMap->entries[Value("request")] = Value(makeNative("http.request", -1,
+        [&applyHttpOpts, &layerHeaders](const std::vector<Value>& args) -> Value {
+            // http.request(opts)              → stateless
+            // http.request(session, opts)     → session-bound
+            const Value* sessionArg = nullptr;
+            const Value* optsArg    = nullptr;
+            if (args.size() == 1 && args[0].isMap()) {
+                optsArg = &args[0];
+            } else if (args.size() == 2 && httpIsSession(args[0]) && args[1].isMap()) {
+                sessionArg = &args[0];
+                optsArg    = &args[1];
+            } else {
+                throw RuntimeError(
+                    "http.request() requires (opts) or (session, opts)", 0);
+            }
+
+            auto& opts = optsArg->asMap()->entries;
             std::string method = "GET", url, body;
-            std::unordered_map<std::string, std::string> headers;
             if (opts.count("method")) method = opts.at("method").toString();
             if (opts.count("url")) url = opts.at("url").toString();
             else throw RuntimeError("http.request() requires a 'url' field", 0);
             if (opts.count("body")) body = opts.at("body").toString();
-            if (opts.count("headers") && opts.at("headers").isMap()) {
-                for (auto& [k, v] : opts.at("headers").asMap()->entries)
-                    headers[k.toString()] = v.toString();
+
+            // Base values: from session if present, else fresh defaults.
+            HttpOptions httpOpts = sessionArg
+                ? httpSessionGetDefaultOpts(*sessionArg) : HttpOptions{};
+            std::unordered_map<std::string, std::string> baseHeaders;
+            if (sessionArg) baseHeaders = httpSessionGetDefaultHeaders(*sessionArg);
+
+            applyHttpOpts(httpOpts, opts);
+            auto headers = layerHeaders(std::move(baseHeaders), opts);
+
+            return sessionArg
+                ? httpSessionRequest(*sessionArg, method, url, body, headers, httpOpts)
+                : doHttpRequest(method, url, body, headers, httpOpts);
+        }));
+
+    // http.session(opts?) — create a keepalive session. Accepts the
+    // same options shape as http.request, plus a top-level `headers`
+    // map for session-default request headers. Returns an opaque
+    // PraiaExternal (prints as <external:http.session>); use it as
+    // the first arg to http.get/post/request, and close with
+    // http.close (or let the GC do it).
+    httpMap->entries[Value("session")] = Value(makeNative("http.session", -1,
+        [&applyHttpOpts, &layerHeaders](const std::vector<Value>& args) -> Value {
+            if (args.size() > 1)
+                throw RuntimeError("http.session() takes 0 or 1 argument", 0);
+            HttpOptions defaultOpts;
+            std::unordered_map<std::string, std::string> defaultHeaders;
+            if (args.size() == 1) {
+                if (!args[0].isMap())
+                    throw RuntimeError("http.session() options must be a map", 0);
+                auto& m = args[0].asMap()->entries;
+                applyHttpOpts(defaultOpts, m);
+                defaultHeaders = layerHeaders({}, m);
             }
+            return httpCreateSession(defaultOpts, defaultHeaders);
+        }));
 
-            // Build the HttpOptions from the same options map. All
-            // fields are optional with sensible defaults; numeric
-            // timeouts are in seconds at the user-facing API (matches
-            // how every HTTP client in the wild documents them) and
-            // converted to ms here.
-            HttpOptions httpOpts;
-            auto secsToMs = [](const Value& v) -> int {
-                if (!v.isNumber()) return -1;
-                double secs = v.asNumber();
-                if (secs <= 0) return -1;
-                return static_cast<int>(secs * 1000.0);
-            };
-            if (opts.count("timeout")) {
-                // `timeout: N` is shorthand for "use N seconds for
-                // everything" — connect, read, AND total budget all
-                // get the same value. Matches Python requests' simple
-                // `timeout=10` form.
-                int ms = secsToMs(opts.at("timeout"));
-                if (ms > 0) {
-                    httpOpts.connectTimeoutMs = ms;
-                    httpOpts.readTimeoutMs    = ms;
-                    httpOpts.totalTimeoutMs   = ms;
-                }
-            }
-            // Per-axis overrides win over the shorthand.
-            if (opts.count("connectTimeout"))
-                httpOpts.connectTimeoutMs = secsToMs(opts.at("connectTimeout"));
-            if (opts.count("readTimeout"))
-                httpOpts.readTimeoutMs    = secsToMs(opts.at("readTimeout"));
-            if (opts.count("totalTimeout"))
-                httpOpts.totalTimeoutMs   = secsToMs(opts.at("totalTimeout"));
-
-            if (opts.count("followRedirects") && opts.at("followRedirects").isBool())
-                httpOpts.followRedirects = opts.at("followRedirects").asBool();
-            if (opts.count("maxRedirects") && opts.at("maxRedirects").isNumber())
-                httpOpts.maxRedirects =
-                    static_cast<int>(opts.at("maxRedirects").asNumber());
-
-            if (opts.count("insecure") && opts.at("insecure").isBool())
-                httpOpts.insecure = opts.at("insecure").asBool();
-            if (opts.count("caBundle") && opts.at("caBundle").isString())
-                httpOpts.caBundle = opts.at("caBundle").asString();
-
-            return doHttpRequest(method, url, body, headers, httpOpts);
+    httpMap->entries[Value("close")] = Value(makeNative("http.close", 1,
+        [](const std::vector<Value>& args) -> Value {
+            httpSessionClose(args[0]);
+            return Value();
         }));
 
     // http.openStream(opts) — same option surface as http.request,
