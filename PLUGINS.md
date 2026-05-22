@@ -213,10 +213,12 @@ extern "C" void praia_register(PraiaMap* module) {
 
 | Storage shape | Pin needed? |
 |---|---|
-| Local `Value` in a single native call | No. The C++ stack frame keeps it alive. |
-| `Value` argument received in a native call | No. The caller's frame holds it. |
+| Local `Value` / `Value` argument in a non-reentrant native call | No. The C++ stack frame keeps the `shared_ptr` alive, and nothing else runs between native entry and return to trigger a sweep. |
+| Local `Value` / argument across a `praia::call` callback, async yield, or any other reentrant path | **Yes.** Re-entering the interpreter can run a GC sweep on this thread. The C++ stack pins the `shared_ptr` (so the object's address stays valid) but the sweep can still clear the object's *internal* references — see [Scope guard (RAII)](#scope-guard-raii) below. |
 | `Value` stashed in C++ static / global between calls | **Yes.** |
 | `Value` inside a `PraiaExternal`'s opaque data (e.g. an SQLite connection wrapper) | **Yes, if the stored Value is GC-tracked.** The external itself is GC-tracked, but its `data` field is just `void*` — the GC doesn't know to walk inside. Pin any Praia Values you store there. |
+
+The rule in one sentence: **a local `Value` is safe without a pin only while no Praia code can run on this thread**. The moment you call back into the interpreter — directly via `praia::call`, indirectly via anything that allocates Praia objects, or implicitly across an async yield — a sweep can fire and the value's internals are exposed.
 
 ### When you don't
 
@@ -224,7 +226,7 @@ Values that aren't GC-tracked (numbers, strings, bools, nil) accept `pinValue` h
 
 ### Scope guard (RAII)
 
-For short-lived holds inside a native function — e.g. saving an argument across a `praia::call` that recursively triggers GC — use `PinnedValue`. Move-only; pin on construction, unpin on destruction.
+For short-lived holds inside a native function — saving an argument across a `praia::call` that recursively triggers GC, or buffering a value across any other re-entrant path — use `PinnedValue`. Move-only; pin on construction, unpin on destruction; bound to the heap it pinned against so a moved guard releases against the correct registry.
 
 ```cpp
 module->entries["recurseSafely"] = Value(makeNative("mod.recurseSafely", 2,
@@ -237,6 +239,8 @@ module->entries["recurseSafely"] = Value(makeNative("mod.recurseSafely", 2,
         return keepAlive.get();
     }));
 ```
+
+This is the same situation the table's second row points at: a local/argument value that crosses a re-entrant boundary. Reach for `PinnedValue` (or the lower-level `pinValue` / `unpinValue` pair) whenever a value has to survive a call back into the interpreter.
 
 ### Common bugs
 

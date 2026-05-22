@@ -319,10 +319,23 @@ inline T* getExternal(const Value& v, const char* typeName) {
 // For short-lived holds (inside a single native call), use the
 // PinnedValue scope guard below instead.
 inline void pinValue(const Value& v) {
+    // Pinning on a thread without an active interpreter would silently
+    // register the value in an orphan thread-local GcHeap that nothing
+    // ever marks — the pin would do nothing, and the user would have no
+    // hint that they're mis-wired. Catch it loudly. Matches the same
+    // check in praia::call for callable invocation.
+    if (!currentExecutor()) {
+        throw RuntimeError(
+            "praia::pinValue invoked with no active Praia executor on this thread", 0);
+    }
     GcHeap::current().pinValue(v);
 }
 
 inline void unpinValue(const Value& v) {
+    if (!currentExecutor()) {
+        throw RuntimeError(
+            "praia::unpinValue invoked with no active Praia executor on this thread", 0);
+    }
     GcHeap::current().unpinValue(v);
 }
 
@@ -333,29 +346,60 @@ inline void unpinValue(const Value& v) {
 // patterns like an init-time callback registration that never
 // goes back through Praia).
 //
+// Thread binding: each GcHeap is thread-local. The guard records
+// the heap it pinned against at construction and unpins against
+// the SAME heap on destruction. That way moving the guard
+// (intentionally or via container reallocation) inside one thread
+// keeps working, but using a guard cross-thread fails loudly:
+// the constructor throws if there's no active executor, and
+// move-assign carries the bound heap across so the eventual
+// unpin lands in the right registry.
+//
 // Example:
 //
 //   {
 //       praia::PinnedValue pin(someValue);
 //       // someValue protected from GC while `pin` is in scope.
 //       expensiveOperation(someValue);
-//   }   // unpinned here.
+//   }   // unpinned here on the same heap that pinned.
 class PinnedValue {
 public:
-    explicit PinnedValue(const Value& v) : v_(v), pinned_(true) {
-        pinValue(v_);
+    explicit PinnedValue(const Value& v)
+        : v_(v), heap_(nullptr), pinned_(false) {
+        // Refuse to register against an orphan heap (no executor =>
+        // this thread isn't running Praia code; any pin would just
+        // leak into a GcHeap nothing ever sweeps).
+        if (!currentExecutor()) {
+            throw RuntimeError(
+                "praia::PinnedValue constructed with no active Praia executor on this thread", 0);
+        }
+        heap_ = &GcHeap::current();
+        heap_->pinValue(v_);
+        pinned_ = true;
     }
-    ~PinnedValue() { if (pinned_) unpinValue(v_); }
+
+    ~PinnedValue() {
+        // Always release against the heap we pinned to — not against
+        // GcHeap::current(), which on a different thread would be a
+        // different heap with no record of our pin. If the destructor
+        // genuinely fires on a different thread the plugin has a bug
+        // (we can't throw from here), but using the stored heap at
+        // least keeps the registry consistent on the right thread.
+        if (pinned_ && heap_) heap_->unpinValue(v_);
+    }
 
     PinnedValue(PinnedValue&& other) noexcept
-        : v_(std::move(other.v_)), pinned_(other.pinned_) {
+        : v_(std::move(other.v_)), heap_(other.heap_), pinned_(other.pinned_) {
+        other.heap_   = nullptr;
         other.pinned_ = false;
     }
     PinnedValue& operator=(PinnedValue&& other) noexcept {
         if (this != &other) {
-            if (pinned_) unpinValue(v_);
-            v_ = std::move(other.v_);
+            if (pinned_ && heap_) heap_->unpinValue(v_);
+            v_      = std::move(other.v_);
+            heap_   = other.heap_;
             pinned_ = other.pinned_;
+            other.heap_   = nullptr;
             other.pinned_ = false;
         }
         return *this;
@@ -366,8 +410,9 @@ public:
     const Value& get() const { return v_; }
 
 private:
-    Value v_;
-    bool  pinned_;
+    Value    v_;
+    GcHeap*  heap_;
+    bool     pinned_;
 };
 
 }  // namespace praia
