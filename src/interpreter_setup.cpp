@@ -1895,10 +1895,13 @@ Interpreter::Interpreter() {
                 }
                 if (m.count("poolIdleSecs") && m.at("poolIdleSecs").isNumber()) {
                     double secs = m.at("poolIdleSecs").asNumber();
-                    // NaN / Inf reject — same UB reason. Cap at INT_MAX ms
-                    // so the secs * 1000 multiplication doesn't overflow.
+                    // NaN / Inf reject always (cast to int is UB). The
+                    // INT_MAX/1000 overflow bound only applies to positive
+                    // values — anything <= 0 collapses to 0 below ("disable
+                    // TTL"), so a large negative like -1e18 is a valid
+                    // way to say "no timeout." Don't reject it.
                     if (!std::isfinite(secs) ||
-                        std::fabs(secs) * 1000.0 > static_cast<double>(INT_MAX)) {
+                        (secs > 0 && secs * 1000.0 > static_cast<double>(INT_MAX))) {
                         throw RuntimeError(
                             "http.session(): poolIdleSecs must be a finite "
                             "value below INT_MAX/1000 seconds", 0);

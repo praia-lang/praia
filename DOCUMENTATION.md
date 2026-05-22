@@ -3391,16 +3391,21 @@ let s = http.session({poolSize: 20, poolIdleSecs: 30})
 ###### When to tune
 
 - **Lower `poolSize`** for crawler-style or multi-host workloads that touch hundreds of unique hosts in one session — bounds memory and FD usage.
+
   ```praia
   let s = http.session({poolSize: 10})
   ```
+
 - **Raise `poolSize`** when you talk to a small set of hosts at high concurrency. `poolSize` only matters across distinct host:port keys; the default 100 is fine for the common one-at-a-time case but is overkill if you only touch ≤ 2 hosts.
 - **Lower `poolIdleSecs`** when the upstream server's keepalive timeout is shorter than the default 90 s (some load balancers default to 30 s or 60 s). Going below the server's timeout avoids the stale-conn-EPIPE retry that fires when you reuse a conn the server already closed.
+
   ```praia
   let s = http.session({poolIdleSecs: 25})    // upstream times out at 30s
   ```
+
 - **Raise `poolIdleSecs`** when the server keeps idle conns alive longer than 90 s AND your workload has bursts separated by long quiet periods — reuses more, reconnects less.
 - **`poolIdleSecs: 0`** disables the TTL entirely. Use when you know the server's keepalive is unbounded (e.g., a local microservice).
+
   ```praia
   let s = http.session({poolIdleSecs: 0})
   ```

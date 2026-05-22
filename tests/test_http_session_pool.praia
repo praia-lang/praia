@@ -122,16 +122,29 @@ let p2 = net.localAddr(l2).port
 let l3 = net.listen(0)
 let p3 = net.localAddr(l3).port
 
+// Keepalive-friendly serve loops: each conn stays open across
+// requests (no Connection: close, no immediate net.close) so the
+// client actually pools the idle conn. Without this, the server's
+// immediate FIN would make the next sessionTakeIdle's poll-probe
+// discard the entry — which would short-circuit LRU eviction and
+// give the tests a false-positive pass.
 let _f2 = async lam{ in
     while (true) {
         let c = net.accept(l2)
-        let req = ""
-        while (!req.contains("\r\n\r\n")) {
-            let ch = net.recv(c, 4096)
-            if (len(ch) == 0) { break }
-            req = req + ch
+        let connKeepalive = true
+        while (connKeepalive) {
+            let req = ""
+            while (!req.contains("\r\n\r\n")) {
+                let ch = net.recv(c, 4096)
+                if (len(ch) == 0) {
+                    connKeepalive = false
+                    break
+                }
+                req = req + ch
+            }
+            if (!connKeepalive) { break }
+            net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nB")
         }
-        net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nB")
         net.close(c)
     }
 }()
@@ -139,13 +152,20 @@ let _f2 = async lam{ in
 let _f3 = async lam{ in
     while (true) {
         let c = net.accept(l3)
-        let req = ""
-        while (!req.contains("\r\n\r\n")) {
-            let ch = net.recv(c, 4096)
-            if (len(ch) == 0) { break }
-            req = req + ch
+        let connKeepalive = true
+        while (connKeepalive) {
+            let req = ""
+            while (!req.contains("\r\n\r\n")) {
+                let ch = net.recv(c, 4096)
+                if (len(ch) == 0) {
+                    connKeepalive = false
+                    break
+                }
+                req = req + ch
+            }
+            if (!connKeepalive) { break }
+            net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nC")
         }
-        net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nC")
         net.close(c)
     }
 }()
