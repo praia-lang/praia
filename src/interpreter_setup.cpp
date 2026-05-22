@@ -1907,9 +1907,15 @@ Interpreter::Interpreter() {
                             "value below INT_MAX/1000 seconds", 0);
                     }
                     // 0 / negative is a deliberate "disable the TTL" toggle —
-                    // pass it through. Positive values convert to ms;
+                    // pass it through as 0. Positive values convert to ms;
                     // fractional seconds are allowed (e.g. 0.1 = 100 ms).
-                    poolIdleMs = secs <= 0 ? 0 : static_cast<int>(secs * 1000.0);
+                    // Round UP rather than truncate so sub-millisecond
+                    // positives (0.0005 → 0.5 ms) don't collapse to 0 and
+                    // accidentally disable the TTL — every positive value
+                    // gets at least a 1 ms timeout.
+                    poolIdleMs = secs <= 0
+                        ? 0
+                        : static_cast<int>(std::ceil(secs * 1000.0));
                 }
             }
             // The struct's own defaults kick in when we pass -1 (or
