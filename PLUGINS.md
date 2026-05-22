@@ -168,6 +168,82 @@ If your wrapped resource holds back-references into Praia (e.g. a callback regis
 
 A Value that prints as `<external:typeName>`, passes through assignments / function calls / arrays / maps unchanged, and can't be used as a map key (the underlying pointer isn't hashable). The typeName isn't accessible via any API or field — but it IS visible in string form (`str(h)`, `print(h)`, REPL output) as part of the `<external:...>` rendering. Treat that string output as a diagnostic label, not a stable contract; for type checks, use `praia::getExternal<T>` on the C++ side.
 
+## GC roots: stashing Values across native calls
+
+If your plugin stashes a Praia `Value` in C++ static / global storage that outlives the native function call — a callback table, a cache, a singleton — you **must** pin it as a GC root. Otherwise the next garbage collection treats the value as unreachable and the sweep hollows out the underlying object's internal references. The `shared_ptr` you held stays valid, but the object is empty: a stashed `Callable` finds an empty closure environment, a cached `PraiaMap` finds its entries cleared.
+
+`praia::pinValue` registers the value with the current thread's `GcHeap` so the mark phase visits it on every collection. Reference-counted by multiplicity: pin N times means N unpins to release. The matching uses last-in-first-out, so nested RAII pin/unpin pairs work without bookkeeping.
+
+```cpp
+#include "praia_plugin.h"
+#include <unordered_map>
+
+namespace {
+std::unordered_map<std::string, Value> g_callbacks;
+}
+
+extern "C" void praia_register(PraiaMap* module) {
+    module->entries["on"] = Value(makeNative("mod.on", 2,
+        [](const std::vector<Value>& args) -> Value {
+            auto& name = praia::requireString(args, 0, "mod.on");
+            auto  cb   = praia::requireCallable(args, 1, "mod.on");
+            // Release the old pin BEFORE overwriting the map slot —
+            // otherwise the old value leaks a pin forever.
+            auto it = g_callbacks.find(name);
+            if (it != g_callbacks.end()) praia::unpinValue(it->second);
+            praia::pinValue(args[1]);
+            g_callbacks[name] = args[1];
+            return Value();
+        }));
+
+    module->entries["fire"] = Value(makeNative("mod.fire", 1,
+        [](const std::vector<Value>& args) -> Value {
+            auto& name = praia::requireString(args, 0, "mod.fire");
+            auto it = g_callbacks.find(name);
+            if (it == g_callbacks.end()) return Value();
+            // Safe to call: the pin kept the callable's closure
+            // environment alive across however many GC sweeps fired
+            // between `mod.on(...)` and now.
+            return praia::call(it->second.asCallable(), {});
+        }));
+}
+```
+
+### When you need this
+
+| Storage shape | Pin needed? |
+|---|---|
+| Local `Value` in a single native call | No. The C++ stack frame keeps it alive. |
+| `Value` argument received in a native call | No. The caller's frame holds it. |
+| `Value` stashed in C++ static / global between calls | **Yes.** |
+| `Value` inside a `PraiaExternal`'s opaque data (e.g. an SQLite connection wrapper) | **Yes, if the stored Value is GC-tracked.** The external itself is GC-tracked, but its `data` field is just `void*` — the GC doesn't know to walk inside. Pin any Praia Values you store there. |
+
+### When you don't
+
+Values that aren't GC-tracked (numbers, strings, bools, nil) accept `pinValue` harmlessly — the registry adds the entry, the mark phase no-ops on the unwrappable type, and the sweep can't break anything anyway. There's no need to type-check before pinning.
+
+### Scope guard (RAII)
+
+For short-lived holds inside a native function — e.g. saving an argument across a `praia::call` that recursively triggers GC — use `PinnedValue`. Move-only; pin on construction, unpin on destruction.
+
+```cpp
+module->entries["recurseSafely"] = Value(makeNative("mod.recurseSafely", 2,
+    [](const std::vector<Value>& args) -> Value {
+        praia::PinnedValue keepAlive(args[0]);   // pin until scope exit
+        // The Praia callback might internally trigger GC pressure.
+        // Without `keepAlive`, args[0]'s captured env could be cleared
+        // mid-call — even though args[0] is still on the C++ stack.
+        praia::call(args[1].asCallable(), {});
+        return keepAlive.get();
+    }));
+```
+
+### Common bugs
+
+- **Replace-without-unpin.** Storing a new value in a slot you already pinned without unpinning the old one leaks a pin every time. The old value stays a root forever; eventually the registry walks slow as it grows.
+- **Unpin-without-pin.** `praia::unpinValue(v)` is silent on a missing match — won't crash, but also won't tell you the bookkeeping is off.
+- **Pinning the wrong thread's heap.** Each thread has its own `GcHeap`. Pin in the thread that holds the C++ storage. If your plugin spans threads, pin per-thread or pin only on the owning thread.
+
 ## Plugin API
 
 ### Entry point

@@ -28,6 +28,24 @@ public:
     void markValue(const Value& v);
     void markEnvironment(Environment* env);
 
+    // GC root pinning for plugin-held Values. A native plugin that
+    // stashes a Value in C++ static / global storage between calls
+    // (callback table, cache, singleton) MUST pin it — the value
+    // isn't reachable from the interpreter's roots and would be
+    // hollowed out by the next sweep (the shared_ptr stays valid,
+    // but the underlying object's internal references get cleared).
+    //
+    // Reference-counted by multiplicity: pinning the same value N
+    // times requires N unpins to release. Last-in-first-out matching
+    // (unpin removes the most recently inserted match) keeps RAII
+    // pin/unpin pairs nesting cleanly.
+    //
+    // Non-GC-tracked values (numbers, strings, bools, nil) are
+    // accepted but never need pinning; storing them in the registry
+    // is a harmless no-op as far as the sweep is concerned.
+    void pinValue(const Value& v);
+    void unpinValue(const Value& v);
+
     // Collection control
     using RootMarker = std::function<void(GcHeap&)>;
     void setRootMarker(RootMarker marker);
@@ -47,6 +65,9 @@ private:
 
     std::vector<GcEntry> entries_;
     std::unordered_set<void*> marked_;
+    // Plugin-pinned values — see pinValue/unpinValue. Marked alongside
+    // the interpreter's own roots on every collection.
+    std::vector<Value> pinned_;
     RootMarker rootMarker_;
     int allocsSinceGc_ = 0;
     int lastCollected_ = 0;

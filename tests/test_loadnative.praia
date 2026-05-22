@@ -254,4 +254,66 @@ testing.test("opaque handle: destructor fires under GC pressure", lam{ in
         "600 handles created, 600 destructors fired")
 })
 
+// ── GC root pinning (praia::pinValue / unpinValue) ────────────
+
+// Build a callback whose captured environment is *only* reachable
+// through the returned Callable. Critical: defining the lambda inside
+// a helper that then returns means the helper's frame env is no
+// longer on the call stack — so the only path the GC has to reach
+// the captured `secret` upvalue is via the plugin's pinned Value.
+// Putting the lambda inline in the test would leave the test's own
+// frame env on the stack, marking the captured env "for free" and
+// silently masking a missing pin.
+func _makePinTestCallback(payload) {
+    return lam{ in return payload }
+}
+
+testing.test("plugin-pinned callback survives GC pressure", lam{ in
+    counter.setStored(_makePinTestCallback("alive"))
+    // _makePinTestCallback has returned — its frame env is no longer
+    // a root. The only thing keeping the closure (and its `payload`
+    // upvalue) alive is the plugin's C++ pin.
+    let h = nil
+    for (i in 0..600) {
+        h = counter.new()   // pure allocation churn — trips the GC
+    }
+    h = nil
+    let result = counter.callStored()
+    testing.assertEqual(result, "alive",
+        "pinned callback retained its environment across the sweep")
+    counter.clearStored()
+})
+
+testing.test("pinned callback's captured upvalues remain bound", lam{ in
+    // Same shape as above but proves the *bound value* on the
+    // upvalue survives — not just the slot. Without pinning, the
+    // sweep would `env->variables.clear()` and the lookup would
+    // either throw or return nil.
+    counter.setStored(_makePinTestCallback("praia-pinning-works"))
+    let h = nil
+    for (i in 0..600) {
+        h = counter.new()
+    }
+    h = nil
+    testing.assertEqual(counter.callStored(), "praia-pinning-works",
+        "upvalue value survived the sweep alongside the closure")
+    counter.clearStored()
+})
+
+testing.test("clearStored unpins so the closure becomes collectable", lam{ in
+    // After clearStored() releases the pin AND drops the C++ stash,
+    // there are no remaining references to the closure — the next
+    // GC sweep is free to collect it. We can't directly observe
+    // closure collection (no destructor count for Callables), but
+    // we can verify the slot was cleared by re-calling callStored
+    // and asserting it now throws the "no callback stored" error
+    // rather than reusing a stale binding.
+    counter.setStored(lam{ in return 42 })
+    counter.clearStored()
+    let err = nil
+    try { counter.callStored() } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw after clearStored")
+    testing.assert(err.contains("no callback stored"), str(err))
+})
+
 testing.done()

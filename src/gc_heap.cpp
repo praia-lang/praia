@@ -84,7 +84,30 @@ void GcHeap::collect() {
 // ── Mark phase ──
 
 void GcHeap::mark() {
-    rootMarker_(*this);
+    if (rootMarker_) rootMarker_(*this);
+    // Plugin-pinned values: same reachability semantics as the
+    // interpreter's roots — anything reachable from a pinned value
+    // survives the sweep. Walked here so the interpreter's marker
+    // doesn't need to know about plugin state.
+    for (const auto& v : pinned_) markValue(v);
+}
+
+void GcHeap::pinValue(const Value& v) {
+    pinned_.push_back(v);
+}
+
+void GcHeap::unpinValue(const Value& v) {
+    // Walk back-to-front so the most recently pinned matching entry
+    // wins — gives RAII guards LIFO semantics. Linear in pin count,
+    // which is fine for the realistic case of "a handful of pinned
+    // callbacks/caches per plugin"; if a plugin pins thousands of
+    // values, replace with a hash-multiset.
+    for (auto it = pinned_.rbegin(); it != pinned_.rend(); ++it) {
+        if (*it == v) {
+            pinned_.erase(std::next(it).base());
+            return;
+        }
+    }
 }
 
 void GcHeap::markValue(const Value& v) {

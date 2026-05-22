@@ -280,4 +280,94 @@ inline T* getExternal(const Value& v, const char* typeName) {
     return static_cast<T*>(ext->data);
 }
 
+// ── GC root pinning ────────────────────────────────────────────
+//
+// A native plugin that stashes a Praia Value in C++ static / global
+// storage between calls (callback registries, caches, singletons)
+// MUST pin it for the lifetime it's reachable from C++. Without a
+// pin, the next garbage collection treats the value as unreachable
+// (it's not in the interpreter's roots) and *clears the underlying
+// object's internal references during the sweep*. The shared_ptr
+// you held stays valid, but the object is hollow — calling a
+// stashed Callable finds an empty Environment, reading a cached
+// PraiaMap finds its entries cleared, etc.
+//
+// `pinValue` / `unpinValue` are reference-counted by multiplicity:
+// pin N times → unpin N times to actually release. Last-in-first-
+// out matching keeps nested RAII pin/unpin pairs unambiguous.
+//
+// Non-GC-tracked values (numbers, strings, bools, nil) accept pins
+// harmlessly — they have nothing for the sweep to clear, so the
+// pin is a no-op on the mark side.
+//
+// Example: a callback table.
+//
+//   static std::unordered_map<std::string, Value> g_callbacks;
+//
+//   module->entries["on"] = Value(makeNative("mod.on", 2,
+//       [](const std::vector<Value>& args) -> Value {
+//           auto& name = praia::requireString(args, 0, "mod.on");
+//           auto  cb   = praia::requireCallable(args, 1, "mod.on");
+//           auto it = g_callbacks.find(name);
+//           if (it != g_callbacks.end())
+//               praia::unpinValue(it->second);   // release old
+//           praia::pinValue(args[1]);            // hold new
+//           g_callbacks[name] = args[1];
+//           return Value();
+//       }));
+//
+// For short-lived holds (inside a single native call), use the
+// PinnedValue scope guard below instead.
+inline void pinValue(const Value& v) {
+    GcHeap::current().pinValue(v);
+}
+
+inline void unpinValue(const Value& v) {
+    GcHeap::current().unpinValue(v);
+}
+
+// RAII scope guard: pin on construction, unpin on destruction.
+// Move-only — copy would double-unpin. Lifetime is whatever C++
+// scope holds the guard; storing it in a static container extends
+// the pin to the container's lifetime (useful for "pin forever"
+// patterns like an init-time callback registration that never
+// goes back through Praia).
+//
+// Example:
+//
+//   {
+//       praia::PinnedValue pin(someValue);
+//       // someValue protected from GC while `pin` is in scope.
+//       expensiveOperation(someValue);
+//   }   // unpinned here.
+class PinnedValue {
+public:
+    explicit PinnedValue(const Value& v) : v_(v), pinned_(true) {
+        pinValue(v_);
+    }
+    ~PinnedValue() { if (pinned_) unpinValue(v_); }
+
+    PinnedValue(PinnedValue&& other) noexcept
+        : v_(std::move(other.v_)), pinned_(other.pinned_) {
+        other.pinned_ = false;
+    }
+    PinnedValue& operator=(PinnedValue&& other) noexcept {
+        if (this != &other) {
+            if (pinned_) unpinValue(v_);
+            v_ = std::move(other.v_);
+            pinned_ = other.pinned_;
+            other.pinned_ = false;
+        }
+        return *this;
+    }
+    PinnedValue(const PinnedValue&) = delete;
+    PinnedValue& operator=(const PinnedValue&) = delete;
+
+    const Value& get() const { return v_; }
+
+private:
+    Value v_;
+    bool  pinned_;
+};
+
 }  // namespace praia
