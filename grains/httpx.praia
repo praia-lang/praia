@@ -1,0 +1,125 @@
+// httpx: HTTP session with auto-threaded cookies.
+//
+// Composes the two existing primitives without adding any C++:
+//   - http.session() for TCP/TLS keepalive + default opts/headers.
+//   - cookie.Jar() for RFC 6265 cookie tracking.
+//
+// Every request through the session:
+//   1. Reads the jar for matching cookies and attaches a Cookie header
+//      (only if the caller didn't supply one — caller wins on override).
+//   2. Issues the request via the keepalive session.
+//   3. Feeds response Set-Cookie back into the jar.
+//
+// Usage:
+//   use "httpx"
+//
+//   let s = httpx.session({headers: {"User-Agent": "my-app/1.0"}})
+//   let r1 = s.post("https://api.example.com/login", '{"u":"x","p":"y"}')
+//   // Set-Cookie absorbed into s.jar
+//   let r2 = s.get("https://api.example.com/profile")
+//   // Cookie header attached from s.jar
+//   s.close()
+//
+// Options map mirrors http.session's shape (timeout, connectTimeout,
+// readTimeout, totalTimeout, followRedirects, maxRedirects, insecure,
+// caBundle, headers). The extra `jar` key, if present, is used as the
+// session's cookie jar — pass a pre-populated cookie.Jar() to resume
+// state across runs, or omit and the session creates an empty one.
+
+use "cookie"
+
+class Session {
+    func init(opts) {
+        opts = opts ?? {}
+        // Use a caller-supplied jar if provided so cookies can persist
+        // across Session instances (e.g., loaded from disk). Otherwise
+        // create an empty one. The C++ http.session ignores unknown
+        // keys, so passing the whole opts map through is safe.
+        this._jar = opts.jar ?? cookie.Jar()
+        this._session = http.session(opts)
+        this._closed = false
+    }
+
+    // Three shorthand verbs that mirror the polymorphic http.* surface.
+    // Each forwards into _dispatch with method/url normalized into a
+    // single options map so the cookie-threading lives in one place.
+
+    func get(url, opts) {
+        return this._dispatch("GET", url, nil, opts)
+    }
+
+    func post(url, body, opts) {
+        return this._dispatch("POST", url, body, opts)
+    }
+
+    func request(opts) {
+        if (!opts) { throw "httpx.Session.request() requires an options map" }
+        let method = opts.method ?? "GET"
+        let url    = opts.url
+        if (!url) { throw "httpx.Session.request() requires opts.url" }
+        let body   = opts.body
+        return this._dispatch(method, url, body, opts)
+    }
+
+    func _dispatch(method, url, body, opts) {
+        if (this._closed) {
+            throw "httpx.Session is closed"
+        }
+        // Copy opts so we don't mutate the caller's map. Praia's map
+        // spread builds a fresh map; subsequent assignments are local.
+        let merged = opts != nil ? {...opts} : {}
+        merged.method = method
+        merged.url    = url
+        if (body != nil) { merged.body = body }
+
+        // Strip the wrapper-only `jar` key — http.session already
+        // consumed it at construction; passing it through is harmless
+        // but keeps the options map clean for debugging output.
+        merged.jar = nil
+
+        // Layer the jar's Cookie header. Caller-supplied Cookie wins
+        // (matches Set-Cookie semantics: the caller is overriding).
+        // HTTP header names are case-insensitive, so any-case "cookie"
+        // counts as the caller having set it — checking only "Cookie"
+        // would silently shadow a lowercase header with the jar value.
+        let headers = merged.headers != nil ? {...merged.headers} : {}
+        let callerHasCookie = false
+        for (k in keys(headers)) {
+            if (k.lower() == "cookie") {
+                callerHasCookie = true
+                break
+            }
+        }
+        if (!callerHasCookie) {
+            let h = this._jar.headerFor(url)
+            if (h != "") { headers.Cookie = h }
+        }
+        merged.headers = headers
+
+        let r = http.request(this._session, merged)
+        // acceptResponse no-ops on missing response.cookies, so a bare
+        // GET with no Set-Cookie just passes through.
+        this._jar.acceptResponse(url, r)
+        return r
+    }
+
+    // Accessors for introspection. Returning the jar by reference is
+    // intentional — callers may want to mutate it (clear, inspect)
+    // and have the next request reflect that.
+    func jar() { return this._jar }
+
+    // Idempotent close — mirrors http.close's contract. After close,
+    // any request method throws "httpx.Session is closed".
+    func close() {
+        if (this._closed) { return }
+        http.close(this._session)
+        this._closed = true
+    }
+}
+
+// Factory matching the cookie.Jar() / http.session() naming.
+func session(opts) {
+    return Session(opts)
+}
+
+export { Session, session }

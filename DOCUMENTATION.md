@@ -3379,7 +3379,7 @@ If the session goes out of scope without an explicit close, the GC's sweep runs 
 
 ##### What's not in this session yet
 
-- **No cookie jar.** Use the `cookie` grain's `Jar` class for client-side cookie tracking; the session response's `cookies` array still surfaces incoming `Set-Cookie` headers.
+- **No cookie jar.** Use the [`httpx` grain](#cookie-aware-sessions--httpx) for auto-threaded cookies on top of `http.session`, or the lower-level `cookie.Jar` directly. The session response's `cookies` array still surfaces incoming `Set-Cookie` headers either way.
 - **No `http.openStream` integration.** Streaming responses always open a fresh connection. Session-pooled streaming would need pool-vs-stream lifetime mediation that wasn't worth landing alongside the buffered-request session.
 
 #### Streaming responses — `http.openStream`
@@ -3651,6 +3651,55 @@ http.decodeURI("hello%20world")    // "hello world"
 ```
 
 `encodeURI` leaves unreserved characters (`A-Z a-z 0-9 - _ . ~`) as-is and percent-encodes everything else. `decodeURI` reverses `%XX` sequences. Use these when building URLs with user input to prevent injection.
+
+### Cookie-aware sessions — `httpx`
+
+The `httpx` grain composes `http.session` (TCP/TLS keepalive + default opts/headers) with `cookie.Jar` (RFC 6265 client-side cookie tracking). Every request through an `httpx.Session`:
+
+1. Attaches a `Cookie` header for cookies in the jar that match the URL (unless the caller already set `Cookie` explicitly — caller wins).
+2. Issues the request via the underlying `http.session`.
+3. Feeds any `Set-Cookie` headers from the response back into the jar.
+
+```
+use "httpx"
+
+let s = httpx.session({headers: {"User-Agent": "my-app/1.0"}})
+
+let login = s.post("https://api.example.com/login", json.stringify({u: "x", p: "y"}))
+// Set-Cookie from the response is absorbed into s.jar().
+
+let profile = s.get("https://api.example.com/profile")
+// Cookie header is automatically attached.
+
+s.close()
+```
+
+`httpx.session(opts?)` returns a `Session` instance. Methods mirror the underlying `http.*` shapes:
+
+| Method | Calls |
+|--------|-------|
+| `s.get(url, opts?)` | `http.get(s._session, url, ...)` with cookies threaded |
+| `s.post(url, body, opts?)` | `http.post(...)` with cookies threaded |
+| `s.request(opts)` | `http.request(...)` with cookies threaded |
+| `s.jar()` | The underlying `cookie.Jar` (mutable; call `.clear()` to drop all cookies) |
+| `s.close()` | Closes the underlying `http.session`. Idempotent. |
+
+The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `headers`) plus one extra key:
+
+- **`jar`** — if provided, the session uses this `cookie.Jar` instance instead of creating an empty one. Useful for resuming cookie state across runs (save with `jar.cookies()`, restore by constructing a jar with the saved entries) or for sharing one jar across multiple sessions.
+
+#### Caller-supplied Cookie wins
+
+Setting `headers: {Cookie: "..."}` on a per-call basis bypasses the jar for that call. The jar still ingests the response's `Set-Cookie` afterwards.
+
+```
+let r = s.request({url: someUrl,
+                   headers: {Cookie: "manual=override"}})
+```
+
+#### When to use `httpx` vs `http.session` + `cookie.Jar` directly
+
+Use `httpx` when you want cookies threaded automatically — the typical case for any script that follows a login flow or talks to a session-cookie-based API. Use `http.session` + `cookie.Jar` directly only when you need fine-grained control over when cookies are attached/ingested.
 
 ---
 
