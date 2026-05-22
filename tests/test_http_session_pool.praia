@@ -1,0 +1,233 @@
+use "testing"
+
+// Pool bounds + idle TTL + openStream-session. Separated from
+// test_http_session.praia because `praia test` subprocess-isolates
+// between files — gives this file fresh OS-level networking state
+// independent of the existing 56-case suite next door.
+
+let headerOf = lam{ req, name in
+    let needle = "\n" + name.lower() + ":"
+    let lower = req.lower()
+    let idx = lower.indexOf(needle)
+    if (idx < 0) { return "" }
+    let start = idx + len(needle)
+    let end = req.indexOf("\r\n", start)
+    if (end < 0) { return "" }
+    return req.slice(start, end).strip()
+}
+
+// One server, used by the openStream + idle-TTL tests. Keepalive on
+// the wire — no forced Connection: close — so the pool actually
+// caches the conn.
+let listener = net.listen(0)
+let TEST_PORT = net.localAddr(listener).port
+
+// Per-accept counter the server stamps onto every response as
+// X-Conn-Id. Two requests on the same kept-alive TCP conn carry the
+// same id; a fresh accept produces a new one. Tests that need to
+// prove reuse vs eviction read this header.
+let _serverFuture = async lam{ in
+    let connCounter = 0
+    while (true) {
+        let c = net.accept(listener)
+        connCounter = connCounter + 1
+        let myId = connCounter
+        let connKeepalive = true
+        while (connKeepalive) {
+            let req = ""
+            while (!req.contains("\r\n\r\n")) {
+                let chunk = net.recv(c, 4096)
+                if (len(chunk) == 0) {
+                    connKeepalive = false
+                    break
+                }
+                req = req + chunk
+            }
+            if (!connKeepalive) { break }
+            // Body = the User-Agent the server saw, so openStream-
+            // session tests can verify the default header threaded
+            // through.
+            let body = headerOf(req, "User-Agent")
+            net.send(c, "HTTP/1.1 200 OK\r\n" +
+                       "Content-Length: " + str(len(body.bytes())) + "\r\n" +
+                       "X-Conn-Id: " + str(myId) + "\r\n\r\n" +
+                       body)
+        }
+        net.close(c)
+    }
+}()
+
+let base = "http://localhost:" + str(TEST_PORT)
+
+// ── openStream(session, opts) ─────────────────────────────────
+
+testing.test("openStream(session, opts) inherits session default headers", lam{ in
+    let s = http.session({headers: {"User-Agent": "praia-pool-test/1.0"}})
+    let stream = http.openStream(s, {url: base + "/x"})
+    testing.assertEqual(stream.status, 200, nil)
+    let body = stream.readAll()
+    testing.assertEqual(body, "praia-pool-test/1.0",
+        "stream request carried the session-default User-Agent")
+    stream.close()
+    http.close(s)
+})
+
+testing.test("openStream() stateless path still works (one-arg)", lam{ in
+    let stream = http.openStream({url: base + "/x",
+                                    headers: {"User-Agent": "stateless-stream"}})
+    testing.assertEqual(stream.status, 200, nil)
+    let body = stream.readAll()
+    testing.assertEqual(body, "stateless-stream", nil)
+    stream.close()
+})
+
+testing.test("openStream() with bad arg shape throws", lam{ in
+    let err = nil
+    try { http.openStream(42) } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw on non-opts first arg")
+    testing.assert(err.contains("requires"), str(err))
+})
+
+// ── Idle TTL ──────────────────────────────────────────────────
+
+testing.test("poolIdleSecs drops a stale idle entry on next take", lam{ in
+    // Short TTL (100 ms). Sleep 200 ms between requests so the pooled
+    // conn is older than the TTL on the second take. Assert via the
+    // server's X-Conn-Id header that request 2 landed on a *new* TCP
+    // accept rather than reusing the pool entry — the proof that the
+    // TTL fired.
+    let s = http.session({poolIdleSecs: 0.1})
+    let r1 = http.get(s, base + "/ping")
+    testing.assertEqual(r1.status, 200, nil)
+    time.sleep(200)
+    let r2 = http.get(s, base + "/ping")
+    testing.assertEqual(r2.status, 200, nil)
+    testing.assert(r1.headers["x-conn-id"] != r2.headers["x-conn-id"],
+        "TTL must evict: second request should not reuse the stale conn " +
+        "(r1=" + str(r1.headers["x-conn-id"]) +
+        ", r2=" + str(r2.headers["x-conn-id"]) + ")")
+    http.close(s)
+})
+
+testing.test("poolIdleSecs: 0 disables the TTL (kept indefinitely)", lam{ in
+    // With TTL disabled, two sequential requests should reuse the
+    // pooled conn → same X-Conn-Id. (No sleep between requests, so
+    // no time-based discard could have fired anyway; the load-bearing
+    // bit is that disabling the TTL doesn't break reuse.)
+    let s = http.session({poolIdleSecs: 0})
+    let r1 = http.get(s, base + "/ping")
+    let r2 = http.get(s, base + "/ping")
+    testing.assertEqual(r1.headers["x-conn-id"], r2.headers["x-conn-id"],
+        "TTL=0 must reuse the pooled conn between back-to-back requests")
+    http.close(s)
+})
+
+// ── LRU eviction ──────────────────────────────────────────────
+
+// Three additional servers on three distinct ports so the pool key
+// (scheme://host:port) differs across them. With poolSize: 2 and 3
+// hosts touched in sequence, the LRU host gets evicted.
+let l2 = net.listen(0)
+let p2 = net.localAddr(l2).port
+let l3 = net.listen(0)
+let p3 = net.localAddr(l3).port
+
+// Keepalive-friendly serve loops: each conn stays open across
+// requests (no Connection: close, no immediate net.close) so the
+// client actually pools the idle conn. Without this, the server's
+// immediate FIN would make the next sessionTakeIdle's poll-probe
+// discard the entry — which would short-circuit LRU eviction and
+// give the tests a false-positive pass.
+let _f2 = async lam{ in
+    let n = 0
+    while (true) {
+        let c = net.accept(l2)
+        n = n + 1
+        let myId = n
+        let connKeepalive = true
+        while (connKeepalive) {
+            let req = ""
+            while (!req.contains("\r\n\r\n")) {
+                let ch = net.recv(c, 4096)
+                if (len(ch) == 0) {
+                    connKeepalive = false
+                    break
+                }
+                req = req + ch
+            }
+            if (!connKeepalive) { break }
+            net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n" +
+                       "X-Conn-Id: " + str(myId) + "\r\n\r\nB")
+        }
+        net.close(c)
+    }
+}()
+
+let _f3 = async lam{ in
+    let n = 0
+    while (true) {
+        let c = net.accept(l3)
+        n = n + 1
+        let myId = n
+        let connKeepalive = true
+        while (connKeepalive) {
+            let req = ""
+            while (!req.contains("\r\n\r\n")) {
+                let ch = net.recv(c, 4096)
+                if (len(ch) == 0) {
+                    connKeepalive = false
+                    break
+                }
+                req = req + ch
+            }
+            if (!connKeepalive) { break }
+            net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n" +
+                       "X-Conn-Id: " + str(myId) + "\r\n\r\nC")
+        }
+        net.close(c)
+    }
+}()
+
+testing.test("poolSize=2 evicts the LRU host when a third arrives", lam{ in
+    // poolSize=2 → pool holds at most 2 idle conns. Touching A, B,
+    // C in sequence puts {A,B} in the pool, then C arrives and the
+    // LRU (A) gets evicted. A re-hit on A opens a fresh socket — the
+    // X-Conn-Id from server A must therefore differ between rA (the
+    // first conn) and rA2 (after eviction). Same-id would mean the
+    // eviction didn't fire and we reused the original entry.
+    let s = http.session({poolSize: 2})
+    let baseB = "http://localhost:" + str(p2)
+    let baseC = "http://localhost:" + str(p3)
+
+    let rA = http.get(s, base + "/x")
+    testing.assertEqual(rA.status, 200, nil)
+    let rB = http.get(s, baseB + "/x")
+    testing.assertEqual(rB.body, "B", nil)
+    let rC = http.get(s, baseC + "/x")
+    testing.assertEqual(rC.body, "C", nil)
+    // The LRU-proof assertion.
+    let rA2 = http.get(s, base + "/x")
+    testing.assertEqual(rA2.status, 200, nil)
+    testing.assert(rA.headers["x-conn-id"] != rA2.headers["x-conn-id"],
+        "LRU must evict host A when C overflows the pool: rA2 should be " +
+        "a fresh accept (rA=" + str(rA.headers["x-conn-id"]) +
+        ", rA2=" + str(rA2.headers["x-conn-id"]) + ")")
+    http.close(s)
+})
+
+testing.test("poolSize: 1 still works (degenerate case)", lam{ in
+    // Pool of 1 means every distinct-host request evicts the previous
+    // one. Sequential same-host requests still reuse. Just check the
+    // wiring doesn't crash under repeated eviction.
+    let s = http.session({poolSize: 1})
+    let baseB = "http://localhost:" + str(p2)
+    for (i in 0..3) {
+        let rA = http.get(s, base + "/x")
+        testing.assertEqual(rA.status, 200, nil)
+        let rB = http.get(s, baseB + "/x")
+        testing.assertEqual(rB.body, "B", nil)
+    }
+    http.close(s)
+})
+
+testing.done()

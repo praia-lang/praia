@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -1869,14 +1870,59 @@ Interpreter::Interpreter() {
                 throw RuntimeError("http.session() takes 0 or 1 argument", 0);
             HttpOptions defaultOpts;
             std::unordered_map<std::string, std::string> defaultHeaders;
+            // -1 here means "let httpCreateSession use the struct default"
+            // (100 conns, 90s TTL). Explicit user values override.
+            int poolMaxSize = -1;
+            int poolIdleMs  = -1;
             if (args.size() == 1) {
                 if (!args[0].isMap())
                     throw RuntimeError("http.session() options must be a map", 0);
                 auto& m = args[0].asMap()->entries;
                 applyHttpOpts(defaultOpts, m);
                 defaultHeaders = layerHeaders({}, m);
+                if (m.count("poolSize") && m.at("poolSize").isNumber()) {
+                    double v = m.at("poolSize").asNumber();
+                    // Reject NaN / Inf (cast to int is UB), out-of-int-range
+                    // values, and non-integers — "1.5 connections" is
+                    // meaningless, fail loudly instead of silently truncating.
+                    if (!std::isfinite(v) ||
+                        std::fabs(v) > static_cast<double>(INT_MAX) ||
+                        v != std::floor(v)) {
+                        throw RuntimeError(
+                            "http.session(): poolSize must be a finite integer", 0);
+                    }
+                    poolMaxSize = static_cast<int>(v);
+                }
+                if (m.count("poolIdleSecs") && m.at("poolIdleSecs").isNumber()) {
+                    double secs = m.at("poolIdleSecs").asNumber();
+                    // NaN / Inf reject always (cast to int is UB). The
+                    // INT_MAX/1000 overflow bound only applies to positive
+                    // values — anything <= 0 collapses to 0 below ("disable
+                    // TTL"), so a large negative like -1e18 is a valid
+                    // way to say "no timeout." Don't reject it.
+                    if (!std::isfinite(secs) ||
+                        (secs > 0 && secs * 1000.0 > static_cast<double>(INT_MAX))) {
+                        throw RuntimeError(
+                            "http.session(): poolIdleSecs must be a finite "
+                            "value below INT_MAX/1000 seconds", 0);
+                    }
+                    // 0 / negative is a deliberate "disable the TTL" toggle —
+                    // pass it through as 0. Positive values convert to ms;
+                    // fractional seconds are allowed (e.g. 0.1 = 100 ms).
+                    // Round UP rather than truncate so sub-millisecond
+                    // positives (0.0005 → 0.5 ms) don't collapse to 0 and
+                    // accidentally disable the TTL — every positive value
+                    // gets at least a 1 ms timeout.
+                    poolIdleMs = secs <= 0
+                        ? 0
+                        : static_cast<int>(std::ceil(secs * 1000.0));
+                }
             }
-            return httpCreateSession(defaultOpts, defaultHeaders);
+            // The struct's own defaults kick in when we pass -1 (or
+            // anything < 1 for poolMaxSize). poolIdleMs == 0 means
+            // "disable TTL"; the factory passes it through verbatim.
+            return httpCreateSession(defaultOpts, defaultHeaders,
+                                     poolMaxSize, poolIdleMs);
         }));
 
     httpMap->entries[Value("close")] = Value(makeNative("http.close", 1,
@@ -1885,61 +1931,46 @@ Interpreter::Interpreter() {
             return Value();
         }));
 
-    // http.openStream(opts) — same option surface as http.request,
-    // but returns a stream handle instead of slurping the body.
-    // Use it for downloads / NDJSON feeds / anything that doesn't
-    // fit comfortably in memory. The handle is compatible with
+    // http.openStream — same option surface as http.request, but
+    // returns a stream handle instead of slurping the body. Use it
+    // for downloads / NDJSON feeds / anything that doesn't fit
+    // comfortably in memory. The handle is compatible with
     // json.parser (both expose .read(n)).
-    httpMap->entries[Value("openStream")] = Value(makeNative("http.openStream", 1,
-        [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isMap())
-                throw RuntimeError("http.openStream() requires an options map", 0);
-            auto& opts = args[0].asMap()->entries;
+    //
+    //   http.openStream(opts)              → stateless
+    //   http.openStream(session, opts)     → inherits session defaults
+    //
+    // The session path layers session-default headers + opts under
+    // per-call values; the stream itself still opens a fresh socket
+    // (pool-of-streams is documented as a deliberate non-feature).
+    httpMap->entries[Value("openStream")] = Value(makeNative("http.openStream", -1,
+        [applyHttpOpts, layerHeaders](const std::vector<Value>& args) -> Value {
+            const Value* sessionArg = nullptr;
+            const Value* optsArg    = nullptr;
+            if (args.size() == 1 && args[0].isMap()) {
+                optsArg = &args[0];
+            } else if (args.size() == 2 && httpIsSession(args[0]) && args[1].isMap()) {
+                sessionArg = &args[0];
+                optsArg    = &args[1];
+            } else {
+                throw RuntimeError(
+                    "http.openStream() requires (opts) or (session, opts)", 0);
+            }
+
+            auto& opts = optsArg->asMap()->entries;
             std::string method = "GET", url, body;
-            std::unordered_map<std::string, std::string> headers;
             if (opts.count("method")) method = opts.at("method").toString();
             if (opts.count("url")) url = opts.at("url").toString();
             else throw RuntimeError("http.openStream() requires a 'url' field", 0);
             if (opts.count("body")) body = opts.at("body").toString();
-            if (opts.count("headers") && opts.at("headers").isMap()) {
-                for (auto& [k, v] : opts.at("headers").asMap()->entries)
-                    headers[k.toString()] = v.toString();
-            }
 
-            // Identical options-parsing shape to http.request so
-            // callers can copy-paste a working request and switch
-            // verbs. Kept inline rather than factored out because
-            // factoring would require Value-typed glue.
-            HttpOptions httpOpts;
-            auto secsToMs = [](const Value& v) -> int {
-                if (!v.isNumber()) return -1;
-                double secs = v.asNumber();
-                if (secs <= 0) return -1;
-                return static_cast<int>(secs * 1000.0);
-            };
-            if (opts.count("timeout")) {
-                int ms = secsToMs(opts.at("timeout"));
-                if (ms > 0) {
-                    httpOpts.connectTimeoutMs = ms;
-                    httpOpts.readTimeoutMs    = ms;
-                    httpOpts.totalTimeoutMs   = ms;
-                }
-            }
-            if (opts.count("connectTimeout"))
-                httpOpts.connectTimeoutMs = secsToMs(opts.at("connectTimeout"));
-            if (opts.count("readTimeout"))
-                httpOpts.readTimeoutMs    = secsToMs(opts.at("readTimeout"));
-            if (opts.count("totalTimeout"))
-                httpOpts.totalTimeoutMs   = secsToMs(opts.at("totalTimeout"));
-            if (opts.count("followRedirects") && opts.at("followRedirects").isBool())
-                httpOpts.followRedirects = opts.at("followRedirects").asBool();
-            if (opts.count("maxRedirects") && opts.at("maxRedirects").isNumber())
-                httpOpts.maxRedirects =
-                    static_cast<int>(opts.at("maxRedirects").asNumber());
-            if (opts.count("insecure") && opts.at("insecure").isBool())
-                httpOpts.insecure = opts.at("insecure").asBool();
-            if (opts.count("caBundle") && opts.at("caBundle").isString())
-                httpOpts.caBundle = opts.at("caBundle").asString();
+            HttpOptions httpOpts = sessionArg
+                ? httpSessionGetDefaultOpts(*sessionArg) : HttpOptions{};
+            std::unordered_map<std::string, std::string> baseHeaders;
+            if (sessionArg) baseHeaders = httpSessionGetDefaultHeaders(*sessionArg);
+
+            applyHttpOpts(httpOpts, opts);
+            auto headers = layerHeaders(std::move(baseHeaders), opts);
 
             return httpOpenStream(method, url, body, headers, httpOpts);
         }));
