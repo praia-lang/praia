@@ -186,7 +186,7 @@ extern "C" void praia_register(PraiaMap* module) {
     module->entries["on"] = Value(makeNative("mod.on", 2,
         [](const std::vector<Value>& args) -> Value {
             auto& name = praia::requireString(args, 0, "mod.on");
-            auto  cb   = praia::requireCallable(args, 1, "mod.on");
+            praia::requireCallable(args, 1, "mod.on");   // validate type
             // Release the old pin BEFORE overwriting the map slot —
             // otherwise the old value leaks a pin forever.
             auto it = g_callbacks.find(name);

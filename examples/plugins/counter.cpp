@@ -40,9 +40,9 @@ constexpr const char* kTag = "counter.handle";
 // callable's Environment between when setStored stashes it and
 // callStored fires it. A real plugin would use this pattern for
 // a callback registry (`mod.on("event", handler)`), a cached
-// callable, or a singleton.
+// callable, or a singleton. Default-constructed Value is nil;
+// we treat nil as "no callback stored" — no separate flag needed.
 Value g_storedCallback;
-bool  g_haveStored = false;
 
 }  // namespace
 
@@ -96,12 +96,13 @@ extern "C" void praia_register(PraiaMap* module) {
     // event-callback registry would use.
     module->entries["setStored"] = Value(makeNative("counter.setStored", 1,
         [](const std::vector<Value>& args) -> Value {
-            auto cb = praia::requireCallable(args, 0, "counter.setStored");
+            // Type-check the argument; the returned shared_ptr is
+            // unused — args[0] flows through as a Value.
+            praia::requireCallable(args, 0, "counter.setStored");
             // Replacing an existing stored callback releases the old
             // pin first — leaks the pin otherwise.
-            if (g_haveStored) praia::unpinValue(g_storedCallback);
+            if (!g_storedCallback.isNil()) praia::unpinValue(g_storedCallback);
             g_storedCallback = args[0];
-            g_haveStored = true;
             praia::pinValue(g_storedCallback);
             return Value();
         },
@@ -113,7 +114,7 @@ extern "C" void praia_register(PraiaMap* module) {
     // calling it would then fail at variable lookup or worse.
     module->entries["callStored"] = Value(makeNative("counter.callStored", 0,
         [](const std::vector<Value>&) -> Value {
-            if (!g_haveStored)
+            if (g_storedCallback.isNil())
                 praia::error("counter.callStored: no callback stored");
             return praia::call(g_storedCallback.asCallable(), {});
         }));
@@ -122,10 +123,9 @@ extern "C" void praia_register(PraiaMap* module) {
     // Idempotent so test teardown can call it unconditionally.
     module->entries["clearStored"] = Value(makeNative("counter.clearStored", 0,
         [](const std::vector<Value>&) -> Value {
-            if (g_haveStored) {
+            if (!g_storedCallback.isNil()) {
                 praia::unpinValue(g_storedCallback);
                 g_storedCallback = Value();
-                g_haveStored = false;
             }
             return Value();
         }));

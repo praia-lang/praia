@@ -84,26 +84,58 @@ void GcHeap::collect() {
 // ── Mark phase ──
 
 void GcHeap::mark() {
-    if (rootMarker_) rootMarker_(*this);
+    rootMarker_(*this);
     // Plugin-pinned values: same reachability semantics as the
     // interpreter's roots — anything reachable from a pinned value
-    // survives the sweep. Walked here so the interpreter's marker
-    // doesn't need to know about plugin state.
+    // survives the sweep. Walked after the interpreter's marker so
+    // the marker itself doesn't need to know about plugin state.
     for (const auto& v : pinned_) markValue(v);
 }
 
+// Identify a Value by its underlying GC-heap pointer. Used for the
+// pinValue/unpinValue match — Value::operator== does deep equality
+// for arrays/maps/etc. and falls through to `false` for Callables,
+// neither of which is the semantics we want here. We want "same
+// underlying allocation" so unpinValue(v) removes the entry pinValue(v)
+// added, regardless of whether two distinct Values would compare equal.
+// Returns nullptr for non-GC-tracked values (numbers, strings, bools,
+// nil) — those have nothing for the sweep to clear and don't need
+// to live in the registry.
+static void* gcPointer(const Value& v) {
+    if (v.isArray())     return v.asArray().get();
+    if (v.isTagged())    return v.asTagged().get();
+    if (v.isMap())       return v.asMap().get();
+    if (v.isSet())       return v.asSet().get();
+    if (v.isInstance())  return v.asInstance().get();
+    if (v.isCallable())  return v.asCallable().get();
+    if (v.isGenerator()) return v.asGenerator().get();
+    if (v.isExternal())  return v.asExternal().get();
+    return nullptr;
+}
+
 void GcHeap::pinValue(const Value& v) {
-    pinned_.push_back(v);
+    // Non-GC values have nothing for the sweep to break, so the
+    // registry doesn't need them — skipping keeps unpinValue's
+    // match-by-pointer invariant (every entry has a non-null pointer)
+    // and avoids retaining a never-needed string copy.
+    if (gcPointer(v)) pinned_.push_back(v);
 }
 
 void GcHeap::unpinValue(const Value& v) {
+    void* target = gcPointer(v);
+    if (!target) return;
     // Walk back-to-front so the most recently pinned matching entry
     // wins — gives RAII guards LIFO semantics. Linear in pin count,
     // which is fine for the realistic case of "a handful of pinned
     // callbacks/caches per plugin"; if a plugin pins thousands of
     // values, replace with a hash-multiset.
+    //
+    // We match by underlying GC-heap pointer rather than
+    // Value::operator==, which does deep equality for arrays/maps
+    // and falls through to false for Callables — neither matches
+    // the "same allocation I pinned earlier" semantics we want.
     for (auto it = pinned_.rbegin(); it != pinned_.rend(); ++it) {
-        if (*it == v) {
+        if (gcPointer(*it) == target) {
             pinned_.erase(std::next(it).base());
             return;
         }
