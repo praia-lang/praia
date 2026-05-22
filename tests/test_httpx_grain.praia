@@ -1,0 +1,191 @@
+use "testing"
+use "httpx"
+use "cookie"
+
+// httpx grain — wraps http.session() + cookie.Jar() so Set-Cookie
+// from one request gets auto-attached as a Cookie on the next.
+// Mock server records the inbound Cookie header (echoed in body) and
+// optionally sets cookies via Set-Cookie response headers. The
+// behavior is per-path so each test can drive its own scenario.
+
+let listener = net.listen(0)
+let TEST_PORT = net.localAddr(listener).port
+
+// Lookup the raw value of a request header (case-insensitive name match).
+let headerOf = lam{ req, name in
+    let needle = "\n" + name.lower() + ":"
+    let lower = req.lower()
+    let idx = lower.indexOf(needle)
+    if (idx < 0) { return "" }
+    let start = idx + len(needle)
+    let end = req.indexOf("\r\n", start)
+    if (end < 0) { return "" }
+    return req.slice(start, end).strip()
+}
+
+let _serverFuture = async lam{ in
+    while (true) {
+        let c = net.accept(listener)
+        let connKeepalive = true
+        while (connKeepalive) {
+            let req = ""
+            while (!req.contains("\r\n\r\n")) {
+                let chunk = net.recv(c, 4096)
+                if (len(chunk) == 0) {
+                    connKeepalive = false
+                    break
+                }
+                req = req + chunk
+            }
+            if (!connKeepalive) { break }
+
+            let firstSp = req.indexOf(" ")
+            let after = req.slice(firstSp + 1, len(req))
+            let path = after.slice(0, after.indexOf(" "))
+
+            // Body = the Cookie header value the server saw on this
+            // request, so the test can assert what was threaded.
+            let body = headerOf(req, "Cookie")
+
+            // Per-path Set-Cookie injection. Each path returns a
+            // distinct cookie so test cases can verify the right one
+            // (or right combination) carries forward.
+            let extra = ""
+            if (path == "/login") {
+                extra = "Set-Cookie: sid=abc123; Path=/\r\n"
+            } elif (path == "/login-secure") {
+                extra = "Set-Cookie: sid=def456; Path=/; Secure\r\n"
+            } elif (path == "/login-scoped") {
+                extra = "Set-Cookie: scoped=yes; Path=/area\r\n"
+            } elif (path == "/multi") {
+                extra = "Set-Cookie: a=1; Path=/\r\n" +
+                        "Set-Cookie: b=2; Path=/\r\n"
+            }
+
+            net.send(c, "HTTP/1.1 200 OK\r\n" +
+                       extra +
+                       "Content-Length: " + str(len(body.bytes())) + "\r\n\r\n" +
+                       body)
+        }
+        net.close(c)
+    }
+}()
+
+let base = "http://localhost:" + str(TEST_PORT)
+
+// ── Basic plumbing ───────────────────────────────────────────
+
+testing.test("session() returns a usable wrapper", lam{ in
+    let s = httpx.session()
+    let r = s.get(base + "/")
+    testing.assertEqual(r.status, 200, nil)
+    testing.assertEqual(r.body, "", "no cookies on a bare path → empty Cookie header echo")
+    s.close()
+})
+
+testing.test("jar() exposes the underlying cookie.Jar instance", lam{ in
+    let s = httpx.session()
+    testing.assertEqual(s.jar().size(), 0, "fresh jar starts empty")
+    s.close()
+})
+
+// ── Cookie threading ─────────────────────────────────────────
+
+testing.test("Set-Cookie from response 1 attaches to request 2", lam{ in
+    let s = httpx.session()
+    let r1 = s.get(base + "/login")
+    testing.assertEqual(r1.status, 200, nil)
+    // Server echoes the Cookie header it received: empty on first call
+    // (no cookies in jar yet), then sid=abc123 on the second.
+    testing.assertEqual(r1.body, "", "first request had no cookies in jar")
+    let r2 = s.get(base + "/anything")
+    testing.assertEqual(r2.body, "sid=abc123",
+        "second request carried the jar's cookie")
+    s.close()
+})
+
+// Max-Age=0 cookie deletion semantics are covered by tests/test_cookie_grain.praia
+// — they test cookie.Jar directly, which is the only thing that interprets
+// Max-Age. The wrapper just hands Set-Cookie through, so re-asserting it here
+// would duplicate cookie-grain coverage without adding wrapper-specific signal.
+
+testing.test("multiple Set-Cookie headers all land in the jar", lam{ in
+    let s = httpx.session()
+    s.get(base + "/multi")
+    let r = s.get(base + "/x")
+    // Both cookies should be in the Cookie header. Order can vary by
+    // path-length tiebreak in cookie.Jar; both with Path=/ tie so
+    // insertion order applies — but assert both keys are present
+    // rather than the exact ordering.
+    testing.assert(r.body.contains("a=1"), "a=1 attached: " + str(r.body))
+    testing.assert(r.body.contains("b=2"), "b=2 attached: " + str(r.body))
+    s.close()
+})
+
+testing.test("Secure cookie is suppressed on plain-HTTP requests", lam{ in
+    // The /login-secure server response sets `Secure`. Since the test
+    // host is http://, the jar must filter this cookie out on outbound
+    // requests. (Defense-in-depth check that cookie.Jar's matching is
+    // wired through correctly via our wrapper.)
+    let s = httpx.session()
+    s.get(base + "/login-secure")
+    let r = s.get(base + "/x")
+    testing.assertEqual(r.body, "",
+        "Secure cookie must not attach over plain HTTP")
+    s.close()
+})
+
+testing.test("path-scoped cookie only attaches to matching paths", lam{ in
+    let s = httpx.session()
+    s.get(base + "/login-scoped")          // sets scoped=yes; Path=/area
+    let r1 = s.get(base + "/")
+    testing.assertEqual(r1.body, "",
+        "path-scoped cookie not sent to /")
+    let r2 = s.get(base + "/area/page")
+    testing.assertEqual(r2.body, "scoped=yes",
+        "path-scoped cookie sent to /area/...")
+    s.close()
+})
+
+// ── Caller-supplied Cookie wins over jar ─────────────────────
+
+testing.test("explicit per-call Cookie header overrides the jar", lam{ in
+    let s = httpx.session()
+    s.get(base + "/login")                 // sid=abc123 now in jar
+    // A per-call Cookie header is the user explicitly stating "use
+    // this exact value." The wrapper must not silently overwrite it
+    // with the jar's value.
+    let r = s.request({url: base + "/x",
+                        headers: {Cookie: "manual=override"}})
+    testing.assertEqual(r.body, "manual=override",
+        "per-call Cookie wins over jar")
+    s.close()
+})
+
+// ── Close lifecycle ──────────────────────────────────────────
+
+testing.test("idempotent close: double-close is a no-op", lam{ in
+    let s = httpx.session()
+    s.close()
+    s.close()
+})
+
+testing.test("use-after-close throws", lam{ in
+    let s = httpx.session()
+    s.close()
+    let err = nil
+    try { s.get(base + "/") } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw")
+    testing.assert(err.contains("closed"), str(err))
+})
+
+testing.test("request() without url throws", lam{ in
+    let s = httpx.session()
+    let err = nil
+    try { s.request({method: "GET"}) } catch (e) { err = str(e) }
+    testing.assert(err != nil, nil)
+    testing.assert(err.contains("url"), str(err))
+    s.close()
+})
+
+testing.done()
