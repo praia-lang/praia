@@ -80,7 +80,13 @@ class Session {
         let headers = merged.headers != nil ? {...merged.headers} : {}
         let callerHasCookie = false
         for (k in keys(headers)) {
-            if (k.lower() == "cookie") {
+            // HTTP header keys are always strings in practice, but the
+            // underlying map allows any key type. Guard the .lower()
+            // call so a stray non-string key surfaces as "ignored
+            // weird key" rather than a runtime error from inside the
+            // wrapper. The http client's own header validator catches
+            // it downstream.
+            if (type(k) == "string" && k.lower() == "cookie") {
                 callerHasCookie = true
                 break
             }

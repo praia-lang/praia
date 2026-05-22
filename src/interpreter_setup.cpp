@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -1880,12 +1881,31 @@ Interpreter::Interpreter() {
                 applyHttpOpts(defaultOpts, m);
                 defaultHeaders = layerHeaders({}, m);
                 if (m.count("poolSize") && m.at("poolSize").isNumber()) {
-                    poolMaxSize = static_cast<int>(m.at("poolSize").asNumber());
+                    double v = m.at("poolSize").asNumber();
+                    // Reject NaN / Inf (cast to int is UB), out-of-int-range
+                    // values, and non-integers — "1.5 connections" is
+                    // meaningless, fail loudly instead of silently truncating.
+                    if (!std::isfinite(v) ||
+                        std::fabs(v) > static_cast<double>(INT_MAX) ||
+                        v != std::floor(v)) {
+                        throw RuntimeError(
+                            "http.session(): poolSize must be a finite integer", 0);
+                    }
+                    poolMaxSize = static_cast<int>(v);
                 }
                 if (m.count("poolIdleSecs") && m.at("poolIdleSecs").isNumber()) {
                     double secs = m.at("poolIdleSecs").asNumber();
+                    // NaN / Inf reject — same UB reason. Cap at INT_MAX ms
+                    // so the secs * 1000 multiplication doesn't overflow.
+                    if (!std::isfinite(secs) ||
+                        std::fabs(secs) * 1000.0 > static_cast<double>(INT_MAX)) {
+                        throw RuntimeError(
+                            "http.session(): poolIdleSecs must be a finite "
+                            "value below INT_MAX/1000 seconds", 0);
+                    }
                     // 0 / negative is a deliberate "disable the TTL" toggle —
-                    // pass it through. Positive values convert to ms.
+                    // pass it through. Positive values convert to ms;
+                    // fractional seconds are allowed (e.g. 0.1 = 100 ms).
                     poolIdleMs = secs <= 0 ? 0 : static_cast<int>(secs * 1000.0);
                 }
             }

@@ -160,11 +160,10 @@ testing.test("poolSize=2 evicts the LRU host when a third arrives", lam{ in
     // eviction loop are wired correctly and don't trip an
     // shutdown_close-on-bad-iter bug.)
     let s = http.session({poolSize: 2})
-    let baseA = "http://localhost:" + str(TEST_PORT)
     let baseB = "http://localhost:" + str(p2)
     let baseC = "http://localhost:" + str(p3)
 
-    let rA = http.get(s, baseA + "/x")
+    let rA = http.get(s, base + "/x")
     testing.assertEqual(rA.status, 200, nil)
     let rB = http.get(s, baseB + "/x")
     testing.assertEqual(rB.body, "B", nil)
@@ -172,7 +171,7 @@ testing.test("poolSize=2 evicts the LRU host when a third arrives", lam{ in
     testing.assertEqual(rC.body, "C", nil)
     // A re-hit on host A — its idle conn was just evicted, so this
     // opens fresh and still works.
-    let rA2 = http.get(s, baseA + "/x")
+    let rA2 = http.get(s, base + "/x")
     testing.assertEqual(rA2.status, 200, nil)
     http.close(s)
 })
@@ -182,10 +181,9 @@ testing.test("poolSize: 1 still works (degenerate case)", lam{ in
     // one. Sequential same-host requests still reuse. Just check the
     // wiring doesn't crash under repeated eviction.
     let s = http.session({poolSize: 1})
-    let baseA = "http://localhost:" + str(TEST_PORT)
     let baseB = "http://localhost:" + str(p2)
     for (i in 0..3) {
-        let rA = http.get(s, baseA + "/x")
+        let rA = http.get(s, base + "/x")
         testing.assertEqual(rA.status, 200, nil)
         let rB = http.get(s, baseB + "/x")
         testing.assertEqual(rB.body, "B", nil)
