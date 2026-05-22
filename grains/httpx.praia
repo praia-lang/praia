@@ -79,8 +79,18 @@ class Session {
 
         // Layer the jar's Cookie header. Caller-supplied Cookie wins
         // (matches Set-Cookie semantics: the caller is overriding).
+        // HTTP header names are case-insensitive, so any-case "cookie"
+        // counts as the caller having set it — checking only "Cookie"
+        // would silently shadow a lowercase header with the jar value.
         let headers = merged.headers != nil ? {...merged.headers} : {}
-        if (!headers.has("Cookie")) {
+        let callerHasCookie = false
+        for (k in keys(headers)) {
+            if (k.lower() == "cookie") {
+                callerHasCookie = true
+                break
+            }
+        }
+        if (!callerHasCookie) {
             let h = this._jar.headerFor(url)
             if (h != "") { headers.Cookie = h }
         }

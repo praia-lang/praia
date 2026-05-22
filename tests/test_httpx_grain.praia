@@ -162,6 +162,10 @@ testing.test("explicit per-call Cookie header overrides the jar", lam{ in
     s.close()
 })
 
+// (lowercase / mixed-case cookie header is also honored — covered in
+// test_httpx_grain_opts.praia to keep this file's accept count below
+// the tree-walker localhost-accept stall threshold.)
+
 // ── Close lifecycle ──────────────────────────────────────────
 
 testing.test("idempotent close: double-close is a no-op", lam{ in

@@ -15,6 +15,19 @@ use "cookie"
 let listener = net.listen(0)
 let TEST_PORT = net.localAddr(listener).port
 
+// Server echoes the inbound Cookie header value in the body so tests
+// can assert what was actually threaded.
+let headerOf = lam{ req, name in
+    let needle = "\n" + name.lower() + ":"
+    let lower = req.lower()
+    let idx = lower.indexOf(needle)
+    if (idx < 0) { return "" }
+    let start = idx + len(needle)
+    let end = req.indexOf("\r\n", start)
+    if (end < 0) { return "" }
+    return req.slice(start, end).strip()
+}
+
 let _serverFuture = async lam{ in
     while (true) {
         let c = net.accept(listener)
@@ -27,9 +40,12 @@ let _serverFuture = async lam{ in
         let firstSp = req.indexOf(" ")
         let after = req.slice(firstSp + 1, len(req))
         let path = after.slice(0, after.indexOf(" "))
+        let body = headerOf(req, "Cookie")
         let extra = ""
         if (path == "/login") { extra = "Set-Cookie: sid=abc123; Path=/\r\n" }
-        net.send(c, "HTTP/1.1 200 OK\r\n" + extra + "Content-Length: 0\r\n\r\n")
+        net.send(c, "HTTP/1.1 200 OK\r\n" + extra +
+                   "Content-Length: " + str(len(body.bytes())) + "\r\n\r\n" +
+                   body)
         net.close(c)
     }
 }()
@@ -70,6 +86,20 @@ testing.test("request({method, url, body, headers}) round-trips", lam{ in
     let r = s.request({method: "GET", url: base + "/",
                         headers: {"X-Test": "abc"}})
     testing.assertEqual(r.status, 200, nil)
+    s.close()
+})
+
+testing.test("lowercase 'cookie' per-call header is honored (case-insensitive)", lam{ in
+    // HTTP header names are case-insensitive. A caller passing "cookie"
+    // (any case) still counts as "I'm setting the cookie header myself" —
+    // the wrapper must not shadow it with the jar's value just because
+    // the casing isn't exactly "Cookie".
+    let s = httpx.session()
+    s.get(base + "/login")        // sid=abc123 in jar
+    let r = s.request({url: base + "/x",
+                        headers: {"cookie": "lc=wins"}})
+    testing.assertEqual(r.body, "lc=wins",
+        "lowercase cookie still beats the jar")
     s.close()
 })
 
