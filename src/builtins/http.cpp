@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <list>
 #include <csignal>
 #include <iostream>
 #include <mutex>
@@ -1052,11 +1053,28 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
 // File-local session state. The struct stays here (rather than in
 // builtins.h) so it can hold the file-private SocketConn type and so
 // interpreter_setup.cpp sees only opaque accessors.
+// One entry in the session's idle keep-alive pool: a socket plus the
+// instant it was returned to the pool. The key duplicates the map key
+// so eviction (back-of-list) can erase from the index without a
+// reverse lookup.
+struct PoolEntry {
+    std::string key;
+    std::unique_ptr<SocketConn> conn;
+    std::chrono::steady_clock::time_point insertedAt;
+};
+
 struct HttpSession {
-    // Idle keep-alive sockets, one per "scheme://host:port". A more
-    // sophisticated pool (per-host queue, LRU, idle timeout) is a
-    // documented follow-up; v1 is intentionally minimal.
-    std::unordered_map<std::string, std::unique_ptr<SocketConn>> idle;
+    // LRU pool — front = most recently used. std::list provides the
+    // iterator stability the index needs across insert/erase.
+    std::list<PoolEntry> idleList;
+    std::unordered_map<std::string, std::list<PoolEntry>::iterator> idleIndex;
+    // 100 hosts per session covers all realistic API workloads;
+    // 90 000 ms matches the de facto default keepalive timeout of
+    // every HTTP/1.1 server in the wild (nginx, apache, Go net/http).
+    // poolIdleMs <= 0 disables the TTL — useful escape hatch for
+    // callers that know their server keeps conns alive indefinitely.
+    int poolMaxSize = 100;
+    int poolIdleMs  = 90 * 1000;
     HttpOptions defaultOpts;
     std::unordered_map<std::string, std::string> defaultHeaders;
     bool closed = false;
@@ -1085,16 +1103,32 @@ static std::string sessionPoolKey(const ParsedUrl& p, const HttpOptions& opts) {
 }
 
 // Take an idle conn for `key` out of the pool, probing it for staleness
-// before returning. A zero-timeout poll() catches the easy case where
-// the peer closed since we stored the socket; the subtler case where
-// the peer closes between this probe and the next send is handled by
-// the once-and-only-once retry in httpSessionRequest.
+// before returning. Three filters in order:
+//   1. Idle-TTL: a conn that's been sitting longer than poolIdleMs has
+//      almost certainly been closed server-side already — discard it
+//      instead of paying the EPIPE-and-retry tax on next send.
+//   2. POLLIN-probe: catches the case where the peer closed between
+//      pool storage and now (clean EOF or unsolicited data).
+//   3. The send/recv retry in httpSessionRequest catches the race
+//      where the peer closes between this probe and our first write.
 static std::unique_ptr<SocketConn> sessionTakeIdle(HttpSession& s,
                                                    const std::string& key) {
-    auto it = s.idle.find(key);
-    if (it == s.idle.end()) return nullptr;
-    auto conn = std::move(it->second);
-    s.idle.erase(it);
+    auto it = s.idleIndex.find(key);
+    if (it == s.idleIndex.end()) return nullptr;
+    auto listIt = it->second;
+    auto conn = std::move(listIt->conn);
+    auto insertedAt = listIt->insertedAt;
+    s.idleList.erase(listIt);
+    s.idleIndex.erase(it);
+
+    if (s.poolIdleMs > 0) {
+        auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - insertedAt).count();
+        if (ageMs > s.poolIdleMs) {
+            conn->shutdown_close();
+            return nullptr;
+        }
+    }
 
     struct pollfd pfd;
     pfd.fd = conn->fd;
@@ -1117,18 +1151,31 @@ static std::unique_ptr<SocketConn> sessionTakeIdle(HttpSession& s,
     return conn;
 }
 
-// Return a freshly-used conn to the idle pool. If there's already a
-// stored conn for the same key, prefer the newer one — simpler than a
-// queue and good enough for the dominant "talk to the same host
-// repeatedly" workload that motivated sessions in the first place.
+// Return a freshly-used conn to the idle pool. Same-key replacement
+// reuses the existing list slot (and moves it to the front so it's
+// marked most-recently-used); a new key gets pushed to the front and
+// triggers LRU eviction off the back if we're now over capacity.
 static void sessionReturnIdle(HttpSession& s, const std::string& key,
                               std::unique_ptr<SocketConn> conn) {
-    auto it = s.idle.find(key);
-    if (it != s.idle.end()) {
-        it->second->shutdown_close();
-        it->second = std::move(conn);
-    } else {
-        s.idle.emplace(key, std::move(conn));
+    auto now = std::chrono::steady_clock::now();
+    auto it = s.idleIndex.find(key);
+    if (it != s.idleIndex.end()) {
+        // Same-key replace: tear down the old conn, swap in the new
+        // one, splice the slot to the front to mark it MRU.
+        it->second->conn->shutdown_close();
+        it->second->conn = std::move(conn);
+        it->second->insertedAt = now;
+        s.idleList.splice(s.idleList.begin(), s.idleList, it->second);
+        return;
+    }
+    s.idleList.push_front({key, std::move(conn), now});
+    s.idleIndex[key] = s.idleList.begin();
+
+    while (static_cast<int>(s.idleList.size()) > s.poolMaxSize) {
+        auto& victim = s.idleList.back();
+        victim.conn->shutdown_close();
+        s.idleIndex.erase(victim.key);
+        s.idleList.pop_back();
     }
 }
 
@@ -1137,17 +1184,26 @@ static HttpSession* sessionFromValue(const Value& v) {
 }
 
 Value httpCreateSession(const HttpOptions& defaultOpts,
-                        const std::unordered_map<std::string, std::string>& defaultHeaders) {
+                        const std::unordered_map<std::string, std::string>& defaultHeaders,
+                        int poolMaxSize,
+                        int poolIdleMs) {
     auto* s = new HttpSession();
     s->defaultOpts = defaultOpts;
     s->defaultHeaders = defaultHeaders;
+    if (poolMaxSize >= 1) s->poolMaxSize = poolMaxSize;
+    // Sentinel: poolIdleMs == -1 means "caller didn't pass an opt —
+    // keep the struct default." 0 is the meaningful "disable TTL"
+    // value (kept forever) and is passed through verbatim. Anything
+    // > 0 sets the TTL.
+    if (poolIdleMs != -1) s->poolIdleMs = poolIdleMs;
     return praia::makeExternal<HttpSession>(s, kHttpSessionTypeTag,
         [](HttpSession* p) {
             // Drain the pool — every stored fd / SSL_CTX gets released.
-            for (auto& [_, conn] : p->idle) {
-                if (conn) conn->shutdown_close();
+            for (auto& entry : p->idleList) {
+                if (entry.conn) entry.conn->shutdown_close();
             }
-            p->idle.clear();
+            p->idleList.clear();
+            p->idleIndex.clear();
             delete p;
         });
 }
@@ -1169,10 +1225,11 @@ httpSessionGetDefaultHeaders(const Value& session) {
 void httpSessionClose(const Value& session) {
     auto* s = sessionFromValue(session);
     if (s->closed) return;
-    for (auto& [_, conn] : s->idle) {
-        if (conn) conn->shutdown_close();
+    for (auto& entry : s->idleList) {
+        if (entry.conn) entry.conn->shutdown_close();
     }
-    s->idle.clear();
+    s->idleList.clear();
+    s->idleIndex.clear();
     s->closed = true;
 }
 

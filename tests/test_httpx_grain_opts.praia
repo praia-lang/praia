@@ -89,6 +89,49 @@ testing.test("request({method, url, body, headers}) round-trips", lam{ in
     s.close()
 })
 
+testing.test("explicit per-call Cookie header overrides the jar", lam{ in
+    let s = httpx.session()
+    s.get(base + "/login")                 // sid=abc123 now in jar
+    // A per-call Cookie header is the user explicitly stating "use
+    // this exact value." The wrapper must not silently overwrite it
+    // with the jar's value.
+    let r = s.request({url: base + "/x",
+                        headers: {Cookie: "manual=override"}})
+    testing.assertEqual(r.body, "manual=override",
+        "per-call Cookie wins over jar")
+    s.close()
+})
+
+testing.test("Session.stream(url) threads cookies into the streamed request", lam{ in
+    // /login puts sid=abc123 in the jar.
+    let s = httpx.session()
+    s.get(base + "/login")
+    // A streamed request through the same session must attach the
+    // jar's Cookie header — the stream handle's body echoes back
+    // what the server received, so we can assert directly.
+    let stream = s.stream(base + "/x")
+    testing.assertEqual(stream.status, 200, nil)
+    let body = stream.readAll()
+    testing.assertEqual(body, "sid=abc123",
+        "stream request carried the jar's Cookie header")
+    stream.close()
+    s.close()
+})
+
+testing.test("Session.stream() also ingests Set-Cookie from the response", lam{ in
+    // /login on the streamed path should still update the jar.
+    let s = httpx.session()
+    let stream = s.stream(base + "/login")
+    stream.close()
+    testing.assertEqual(s.jar().size(), 1,
+        "stream response's Set-Cookie landed in the jar")
+    // Follow-up request — buffered or streamed — should see it.
+    let r = s.get(base + "/x")
+    testing.assertEqual(r.body, "sid=abc123",
+        "next request inherits cookies that arrived via the stream")
+    s.close()
+})
+
 testing.test("lowercase 'cookie' per-call header is honored (case-insensitive)", lam{ in
     // HTTP header names are case-insensitive. A caller passing "cookie"
     // (any case) still counts as "I'm setting the cookie header myself" —

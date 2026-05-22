@@ -3318,7 +3318,7 @@ Connect against an unroutable IP throws "connect timed out after Nms" with an ex
 
 For scripts that issue multiple requests to the same host, an `http.session` reuses the underlying TCP/TLS connection across calls and applies session-default headers and options. This skips a fresh DNS lookup + TCP handshake + (for HTTPS) TLS handshake on every request beyond the first.
 
-```
+```praia
 let s = http.session({
     headers: {"User-Agent": "my-app/1.0"},
     timeout: 30,
@@ -3343,7 +3343,7 @@ The connection pool is keyed by `scheme://host:port`, so requests to different h
 
 Session-default `headers` and options are applied as the base for every call through the session. Per-call values override them on key conflict:
 
-```
+```praia
 let s = http.session({
     headers: {"User-Agent": "my-app/1.0", "X-Trace-Id": "abc"},
     timeout: 30,
@@ -3371,16 +3371,37 @@ A response is **not** pooled if it sets `Connection: close`, or its body framing
 
 `http.close(session)` is idempotent — calling it twice (or after the GC has already reclaimed the handle) is a no-op, never a double-free:
 
-```
+```praia
 http.close(s)
 ```
 
 If the session goes out of scope without an explicit close, the GC's sweep runs the deleter and drains the pool. Explicit `http.close` is for deterministic cleanup (typical in scripts where the timing matters).
 
+##### Pool bounds
+
+The session keeps at most `poolSize` idle connections — one per `scheme://host:port` — and applies an idle TTL of `poolIdleSecs` to each. Both are configurable on `http.session(opts)`:
+
+- **`poolSize`** — integer; max idle connections (LRU-evicted past this). Defaults to **100**, which covers all realistic API workloads. Set lower to bound memory for crawler-style sessions touching many hosts.
+- **`poolIdleSecs`** — float; per-connection idle timeout. A conn that's been sitting longer than this gets dropped on next take instead of reused (and a stale-conn EPIPE retry). Defaults to **90 seconds**, matching the de facto keepalive timeout of nginx / apache / Go net/http. Set to `0` to disable the TTL entirely (kept forever — useful when you know your server's keepalive is unbounded).
+
+```praia
+let s = http.session({poolSize: 20, poolIdleSecs: 30})
+```
+
+##### Streaming through a session
+
+`http.openStream` is also polymorphic on the first arg: pass a session and the stream inherits the session's default headers and options. The stream itself always opens a fresh socket — there's no pool-of-streams, because stream handles take ownership of the socket for their lifetime and pool-return semantics differ from buffered requests.
+
+```praia
+let s = http.session({headers: {"User-Agent": "my-app/1.0"}})
+let stream = http.openStream(s, {url: "https://example.com/big.json"})
+// User-Agent inherited from session.
+```
+
 ##### What's not in this session yet
 
-- **No cookie jar.** Use the [`httpx` grain](#cookie-aware-sessions--httpx) for auto-threaded cookies on top of `http.session`, or the lower-level `cookie.Jar` directly. The session response's `cookies` array still surfaces incoming `Set-Cookie` headers either way.
-- **No `http.openStream` integration.** Streaming responses always open a fresh connection. Session-pooled streaming would need pool-vs-stream lifetime mediation that wasn't worth landing alongside the buffered-request session.
+- **No cookie jar on `http.session`.** Use the [`httpx` grain](#cookie-aware-sessions--httpx) for auto-threaded cookies (also covers `httpx.Session.stream`), or the lower-level `cookie.Jar` directly. The session response's `cookies` array still surfaces incoming `Set-Cookie` headers either way.
+- **No pool-of-streams.** `http.openStream(session, opts)` opens fresh every time. Pooling stream-conns needs rent / return / poison logic worth a separate review.
 
 #### Streaming responses — `http.openStream`
 
@@ -3445,7 +3466,7 @@ s.close()
 
 Pass a handler function to `http.createServer`. The handler receives a request map and returns a response map:
 
-```
+```praia
 let server = http.createServer(lam{ req in
     if (req.path == "/") {
         return {
@@ -3486,7 +3507,7 @@ You can also return a plain string — it becomes a 200 text/plain response.
 
 #### Example: JSON API
 
-```
+```praia
 let server = http.createServer(lam{ req in
     if (req.method == "GET" && req.path == "/api/time") {
         return {
@@ -3527,7 +3548,7 @@ Headers are capped at 64 KB regardless.
 
 The server handles `SIGINT` (Ctrl-C) and `SIGTERM` (container stop) gracefully — it finishes the current request, closes the socket, and returns from `listen()`. Code after `listen()` runs normally:
 
-```
+```praia
 server.listen(8080)
 // This runs after Ctrl-C or SIGTERM:
 print("Shutting down...")
@@ -3538,7 +3559,7 @@ sqlite.close(db)
 
 `http.sse(req, callback)` keeps the connection open for real-time streaming. The callback receives a `send` function.
 
-```
+```praia
 server.get("/events", lam{ req, params in
     return http.sse(req, lam{ send in
         for (i in 0..10) {
@@ -3552,7 +3573,7 @@ server.get("/events", lam{ req, params in
 
 The client receives standard SSE format:
 
-```
+```praia
 event: update
 data: {"count":0}
 
@@ -3575,7 +3596,7 @@ events.addEventListener('update', e => {
 
 Query strings are automatically parsed into a map. Values are URL-decoded.
 
-```
+```praia
 // Request: GET /search?q=hello+world&page=2
 
 server.get("/search", lam{ req, params in
@@ -3596,7 +3617,7 @@ Instead of manually building response maps, use these helpers:
 | `http.redirect(url, status?)` | Redirect (302 by default) |
 | `http.file(path, status?, opts?)` | Serve a file with auto-detected MIME type |
 
-```
+```praia
 // Before
 return {status: 200, body: json.stringify(data), headers: {"Content-Type": "application/json"}}
 
@@ -3614,7 +3635,7 @@ return http.file("public/style.css")     // auto-detects text/css
 
 #### Static file serving
 
-```
+```praia
 server.get("/static/:filename", lam{ req, params in
     // Always pair user-controlled paths with withinDir — see below.
     return http.file("public/" + params.filename, {withinDir: "public"})
@@ -3627,7 +3648,7 @@ server.get("/static/:filename", lam{ req, params in
 
 Use the `withinDir` option. It resolves both the path and the dir to their canonical absolute forms (handling `..`, relative components, and symlinks) and throws if the path escapes the dir. Symlinks targeting outside the jail are blocked.
 
-```
+```praia
 server.get("/files/:name", lam{ req, params in
     try {
         return http.file("uploads/" + params.name, {withinDir: "uploads"})
@@ -3681,6 +3702,7 @@ s.close()
 | `s.get(url, opts?)` | `http.get(s._session, url, ...)` with cookies threaded |
 | `s.post(url, body, opts?)` | `http.post(...)` with cookies threaded |
 | `s.request(opts)` | `http.request(...)` with cookies threaded |
+| `s.stream(url, opts?)` | `http.openStream(...)` with cookies threaded; returns a stream handle |
 | `s.jar()` | The underlying `cookie.Jar` (mutable; call `.clear()` to drop all cookies) |
 | `s.close()` | Closes the underlying `http.session`. Idempotent. |
 

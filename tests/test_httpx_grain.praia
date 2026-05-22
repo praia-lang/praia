@@ -149,18 +149,11 @@ testing.test("path-scoped cookie only attaches to matching paths", lam{ in
 
 // ── Caller-supplied Cookie wins over jar ─────────────────────
 
-testing.test("explicit per-call Cookie header overrides the jar", lam{ in
-    let s = httpx.session()
-    s.get(base + "/login")                 // sid=abc123 now in jar
-    // A per-call Cookie header is the user explicitly stating "use
-    // this exact value." The wrapper must not silently overwrite it
-    // with the jar's value.
-    let r = s.request({url: base + "/x",
-                        headers: {Cookie: "manual=override"}})
-    testing.assertEqual(r.body, "manual=override",
-        "per-call Cookie wins over jar")
-    s.close()
-})
+// "Explicit per-call Cookie header overrides the jar" — moved to
+// test_httpx_grain_opts.praia. With s.stream now also exercising the
+// same _prepRequest path, this file's accept-count had crept past
+// the tree-walker localhost-accept stall threshold; the per-call
+// override case is still verified, just in a fresh subprocess.
 
 // (lowercase / mixed-case cookie header is also honored — covered in
 // test_httpx_grain_opts.praia to keep this file's accept count below

@@ -105,8 +105,15 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
 // struct itself stays file-private in builtins/http.cpp so SocketConn
 // and the OpenSSL state never leak outside the module.
 
+// `poolMaxSize` clamps the number of idle keep-alive conns held by the
+// session (LRU evicted past this). `poolIdleMs` is the per-conn
+// idle-TTL: conns older than this on next take are dropped instead of
+// reused. Values <= 0 disable the TTL (kept forever); poolMaxSize < 1
+// falls back to the struct default.
 Value httpCreateSession(const HttpOptions& defaultOpts,
-                        const std::unordered_map<std::string, std::string>& defaultHeaders);
+                        const std::unordered_map<std::string, std::string>& defaultHeaders,
+                        int poolMaxSize,
+                        int poolIdleMs);
 
 // Drive one request (with redirect handling) through the session's
 // pool. Caller has already layered session defaults under per-call

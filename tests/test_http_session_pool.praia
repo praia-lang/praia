@@ -1,0 +1,196 @@
+use "testing"
+
+// Pool bounds + idle TTL + openStream-session. Separated from
+// test_http_session.praia because `praia test` subprocess-isolates
+// between files — gives this file fresh OS-level networking state
+// independent of the existing 56-case suite next door.
+
+let headerOf = lam{ req, name in
+    let needle = "\n" + name.lower() + ":"
+    let lower = req.lower()
+    let idx = lower.indexOf(needle)
+    if (idx < 0) { return "" }
+    let start = idx + len(needle)
+    let end = req.indexOf("\r\n", start)
+    if (end < 0) { return "" }
+    return req.slice(start, end).strip()
+}
+
+// One server, used by the openStream + idle-TTL tests. Keepalive on
+// the wire — no forced Connection: close — so the pool actually
+// caches the conn.
+let listener = net.listen(0)
+let TEST_PORT = net.localAddr(listener).port
+
+let _serverFuture = async lam{ in
+    while (true) {
+        let c = net.accept(listener)
+        let connKeepalive = true
+        while (connKeepalive) {
+            let req = ""
+            while (!req.contains("\r\n\r\n")) {
+                let chunk = net.recv(c, 4096)
+                if (len(chunk) == 0) {
+                    connKeepalive = false
+                    break
+                }
+                req = req + chunk
+            }
+            if (!connKeepalive) { break }
+            // Body = the User-Agent the server saw, so openStream-
+            // session tests can verify the default header threaded
+            // through.
+            let body = headerOf(req, "User-Agent")
+            net.send(c, "HTTP/1.1 200 OK\r\n" +
+                       "Content-Length: " + str(len(body.bytes())) + "\r\n\r\n" +
+                       body)
+        }
+        net.close(c)
+    }
+}()
+
+let base = "http://localhost:" + str(TEST_PORT)
+
+// ── openStream(session, opts) ─────────────────────────────────
+
+testing.test("openStream(session, opts) inherits session default headers", lam{ in
+    let s = http.session({headers: {"User-Agent": "praia-pool-test/1.0"}})
+    let stream = http.openStream(s, {url: base + "/x"})
+    testing.assertEqual(stream.status, 200, nil)
+    let body = stream.readAll()
+    testing.assertEqual(body, "praia-pool-test/1.0",
+        "stream request carried the session-default User-Agent")
+    stream.close()
+    http.close(s)
+})
+
+testing.test("openStream() stateless path still works (one-arg)", lam{ in
+    let stream = http.openStream({url: base + "/x",
+                                    headers: {"User-Agent": "stateless-stream"}})
+    testing.assertEqual(stream.status, 200, nil)
+    let body = stream.readAll()
+    testing.assertEqual(body, "stateless-stream", nil)
+    stream.close()
+})
+
+testing.test("openStream() with bad arg shape throws", lam{ in
+    let err = nil
+    try { http.openStream(42) } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw on non-opts first arg")
+    testing.assert(err.contains("requires"), str(err))
+})
+
+// ── Idle TTL ──────────────────────────────────────────────────
+
+testing.test("poolIdleSecs drops a stale idle entry on next take", lam{ in
+    // Set a very short TTL so we can prove it fires deterministically.
+    // The pool stores the conn from request 1; after 200ms it's older
+    // than the 100ms TTL and gets discarded on take. Request 2 opens
+    // a fresh socket — which means the server accepts twice rather
+    // than once.
+    //
+    // We can't directly observe the C++ pool state, so the assertion
+    // here is "the second request succeeds" — implicit in the test
+    // not timing out. (A negative test where the conn was already
+    // closed server-side would hang waiting for a phantom response;
+    // the TTL path's job is to *avoid* that hang.)
+    let s = http.session({poolIdleSecs: 0.1})
+    let r1 = http.get(s, base + "/ping")
+    testing.assertEqual(r1.status, 200, nil)
+    time.sleep(200)
+    let r2 = http.get(s, base + "/ping")
+    testing.assertEqual(r2.status, 200, nil)
+    http.close(s)
+})
+
+testing.test("poolIdleSecs: 0 disables the TTL (kept indefinitely)", lam{ in
+    // Mostly a smoke test that the value passes through correctly.
+    // The behavior is "doesn't crash, requests still work."
+    let s = http.session({poolIdleSecs: 0})
+    let r = http.get(s, base + "/ping")
+    testing.assertEqual(r.status, 200, nil)
+    http.close(s)
+})
+
+// ── LRU eviction ──────────────────────────────────────────────
+
+// Three additional servers on three distinct ports so the pool key
+// (scheme://host:port) differs across them. With poolSize: 2 and 3
+// hosts touched in sequence, the LRU host gets evicted.
+let l2 = net.listen(0)
+let p2 = net.localAddr(l2).port
+let l3 = net.listen(0)
+let p3 = net.localAddr(l3).port
+
+let _f2 = async lam{ in
+    while (true) {
+        let c = net.accept(l2)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let ch = net.recv(c, 4096)
+            if (len(ch) == 0) { break }
+            req = req + ch
+        }
+        net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nB")
+        net.close(c)
+    }
+}()
+
+let _f3 = async lam{ in
+    while (true) {
+        let c = net.accept(l3)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let ch = net.recv(c, 4096)
+            if (len(ch) == 0) { break }
+            req = req + ch
+        }
+        net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nC")
+        net.close(c)
+    }
+}()
+
+testing.test("poolSize=2 evicts the LRU host when a third arrives", lam{ in
+    // The pool can only hold 2 idle conns at once. Touching three
+    // distinct host:port targets in sequence must evict the first;
+    // the assertion here is structural: all three requests succeed,
+    // i.e. eviction doesn't break anything. (Direct verification of
+    // *which* conn got evicted would need internal pool introspection
+    // — out of scope; this is the smoke-test that the size cap and
+    // eviction loop are wired correctly and don't trip an
+    // shutdown_close-on-bad-iter bug.)
+    let s = http.session({poolSize: 2})
+    let baseA = "http://localhost:" + str(TEST_PORT)
+    let baseB = "http://localhost:" + str(p2)
+    let baseC = "http://localhost:" + str(p3)
+
+    let rA = http.get(s, baseA + "/x")
+    testing.assertEqual(rA.status, 200, nil)
+    let rB = http.get(s, baseB + "/x")
+    testing.assertEqual(rB.body, "B", nil)
+    let rC = http.get(s, baseC + "/x")
+    testing.assertEqual(rC.body, "C", nil)
+    // A re-hit on host A — its idle conn was just evicted, so this
+    // opens fresh and still works.
+    let rA2 = http.get(s, baseA + "/x")
+    testing.assertEqual(rA2.status, 200, nil)
+    http.close(s)
+})
+
+testing.test("poolSize: 1 still works (degenerate case)", lam{ in
+    // Pool of 1 means every distinct-host request evicts the previous
+    // one. Sequential same-host requests still reuse. Just check the
+    // wiring doesn't crash under repeated eviction.
+    let s = http.session({poolSize: 1})
+    let baseA = "http://localhost:" + str(TEST_PORT)
+    let baseB = "http://localhost:" + str(p2)
+    for (i in 0..3) {
+        let rA = http.get(s, baseA + "/x")
+        testing.assertEqual(rA.status, 200, nil)
+        let rB = http.get(s, baseB + "/x")
+        testing.assertEqual(rB.body, "B", nil)
+    }
+    http.close(s)
+})
+
+testing.done()

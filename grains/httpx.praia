@@ -61,27 +61,22 @@ class Session {
         return this._dispatch(method, url, body, opts)
     }
 
-    func _dispatch(method, url, body, opts) {
+    // Build the merged options map for a request: copies the caller's
+    // map, normalizes method/url/body, strips the wrapper-only `jar`
+    // key, and layers the jar's Cookie header under any caller-
+    // supplied Cookie (case-insensitive match — see the per-call
+    // headers test). Shared between _dispatch (buffered request) and
+    // stream (streaming request) so the cookie path lives in one place.
+    func _prepRequest(method, url, body, opts) {
         if (this._closed) {
             throw "httpx.Session is closed"
         }
-        // Copy opts so we don't mutate the caller's map. Praia's map
-        // spread builds a fresh map; subsequent assignments are local.
         let merged = opts != nil ? {...opts} : {}
         merged.method = method
         merged.url    = url
         if (body != nil) { merged.body = body }
-
-        // Strip the wrapper-only `jar` key — http.session already
-        // consumed it at construction; passing it through is harmless
-        // but keeps the options map clean for debugging output.
         merged.jar = nil
 
-        // Layer the jar's Cookie header. Caller-supplied Cookie wins
-        // (matches Set-Cookie semantics: the caller is overriding).
-        // HTTP header names are case-insensitive, so any-case "cookie"
-        // counts as the caller having set it — checking only "Cookie"
-        // would silently shadow a lowercase header with the jar value.
         let headers = merged.headers != nil ? {...merged.headers} : {}
         let callerHasCookie = false
         for (k in keys(headers)) {
@@ -95,12 +90,27 @@ class Session {
             if (h != "") { headers.Cookie = h }
         }
         merged.headers = headers
+        return merged
+    }
 
+    func _dispatch(method, url, body, opts) {
+        let merged = this._prepRequest(method, url, body, opts)
         let r = http.request(this._session, merged)
         // acceptResponse no-ops on missing response.cookies, so a bare
         // GET with no Set-Cookie just passes through.
         this._jar.acceptResponse(url, r)
         return r
+    }
+
+    // Streaming variant. The stream handle exposes .status / .headers
+    // / .cookies up front, so jar ingestion works on it identically to
+    // a buffered response. The stream itself opens a fresh socket
+    // every time (no pool-of-streams — see plan doc).
+    func stream(url, opts) {
+        let merged = this._prepRequest("GET", url, nil, opts)
+        let s = http.openStream(this._session, merged)
+        this._jar.acceptResponse(url, s)
+        return s
     }
 
     // Accessors for introspection. Returning the jar by reference is
