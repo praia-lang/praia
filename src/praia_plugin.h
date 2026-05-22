@@ -35,6 +35,8 @@
 #include "gc_heap.h"        // gcNew<T>()
 #include "builtins.h"       // makeNative()
 #include "praia_runtime.h"  // praia::currentExecutor, praia::invokeExecutor
+#include <cstdio>           // std::fprintf in PinnedValue cross-thread abort
+#include <cstdlib>          // std::abort  in PinnedValue cross-thread abort
 
 // ── Plugin ABI version ─────────────────────────────────────────
 //
@@ -379,13 +381,16 @@ public:
     }
 
     ~PinnedValue() {
-        // Always release against the heap we pinned to — not against
-        // GcHeap::current(), which on a different thread would be a
-        // different heap with no record of our pin. If the destructor
-        // genuinely fires on a different thread the plugin has a bug
-        // (we can't throw from here), but using the stored heap at
-        // least keeps the registry consistent on the right thread.
-        if (pinned_ && heap_) heap_->unpinValue(v_);
+        // Release against the heap we pinned to — but only if we're
+        // still on that thread. Each `GcHeap` is thread-local, so a
+        // destruct on a different thread would either race on the
+        // origin thread's pinned_ vector (if that thread is alive) or
+        // dereference a dead thread's storage. Both are UB. Abort
+        // loudly instead — cross-thread destruction is always a
+        // plugin bug, and a clean process death is strictly better
+        // than the silent corruption the alternative invites. We
+        // can't throw from a destructor.
+        if (pinned_ && heap_) releaseOrAbort();
     }
 
     PinnedValue(PinnedValue&& other) noexcept
@@ -395,7 +400,10 @@ public:
     }
     PinnedValue& operator=(PinnedValue&& other) noexcept {
         if (this != &other) {
-            if (pinned_ && heap_) heap_->unpinValue(v_);
+            // Same cross-thread concern as the destructor. Move-assign
+            // is noexcept (vector resize requires it), so abort
+            // rather than throw on a mismatch.
+            if (pinned_ && heap_) releaseOrAbort();
             v_      = std::move(other.v_);
             heap_   = other.heap_;
             pinned_ = other.pinned_;
@@ -410,6 +418,23 @@ public:
     const Value& get() const { return v_; }
 
 private:
+    // Release this guard's pin against the heap it was pinned on.
+    // Aborts if we're not on that heap's thread — caller must already
+    // have verified `pinned_ && heap_` before invoking. Keeping the
+    // abort path out-of-line shrinks the destructor/move-assign
+    // bodies and lets the message live in one place.
+    void releaseOrAbort() noexcept {
+        if (heap_ != &GcHeap::current()) {
+            std::fprintf(stderr,
+                "praia::PinnedValue: cross-thread teardown detected. "
+                "The guard was pinned on a different thread's GcHeap; "
+                "releasing it from here would race on (or dereference) "
+                "that heap. Pin/unpin must happen on the same thread.\n");
+            std::abort();
+        }
+        heap_->unpinValue(v_);
+    }
+
     Value    v_;
     GcHeap*  heap_;
     bool     pinned_;
