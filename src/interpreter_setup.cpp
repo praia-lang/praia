@@ -4317,24 +4317,29 @@ Interpreter::Interpreter() {
             // Lock for the entire load to prevent double-loading
             std::lock_guard<std::mutex> lock(g_pluginMutex);
 
-            // Refuse to start a new load once teardown has begun. By
-            // the time runPluginExitHooks flips this flag, the drain
-            // loop has already published the snapshot it intends to
-            // call; a hook pushed after that point would leak. In
-            // practice no engine thread should still be running this
-            // far into exit (the Interpreter destructor blocks on
-            // outstanding futures first), so the throw is a defensive
-            // signal rather than a hot path.
+            // Cache fast-path runs BEFORE the shutdown guard: a
+            // cache hit returns an already-loaded module, which
+            // doesn't enqueue any new hook, so it's safe during
+            // teardown. Only a fresh load (which would push a hook
+            // the drain loop has already passed) needs to be
+            // refused.
+            auto it = g_pluginCache.find(absPath);
+            if (it != g_pluginCache.end())
+                return Value(it->second);
+
+            // Refuse a fresh load once teardown has begun. By the
+            // time runPluginExitHooks flips this flag, the drain loop
+            // has already published the snapshot it intends to call;
+            // a hook pushed after that point would leak. In practice
+            // no engine thread should still be running this far into
+            // exit (the Interpreter destructor blocks on outstanding
+            // futures first), so the throw is a defensive signal
+            // rather than a hot path.
             if (g_pluginShutdown) {
                 throw RuntimeError(
                     "loadNative(): cannot load plugins during process "
                     "exit — '" + path + "'", 0);
             }
-
-            // Check cache
-            auto it = g_pluginCache.find(absPath);
-            if (it != g_pluginCache.end())
-                return Value(it->second);
 
             // dlopen
             void* handle = dlopen(absPath.c_str(), RTLD_NOW | RTLD_LOCAL);
