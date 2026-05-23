@@ -341,4 +341,84 @@ testing.test("callStored after clearStored throws (slot cleared)", lam{ in
     testing.assert(err.contains("no callback stored"), str(err))
 })
 
+testing.test("shouldCancel returns nil outside withCancel scope", lam{ in
+    // No withCancel scope on this thread = no token bound = nullopt
+    // on the C++ side, which the plugin surfaces as Praia nil. This
+    // is the default state plugin code must handle as "no
+    // cancellation requested" (run to completion).
+    testing.assertEqual(counter._cancelState(), nil,
+        "nil before any withCancel scope")
+})
+
+testing.test("shouldCancel returns false inside withCancel, not cancelled", lam{ in
+    // Inside withCancel, the thread-local is set. The atomic flag is
+    // still false (the token hasn't been cancelled), so shouldCancel
+    // returns false — distinct from nil — letting plugin code know a
+    // token IS in scope but no cancel has been requested.
+    let tok = CancellationToken()
+    let inside = withCancel(tok, lam{ in return counter._cancelState() })
+    testing.assertEqual(inside, false,
+        "false while withCancel scope is active and uncancelled")
+    // And the scope unbinds on exit — should be back to nil.
+    testing.assertEqual(counter._cancelState(), nil,
+        "nil restored after withCancel returns")
+})
+
+testing.test("shouldCancel returns true after token.cancel()", lam{ in
+    // Cancel before entering the scope; the flag is sticky, so the
+    // scope sees it set from the start.
+    let tok = CancellationToken()
+    tok.cancel()
+    let seen = withCancel(tok, lam{ in return counter._cancelState() })
+    testing.assertEqual(seen, true,
+        "true when scope's token is already cancelled")
+})
+
+testing.test("nested withCancel restores outer scope on inner return", lam{ in
+    // RAII save/restore guarantee. Inner scope's token shadows the
+    // outer; on inner return the outer token is visible again.
+    let outer = CancellationToken()
+    let inner = CancellationToken()
+    inner.cancel()
+    let observed = withCancel(outer, lam{ in
+        let beforeInner = counter._cancelState()  // false (outer, not cancelled)
+        let duringInner = withCancel(inner, lam{ in return counter._cancelState() })
+        let afterInner = counter._cancelState()  // false again (outer restored)
+        return [beforeInner, duringInner, afterInner]
+    })
+    testing.assertEqual(observed, [false, true, false],
+        "nested scope restores outer token on return")
+})
+
+testing.test("withCancel unbinds on exception from fn", lam{ in
+    // The CancelScope is RAII; an exception propagating out of fn
+    // must still restore g_currentCancel. Tests that a subsequent
+    // shouldCancel() outside any scope sees nil rather than the
+    // dangling state pointer of the just-exited scope.
+    let tok = CancellationToken()
+    let caught = nil
+    try {
+        withCancel(tok, lam{ in throw "boom" })
+    } catch (e) { caught = str(e) }
+    testing.assertEqual(caught, "boom", "exception propagated through withCancel")
+    testing.assertEqual(counter._cancelState(), nil,
+        "scope unbound even when fn threw")
+})
+
+testing.test("compute native bails early when cancelled cross-thread", lam{ in
+    // Real-world shape: a CPU-bound native runs on a task thread,
+    // and the main thread flips the token. The native must see the
+    // cancel within its polling interval and return a partial count.
+    // computeUntilCancelled polls every 4096 iterations, so the
+    // returned count is well below the bound but not necessarily 0.
+    let tok = CancellationToken()
+    func work() { return withCancel(tok, lam{ in return counter.computeUntilCancelled(10000000000) }) }
+    let fut = async work()
+    time.sleep(50)
+    tok.cancel()
+    let done = await fut
+    testing.assert(done < 10000000000,
+        "bailed out before completing the full loop (got " + str(done) + ")")
+})
+
 testing.done()

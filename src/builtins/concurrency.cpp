@@ -1,4 +1,5 @@
 #include "../builtins.h"
+#include "../cancellation.h"  // CancellationState + CancelScope (thread-local current-token)
 #include <atomic>
 #include <condition_variable>
 #include <iostream>
@@ -177,9 +178,11 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
     // long-running async tasks and have them poll `cancelled()` in their
     // loop to bail out cleanly. Same shared-state-via-native-closures trick
     // as Channel/SharedMap, so the token survives async deep-copy.
-    struct CancellationState {
-        std::atomic<bool> cancelled{false};
-    };
+    //
+    // The CancellationState struct itself lives in src/cancellation.h so
+    // the plugin runtime shim (praia::shouldCancel) can read the same
+    // flag through a thread-local pointer set by withCancel below.
+    using praia::detail::CancellationState;
 
     globals->define("CancellationToken", Value(makeNative("CancellationToken", 0,
         [](const std::vector<Value>&) -> Value {
@@ -207,7 +210,82 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
                     return Value();
                 }));
 
+            // Hidden _state slot: a PraiaExternal whose data points
+            // directly at the same CancellationState the closures
+            // capture. withCancel reads this to find the address of
+            // the atomic flag without going through a callable
+            // invocation. Ownership is anchored by the std::function
+            // deleter, which holds a shared_ptr<CancellationState> in
+            // its capture — that ref keeps the state alive as long as
+            // the External is reachable, paralleling the closures'
+            // own captures. When the External destructs, the deleter
+            // body (a no-op) runs, then the std::function destructor
+            // releases the captured shared_ptr.
+            auto ext = gcNew<PraiaExternal>();
+            ext->data = static_cast<void*>(state.get());
+            ext->typeName = "praia.CancellationState";
+            ext->deleter = [keep = state](void* /*p*/) { (void)keep; };
+            tok->entries[Value("_state")] = Value(ext);
+
             return Value(tok);
+        })));
+
+    // ── withCancel(token, fn, ...args) — bind token to the current scope ──
+    //
+    // Runs `fn(...args)` with `token`'s cancellation state published
+    // through the thread-local `g_currentCancel` pointer. Plugin native
+    // code calls `praia::shouldCancel()` to read it. Restores the
+    // previous binding on every exit path (including exceptions from
+    // fn) via the CancelScope RAII guard.
+    //
+    // Composes with async: `async(lam { withCancel(tok, () -> heavyWork()) })`
+    // — the thread-local is set on the task's worker thread for the
+    // duration of fn, and torn down when fn returns. Outside any
+    // withCancel scope, shouldCancel() returns nullopt and native code
+    // treats that as "no cancellation requested".
+    globals->define("withCancel", Value(makeNative("withCancel", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2)
+                throw RuntimeError(
+                    "withCancel(token, fn, ...args) requires at least 2 arguments", 0);
+            // Extract the CancellationState pointer from the token's
+            // hidden _state slot. The error wording distinguishes the
+            // two ways this can fail so a confused user can fix it
+            // without reading the source.
+            if (!args[0].isMap())
+                throw RuntimeError(
+                    "withCancel(token, ...): first argument must be a CancellationToken", 0);
+            auto& tokMap = args[0].asMap()->entries;
+            auto it = tokMap.find(Value("_state"));
+            if (it == tokMap.end() || !it->second.isExternal() ||
+                it->second.asExternal()->typeName != "praia.CancellationState") {
+                throw RuntimeError(
+                    "withCancel(token, ...): first argument must be a CancellationToken "
+                    "produced by CancellationToken() (got a map without a _state slot)", 0);
+            }
+            auto* state = static_cast<CancellationState*>(
+                it->second.asExternal()->data);
+            // A well-formed CancellationToken always carries a
+            // non-null state pointer (std::make_shared in
+            // CancellationToken() never returns null). A null here
+            // means a hostile/buggy plugin minted an External with
+            // the right typeName but no payload — fail loudly
+            // rather than dereferencing inside CancelScope.
+            if (!state) {
+                throw RuntimeError(
+                    "withCancel(token, ...): token has a malformed "
+                    "_state slot (null payload)", 0);
+            }
+
+            if (!args[1].isCallable())
+                throw RuntimeError(
+                    "withCancel(token, fn, ...): second argument must be callable", 0);
+
+            std::vector<Value> callArgs(args.begin() + 2, args.end());
+
+            // RAII: restores previous scope even if fn throws.
+            praia::detail::CancelScope scope(state);
+            return callSafe(*g_currentInterp, args[1].asCallable(), callArgs);
         })));
 
     // ── SharedMap() — cross-VM key-value store ──

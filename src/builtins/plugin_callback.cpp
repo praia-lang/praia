@@ -11,6 +11,7 @@
 
 #include "../praia_runtime.h"
 
+#include "../cancellation.h"  // detail::g_currentCancel for shouldCancel
 #include "../interpreter.h"   // g_currentInterp
 #include "../builtins.h"      // callSafe
 #include "../vm/vm.h"         // VM::current, callWithVM
@@ -65,6 +66,19 @@ Value invokeExecutor(void* exec,
     }
     auto* interp = reinterpret_cast<Interpreter*>(raw);
     return callSafe(*interp, fn, args);
+}
+
+std::optional<bool> shouldCancel() {
+    // Thread-local read; no executor needed. Returning nullopt outside
+    // a withCancel scope (rather than `false`) lets plugin code
+    // distinguish "no cancellation in this context, run as long as
+    // you want" from "cancellation in scope and not yet triggered" —
+    // useful for natives that want different default behaviour in
+    // each case (e.g. log a warning when no token is bound but the
+    // operation is known to be cancellable).
+    auto* state = detail::g_currentCancel;
+    if (!state) return std::nullopt;
+    return state->cancelled.load(std::memory_order_acquire);
 }
 
 void postToEngine(void* exec,

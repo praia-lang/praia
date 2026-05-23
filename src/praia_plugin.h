@@ -57,7 +57,11 @@
 //       resolve against a v1 engine; bumping the ABI surfaces that
 //       as a clean "rebuild required" diagnostic at loadNative time
 //       rather than a raw dlerror about an unresolved symbol.
-#define PRAIA_PLUGIN_ABI_VERSION 2
+//   3 — adds praia::shouldCancel for cooperative cancellation. Same
+//       rationale: a v3 plugin's reference to the symbol won't
+//       resolve against a v2 engine, so the ABI gate gives a clear
+//       diagnostic instead of a dlerror.
+#define PRAIA_PLUGIN_ABI_VERSION 3
 
 #define PRAIA_DECLARE_ABI()                                             \
     extern "C" int praia_abi_version() {                                \

@@ -38,6 +38,7 @@
 #include "value.h"  // Value, Callable, RuntimeError
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace praia {
@@ -111,5 +112,42 @@ Value invokeExecutor(void* exec,
 void postToEngine(void* exec,
                   std::shared_ptr<Callable> fn,
                   std::vector<Value> args);
+
+// Cooperative cancellation — query the current scope's cancel flag.
+//
+// Returns:
+//   std::nullopt — no token is bound on the calling thread. The default
+//                  outside an active `withCancel(token, fn)` scope.
+//                  Plugins should treat this as "no cancellation
+//                  requested" and keep working.
+//   false        — token bound, not yet cancelled. Keep working; check
+//                  again on the next iteration.
+//   true         — token bound, cancelled. Bail out as soon as feasible
+//                  (return partial result, throw RuntimeError, etc. —
+//                  pick whatever the surrounding API contract expects).
+//
+// Implementation is a single thread-local pointer read plus, if
+// non-null, an atomic acquire-load of the cancel flag. Cheap enough
+// to call from the inner loop of a compute-heavy native; common
+// pattern is to amortise even that across a few thousand iterations:
+//
+//   for (size_t i = 0; i < n; i++) {
+//       if ((i & 0xfff) == 0) {
+//           auto c = praia::shouldCancel();
+//           if (c && *c) return /* partial result */;
+//       }
+//       ...
+//   }
+//
+// Threading. The thread-local is set only while a Praia-side
+// `withCancel(token, fn)` scope is on the calling thread's stack;
+// a worker thread spawned by the plugin starts with no token bound
+// (shouldCancel returns nullopt there). A plugin that wants its
+// worker to honour the engine thread's token must capture the token
+// itself on the engine thread (a CancellationToken Value, pinned via
+// praia::pinValue) and poll it from the worker, OR marshal a
+// pre-cancellation check back to the engine via praia::postToEngine
+// before doing each large chunk of work.
+std::optional<bool> shouldCancel();
 
 }  // namespace praia
