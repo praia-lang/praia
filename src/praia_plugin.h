@@ -66,7 +66,12 @@
 //       v3 engine would silently skip it (the v3 engine doesn't
 //       dlsym for the symbol). Bumping is what surfaces the
 //       mismatch as a clean diagnostic rather than a missed cleanup.
-#define PRAIA_PLUGIN_ABI_VERSION 4
+//   5 — adds the praia::Promise primitive for plugin-constructed
+//       Futures (praia_runtime.h). v4 engines can't resolve the new
+//       symbols (Promise ctor / future / resolve / reject); the bump
+//       surfaces the mismatch as the standard "rebuild required"
+//       diagnostic at loadNative time rather than a raw dlerror.
+#define PRAIA_PLUGIN_ABI_VERSION 5
 
 #define PRAIA_DECLARE_ABI()                                             \
     extern "C" int praia_abi_version() {                                \

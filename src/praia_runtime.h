@@ -150,4 +150,77 @@ void postToEngine(void* exec,
 // before doing each large chunk of work.
 std::optional<bool> shouldCancel();
 
+// Plugin-constructed Future. Bridges native worker threads to
+// Praia's `await` so a plugin can return a Future immediately and
+// fulfil it later from off-engine code (libuv callbacks, std::thread
+// workers, native I/O completions).
+//
+// Usage:
+//
+//   Value myplugin_fetch(const std::vector<Value>& args) {
+//       std::string url = praia::requireString(args, 0, "myplugin.fetch");
+//       praia::Promise p;
+//       Value fut = p.future();
+//       std::thread([p, url]() mutable {
+//           std::string body = blockingHttpGet(url);
+//           p.resolve(Value(std::move(body)));
+//       }).detach();
+//       return fut;
+//   }
+//
+// User code:
+//
+//   let body = await myplugin.fetch("https://example.com")
+//
+// Lifetime. Promise is reference-counted via a private shared_ptr,
+// so it's freely copyable — capture it by value into as many
+// lambdas / threads as you need. Each copy refers to the same
+// underlying state. If the LAST copy drops without resolve/reject,
+// the linked Future is rejected with a "plugin Promise was dropped
+// before resolve or reject" RuntimeError so the awaiter doesn't
+// block forever.
+//
+// Fulfilment. resolve and reject are noexcept and safe to call from
+// any thread (no executor required). The first call wins via an
+// atomic CAS; subsequent calls are silent no-ops. Mirrors how
+// JavaScript Promises behave — "the first .then wins, the rest are
+// ignored" — chosen because most real producers race against each
+// other (timeout vs. completion, two retries, …) and care only that
+// one of them lands.
+//
+// GC contract for `resolve(Value)`. Praia's PraiaFuture is not
+// traced by the GC (see gcMarkRoots); a Value sitting "in transit"
+// between resolve and await is invisible to the collector. For
+// non-GC values (numbers, strings, bools, nil) this doesn't matter
+// — they have no interior the sweep could hollow. For GC-tracked
+// values (Map, Array, Instance, Callable) the plugin MUST keep the
+// value pinned via praia::pinValue while it's in transit, and unpin
+// after await has consumed it. The canonical pattern is the same
+// pin-on-engine / unpin-on-engine wrapper postToEngine plugins use
+// (see examples/plugins/counter.cpp::scheduleAsync). Most plugins
+// resolve with strings or numbers and never hit this.
+class Promise {
+public:
+    // Constructs a fresh promise + linked future. May throw
+    // std::bad_alloc; everything else is noexcept.
+    Promise();
+
+    // The Future Value to hand to user code. The same Value is
+    // returned each call (the underlying shared_future is cached on
+    // construction); multiple awaiters get the same future.
+    Value future() const;
+
+    // Fulfil with `result`. First call wins; subsequent
+    // resolve/reject calls are silent no-ops. Safe from any thread.
+    void resolve(Value result) noexcept;
+
+    // Reject with `message`. The corresponding `await` throws
+    // RuntimeError carrying `message` verbatim. Safe from any thread.
+    void reject(const std::string& message) noexcept;
+
+private:
+    struct State;
+    std::shared_ptr<State> state_;
+};
+
 }  // namespace praia
