@@ -384,12 +384,22 @@ void Interpreter::drainPosted() {
         // to surface the exception to. Log and continue draining;
         // one bad callback shouldn't poison the queue or propagate
         // up through checkInterrupt into unrelated user code.
+        //
+        // callSafe deliberately leaves frames on callStack when the
+        // body throws (for stack-trace formatting). Since we swallow
+        // the exception here, we'd otherwise accumulate stale frames
+        // forever — restore callStack to its pre-call size on every
+        // catch path. Mirrors the same pattern used by TryCatchStmt
+        // in execute().
+        size_t savedStackSize = callStack.size();
         try {
             callSafe(*this, pc.fn, pc.args);
         } catch (const RuntimeError& e) {
+            callStack.resize(savedStackSize);
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised: %s\n", e.what());
         } catch (const std::exception& e) {
+            callStack.resize(savedStackSize);
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised non-Praia exception: %s\n",
                 e.what());
@@ -397,6 +407,7 @@ void Interpreter::drainPosted() {
             // Raw throw of a non-exception value. Rare in practice
             // (Praia code only throws RuntimeError) but possible
             // through a misbehaving plugin native.
+            callStack.resize(savedStackSize);
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised an unknown exception\n");
         }

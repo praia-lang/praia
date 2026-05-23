@@ -336,16 +336,33 @@ void VM::drainPosted() {
         // to surface the exception to. Log and continue draining;
         // one bad callback shouldn't poison the queue or propagate
         // up through the dispatch loop into unrelated user code.
+        //
+        // callWithVM pushes the callable + args onto the data stack
+        // and a frame onto the call frames before invoking
+        // vm.execute. If user code throws (or vm.execute returns
+        // RUNTIME_ERROR which we surface as a throw), neither is
+        // unwound — leaving stack/frame state inconsistent for the
+        // ops that follow the drain. Save both before the call and
+        // restore on every catch path. Mirrors the same pattern used
+        // by the defer loop in OP_RETURN.
+        int savedTop = stackTop;
+        int savedFrameCount = frameCount;
         try {
             callWithVM(*this, pc.fn, pc.args);
         } catch (const RuntimeError& e) {
+            stackTop = savedTop;
+            frameCount = savedFrameCount;
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised: %s\n", e.what());
         } catch (const std::exception& e) {
+            stackTop = savedTop;
+            frameCount = savedFrameCount;
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised non-Praia exception: %s\n",
                 e.what());
         } catch (...) {
+            stackTop = savedTop;
+            frameCount = savedFrameCount;
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised an unknown exception\n");
         }
@@ -950,13 +967,18 @@ VM::Result VM::execute(int baseFrameCount_) {
 
     try {
     for (;;) {
+        // Cross-thread post fast-path: a single acquire load per
+        // dispatch when the queue is empty (the common case), which
+        // is the cheapest atomic we can do. The branch predicts true
+        // for "empty" so the typical iteration pays one load + one
+        // predicted-not-taken branch. Calling drainPosted() out of
+        // the gc-counter branch bounded post latency at 1024 ops;
+        // checking per-op makes the latency match the next safe
+        // yield point exactly.
+        if (postedPending_.load(std::memory_order_acquire)) drainPosted();
         if (--gcCounter_ <= 0) {
             gcCounter_ = 1024;
             GcHeap::current().collectIfNeeded();
-            // Drain any cross-thread posts before signal handling so a
-            // worker-posted callback doesn't get masked by an
-            // immediately-following SIGINT-as-Interrupted bail-out.
-            drainPosted();
             // Check for pending SIGINT — makes Ctrl+C catchable by try/catch
             if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
                 g_pendingSignals.fetch_and(~(1u << SIGINT));

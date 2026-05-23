@@ -52,7 +52,12 @@
 //
 // History:
 //   1 — initial versioned ABI (Praia 0.4+)
-#define PRAIA_PLUGIN_ABI_VERSION 1
+//   2 — adds praia::postToEngine for cross-thread call marshalling
+//       (praia_runtime.h). Plugins that link the new symbol won't
+//       resolve against a v1 engine; bumping the ABI surfaces that
+//       as a clean "rebuild required" diagnostic at loadNative time
+//       rather than a raw dlerror about an unresolved symbol.
+#define PRAIA_PLUGIN_ABI_VERSION 2
 
 #define PRAIA_DECLARE_ABI()                                             \
     extern "C" int praia_abi_version() {                                \

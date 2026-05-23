@@ -174,15 +174,33 @@ extern "C" void praia_register(PraiaMap* module) {
             praia::requireCallable(args, 1, "counter.scheduleAsync");
 
             // Pin everything that has to survive the worker→engine
-            // gap. `pinned` is what the wrapper unpins after the
-            // user callback returns. Non-GC values (numbers, strings)
-            // no-op inside pinValue, but we keep them in `pinned` so
-            // the unpin loop stays uniform.
-            std::vector<Value> pinned;
-            pinned.reserve(args.size() - 1);
+            // gap, threaded through a shared_ptr<PinHolder>. The
+            // holder's destructor unpins on the engine thread if the
+            // wrapper never gets a chance to run (e.g. an exception
+            // between pin and detach hollows out the wrapper without
+            // invoking its body). The wrapper body explicitly
+            // releases the holder before returning so the destructor
+            // is a no-op on the success path. Non-GC values
+            // (numbers, strings) no-op inside pinValue, but we keep
+            // them in `pinned` so the unpin loop stays uniform.
+            struct PinHolder {
+                std::vector<Value> pinned;
+                bool released = false;
+                ~PinHolder() {
+                    if (released) return;
+                    // Engine-thread destruction is required because
+                    // unpinValue throws on threads without an active
+                    // executor. In every path that reaches this dtor
+                    // — scheduleAsync's own return, or drainPosted
+                    // dropping the wrapper — that's where we are.
+                    for (auto& v : pinned) praia::unpinValue(v);
+                }
+            };
+            auto holder = std::make_shared<PinHolder>();
+            holder->pinned.reserve(args.size() - 1);
             for (size_t i = 1; i < args.size(); i++) {
                 praia::pinValue(args[i]);
-                pinned.push_back(args[i]);
+                holder->pinned.push_back(args[i]);
             }
 
             // Trailing args (args[2..]) are what we actually pass to
@@ -203,24 +221,36 @@ extern "C" void praia_register(PraiaMap* module) {
             auto userCb = args[1].asCallable();
             std::shared_ptr<Callable> wrapper = makeNative(
                 "counter.scheduleAsync.wrap", -1,
-                [userCb, pinned = std::move(pinned)]
+                [userCb, holder]
                 (const std::vector<Value>& wrapArgs) -> Value {
                     Value result;
                     try {
                         result = praia::call(userCb, wrapArgs);
                     } catch (...) {
-                        // The wrapper MUST unpin even if the user
-                        // callback throws — otherwise an exception
-                        // turns this scheduleAsync into a permanent
-                        // pin leak. Rethrow after cleanup; the
-                        // engine's drainPosted catches it.
-                        for (auto& v : pinned) praia::unpinValue(v);
+                        // Unpin and mark released even on throw —
+                        // the holder's destructor would otherwise
+                        // double-unpin (which unpinValue tolerates
+                        // but is wasted work). Rethrow; drainPosted
+                        // catches and logs.
+                        for (auto& v : holder->pinned) praia::unpinValue(v);
+                        holder->released = true;
                         throw;
                     }
-                    for (auto& v : pinned) praia::unpinValue(v);
+                    for (auto& v : holder->pinned) praia::unpinValue(v);
+                    holder->released = true;
                     return result;
                 });
 
+            // Demo-grade lifetime: a detached worker plus the raw
+            // executor token assumes the engine outlives any pending
+            // sleep. That's true for the test/REPL contexts that
+            // load this plugin — the process holds the engine until
+            // exit. A production plugin doing the same thing should
+            // own the worker thread (join on plugin shutdown, or
+            // attach a cancellation token the engine's teardown hook
+            // can signal). Praia doesn't yet expose a plugin-
+            // teardown hook, so we can't model that pattern here
+            // without inventing one ahead of its design.
             void* engine = praia::currentExecutor();
             std::thread([engine, wrapper, cbArgs = std::move(cbArgs), delayMs]() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
