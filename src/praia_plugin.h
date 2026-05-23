@@ -61,7 +61,12 @@
 //       rationale: a v3 plugin's reference to the symbol won't
 //       resolve against a v2 engine, so the ABI gate gives a clear
 //       diagnostic instead of a dlerror.
-#define PRAIA_PLUGIN_ABI_VERSION 3
+//   4 — adds the optional praia_at_exit() teardown hook. New plugins
+//       that export the symbol expect it to run; loading them on a
+//       v3 engine would silently skip it (the v3 engine doesn't
+//       dlsym for the symbol). Bumping is what surfaces the
+//       mismatch as a clean diagnostic rather than a missed cleanup.
+#define PRAIA_PLUGIN_ABI_VERSION 4
 
 #define PRAIA_DECLARE_ABI()                                             \
     extern "C" int praia_abi_version() {                                \
@@ -88,6 +93,49 @@
     extern "C" const char* praia_plugin_name()        { return NAME; }       \
     extern "C" const char* praia_plugin_version()     { return VERSION; }    \
     extern "C" const char* praia_plugin_description() { return DESCRIPTION; }
+
+// ── Process-exit cleanup hook ──────────────────────────────────
+//
+// A plugin that owns OS resources past the lifetime of any single
+// native call — log files, sockets, write-behind buffers, named
+// shared memory, file locks — may export an optional
+//
+//   extern "C" void praia_at_exit(void);
+//
+// at file scope. loadNative() dlsym's the symbol; if present, praia
+// invokes it once at process exit (LIFO across plugins, so plugins
+// loaded later tear down before plugins loaded earlier).
+//
+// Timing. The hook runs on the main thread, after main()'s body has
+// returned (or unwound through `sys.exit()`), before the C++ runtime
+// destroys static storage. Plugin worker threads spawned via
+// std::thread are NOT joined by praia — your hook must signal them
+// to stop and join (or detach with a documented "leak intentional"
+// rationale) before returning. Treat the hook as a strict deadline:
+// flush, close, release, return. Do NOT call praia::call or
+// praia::postToEngine from inside — both engines are torn down (or
+// torn down imminently) and any Praia Value you held is no longer
+// safe to invoke.
+//
+// Skipped paths. The hook is best-effort. It does NOT run when the
+// process exits via _Exit, abort, std::terminate (uncaught
+// exception), or a fatal signal that bypasses our handlers. Don't
+// rely on it for correctness — it's a courtesy for clean teardown.
+// If durability matters, fsync as you write rather than at exit.
+//
+// Errors. An exception escaping the hook is caught, logged to
+// stderr (`[praia_at_exit] <plugin path>: <message>`) and swallowed.
+// Other plugins' hooks still run. Don't throw if you can help it.
+//
+// Place once at file scope (no macro needed, just the function):
+//
+//   extern "C" void praia_at_exit(void) {
+//       g_logFile.flush();
+//       g_logFile.close();
+//   }
+//
+// Plugins that don't export the symbol pay no cost at load time
+// beyond a single dlsym probe; runtime exit is unchanged.
 
 namespace praia {
 

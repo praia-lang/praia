@@ -1000,7 +1000,27 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
     return failed == 0 ? 0 : 1;
 }
 
+// Implemented in interpreter_setup.cpp. Walks the list of optional
+// praia_at_exit hooks registered by loadNative, LIFO, swallowing
+// per-hook exceptions. Idempotent.
+extern void runPluginExitHooks();
+
+// RAII guard so every return path out of main() — including the many
+// `catch (const ExitSignal&) { return e.code; }` paths scattered
+// through the subcommand handlers — runs the plugin teardown hooks.
+// Placing one local at the top of main() beats threading an explicit
+// call through every return site, and gives plugin hooks a defined
+// ordering: their destructor runs before any function-static or
+// namespace-static object's destructor, which is the right
+// invariant — plugin hooks should NOT touch praia statics they
+// might race against during teardown.
+struct PluginExitGuard {
+    ~PluginExitGuard() { runPluginExitHooks(); }
+};
+
 int main(int argc, char* argv[]) {
+    PluginExitGuard pluginExitGuard;
+
     // Force line buffering on stdout/stderr. By default C++ block-buffers
     // stdout when it isn't a TTY (e.g. piped to a file or grep), which
     // delays log output until the script exits. Servers and long-running

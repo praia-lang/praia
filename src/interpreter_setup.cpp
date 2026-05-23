@@ -65,6 +65,17 @@ static std::mutex g_pluginMutex;
 static std::unordered_map<std::string, std::shared_ptr<PraiaMap>> g_pluginCache;
 static std::vector<void*> g_pluginHandles; // never dlclose'd — function pointers must stay valid
 
+// praia_at_exit hooks, paired with the plugin path that registered
+// them. Path is kept for diagnostic wording when a hook throws.
+// Vector order matches load order; runPluginExitHooks walks it in
+// reverse so plugins loaded later tear down first (LIFO, mirrors C's
+// atexit and what plugin authors expect from layered dependencies).
+struct PluginAtExitEntry {
+    void (*fn)();
+    std::string pluginPath;
+};
+static std::vector<PluginAtExitEntry> g_pluginAtExitHooks;
+
 static int signalNameToNum(const std::string& name) {
     if (name == "SIGINT"  || name == "INT")  return SIGINT;
     if (name == "SIGTERM" || name == "TERM") return SIGTERM;
@@ -4405,8 +4416,57 @@ Interpreter::Interpreter() {
             // Success — cache the module
             g_pluginCache[absPath] = moduleMap;
 
+            // Optional process-exit hook. dlsym independently of
+            // registration; presence is an opt-in. Registered LAST,
+            // after the cache assignment, so a throw between
+            // praia_register and here (metadata probing or cache
+            // alloc) doesn't leave a stale hook. If the same plugin
+            // is then loaded a second time, the cache path returns
+            // early and we never reach here again — a single
+            // dlsym + push per plugin. Symbol is fixed: extern "C"
+            // void praia_at_exit(void).
+            using AtExitFn = void (*)();
+            dlerror();
+            if (auto atExitFn = reinterpret_cast<AtExitFn>(dlsym(handle, "praia_at_exit"))) {
+                g_pluginAtExitHooks.push_back({atExitFn, absPath});
+            } else {
+                dlerror(); // swallow "symbol not found" — hook is optional
+            }
+
             return Value(moduleMap);
         })));
+}
+
+// Process-exit teardown for plugins that exported praia_at_exit.
+// Called from main() on every normal return path via a stack-local
+// RAII guard, so it fires for both clean exits and sys.exit()
+// returns. Idempotent — clears the registry after running so a
+// nested guard (shouldn't happen, but defensively) doesn't call
+// hooks twice.
+//
+// Iterates in reverse load order so plugins loaded later — which
+// may depend on earlier plugins' state — tear down first. Errors
+// from individual hooks are logged and swallowed; one bad plugin
+// doesn't strand the others' cleanup.
+void runPluginExitHooks() {
+    while (!g_pluginAtExitHooks.empty()) {
+        // Pop before invoking so a hook that re-enters loadNative
+        // (shouldn't, but defensively) doesn't observe its own
+        // half-run state.
+        auto entry = g_pluginAtExitHooks.back();
+        g_pluginAtExitHooks.pop_back();
+        try {
+            entry.fn();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                "[praia_at_exit] %s: %s\n",
+                entry.pluginPath.c_str(), e.what());
+        } catch (...) {
+            std::fprintf(stderr,
+                "[praia_at_exit] %s: unknown exception\n",
+                entry.pluginPath.c_str());
+        }
+    }
 }
 
 void Interpreter::setArgs(const std::vector<std::string>& args) {
