@@ -254,4 +254,52 @@ testing.test("opaque handle: destructor fires under GC pressure", lam{ in
         "600 handles created, 600 destructors fired")
 })
 
+// ── GC root pinning (praia::pinValue / unpinValue) ────────────
+
+// Build a callback whose captured environment is *only* reachable
+// through the returned Callable. Critical: defining the lambda inside
+// a helper that then returns means the helper's frame env is no
+// longer on the call stack — so the only path the GC has to reach
+// the captured `secret` upvalue is via the plugin's pinned Value.
+// Putting the lambda inline in the test would leave the test's own
+// frame env on the stack, marking the captured env "for free" and
+// silently masking a missing pin.
+func _makePinTestCallback(payload) {
+    return lam{ in return payload }
+}
+
+testing.test("stashed callback survives GC pressure with its upvalue", lam{ in
+    // Stash a callable whose closure captures an upvalue ("payload").
+    // _makePinTestCallback has returned by the time we hit the GC
+    // loop — its frame env is no longer on the call stack, so the
+    // only thing keeping the closure (and the upvalue's slot) alive
+    // is the plugin's C++ pin. Without that pin, the sweep would
+    // `env->variables.clear()` and the next call would fail with
+    // "Undefined variable 'payload'" (reproducible at top-level —
+    // see PLUGINS.md for the bug-existence proof).
+    counter.setStored(_makePinTestCallback("alive"))
+    let h = nil
+    for (i in 0..600) {
+        h = counter.new()   // pure allocation churn — trips the GC
+    }
+    h = nil
+    testing.assertEqual(counter.callStored(), "alive",
+        "pinned closure + upvalue survived the sweep")
+    counter.clearStored()
+})
+
+testing.test("callStored after clearStored throws (slot cleared)", lam{ in
+    // clearStored releases the pin AND drops the C++ stash. We can't
+    // directly observe Callable collection (no destructor count for
+    // Praia callables), but we can verify the slot is empty by
+    // asserting the next callStored throws the no-callback error
+    // rather than reusing a stale binding.
+    counter.setStored(lam{ in return 42 })
+    counter.clearStored()
+    let err = nil
+    try { counter.callStored() } catch (e) { err = str(e) }
+    testing.assert(err != nil, "must throw after clearStored")
+    testing.assert(err.contains("no callback stored"), str(err))
+})
+
 testing.done()

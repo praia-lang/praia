@@ -35,6 +35,15 @@ void deleteCounter(Counter* c) {
 
 constexpr const char* kTag = "counter.handle";
 
+// Plugin-held callback across native calls. Pinned via
+// praia::pinValue so the GC's sweep doesn't hollow out the
+// callable's Environment between when setStored stashes it and
+// callStored fires it. A real plugin would use this pattern for
+// a callback registry (`mod.on("event", handler)`), a cached
+// callable, or a singleton. Default-constructed Value is nil;
+// we treat nil as "no callback stored" — no separate flag needed.
+Value g_storedCallback;
+
 }  // namespace
 
 extern "C" void praia_register(PraiaMap* module) {
@@ -79,5 +88,45 @@ extern "C" void praia_register(PraiaMap* module) {
         [](const std::vector<Value>&) -> Value {
             return Value(static_cast<int64_t>(
                 g_destructorCount.load(std::memory_order_relaxed)));
+        }));
+
+    // counter.setStored(cb) — stash a callable across calls, pinned
+    // as a GC root so the next collection doesn't hollow out its
+    // closure environment. Mirrors the pattern any real plugin's
+    // event-callback registry would use.
+    module->entries["setStored"] = Value(makeNative("counter.setStored", 1,
+        [](const std::vector<Value>& args) -> Value {
+            // Type-check the argument; the returned shared_ptr is
+            // unused — args[0] flows through as a Value.
+            praia::requireCallable(args, 0, "counter.setStored");
+            // Replacing an existing stored callback releases the old
+            // pin first — leaks the pin otherwise.
+            if (!g_storedCallback.isNil()) praia::unpinValue(g_storedCallback);
+            g_storedCallback = args[0];
+            praia::pinValue(g_storedCallback);
+            return Value();
+        },
+        {"cb"}));
+
+    // counter.callStored() — invoke the stashed callable via
+    // praia::call. Without the pin, GC pressure between setStored
+    // and callStored could clear the callable's environment;
+    // calling it would then fail at variable lookup or worse.
+    module->entries["callStored"] = Value(makeNative("counter.callStored", 0,
+        [](const std::vector<Value>&) -> Value {
+            if (g_storedCallback.isNil())
+                praia::error("counter.callStored: no callback stored");
+            return praia::call(g_storedCallback.asCallable(), {});
+        }));
+
+    // counter.clearStored() — release the pin and drop the stash.
+    // Idempotent so test teardown can call it unconditionally.
+    module->entries["clearStored"] = Value(makeNative("counter.clearStored", 0,
+        [](const std::vector<Value>&) -> Value {
+            if (!g_storedCallback.isNil()) {
+                praia::unpinValue(g_storedCallback);
+                g_storedCallback = Value();
+            }
+            return Value();
         }));
 }

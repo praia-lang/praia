@@ -35,6 +35,8 @@
 #include "gc_heap.h"        // gcNew<T>()
 #include "builtins.h"       // makeNative()
 #include "praia_runtime.h"  // praia::currentExecutor, praia::invokeExecutor
+#include <cstdio>           // std::fprintf in PinnedValue cross-thread abort
+#include <cstdlib>          // std::abort  in PinnedValue cross-thread abort
 
 // ── Plugin ABI version ─────────────────────────────────────────
 //
@@ -279,5 +281,163 @@ inline T* getExternal(const Value& v, const char* typeName) {
               expected + "' but got '" + ext->typeName + "'");
     return static_cast<T*>(ext->data);
 }
+
+// ── GC root pinning ────────────────────────────────────────────
+//
+// A native plugin that stashes a Praia Value in C++ static / global
+// storage between calls (callback registries, caches, singletons)
+// MUST pin it for the lifetime it's reachable from C++. Without a
+// pin, the next garbage collection treats the value as unreachable
+// (it's not in the interpreter's roots) and *clears the underlying
+// object's internal references during the sweep*. The shared_ptr
+// you held stays valid, but the object is hollow — calling a
+// stashed Callable finds an empty Environment, reading a cached
+// PraiaMap finds its entries cleared, etc.
+//
+// `pinValue` / `unpinValue` are reference-counted by multiplicity:
+// pin N times → unpin N times to actually release. Last-in-first-
+// out matching keeps nested RAII pin/unpin pairs unambiguous.
+//
+// Non-GC-tracked values (numbers, strings, bools, nil) accept pins
+// harmlessly — they have nothing for the sweep to clear, so the
+// pin is a no-op on the mark side.
+//
+// Example: a callback table.
+//
+//   static std::unordered_map<std::string, Value> g_callbacks;
+//
+//   module->entries["on"] = Value(makeNative("mod.on", 2,
+//       [](const std::vector<Value>& args) -> Value {
+//           auto& name = praia::requireString(args, 0, "mod.on");
+//           auto  cb   = praia::requireCallable(args, 1, "mod.on");
+//           auto it = g_callbacks.find(name);
+//           if (it != g_callbacks.end())
+//               praia::unpinValue(it->second);   // release old
+//           praia::pinValue(args[1]);            // hold new
+//           g_callbacks[name] = args[1];
+//           return Value();
+//       }));
+//
+// For short-lived holds (inside a single native call), use the
+// PinnedValue scope guard below instead.
+inline void pinValue(const Value& v) {
+    // Pinning on a thread without an active interpreter would silently
+    // register the value in an orphan thread-local GcHeap that nothing
+    // ever marks — the pin would do nothing, and the user would have no
+    // hint that they're mis-wired. Catch it loudly. Matches the same
+    // check in praia::call for callable invocation.
+    if (!currentExecutor()) {
+        throw RuntimeError(
+            "praia::pinValue invoked with no active Praia executor on this thread", 0);
+    }
+    GcHeap::current().pinValue(v);
+}
+
+inline void unpinValue(const Value& v) {
+    if (!currentExecutor()) {
+        throw RuntimeError(
+            "praia::unpinValue invoked with no active Praia executor on this thread", 0);
+    }
+    GcHeap::current().unpinValue(v);
+}
+
+// RAII scope guard: pin on construction, unpin on destruction.
+// Move-only — copy would double-unpin. Lifetime is whatever C++
+// scope holds the guard; storing it in a static container extends
+// the pin to the container's lifetime (useful for "pin forever"
+// patterns like an init-time callback registration that never
+// goes back through Praia).
+//
+// Thread binding: each GcHeap is thread-local. The guard records
+// the heap it pinned against at construction and unpins against
+// the SAME heap on destruction. That way moving the guard
+// (intentionally or via container reallocation) inside one thread
+// keeps working, but using a guard cross-thread fails loudly:
+// the constructor throws if there's no active executor, and
+// move-assign carries the bound heap across so the eventual
+// unpin lands in the right registry.
+//
+// Example:
+//
+//   {
+//       praia::PinnedValue pin(someValue);
+//       // someValue protected from GC while `pin` is in scope.
+//       expensiveOperation(someValue);
+//   }   // unpinned here on the same heap that pinned.
+class PinnedValue {
+public:
+    explicit PinnedValue(const Value& v)
+        : v_(v), heap_(nullptr), pinned_(false) {
+        // Refuse to register against an orphan heap (no executor =>
+        // this thread isn't running Praia code; any pin would just
+        // leak into a GcHeap nothing ever sweeps).
+        if (!currentExecutor()) {
+            throw RuntimeError(
+                "praia::PinnedValue constructed with no active Praia executor on this thread", 0);
+        }
+        heap_ = &GcHeap::current();
+        heap_->pinValue(v_);
+        pinned_ = true;
+    }
+
+    ~PinnedValue() {
+        // Release against the heap we pinned to — but only if we're
+        // still on that thread. Each `GcHeap` is thread-local, so a
+        // destruct on a different thread would either race on the
+        // origin thread's pinned_ vector (if that thread is alive) or
+        // dereference a dead thread's storage. Both are UB. Abort
+        // loudly instead — cross-thread destruction is always a
+        // plugin bug, and a clean process death is strictly better
+        // than the silent corruption the alternative invites. We
+        // can't throw from a destructor.
+        if (pinned_ && heap_) releaseOrAbort();
+    }
+
+    PinnedValue(PinnedValue&& other) noexcept
+        : v_(std::move(other.v_)), heap_(other.heap_), pinned_(other.pinned_) {
+        other.heap_   = nullptr;
+        other.pinned_ = false;
+    }
+    PinnedValue& operator=(PinnedValue&& other) noexcept {
+        if (this != &other) {
+            // Same cross-thread concern as the destructor. Move-assign
+            // is noexcept (vector resize requires it), so abort
+            // rather than throw on a mismatch.
+            if (pinned_ && heap_) releaseOrAbort();
+            v_      = std::move(other.v_);
+            heap_   = other.heap_;
+            pinned_ = other.pinned_;
+            other.heap_   = nullptr;
+            other.pinned_ = false;
+        }
+        return *this;
+    }
+    PinnedValue(const PinnedValue&) = delete;
+    PinnedValue& operator=(const PinnedValue&) = delete;
+
+    const Value& get() const { return v_; }
+
+private:
+    // Release this guard's pin against the heap it was pinned on.
+    // Aborts if we're not on that heap's thread — caller must already
+    // have verified `pinned_ && heap_` before invoking. Keeping the
+    // abort path out-of-line shrinks the destructor/move-assign
+    // bodies and lets the message live in one place.
+    void releaseOrAbort() noexcept {
+        if (heap_ != &GcHeap::current()) {
+            std::fprintf(stderr,
+                "praia::PinnedValue: cross-thread teardown detected. "
+                "The guard was pinned on a different thread's GcHeap; "
+                "releasing it from here would race on (or dereference) "
+                "that heap. Pin/unpin must happen on the same thread.\n");
+            std::abort();
+        }
+        heap_->unpinValue(v_);
+    }
+
+    Value    v_;
+    GcHeap*  heap_;
+    bool     pinned_;
+};
 
 }  // namespace praia
