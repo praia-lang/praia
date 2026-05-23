@@ -260,4 +260,57 @@ extern "C" void praia_register(PraiaMap* module) {
         },
         {"delayMs", "cb"}));
 
+    // counter.computeUntilCancelled(iters) — demo of praia::shouldCancel.
+    // Tight loop that increments a local counter `iters` times, polling
+    // shouldCancel() every 4096 iterations and bailing out early when
+    // the surrounding withCancel(token, ...) scope's token flips to
+    // cancelled. Returns the number of iterations completed (== iters
+    // if it ran to completion, less if cancelled, max int64 capped if
+    // anything truly absurd is passed in).
+    //
+    // Polling every iteration would be correct but burns ~1ns/op on
+    // the atomic load — 4096 is the standard amortisation interval
+    // for cancellable inner loops (matches the GC throttle the VM
+    // uses internally). Tune to fit your workload's tolerance for
+    // post-cancellation overshoot.
+    // counter._cancelState() — test-only side channel that mirrors
+    // praia::shouldCancel()'s three-state return as a Praia value:
+    //   nil   ← std::nullopt (no withCancel scope on this thread)
+    //   false ← state bound, not cancelled
+    //   true  ← state bound, cancelled
+    // The user-facing API only needs the optional; this getter lets
+    // tests assert each state directly without relying on behavioral
+    // signals (e.g. iteration counts).
+    module->entries["_cancelState"] = Value(makeNative(
+        "counter._cancelState", 0,
+        [](const std::vector<Value>&) -> Value {
+            auto c = praia::shouldCancel();
+            if (!c) return Value();
+            return Value(*c);
+        }));
+
+    module->entries["computeUntilCancelled"] = Value(makeNative(
+        "counter.computeUntilCancelled", 1,
+        [](const std::vector<Value>& args) -> Value {
+            double raw = praia::requireNumber(args, 0,
+                "counter.computeUntilCancelled");
+            if (!std::isfinite(raw) || raw < 0) {
+                praia::error("counter.computeUntilCancelled(iters): iters must "
+                             "be a non-negative finite number");
+            }
+            int64_t iters = (raw > static_cast<double>(std::numeric_limits<int64_t>::max()))
+                ? std::numeric_limits<int64_t>::max()
+                : static_cast<int64_t>(raw);
+            int64_t done = 0;
+            for (int64_t i = 0; i < iters; i++) {
+                if ((i & 0xfff) == 0) {
+                    auto c = praia::shouldCancel();
+                    if (c && *c) break;
+                }
+                done++;
+            }
+            return Value(done);
+        },
+        {"iters"}));
+
 }
