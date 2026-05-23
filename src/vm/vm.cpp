@@ -340,29 +340,46 @@ void VM::drainPosted() {
         // callWithVM pushes the callable + args onto the data stack
         // and a frame onto the call frames before invoking
         // vm.execute. If user code throws (or vm.execute returns
-        // RUNTIME_ERROR which we surface as a throw), neither is
-        // unwound — leaving stack/frame state inconsistent for the
-        // ops that follow the drain. Save both before the call and
-        // restore on every catch path. Mirrors the same pattern used
-        // by the defer loop in OP_RETURN.
+        // RUNTIME_ERROR which we surface as a throw), none of that
+        // state is unwound. Save everything that the callee could
+        // mutate, restore on every catch path:
+        //   - stackTop / frameCount : the obvious data + frame stacks.
+        //   - openUpvalues          : upvalues captured during the
+        //     failed call point into stack slots that we're about to
+        //     reuse. A closure stashed in a global before the throw
+        //     would later read garbage from those slots. Close
+        //     everything at savedTop and above, mirroring what
+        //     OP_RETURN does on a clean unwind.
+        //   - exceptionHandlers     : tryHandleError balances pushes
+        //     against pops in normal flow, but defense-in-depth: if
+        //     the callee leaves stale entries above its execute
+        //     scope's floor, they'd bleed into the next try/catch
+        //     out in dispatch-loop land. resize() is a no-op when
+        //     size already matches; cheap insurance.
+        // Mirrors the defer loop in OP_RETURN.
         int savedTop = stackTop;
         int savedFrameCount = frameCount;
+        size_t savedHandlerCount = exceptionHandlers.size();
+        auto restore = [&]() {
+            stackTop = savedTop;
+            frameCount = savedFrameCount;
+            closeUpvalues(&stack[savedTop]);
+            if (exceptionHandlers.size() > savedHandlerCount)
+                exceptionHandlers.resize(savedHandlerCount);
+        };
         try {
             callWithVM(*this, pc.fn, pc.args);
         } catch (const RuntimeError& e) {
-            stackTop = savedTop;
-            frameCount = savedFrameCount;
+            restore();
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised: %s\n", e.what());
         } catch (const std::exception& e) {
-            stackTop = savedTop;
-            frameCount = savedFrameCount;
+            restore();
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised non-Praia exception: %s\n",
                 e.what());
         } catch (...) {
-            stackTop = savedTop;
-            frameCount = savedFrameCount;
+            restore();
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised an unknown exception\n");
         }
