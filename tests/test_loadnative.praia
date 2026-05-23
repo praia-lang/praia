@@ -290,25 +290,17 @@ testing.test("stashed callback survives GC pressure with its upvalue", lam{ in
 
 testing.test("postToEngine: worker thread can marshal a callback back", lam{ in
     // counter.scheduleAsync spawns a std::thread that sleeps briefly
-    // then calls praia::postToEngine(engine, cb). The engine drains
-    // posted callbacks at every checkInterrupt (statement / VM tick),
-    // so the busy loop below picks it up. State carrier is a map so
-    // the closure's mutation is visible to the outer scope (boolean
-    // assignment in a captured local doesn't propagate via the VM's
-    // upvalue capture; map-field assignment does, via the shared map
+    // then calls praia::postToEngine(engine, cb). The plugin's
+    // C++ wrapper handles pin/unpin around the callback, so the
+    // user code stays simple. The engine drains posted callbacks at
+    // every checkInterrupt (statement / VM tick), so the busy loop
+    // below picks it up. State carrier is a map so the closure's
+    // mutation is visible to the outer scope (boolean assignment in
+    // a captured local doesn't propagate via the VM's upvalue
+    // capture; map-field assignment does, via the shared map
     // reference).
     let state = {received: false}
-    // `cb` is forward-declared so the lambda's recursive reference to
-    // itself (for the self-unpin call) captures a slot that exists at
-    // capture time. Without this `let cb = nil; cb = lam{...}` shape,
-    // the VM's OP_CLOSURE captures the upvalue before the binding is
-    // installed and the recursive reference resolves to nil.
-    let cb = nil
-    cb = lam{ in
-        state.received = true
-        counter._unpinCallback(cb)   // release the scheduleAsync pin
-    }
-    counter.scheduleAsync(20, cb)
+    counter.scheduleAsync(20, lam{ in state.received = true })
     let i = 0
     while (!state.received && i < 1000) {
         i = i + 1
@@ -324,12 +316,7 @@ testing.test("postToEngine: trailing args ride the queue across threads", lam{ i
     // call. This proves the queue carries the args vector across the
     // worker → engine thread hop intact, not just the callable.
     let result = {value: nil}
-    let cb = nil
-    cb = lam{ x in
-        result.value = x
-        counter._unpinCallback(cb)
-    }
-    counter.scheduleAsync(20, cb, "from-worker")
+    counter.scheduleAsync(20, lam{ x in result.value = x }, "from-worker")
     let i = 0
     while (result.value == nil && i < 1000) {
         i = i + 1

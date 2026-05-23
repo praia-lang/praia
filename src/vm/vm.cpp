@@ -8,6 +8,7 @@
 #include "../parser.h"
 #include "../unicode.h"
 #include <algorithm>
+#include <cstdio>          // std::fprintf in drainPosted's error logging
 #include <atomic>
 #include <chrono>
 #include <cmath>

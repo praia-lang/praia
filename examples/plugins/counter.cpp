@@ -142,6 +142,14 @@ extern "C" void praia_register(PraiaMap* module) {
     // to the engine thread. Any trailing args after `cb` are passed
     // through to the callback verbatim, so the test can verify the
     // queue carries args across the thread hop.
+    //
+    // GC contract: every Value that has to survive the worker→engine
+    // hop is pinned on the engine thread BEFORE the worker spawns
+    // (workers can't pin from their own thread — no executor). The
+    // matching unpin runs on the engine thread inside a wrapper
+    // callable that's what we actually post, so each pinValue has a
+    // guaranteed pairing without burdening the user callback or
+    // making the test responsible for the cleanup.
     module->entries["scheduleAsync"] = Value(makeNative("counter.scheduleAsync", -1,
         [](const std::vector<Value>& args) -> Value {
             if (args.size() < 2) {
@@ -150,45 +158,63 @@ extern "C" void praia_register(PraiaMap* module) {
             }
             int delayMs = static_cast<int>(
                 praia::requireNumber(args, 0, "counter.scheduleAsync"));
-            auto cb = praia::requireCallable(args, 1, "counter.scheduleAsync");
+            praia::requireCallable(args, 1, "counter.scheduleAsync");
 
-            // Pin BEFORE handing the callable off — the worker can't
-            // pin on its own thread (no executor). The matching unpin
-            // is the test's responsibility: counter._unpinCallback
-            // releases it from inside the marshalled-back body, where
-            // we're back on the engine thread and pinValue/unpinValue
-            // work. A production plugin would typically wrap the
-            // user's `cb` in a small auto-unpin shim closure instead.
-            praia::pinValue(args[1]);
+            // Pin everything that has to survive the worker→engine
+            // gap. `pinned` is what the wrapper unpins after the
+            // user callback returns. Non-GC values (numbers, strings)
+            // no-op inside pinValue, but we keep them in `pinned` so
+            // the unpin loop stays uniform.
+            std::vector<Value> pinned;
+            pinned.reserve(args.size() - 1);
+            for (size_t i = 1; i < args.size(); i++) {
+                praia::pinValue(args[i]);
+                pinned.push_back(args[i]);
+            }
 
-            // Pin every Value-typed arg too — they ride the queue
-            // across thread boundaries the same way the callback does,
-            // so an upvalue-capturing GC-tracked arg would be at risk
-            // of having its closure cleared by an engine-side sweep
-            // mid-trip. Non-GC values (numbers, strings) are no-ops
-            // here; pinValue skips them.
+            // Trailing args (args[2..]) are what we actually pass to
+            // the user callback. Copy the slice so the worker's
+            // capture has its own vector.
             std::vector<Value> cbArgs;
             cbArgs.reserve(args.size() - 2);
             for (size_t i = 2; i < args.size(); i++) {
-                praia::pinValue(args[i]);
                 cbArgs.push_back(args[i]);
             }
 
+            // Build the wrapper that the worker will post. The
+            // wrapper runs on the engine thread: invokes the user
+            // callback, then unpins every pinned Value, then
+            // returns. This way the worker doesn't need to touch
+            // pinValue/unpinValue (it can't — wrong thread) and the
+            // user callback doesn't need to clean up after itself.
+            auto userCb = args[1].asCallable();
+            std::shared_ptr<Callable> wrapper = makeNative(
+                "counter.scheduleAsync.wrap", -1,
+                [userCb, pinned = std::move(pinned)]
+                (const std::vector<Value>& wrapArgs) -> Value {
+                    Value result;
+                    try {
+                        result = praia::call(userCb, wrapArgs);
+                    } catch (...) {
+                        // The wrapper MUST unpin even if the user
+                        // callback throws — otherwise an exception
+                        // turns this scheduleAsync into a permanent
+                        // pin leak. Rethrow after cleanup; the
+                        // engine's drainPosted catches it.
+                        for (auto& v : pinned) praia::unpinValue(v);
+                        throw;
+                    }
+                    for (auto& v : pinned) praia::unpinValue(v);
+                    return result;
+                });
+
             void* engine = praia::currentExecutor();
-            std::thread([engine, cb, cbArgs = std::move(cbArgs), delayMs]() {
+            std::thread([engine, wrapper, cbArgs = std::move(cbArgs), delayMs]() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-                praia::postToEngine(engine, cb, cbArgs);
+                praia::postToEngine(engine, wrapper, cbArgs);
             }).detach();
             return Value();
         },
         {"delayMs", "cb"}));
 
-    // counter._unpinCallback(cb) — release a pin a test created via
-    // scheduleAsync. Tests must explicitly clean up; production
-    // plugins would arrange auto-release in the posted wrapper.
-    module->entries["_unpinCallback"] = Value(makeNative("counter._unpinCallback", 1,
-        [](const std::vector<Value>& args) -> Value {
-            praia::unpinValue(args[0]);
-            return Value();
-        }));
 }

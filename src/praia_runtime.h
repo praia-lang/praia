@@ -68,13 +68,37 @@ Value invokeExecutor(void* exec,
 // `exec` must be a token previously captured via currentExecutor()
 // while running on the target engine. Pass it across threads as-is.
 //
-// Lifetime: the caller is responsible for ensuring `exec`'s engine
-// outlives any pending posts. In practice this means the plugin
-// must guarantee the engine that loaded it isn't torn down with
-// worker threads still queued. The deferred call's return value
-// and exceptions are not observable from the caller — for results,
-// arrange your own signaling (e.g. a Praia Queue captured in the
-// callback's closure).
+// Lifetime — engine. The caller is responsible for ensuring `exec`'s
+// engine outlives any pending posts. In practice this means the
+// plugin must guarantee the engine that loaded it isn't torn down
+// with worker threads still queued. The deferred call's return
+// value and exceptions are not observable from the caller — for
+// results, arrange your own signaling (e.g. a Praia Queue captured
+// in the callback's closure).
+//
+// Lifetime — captured Values. The `fn` callable and any GC-tracked
+// Values inside `args` ride this call from a worker thread (no
+// executor, no GcHeap participation) through the queue and into the
+// engine's drainPosted. While they're in the worker's std::thread
+// capture, the GC on the engine side can't see them — its mark
+// phase walks the engine's roots, not arbitrary C++ memory. A sweep
+// fired mid-flight would clear those Values' interiors (env
+// variables on a callable's closure, entries on a map, etc.) even
+// though the shared_ptr keeps the address valid.
+//
+// The caller MUST pin every GC-tracked Value (the callable plus any
+// trailing args) with praia::pinValue BEFORE handing them off to
+// the worker — and MUST arrange for a matching praia::unpinValue
+// on the engine thread after the callback runs. The canonical
+// pattern (see examples/plugins/counter.cpp::scheduleAsync) is to
+// post a small NativeFunction *wrapper* that calls the user
+// callback and then unpins. Posting the user callback directly and
+// trying to unpin from the worker thread doesn't work — pinValue
+// and unpinValue throw on threads without an active executor.
+//
+// Non-GC values (numbers, strings, bools, nil) are unaffected; they
+// have no interior the sweep could clear. pinValue/unpinValue on
+// them are no-ops, so the wrapper's cleanup loop can stay uniform.
 void postToEngine(void* exec,
                   std::shared_ptr<Callable> fn,
                   std::vector<Value> args);
