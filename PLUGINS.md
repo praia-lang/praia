@@ -388,7 +388,86 @@ extern "C" void praia_register(PraiaMap* module) {
 
 `praia::call` works for both Praia engines (the tree-walker and the bytecode VM) — your plugin doesn't need to know which one is running. See `examples/plugins/mathext.cpp::filter` for the full example.
 
-**Pitfall — deferred invocation.** Callbacks must be invoked synchronously from the same plugin call that received them. If you stash a callable and invoke it later from a worker thread, a libuv-style scheduler, or any other off-engine context, `praia::call` will throw with "no active Praia executor on this thread". Stack-based VMs and tracing GCs can't safely have user code called on threads they didn't sanction.
+**Pitfall — deferred invocation.** Callbacks must be invoked synchronously from the same plugin call that received them. If you stash a callable and invoke it later from a worker thread, a libuv-style scheduler, or any other off-engine context, `praia::call` will throw with "no active Praia executor on this thread". Stack-based VMs and tracing GCs can't safely have user code called on threads they didn't sanction. Use `praia::postToEngine` (next section) to marshal the call back to the engine.
+
+### Calling back from background threads — `praia::postToEngine`
+
+The previous section's pitfall — "callbacks must be invoked synchronously" — leaves a real gap: plugins that genuinely do background work (libuv-style I/O, `std::thread` workers, native event loops) need a way to fire Praia callbacks when the background work finishes. `praia::postToEngine` is the supported path.
+
+The shape:
+
+```cpp
+void praia::postToEngine(void* engine,
+                         std::shared_ptr<Callable> fn,
+                         std::vector<Value> args);
+```
+
+The `engine` token is captured on the engine thread via `praia::currentExecutor()` (the same token `praia::call` uses internally). From any thread — even ones that have no Praia executor of their own — call `postToEngine` to enqueue `fn(args)` for execution on the engine's next yield point.
+
+Canonical pattern (the engine schedules a callback to fire after a delay computed by a worker):
+
+```cpp
+#include "praia_plugin.h"
+#include <chrono>
+#include <thread>
+
+extern "C" void praia_register(PraiaMap* module) {
+    module->entries["scheduleAfter"] = Value(makeNative("mod.scheduleAfter", 2,
+        [](const std::vector<Value>& args) -> Value {
+            int  ms = (int)praia::requireNumber(args, 0, "mod.scheduleAfter");
+            auto cb = praia::requireCallable(args, 1, "mod.scheduleAfter");
+
+            // Pin the callable so the engine's GC doesn't collect its
+            // closure environment between now and the post firing.
+            // Pin runs on the engine thread (we're inside a native
+            // call); the worker can't pin from its own thread.
+            praia::pinValue(args[1]);
+
+            void* engine = praia::currentExecutor();   // capture HERE
+
+            // Detach a worker. `engine`, `cb` and `cbValue` are
+            // captured by value; nothing dereferences user-Praia
+            // state from the worker thread itself.
+            Value cbValue = args[1];
+            std::thread([engine, cb, cbValue, ms]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                praia::postToEngine(engine, cb, {});
+                // The matching unpin must run on the engine thread
+                // because praia::unpinValue throws on threads with
+                // no executor. Either:
+                //   1. Have the callback unpin itself at the end of
+                //      its body (the pattern used in the counter
+                //      plugin's test harness), or
+                //   2. Post a separate "release" callable after the
+                //      first one fires.
+                (void)cbValue;
+            }).detach();
+
+            return Value();
+        }));
+}
+```
+
+#### When the post actually fires
+
+The engine drains its post queue at every "yield point":
+
+- **Tree-walker:** before every statement and expression (via `checkInterrupt`).
+- **Bytecode VM:** every ~1024 bytecode ops, at the same boundary as GC + SIGINT checks.
+
+For interactive scripts and request handlers, the latency between `postToEngine` returning on the worker and the callback firing on the engine is microseconds. For tight engine loops that don't allocate (extremely rare in real code), it's bounded by 1024 ops — still negligible.
+
+#### Lifetime and shutdown
+
+The plugin is responsible for ensuring the engine outlives any pending posts. A plugin that spawns workers should join or otherwise drain them in its teardown path; posting to an engine that has already been destroyed is undefined behavior. The detached-thread example above is fine for short-lived workers (sleep, single async I/O); production plugins doing long-running background work should hold a `std::thread` handle and `.join()` on plugin teardown.
+
+#### Fire-and-forget semantics
+
+`postToEngine` has no return value. The deferred call's exceptions are caught by the drain loop and logged to stderr ("`[praia::postToEngine] callback raised: <message>`"); one bad callback can't poison the queue, but the caller can't observe success vs failure directly. For result-passing, capture a Praia `Queue` (from the `concurrency` builtin) or a shared map in the callback's closure and have the worker read it back.
+
+#### Why workers can't call praia::call or praia::pinValue
+
+Both helpers begin with `if (!currentExecutor()) throw`. On a worker thread, `currentExecutor()` is null because no Praia engine has bound its thread-local for that thread. `postToEngine` is the only API documented to be safe to call from such threads — it carries the engine token explicitly so the queue knows which engine to wake.
 
 ### Error handling
 
@@ -479,7 +558,7 @@ Plugin code can be called from one of three contexts. Pick the one that matches 
 
 - **Synchronous calls.** Most plugins. Praia invokes your native function on its own thread; `gcNew` works as expected, `praia::call` works for callbacks, the GC sees your containers normally.
 - **Inside an `async` task.** Praia ships your function to a worker thread for the task's lifetime, with the GC disabled while the task runs. You can still use `gcNew` for short-lived intermediate containers, but **don't let a `gcNew`-built object escape the task scope** — it isn't tracked by the parent's GC. Either return primitives, deep-copy outside the plugin, or marshal the work back to the parent. See the [async/Lock guide](https://praia.sh/docs/advanced/async) for the matching pattern on the Praia side.
-- **Off-engine threads (e.g. libuv callback, your own `std::thread`).** Both `gcNew` and `praia::call` are unsafe. Marshal back to a Praia-driven thread before touching either.
+- **Off-engine threads (e.g. libuv callback, your own `std::thread`).** Both `gcNew` and `praia::call` are unsafe. Use [`praia::postToEngine`](#calling-back-from-background-threads--praiaposttoengine) to schedule the work back on the engine thread.
 
 ## Example
 

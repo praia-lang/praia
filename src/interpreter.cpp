@@ -359,7 +359,44 @@ void Interpreter::executeBlock(const BlockStmt* block,
 
 // ── SIGINT check — called from execute() and tight loops ──
 
+void Interpreter::enqueuePosted(std::shared_ptr<Callable> fn,
+                                std::vector<Value> args) {
+    std::lock_guard<std::mutex> lock(postedMutex_);
+    postedQueue_.push_back({std::move(fn), std::move(args)});
+    // Release so the engine thread's acquire-load in drainPosted sees
+    // the push before the flag flip; together they form the
+    // happens-before edge that lets the engine skip the mutex when
+    // the queue is empty.
+    postedPending_.store(true, std::memory_order_release);
+}
+
+void Interpreter::drainPosted() {
+    if (!postedPending_.load(std::memory_order_acquire)) return;
+    std::vector<PostedCall> work;
+    {
+        std::lock_guard<std::mutex> lock(postedMutex_);
+        work.swap(postedQueue_);
+        postedPending_.store(false, std::memory_order_relaxed);
+    }
+    for (auto& pc : work) {
+        try {
+            callSafe(*this, pc.fn, pc.args);
+        } catch (const RuntimeError& e) {
+            // Posted calls are fire-and-forget — no user-code call
+            // site to surface the exception to. Log and continue
+            // draining; one bad callback shouldn't poison the queue.
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised: %s\n", e.what());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised non-Praia exception: %s\n",
+                e.what());
+        }
+    }
+}
+
 void Interpreter::checkInterrupt(int line, int column) {
+    drainPosted();
     if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
         g_pendingSignals.fetch_and(~(1u << SIGINT));
         std::shared_ptr<Callable> handler;

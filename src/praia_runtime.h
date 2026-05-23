@@ -58,4 +58,25 @@ Value invokeExecutor(void* exec,
                      const std::shared_ptr<Callable>& fn,
                      const std::vector<Value>& args);
 
+// Schedule `fn(args)` to run on the engine identified by `exec` at
+// its next yield point (between statements for the tree-walker;
+// between throttled GC/SIGINT checks for the bytecode VM). Safe to
+// call from any thread, including threads with no active Praia
+// executor — that's the whole point. Returns immediately;
+// fire-and-forget.
+//
+// `exec` must be a token previously captured via currentExecutor()
+// while running on the target engine. Pass it across threads as-is.
+//
+// Lifetime: the caller is responsible for ensuring `exec`'s engine
+// outlives any pending posts. In practice this means the plugin
+// must guarantee the engine that loaded it isn't torn down with
+// worker threads still queued. The deferred call's return value
+// and exceptions are not observable from the caller — for results,
+// arrange your own signaling (e.g. a Praia Queue captured in the
+// callback's closure).
+void postToEngine(void* exec,
+                  std::shared_ptr<Callable> fn,
+                  std::vector<Value> args);
+
 }  // namespace praia

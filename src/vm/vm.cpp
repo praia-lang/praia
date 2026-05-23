@@ -313,6 +313,40 @@ void VM::setArgs(const std::vector<std::string>& args) {
         globals[slot].asMap()->entries[Value("args")] = Value(arr);
 }
 
+void VM::enqueuePosted(std::shared_ptr<Callable> fn, std::vector<Value> args) {
+    std::lock_guard<std::mutex> lock(postedMutex_);
+    postedQueue_.push_back({std::move(fn), std::move(args)});
+    // Release-store so the engine thread's acquire-load in drainPosted
+    // sees the push before the flag flip, forming the happens-before
+    // edge that lets the engine skip the mutex when the queue is empty.
+    postedPending_.store(true, std::memory_order_release);
+}
+
+void VM::drainPosted() {
+    if (!postedPending_.load(std::memory_order_acquire)) return;
+    std::vector<PostedCall> work;
+    {
+        std::lock_guard<std::mutex> lock(postedMutex_);
+        work.swap(postedQueue_);
+        postedPending_.store(false, std::memory_order_relaxed);
+    }
+    for (auto& pc : work) {
+        try {
+            callWithVM(*this, pc.fn, pc.args);
+        } catch (const RuntimeError& e) {
+            // Posted calls are fire-and-forget — no user-code call
+            // site to surface the exception to. Log and continue
+            // draining; one bad callback shouldn't poison the queue.
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised: %s\n", e.what());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised non-Praia exception: %s\n",
+                e.what());
+        }
+    }
+}
+
 void VM::push(Value value) {
     if (stackTop >= STACK_MAX) {
         std::cerr << "Fatal: Stack overflow (depth " << stackTop << ")" << std::endl;
@@ -914,6 +948,10 @@ VM::Result VM::execute(int baseFrameCount_) {
         if (--gcCounter_ <= 0) {
             gcCounter_ = 1024;
             GcHeap::current().collectIfNeeded();
+            // Drain any cross-thread posts before signal handling so a
+            // worker-posted callback doesn't get masked by an
+            // immediately-following SIGINT-as-Interrupted bail-out.
+            drainPosted();
             // Check for pending SIGINT — makes Ctrl+C catchable by try/catch
             if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
                 g_pendingSignals.fetch_and(~(1u << SIGINT));

@@ -12,7 +12,9 @@
 
 #include "praia_plugin.h"
 #include <atomic>
+#include <chrono>
 #include <string>
+#include <thread>
 
 PRAIA_DECLARE_ABI();
 PRAIA_PLUGIN_METADATA("counter", "0.1.0",
@@ -127,6 +129,55 @@ extern "C" void praia_register(PraiaMap* module) {
                 praia::unpinValue(g_storedCallback);
                 g_storedCallback = Value();
             }
+            return Value();
+        }));
+
+    // counter.scheduleAsync(delayMs, cb) — demo of praia::postToEngine.
+    // Spawns a detached worker thread that sleeps for `delayMs` and
+    // then marshals `cb()` back to the engine that called us. This is
+    // the canonical pattern any plugin doing background I/O would
+    // use; the test exercises the round-trip.
+    module->entries["scheduleAsync"] = Value(makeNative("counter.scheduleAsync", 2,
+        [](const std::vector<Value>& args) -> Value {
+            int delayMs = static_cast<int>(
+                praia::requireNumber(args, 0, "counter.scheduleAsync"));
+            auto cb = praia::requireCallable(args, 1, "counter.scheduleAsync");
+            // Pin BEFORE handing the callable off — the worker can't
+            // pin on its own thread (no executor). The pin's lifetime
+            // is bounded by the callback itself (see below).
+            praia::pinValue(args[1]);
+            void* engine = praia::currentExecutor();
+            // Capture the original Value (a string copy is cheap and
+            // gives the deferred unpin the right Value to match
+            // against in the pin registry).
+            Value cbValue = args[1];
+            std::thread([engine, cb, cbValue, delayMs]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                // The post itself enqueues a wrapper that runs `cb` and
+                // then unpins on the engine thread (we can't unpin
+                // here — wrong thread, no executor). To avoid having
+                // to allocate yet another wrapper Callable, we let
+                // the engine drain the callback first; the next
+                // scheduleAsync/clearStored from Praia code can unpin
+                // by passing the same Value back. For this demo we
+                // just leave the pin in place — the test cleans up
+                // explicitly. A production plugin would either
+                // schedule a separate "release" post or use a
+                // PinnedValue stashed in a worker-side struct that's
+                // moved into the post's callable closure.
+                (void)cbValue;
+                praia::postToEngine(engine, cb, {});
+            }).detach();
+            return Value();
+        },
+        {"delayMs", "cb"}));
+
+    // counter._unpinCallback(cb) — release a pin a test created via
+    // scheduleAsync. Tests must explicitly clean up; production
+    // plugins would arrange auto-release in the posted wrapper.
+    module->entries["_unpinCallback"] = Value(makeNative("counter._unpinCallback", 1,
+        [](const std::vector<Value>& args) -> Value {
+            praia::unpinValue(args[0]);
             return Value();
         }));
 }
