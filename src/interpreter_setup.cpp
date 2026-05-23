@@ -65,6 +65,25 @@ static std::mutex g_pluginMutex;
 static std::unordered_map<std::string, std::shared_ptr<PraiaMap>> g_pluginCache;
 static std::vector<void*> g_pluginHandles; // never dlclose'd — function pointers must stay valid
 
+// praia_at_exit hooks, paired with the plugin path that registered
+// them. Path is kept for diagnostic wording when a hook throws.
+// Vector order matches load order; runPluginExitHooks walks it in
+// reverse so plugins loaded later tear down first (LIFO, mirrors C's
+// atexit and what plugin authors expect from layered dependencies).
+struct PluginAtExitEntry {
+    void (*fn)();
+    std::string pluginPath;
+};
+static std::vector<PluginAtExitEntry> g_pluginAtExitHooks;
+
+// Set once by runPluginExitHooks under g_pluginMutex when teardown
+// begins. loadNative checks it (also under g_pluginMutex) and
+// refuses to register new hooks past that point — so a late call
+// (theoretical under current ordering, possible under future
+// threading-model changes) can't enqueue a hook the drain loop has
+// already passed.
+static bool g_pluginShutdown = false;
+
 static int signalNameToNum(const std::string& name) {
     if (name == "SIGINT"  || name == "INT")  return SIGINT;
     if (name == "SIGTERM" || name == "TERM") return SIGTERM;
@@ -4298,10 +4317,29 @@ Interpreter::Interpreter() {
             // Lock for the entire load to prevent double-loading
             std::lock_guard<std::mutex> lock(g_pluginMutex);
 
-            // Check cache
+            // Cache fast-path runs BEFORE the shutdown guard: a
+            // cache hit returns an already-loaded module, which
+            // doesn't enqueue any new hook, so it's safe during
+            // teardown. Only a fresh load (which would push a hook
+            // the drain loop has already passed) needs to be
+            // refused.
             auto it = g_pluginCache.find(absPath);
             if (it != g_pluginCache.end())
                 return Value(it->second);
+
+            // Refuse a fresh load once teardown has begun. By the
+            // time runPluginExitHooks flips this flag, the drain loop
+            // has already published the snapshot it intends to call;
+            // a hook pushed after that point would leak. In practice
+            // no engine thread should still be running this far into
+            // exit (the Interpreter destructor blocks on outstanding
+            // futures first), so the throw is a defensive signal
+            // rather than a hot path.
+            if (g_pluginShutdown) {
+                throw RuntimeError(
+                    "loadNative(): cannot load plugins during process "
+                    "exit — '" + path + "'", 0);
+            }
 
             // dlopen
             void* handle = dlopen(absPath.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -4405,8 +4443,88 @@ Interpreter::Interpreter() {
             // Success — cache the module
             g_pluginCache[absPath] = moduleMap;
 
+            // Optional process-exit hook. dlsym independently of
+            // registration; presence is an opt-in. Registered LAST,
+            // after the cache assignment, so a throw between
+            // praia_register and here (metadata probing or cache
+            // alloc) doesn't leave a stale hook. If the same plugin
+            // is then loaded a second time, the cache path returns
+            // early and we never reach here again — a single
+            // dlsym + push per plugin. Symbol is fixed: extern "C"
+            // void praia_at_exit(void).
+            using AtExitFn = void (*)();
+            dlerror();
+            if (auto atExitFn = reinterpret_cast<AtExitFn>(dlsym(handle, "praia_at_exit"))) {
+                g_pluginAtExitHooks.push_back({atExitFn, absPath});
+            } else {
+                dlerror(); // swallow "symbol not found" — hook is optional
+            }
+
             return Value(moduleMap);
         })));
+}
+
+// Process-exit teardown for plugins that exported praia_at_exit.
+// Called from main() on every normal return path via a stack-local
+// RAII guard, so it fires for both clean exits and sys.exit()
+// returns. Idempotent — clears the registry after running so a
+// nested guard (shouldn't happen, but defensively) doesn't call
+// hooks twice.
+//
+// Iterates in reverse load order so plugins loaded later — which
+// may depend on earlier plugins' state — tear down first. Errors
+// from individual hooks are logged and swallowed; one bad plugin
+// doesn't strand the others' cleanup.
+void runPluginExitHooks() {
+    // Flip the shutdown flag once, before any drain iteration, so a
+    // concurrent loadNative (theoretical under current ordering)
+    // observes shutdown and refuses to enqueue a new hook the drain
+    // would never reach.
+    {
+        std::lock_guard<std::mutex> lock(g_pluginMutex);
+        g_pluginShutdown = true;
+    }
+    while (true) {
+        // Hold g_pluginMutex only long enough to pop the next hook.
+        // loadNative takes the same mutex for the duration of a load;
+        // serialising the pop against the push prevents a data race
+        // if a still-running engine thread (e.g. an unawaited async
+        // task) happens to call loadNative during exit. In practice
+        // Interpreter's destructor blocks on outstanding futures
+        // before PluginExitGuard fires, so the mutex is uncontended
+        // here — but matching the loadNative side's locking
+        // convention is cheap and removes the UB-shaped footgun if
+        // the threading model ever changes.
+        //
+        // CRITICALLY: drop the lock BEFORE invoking entry.fn(). A
+        // hook is plugin-controlled code that may take a long time
+        // (flush, fsync, join worker threads). Holding the mutex
+        // across that call would block any concurrent loadNative
+        // indefinitely; even if the current architecture rules that
+        // out, the lock-then-callback pattern is the kind of latent
+        // deadlock generator we don't want to leave behind.
+        PluginAtExitEntry entry;
+        {
+            std::lock_guard<std::mutex> lock(g_pluginMutex);
+            if (g_pluginAtExitHooks.empty()) return;
+            // Pop before invoking so a hook that re-enters loadNative
+            // (shouldn't, but defensively) doesn't observe its own
+            // half-run state.
+            entry = std::move(g_pluginAtExitHooks.back());
+            g_pluginAtExitHooks.pop_back();
+        }
+        try {
+            entry.fn();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                "[praia_at_exit] %s: %s\n",
+                entry.pluginPath.c_str(), e.what());
+        } catch (...) {
+            std::fprintf(stderr,
+                "[praia_at_exit] %s: unknown exception\n",
+                entry.pluginPath.c_str());
+        }
+    }
 }
 
 void Interpreter::setArgs(const std::vector<std::string>& args) {

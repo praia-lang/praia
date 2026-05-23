@@ -14,6 +14,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>     // std::fopen / std::fputs in praia_at_exit
+#include <cstdlib>    // std::getenv in praia_at_exit
 #include <limits>
 #include <string>
 #include <thread>
@@ -21,6 +23,21 @@
 PRAIA_DECLARE_ABI();
 PRAIA_PLUGIN_METADATA("counter", "0.1.0",
                      "Demo: opaque handles via praia::makeExternal");
+
+// Demo of the optional praia_at_exit hook. Real plugins use this to
+// flush buffered logs, unlock files, signal-and-join worker threads,
+// etc. Here we just write a marker line to a tempfile named by an
+// env var — the test suite reads it back to verify the hook fired.
+// When the env var is unset the hook is a no-op, so the demo plugin
+// doesn't pollute the filesystem on every load.
+extern "C" void praia_at_exit(void) {
+    const char* markerPath = std::getenv("PRAIA_COUNTER_AT_EXIT_MARKER");
+    if (!markerPath || !*markerPath) return;
+    if (FILE* f = std::fopen(markerPath, "w")) {
+        std::fputs("counter.at_exit ran\n", f);
+        std::fclose(f);
+    }
+}
 
 namespace {
 

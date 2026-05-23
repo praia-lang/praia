@@ -405,6 +405,47 @@ testing.test("withCancel unbinds on exception from fn", lam{ in
         "scope unbound even when fn threw")
 })
 
+testing.test("praia_at_exit hook fires once at process exit", lam{ in
+    // The hook only runs on process teardown, so testing it requires
+    // a subprocess. Spawn a child praia that loads the counter
+    // plugin (no further work needed — the dlsym + register
+    // happens during loadNative) and exits cleanly. The plugin's
+    // praia_at_exit writes a marker file at the path in
+    // PRAIA_COUNTER_AT_EXIT_MARKER; we read it back after exec.
+    // env(1) is the portable way to set a var for one command since
+    // sys.exec doesn't expose an env option.
+    let marker = sys.exec(["mktemp", "/tmp/praia_atexit_test.XXXXXX"]).stdout.strip()
+    fs.remove(marker)  // mktemp creates the file; we want the hook to create it
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let result = sys.exec(["env", "PRAIA_COUNTER_AT_EXIT_MARKER=" + marker,
+        praiaBin, "-c", "loadNative('./examples/plugins/counter')"])
+    testing.assertEqual(result.exitCode, 0,
+        "child exited cleanly (stderr: " + result.stderr + ")")
+    testing.assert(fs.exists(marker),
+        "marker file written by the at_exit hook")
+    let contents = fs.read(marker)
+    testing.assertEqual(contents, "counter.at_exit ran\n",
+        "hook wrote the expected marker line")
+    if (fs.exists(marker)) { fs.remove(marker) }
+})
+
+testing.test("praia_at_exit hook fires on sys.exit() too", lam{ in
+    // Same as above but the child uses sys.exit() to terminate.
+    // ExitSignal unwinds through main's catch blocks and the
+    // PluginExitGuard's destructor fires the hooks on the way out.
+    let marker = sys.exec(["mktemp", "/tmp/praia_atexit_test.XXXXXX"]).stdout.strip()
+    fs.remove(marker)
+
+    let praiaBin = path.join(sys.cwd(), "praia")
+    let result = sys.exec(["env", "PRAIA_COUNTER_AT_EXIT_MARKER=" + marker,
+        praiaBin, "-c", "loadNative('./examples/plugins/counter'); sys.exit(0)"])
+    testing.assertEqual(result.exitCode, 0, "sys.exit(0) → clean exit")
+    testing.assert(fs.exists(marker),
+        "marker present even when child exited via sys.exit")
+    if (fs.exists(marker)) { fs.remove(marker) }
+})
+
 testing.test("compute native bails early when cancelled cross-thread", lam{ in
     // Real-world shape: a CPU-bound native runs on a task thread,
     // and the main thread flips the token. The native must see the
