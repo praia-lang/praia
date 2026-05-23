@@ -13,6 +13,8 @@
 #include "praia_plugin.h"
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -156,8 +158,19 @@ extern "C" void praia_register(PraiaMap* module) {
                 praia::error("counter.scheduleAsync(delayMs, cb, ...args) "
                              "requires at least 2 arguments");
             }
-            int delayMs = static_cast<int>(
-                praia::requireNumber(args, 0, "counter.scheduleAsync"));
+            // Validate the delay before casting: NaN / Inf casts to int
+            // are UB; negative values produce a wraparound or no-op
+            // sleep; fractional milliseconds aren't a meaningful unit
+            // for this API.
+            double rawDelay = praia::requireNumber(args, 0, "counter.scheduleAsync");
+            if (!std::isfinite(rawDelay) || rawDelay < 0 ||
+                rawDelay > static_cast<double>(std::numeric_limits<int>::max()) ||
+                std::trunc(rawDelay) != rawDelay) {
+                praia::error("counter.scheduleAsync(delayMs, ...): delayMs must "
+                             "be a non-negative integer in ms (got non-finite, "
+                             "negative, fractional, or out-of-range value)");
+            }
+            int delayMs = static_cast<int>(rawDelay);
             praia::requireCallable(args, 1, "counter.scheduleAsync");
 
             // Pin everything that has to survive the worker→engine
