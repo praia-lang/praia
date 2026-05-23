@@ -265,6 +265,17 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
             }
             auto* state = static_cast<CancellationState*>(
                 it->second.asExternal()->data);
+            // A well-formed CancellationToken always carries a
+            // non-null state pointer (std::make_shared in
+            // CancellationToken() never returns null). A null here
+            // means a hostile/buggy plugin minted an External with
+            // the right typeName but no payload — fail loudly
+            // rather than dereferencing inside CancelScope.
+            if (!state) {
+                throw RuntimeError(
+                    "withCancel(token, ...): token has a malformed "
+                    "_state slot (null payload)", 0);
+            }
 
             if (!args[1].isCallable())
                 throw RuntimeError(

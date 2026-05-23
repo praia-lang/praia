@@ -298,6 +298,13 @@ extern "C" void praia_register(PraiaMap* module) {
                 praia::error("counter.computeUntilCancelled(iters): iters must "
                              "be a non-negative finite number");
             }
+            // Fractional inputs are an obvious caller error; truncating
+            // 3.7 to 3 silently is worse than failing fast. Matches
+            // the integer-ness check scheduleAsync does on delayMs.
+            if (std::trunc(raw) != raw) {
+                praia::error("counter.computeUntilCancelled(iters): iters must "
+                             "be an integer (got a fractional value)");
+            }
             int64_t iters = (raw > static_cast<double>(std::numeric_limits<int64_t>::max()))
                 ? std::numeric_limits<int64_t>::max()
                 : static_cast<int64_t>(raw);
