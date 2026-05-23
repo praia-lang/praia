@@ -58,4 +58,58 @@ Value invokeExecutor(void* exec,
                      const std::shared_ptr<Callable>& fn,
                      const std::vector<Value>& args);
 
+// Schedule `fn(args)` to run on the engine identified by `exec` at
+// its next yield point (between statements for the tree-walker;
+// between throttled GC/SIGINT checks for the bytecode VM). Safe to
+// call from any thread, including threads with no active Praia
+// executor — that's the whole point. Returns immediately;
+// fire-and-forget.
+//
+// `exec` must be a token previously captured via currentExecutor()
+// while running on the target engine. Pass it across threads as-is.
+//
+// Lifetime — engine. The caller is responsible for ensuring `exec`'s
+// engine outlives any pending posts. In practice this means the
+// plugin must guarantee the engine that loaded it isn't torn down
+// with worker threads still queued. The deferred call's return
+// value and exceptions are not observable from the caller — for
+// results, arrange your own signaling (e.g. a Praia Queue captured
+// in the callback's closure).
+//
+// Lifetime — captured Values. The `fn` callable and any GC-tracked
+// Values inside `args` are NOT rooted by the engine while they
+// travel from the worker through to drainPosted. The engine's
+// gcMarkRoots (Interpreter::gcMarkRoots / VM::gcMarkRoots) walks
+// globals + the current env + savedEnvStack_ + grainCache + the
+// pinned_ registry — it does NOT walk postedQueue_, and it cannot
+// see the worker thread's std::thread lambda captures. A sweep
+// fired between the worker capturing the Value and drainPosted
+// running it would clear those Values' interiors (env variables on
+// a callable's closure, entries on a map, etc.) even though the
+// shared_ptr keeps the address valid.
+//
+// The caller MUST pin every GC-tracked Value (the callable plus any
+// trailing args) with praia::pinValue BEFORE handing them off to
+// the worker, and the pins MUST remain in place until the engine
+// has finished running the deferred callback (i.e. until
+// drainPosted has invoked it and returned). The matching
+// praia::unpinValue calls MUST run on the engine thread —
+// pinValue/unpinValue throw on threads without an active executor,
+// so the worker can't release them itself.
+//
+// The canonical pattern (see examples/plugins/counter.cpp ::
+// scheduleAsync) is to post a small NativeFunction wrapper that
+// the engine's drainPosted invokes; the wrapper calls the user
+// callback and then calls praia::unpinValue for each previously
+// pinned Value (in a try/catch so an exception from the user
+// callback doesn't leak pins). That keeps every pinValue paired
+// with an unpinValue without burdening the user-supplied callback.
+//
+// Non-GC values (numbers, strings, bools, nil) are unaffected; they
+// have no interior the sweep could clear. pinValue/unpinValue on
+// them are no-ops, so the wrapper's cleanup loop can stay uniform.
+void postToEngine(void* exec,
+                  std::shared_ptr<Callable> fn,
+                  std::vector<Value> args);
+
 }  // namespace praia

@@ -67,4 +67,26 @@ Value invokeExecutor(void* exec,
     return callSafe(*interp, fn, args);
 }
 
+void postToEngine(void* exec,
+                  std::shared_ptr<Callable> fn,
+                  std::vector<Value> args) {
+    if (!exec) {
+        // Background threads typically obtain `exec` by capturing
+        // currentExecutor() on the engine thread before spawning. A
+        // null token here means the caller passed the result of a
+        // failed currentExecutor() call — surface that loudly rather
+        // than silently dropping the post.
+        throw RuntimeError(
+            "praia::postToEngine called with a null executor token", 0);
+    }
+    auto raw = reinterpret_cast<uintptr_t>(exec);
+    if ((raw & kTagBit) == kTagVm) {
+        auto* vm = reinterpret_cast<VM*>(raw & ~kTagBit);
+        vm->enqueuePosted(std::move(fn), std::move(args));
+    } else {
+        auto* interp = reinterpret_cast<Interpreter*>(raw);
+        interp->enqueuePosted(std::move(fn), std::move(args));
+    }
+}
+
 }  // namespace praia

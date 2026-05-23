@@ -52,7 +52,12 @@
 //
 // History:
 //   1 — initial versioned ABI (Praia 0.4+)
-#define PRAIA_PLUGIN_ABI_VERSION 1
+//   2 — adds praia::postToEngine for cross-thread call marshalling
+//       (praia_runtime.h). Plugins that link the new symbol won't
+//       resolve against a v1 engine; bumping the ABI surfaces that
+//       as a clean "rebuild required" diagnostic at loadNative time
+//       rather than a raw dlerror about an unresolved symbol.
+#define PRAIA_PLUGIN_ABI_VERSION 2
 
 #define PRAIA_DECLARE_ABI()                                             \
     extern "C" int praia_abi_version() {                                \
@@ -203,8 +208,9 @@ inline std::shared_ptr<Callable> requireCallable(
 // invokes it later from a worker thread or libuv-style callback,
 // `praia::call` throws because no engine is bound to that thread.
 // Callbacks must be invoked synchronously from the same plugin
-// thread that received them, or the plugin must marshal back to
-// the engine thread first.
+// thread that received them — or marshalled back via
+// `praia::postToEngine` (below), which is the supported path for
+// any std::thread / libuv / async-I/O scenario.
 inline Value call(const std::shared_ptr<Callable>& fn,
                   const std::vector<Value>& args = {}) {
     void* exec = currentExecutor();
@@ -218,6 +224,41 @@ inline Value call(const std::shared_ptr<Callable>& fn,
     }
     return invokeExecutor(exec, fn, args);
 }
+
+// Marshal a Praia callback back to the engine thread —
+// praia::postToEngine — is declared in praia_runtime.h next to
+// currentExecutor() / invokeExecutor() because the implementation
+// is out-of-line (no thread-local fast-path to inline). See the
+// declaration for the full contract; the canonical pattern is:
+//
+//   module->entries["scheduleAfter"] = Value(makeNative("mod.scheduleAfter", 2,
+//       [](const std::vector<Value>& args) -> Value {
+//           int ms = (int)praia::requireNumber(args, 0, "mod.scheduleAfter");
+//           auto cb = praia::requireCallable(args, 1, "mod.scheduleAfter");
+//           // Pin the callback so the engine thread's GC doesn't
+//           // collect its closure between now and the post firing.
+//           praia::pinValue(args[1]);
+//           void* engine = praia::currentExecutor();   // capture here
+//           std::thread([engine, cb, ms]() {
+//               std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+//               // Different thread — no executor of its own. The post
+//               // crosses the boundary. The pin keeps `cb` alive
+//               // until the engine drains.
+//               praia::postToEngine(engine, cb, {});
+//               // The matching unpin must run on the engine thread —
+//               // typically the callback itself does it at the end.
+//           }).detach();
+//           return Value();
+//       }));
+//
+// Pitfalls:
+//   * Worker threads MUST NOT call praia::pinValue / unpinValue —
+//     those throw on a thread with no active executor. Pin BEFORE
+//     spawning the worker; have the callback unpin itself when it
+//     runs on the engine thread.
+//   * postToEngine is fire-and-forget: no return value, no exception
+//     propagation. The drain loop logs callback exceptions to stderr
+//     and continues; a bad callback can't poison the queue.
 
 // ── Opaque handles ──────────────────────────────────────────────
 //

@@ -288,6 +288,45 @@ testing.test("stashed callback survives GC pressure with its upvalue", lam{ in
     counter.clearStored()
 })
 
+testing.test("postToEngine: worker thread can marshal a callback back", lam{ in
+    // counter.scheduleAsync spawns a std::thread that sleeps briefly
+    // then calls praia::postToEngine(engine, cb). The plugin's
+    // C++ wrapper handles pin/unpin around the callback, so the
+    // user code stays simple. The engine drains posted callbacks at
+    // every checkInterrupt (statement / VM tick), so the busy loop
+    // below picks it up. State carrier is a map so the closure's
+    // mutation is visible to the outer scope (boolean assignment in
+    // a captured local doesn't propagate via the VM's upvalue
+    // capture; map-field assignment does, via the shared map
+    // reference).
+    let state = {received: false}
+    counter.scheduleAsync(20, lam{ in state.received = true })
+    let i = 0
+    while (!state.received && i < 1000) {
+        i = i + 1
+        let _x = counter.new()       // allocate, also yields to drain
+        time.sleep(2)
+    }
+    testing.assert(state.received,
+        "callback should have fired before the busy-wait gave up")
+})
+
+testing.test("postToEngine: trailing args ride the queue across threads", lam{ in
+    // scheduleAsync forwards any args past `cb` to the marshalled
+    // call. This proves the queue carries the args vector across the
+    // worker → engine thread hop intact, not just the callable.
+    let result = {value: nil}
+    counter.scheduleAsync(20, lam{ x in result.value = x }, "from-worker")
+    let i = 0
+    while (result.value == nil && i < 1000) {
+        i = i + 1
+        let _x = counter.new()
+        time.sleep(2)
+    }
+    testing.assertEqual(result.value, "from-worker",
+        "argument value crossed the post intact")
+})
+
 testing.test("callStored after clearStored throws (slot cleared)", lam{ in
     // clearStored releases the pin AND drops the C++ stash. We can't
     // directly observe Callable collection (no destructor count for

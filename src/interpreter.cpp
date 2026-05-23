@@ -8,6 +8,7 @@
 #include "parser.h"
 #include "unicode.h"
 #include <algorithm>
+#include <cstdio>          // std::fprintf in drainPosted's error logging
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -359,7 +360,62 @@ void Interpreter::executeBlock(const BlockStmt* block,
 
 // ── SIGINT check — called from execute() and tight loops ──
 
+void Interpreter::enqueuePosted(std::shared_ptr<Callable> fn,
+                                std::vector<Value> args) {
+    std::lock_guard<std::mutex> lock(postedMutex_);
+    postedQueue_.push_back({std::move(fn), std::move(args)});
+    // Release so the engine thread's acquire-load in drainPosted sees
+    // the push before the flag flip; together they form the
+    // happens-before edge that lets the engine skip the mutex when
+    // the queue is empty.
+    postedPending_.store(true, std::memory_order_release);
+}
+
+void Interpreter::drainPosted() {
+    if (!postedPending_.load(std::memory_order_acquire)) return;
+    std::vector<PostedCall> work;
+    {
+        std::lock_guard<std::mutex> lock(postedMutex_);
+        work.swap(postedQueue_);
+        postedPending_.store(false, std::memory_order_relaxed);
+    }
+    for (auto& pc : work) {
+        // Posted calls are fire-and-forget — no user-code call site
+        // to surface the exception to. Log and continue draining;
+        // one bad callback shouldn't poison the queue or propagate
+        // up through checkInterrupt into unrelated user code.
+        //
+        // callSafe deliberately leaves frames on callStack when the
+        // body throws (for stack-trace formatting). Since we swallow
+        // the exception here, we'd otherwise accumulate stale frames
+        // forever — restore callStack to its pre-call size on every
+        // catch path. Mirrors the same pattern used by TryCatchStmt
+        // in execute().
+        size_t savedStackSize = callStack.size();
+        try {
+            callSafe(*this, pc.fn, pc.args);
+        } catch (const RuntimeError& e) {
+            callStack.resize(savedStackSize);
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised: %s\n", e.what());
+        } catch (const std::exception& e) {
+            callStack.resize(savedStackSize);
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised non-Praia exception: %s\n",
+                e.what());
+        } catch (...) {
+            // Raw throw of a non-exception value. Rare in practice
+            // (Praia code only throws RuntimeError) but possible
+            // through a misbehaving plugin native.
+            callStack.resize(savedStackSize);
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised an unknown exception\n");
+        }
+    }
+}
+
 void Interpreter::checkInterrupt(int line, int column) {
+    drainPosted();
     if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
         g_pendingSignals.fetch_and(~(1u << SIGINT));
         std::shared_ptr<Callable> handler;

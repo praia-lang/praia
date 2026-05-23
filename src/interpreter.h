@@ -3,9 +3,11 @@
 #include "ast.h"
 #include "environment.h"
 #include "value.h"
+#include <atomic>
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -259,6 +261,12 @@ public:
     void checkInterrupt(int line, int column);
     std::shared_ptr<Environment> getGlobals() { return globals; }
 
+    // Cross-thread postToEngine: a worker thread (libuv callback,
+    // std::thread, etc.) enqueues a deferred call here; the engine
+    // drains the queue at its next checkInterrupt yield point.
+    void enqueuePosted(std::shared_ptr<Callable> fn, std::vector<Value> args);
+    void drainPosted();
+
     // Shared function/lambda call implementation
     Value callBody(std::shared_ptr<Environment> callEnv,
                    const std::vector<std::string>& params,
@@ -305,6 +313,22 @@ private:
     uint64_t pendingArgsFilled_ = ~0ULL;
 
     // (interpMutex removed — async tasks use task-local Interpreters instead)
+
+    // ── Cross-thread postToEngine queue ──
+    //
+    // Worker threads call praia::postToEngine() to schedule a callable
+    // for execution on this engine. The queue is drained at every
+    // checkInterrupt() yield point (which fires once per statement
+    // and once per expression). postedPending_ is a lock-free
+    // fast-path: drainPosted() checks it before acquiring postedMutex_,
+    // so the steady-state overhead per yield point is one atomic load.
+    struct PostedCall {
+        std::shared_ptr<Callable> fn;
+        std::vector<Value> args;
+    };
+    std::mutex postedMutex_;
+    std::vector<PostedCall> postedQueue_;
+    std::atomic<bool> postedPending_{false};
 
     // Call stack for error traces
 public:

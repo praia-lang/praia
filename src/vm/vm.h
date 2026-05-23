@@ -3,6 +3,7 @@
 #include "../value.h"
 #include "chunk.h"
 #include "compiler.h"
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -213,6 +214,26 @@ private:
     // these and marks live entries; expired ones are pruned.
     std::mutex inflightRootsMtx_;
     std::vector<std::weak_ptr<std::vector<Value>>> inflightTaskRoots_;
+
+    // ── Cross-thread postToEngine queue ──
+    //
+    // Worker threads call praia::postToEngine() to schedule a callable
+    // for execution on this VM. The queue is drained at the same
+    // boundary as the gcCounter_-throttled GC / SIGINT checks in the
+    // main dispatch loop. postedPending_ is a lock-free fast-path:
+    // drainPosted() loads it before touching postedMutex_, so the
+    // steady-state overhead per drain attempt is one atomic load.
+    struct PostedCall {
+        std::shared_ptr<Callable> fn;
+        std::vector<Value> args;
+    };
+    std::mutex postedMutex_;
+    std::vector<PostedCall> postedQueue_;
+    std::atomic<bool> postedPending_{false};
+public:
+    void enqueuePosted(std::shared_ptr<Callable> fn, std::vector<Value> args);
+    void drainPosted();
+private:
 
     // Module system
     std::string currentFile;

@@ -8,6 +8,7 @@
 #include "../parser.h"
 #include "../unicode.h"
 #include <algorithm>
+#include <cstdio>          // std::fprintf in drainPosted's error logging
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -311,6 +312,78 @@ void VM::setArgs(const std::vector<std::string>& args) {
     int slot = findGlobalSlot("sys");
     if (slot >= 0 && globals[slot].isMap())
         globals[slot].asMap()->entries[Value("args")] = Value(arr);
+}
+
+void VM::enqueuePosted(std::shared_ptr<Callable> fn, std::vector<Value> args) {
+    std::lock_guard<std::mutex> lock(postedMutex_);
+    postedQueue_.push_back({std::move(fn), std::move(args)});
+    // Release-store so the engine thread's acquire-load in drainPosted
+    // sees the push before the flag flip, forming the happens-before
+    // edge that lets the engine skip the mutex when the queue is empty.
+    postedPending_.store(true, std::memory_order_release);
+}
+
+void VM::drainPosted() {
+    if (!postedPending_.load(std::memory_order_acquire)) return;
+    std::vector<PostedCall> work;
+    {
+        std::lock_guard<std::mutex> lock(postedMutex_);
+        work.swap(postedQueue_);
+        postedPending_.store(false, std::memory_order_relaxed);
+    }
+    for (auto& pc : work) {
+        // Posted calls are fire-and-forget — no user-code call site
+        // to surface the exception to. Log and continue draining;
+        // one bad callback shouldn't poison the queue or propagate
+        // up through the dispatch loop into unrelated user code.
+        //
+        // callWithVM pushes the callable + args onto the data stack
+        // and a frame onto the call frames before invoking
+        // vm.execute. If user code throws (or vm.execute returns
+        // RUNTIME_ERROR which we surface as a throw), none of that
+        // state is unwound. Save everything that the callee could
+        // mutate, restore on every catch path:
+        //   - stackTop / frameCount : the obvious data + frame stacks.
+        //   - openUpvalues          : upvalues captured during the
+        //     failed call point into stack slots that we're about to
+        //     reuse. A closure stashed in a global before the throw
+        //     would later read garbage from those slots. Close
+        //     everything at savedTop and above, mirroring what
+        //     OP_RETURN does on a clean unwind.
+        //   - exceptionHandlers     : tryHandleError balances pushes
+        //     against pops in normal flow, but defense-in-depth: if
+        //     the callee leaves stale entries above its execute
+        //     scope's floor, they'd bleed into the next try/catch
+        //     out in dispatch-loop land. resize() is a no-op when
+        //     size already matches; cheap insurance.
+        // Mirrors the defer loop in OP_RETURN.
+        int savedTop = stackTop;
+        int savedFrameCount = frameCount;
+        size_t savedHandlerCount = exceptionHandlers.size();
+        auto restore = [&]() {
+            stackTop = savedTop;
+            frameCount = savedFrameCount;
+            closeUpvalues(&stack[savedTop]);
+            if (exceptionHandlers.size() > savedHandlerCount)
+                exceptionHandlers.resize(savedHandlerCount);
+        };
+        try {
+            callWithVM(*this, pc.fn, pc.args);
+        } catch (const RuntimeError& e) {
+            restore();
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised: %s\n", e.what());
+        } catch (const std::exception& e) {
+            restore();
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised non-Praia exception: %s\n",
+                e.what());
+        } catch (...) {
+            restore();
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised an unknown exception\n");
+        }
+    }
 }
 
 void VM::push(Value value) {
@@ -911,6 +984,15 @@ VM::Result VM::execute(int baseFrameCount_) {
 
     try {
     for (;;) {
+        // Cross-thread post fast-path: a single acquire load per
+        // dispatch when the queue is empty (the common case), which
+        // is the cheapest atomic we can do. The branch predicts true
+        // for "empty" so the typical iteration pays one load + one
+        // predicted-not-taken branch. Calling drainPosted() out of
+        // the gc-counter branch bounded post latency at 1024 ops;
+        // checking per-op makes the latency match the next safe
+        // yield point exactly.
+        if (postedPending_.load(std::memory_order_acquire)) drainPosted();
         if (--gcCounter_ <= 0) {
             gcCounter_ = 1024;
             GcHeap::current().collectIfNeeded();
