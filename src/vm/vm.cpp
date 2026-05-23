@@ -331,18 +331,22 @@ void VM::drainPosted() {
         postedPending_.store(false, std::memory_order_relaxed);
     }
     for (auto& pc : work) {
+        // Posted calls are fire-and-forget — no user-code call site
+        // to surface the exception to. Log and continue draining;
+        // one bad callback shouldn't poison the queue or propagate
+        // up through the dispatch loop into unrelated user code.
         try {
             callWithVM(*this, pc.fn, pc.args);
         } catch (const RuntimeError& e) {
-            // Posted calls are fire-and-forget — no user-code call
-            // site to surface the exception to. Log and continue
-            // draining; one bad callback shouldn't poison the queue.
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised: %s\n", e.what());
         } catch (const std::exception& e) {
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised non-Praia exception: %s\n",
                 e.what());
+        } catch (...) {
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised an unknown exception\n");
         }
     }
 }

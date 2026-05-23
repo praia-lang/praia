@@ -319,26 +319,25 @@ testing.test("postToEngine: worker thread can marshal a callback back", lam{ in
         "callback should have fired before the busy-wait gave up")
 })
 
-testing.test("postToEngine: callback's arguments survive the cross-thread post", lam{ in
-    // Verify the post carries args through. The worker passes nothing
-    // to the post — but a callback that reads its closure (here, the
-    // map identity) proves the captured upvalue's env survives across
-    // the queue's mutex hop.
-    let bucket = {n: 0}
+testing.test("postToEngine: trailing args ride the queue across threads", lam{ in
+    // scheduleAsync forwards any args past `cb` to the marshalled
+    // call. This proves the queue carries the args vector across the
+    // worker → engine thread hop intact, not just the callable.
+    let result = {value: nil}
     let cb = nil
-    cb = lam{ in
-        bucket.n = bucket.n + 1
+    cb = lam{ x in
+        result.value = x
         counter._unpinCallback(cb)
     }
-    counter.scheduleAsync(20, cb)
+    counter.scheduleAsync(20, cb, "from-worker")
     let i = 0
-    while (bucket.n == 0 && i < 1000) {
+    while (result.value == nil && i < 1000) {
         i = i + 1
         let _x = counter.new()
         time.sleep(2)
     }
-    testing.assertEqual(bucket.n, 1,
-        "callback's upvalue mutation was observed after drain")
+    testing.assertEqual(result.value, "from-worker",
+        "argument value crossed the post intact")
 })
 
 testing.test("callStored after clearStored throws (slot cleared)", lam{ in

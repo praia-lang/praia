@@ -465,6 +465,10 @@ The plugin is responsible for ensuring the engine outlives any pending posts. A 
 
 `postToEngine` has no return value. The deferred call's exceptions are caught by the drain loop and logged to stderr ("`[praia::postToEngine] callback raised: <message>`"); one bad callback can't poison the queue, but the caller can't observe success vs failure directly. For result-passing, capture a Praia `Queue` (from the `concurrency` builtin) or a shared map in the callback's closure and have the worker read it back.
 
+#### What can go wrong synchronously
+
+`postToEngine` itself only fails in one way: passing a null `engine` token throws `RuntimeError` ("called with a null executor token"). On a detached worker thread there's no enclosing handler, so an uncaught throw aborts via `std::terminate`. Make sure to capture the token *before* spawning the worker (`praia::currentExecutor()` on the engine thread can return null if the plugin is loaded from an unusual context), and consider guarding against `engine == nullptr` if your plugin's call graph allows it.
+
 #### Why workers can't call praia::call or praia::pinValue
 
 Both helpers begin with `if (!currentExecutor()) throw`. On a worker thread, `currentExecutor()` is null because no Praia engine has bound its thread-local for that thread. `postToEngine` is the only API documented to be safe to call from such threads — it carries the engine token explicitly so the queue knows which engine to wake.

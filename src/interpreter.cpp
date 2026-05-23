@@ -379,18 +379,25 @@ void Interpreter::drainPosted() {
         postedPending_.store(false, std::memory_order_relaxed);
     }
     for (auto& pc : work) {
+        // Posted calls are fire-and-forget — no user-code call site
+        // to surface the exception to. Log and continue draining;
+        // one bad callback shouldn't poison the queue or propagate
+        // up through checkInterrupt into unrelated user code.
         try {
             callSafe(*this, pc.fn, pc.args);
         } catch (const RuntimeError& e) {
-            // Posted calls are fire-and-forget — no user-code call
-            // site to surface the exception to. Log and continue
-            // draining; one bad callback shouldn't poison the queue.
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised: %s\n", e.what());
         } catch (const std::exception& e) {
             std::fprintf(stderr,
                 "[praia::postToEngine] callback raised non-Praia exception: %s\n",
                 e.what());
+        } catch (...) {
+            // Raw throw of a non-exception value. Rare in practice
+            // (Praia code only throws RuntimeError) but possible
+            // through a misbehaving plugin native.
+            std::fprintf(stderr,
+                "[praia::postToEngine] callback raised an unknown exception\n");
         }
     }
 }
