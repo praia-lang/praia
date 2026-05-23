@@ -462,4 +462,61 @@ testing.test("compute native bails early when cancelled cross-thread", lam{ in
         "bailed out before completing the full loop (got " + str(done) + ")")
 })
 
+testing.test("Promise: resolve-before-await delivers the value", lam{ in
+    // 0ms delay — the worker may have resolved by the time we
+    // await, but await must work either way (it just observes the
+    // already-fulfilled future). This covers the happy path.
+    let v = await counter.fetch(0, "hello")
+    testing.assertEqual(v, "hello", "fetch round-tripped the value")
+})
+
+testing.test("Promise: resolve-after-await blocks until fulfilled", lam{ in
+    // 50ms delay — by the time await fires the worker is mid-sleep,
+    // so await must block on the shared_future. Verifies the
+    // cross-thread producer/consumer ordering.
+    let startMs = time.now()
+    let v = await counter.fetch(50, "delayed")
+    let elapsedMs = time.now() - startMs
+    testing.assertEqual(v, "delayed", "delayed fetch returned the right value")
+    testing.assert(elapsedMs >= 40,
+        "await blocked for the delay (elapsed " + str(elapsedMs) + "ms)")
+})
+
+testing.test("Promise: reject surfaces the message verbatim", lam{ in
+    // The worker calls promise.reject(message); Praia's `await`
+    // rethrows that as a RuntimeError carrying the message. The
+    // catch sees the message via str(e), not a wrapped form.
+    let caught = nil
+    try {
+        await counter.fetchReject(0, "io error: connection refused")
+    } catch (e) { caught = str(e) }
+    testing.assertEqual(caught, "io error: connection refused",
+        "reject message round-tripped through await")
+})
+
+testing.test("Promise: dropped without resolve/reject throws cleanly", lam{ in
+    // ~Promise::State fires when the last Promise ref drops without
+    // fulfilment, planting a RuntimeError with a clear message so
+    // the user doesn't see future_error wording.
+    let caught = nil
+    try {
+        await counter.fetchDrop()
+    } catch (e) { caught = str(e) }
+    testing.assertEqual(caught,
+        "plugin Promise was dropped before resolve or reject",
+        "dropped promise produced the documented error")
+})
+
+testing.test("Promise: same future supports multiple awaiters", lam{ in
+    // shared_future allows multiple .get() calls returning the same
+    // value. Two async tasks awaiting the same future should both
+    // observe the resolved string.
+    let fut = counter.fetch(20, "shared")
+    func awaiter() { return await fut }
+    let a = async awaiter()
+    let b = async awaiter()
+    testing.assertEqual(await a, "shared", "first awaiter")
+    testing.assertEqual(await b, "shared", "second awaiter")
+})
+
 testing.done()

@@ -337,4 +337,81 @@ extern "C" void praia_register(PraiaMap* module) {
         },
         {"iters"}));
 
+    // counter.fetch(delayMs, result) — demo of praia::Promise.
+    // Returns a Future immediately; spawns a detached worker that
+    // sleeps `delayMs` and then resolves the Future with `result`.
+    // The Promise is captured by value into the worker's lambda;
+    // copies share the same underlying state.
+    //
+    // The demo accepts a `result` of any type, but only non-GC
+    // values (numbers, strings, bools, nil) are safe without
+    // further bookkeeping. If a caller passes a Map / Array /
+    // Instance / Callable, the GC may sweep its interior in the
+    // window between resolve and await and the user observes a
+    // hollow result. Plugins that need to return GC-tracked
+    // values use the same pin pattern as counter.scheduleAsync;
+    // see the "Returning a Future" section of the plugin docs
+    // for the canonical example.
+    module->entries["fetch"] = Value(makeNative("counter.fetch", 2,
+        [](const std::vector<Value>& args) -> Value {
+            double rawDelay = praia::requireNumber(args, 0, "counter.fetch");
+            if (!std::isfinite(rawDelay) || rawDelay < 0 ||
+                rawDelay > static_cast<double>(std::numeric_limits<int>::max()) ||
+                std::trunc(rawDelay) != rawDelay) {
+                praia::error("counter.fetch(delayMs, result): delayMs must "
+                             "be a non-negative integer in ms");
+            }
+            int delayMs = static_cast<int>(rawDelay);
+
+            praia::Promise promise;
+            Value fut = promise.future();
+
+            std::thread([promise, result = args[1], delayMs]() mutable {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                promise.resolve(std::move(result));
+            }).detach();
+
+            return fut;
+        },
+        {"delayMs", "result"}));
+
+    // counter.fetchReject(delayMs, message) — same shape, but the
+    // worker rejects the Promise. await on the returned future
+    // throws RuntimeError carrying `message` verbatim.
+    module->entries["fetchReject"] = Value(makeNative("counter.fetchReject", 2,
+        [](const std::vector<Value>& args) -> Value {
+            double rawDelay = praia::requireNumber(args, 0, "counter.fetchReject");
+            if (!std::isfinite(rawDelay) || rawDelay < 0 ||
+                rawDelay > static_cast<double>(std::numeric_limits<int>::max()) ||
+                std::trunc(rawDelay) != rawDelay) {
+                praia::error("counter.fetchReject(delayMs, message): delayMs must "
+                             "be a non-negative integer in ms");
+            }
+            int delayMs = static_cast<int>(rawDelay);
+            auto& message = praia::requireString(args, 1, "counter.fetchReject");
+
+            praia::Promise promise;
+            Value fut = promise.future();
+
+            std::thread([promise, message, delayMs]() mutable {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                promise.reject(message);
+            }).detach();
+
+            return fut;
+        },
+        {"delayMs", "message"}));
+
+    // counter.fetchDrop() — constructs a Promise, returns its future,
+    // and drops the Promise without resolve/reject. Test fixture for
+    // the broken-promise → custom message path. The Promise's
+    // destructor sets a clear RuntimeError on the future so await
+    // doesn't hang or produce the generic future_error wording.
+    module->entries["fetchDrop"] = Value(makeNative("counter.fetchDrop", 0,
+        [](const std::vector<Value>&) -> Value {
+            praia::Promise promise;
+            return promise.future();
+            // promise drops here; ~State plants the dropped error.
+        }));
+
 }

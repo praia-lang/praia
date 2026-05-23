@@ -16,8 +16,11 @@
 #include "../builtins.h"      // callSafe
 #include "../vm/vm.h"         // VM::current, callWithVM
 
+#include <atomic>             // Promise::State fulfilled flag
 #include <cassert>
 #include <cstdint>
+#include <exception>          // std::make_exception_ptr in Promise::reject
+#include <future>             // std::promise / std::shared_future in Promise::State
 
 namespace praia {
 
@@ -101,6 +104,86 @@ void postToEngine(void* exec,
         auto* interp = reinterpret_cast<Interpreter*>(raw);
         interp->enqueuePosted(std::move(fn), std::move(args));
     }
+}
+
+// ── Promise ───────────────────────────────────────────────────────
+//
+// State is the only thing the public class hides; everything else
+// (resolve, reject, future) is a thin forwarder. Lifetime: each
+// Promise instance holds a shared_ptr<State>; when the last one
+// drops, ~State runs and — if no resolve/reject has run — sets a
+// "dropped" RuntimeError on the linked future so awaiters don't
+// block forever.
+//
+// Synchronisation: a single std::atomic<bool> CAS in resolve /
+// reject / ~State decides who gets to call std::promise::set_value
+// or set_exception. The std::promise itself is internally
+// thread-safe between set and the future's get, so once the CAS
+// has selected a winner there's no further coordination needed.
+struct Promise::State {
+    std::promise<Value>           promise;
+    std::shared_ptr<PraiaFuture>  futureWrapper;
+    std::atomic<bool>             fulfilled{false};
+
+    State() {
+        // Mirrors how AsyncExpr builds its Future
+        // (src/interpreter.cpp ~line 1617) — share() so multiple
+        // awaits work, wrap in PraiaFuture so Value accepts it.
+        // The shared_future lives only inside futureWrapper; we
+        // don't need a separate field on State — `promise` is what
+        // we call set_value / set_exception on, and the wrapper
+        // carries the reader side.
+        futureWrapper = std::make_shared<PraiaFuture>();
+        futureWrapper->future = promise.get_future().share();
+    }
+
+    ~State() {
+        // Plant a clear "dropped" RuntimeError if no producer
+        // resolved/rejected. Without this, std::promise's destructor
+        // would set future_error{broken_promise} and `await` would
+        // surface it as the generic "Async task failed:
+        // <implementation message>". Praia's `await` rethrows
+        // RuntimeError unchanged (interpreter.cpp:1633 /
+        // vm.cpp:2685), so a RuntimeError here gives the user the
+        // exact message below.
+        if (!fulfilled.exchange(true)) {
+            try {
+                promise.set_exception(std::make_exception_ptr(
+                    RuntimeError("plugin Promise was dropped before "
+                                 "resolve or reject", 0)));
+            } catch (...) {
+                // set_exception can throw if no shared state exists
+                // (e.g. get_future already had its result consumed
+                // in some race). Swallow — destructors mustn't throw.
+            }
+        }
+    }
+};
+
+Promise::Promise() : state_(std::make_shared<State>()) {}
+
+Value Promise::future() const {
+    return Value(state_->futureWrapper);
+}
+
+void Promise::resolve(Value result) noexcept {
+    // CAS first so a losing thread can't double-fulfil; set_value
+    // would throw future_error{promise_already_satisfied}. The
+    // try/catch is belt-and-suspenders for any other implementation
+    // weirdness (memory exhaustion etc.) — noexcept means an escape
+    // would terminate.
+    if (state_->fulfilled.exchange(true)) return;
+    try {
+        state_->promise.set_value(std::move(result));
+    } catch (...) {}
+}
+
+void Promise::reject(const std::string& message) noexcept {
+    if (state_->fulfilled.exchange(true)) return;
+    try {
+        state_->promise.set_exception(std::make_exception_ptr(
+            RuntimeError(message, 0)));
+    } catch (...) {}
 }
 
 }  // namespace praia
