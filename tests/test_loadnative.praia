@@ -374,6 +374,37 @@ testing.test("shouldCancel returns true after token.cancel()", lam{ in
         "true when scope's token is already cancelled")
 })
 
+testing.test("nested withCancel restores outer scope on inner return", lam{ in
+    // RAII save/restore guarantee. Inner scope's token shadows the
+    // outer; on inner return the outer token is visible again.
+    let outer = CancellationToken()
+    let inner = CancellationToken()
+    inner.cancel()
+    let observed = withCancel(outer, lam{ in
+        let beforeInner = counter._cancelState()  // false (outer, not cancelled)
+        let duringInner = withCancel(inner, lam{ in return counter._cancelState() })
+        let afterInner = counter._cancelState()  // false again (outer restored)
+        return [beforeInner, duringInner, afterInner]
+    })
+    testing.assertEqual(observed, [false, true, false],
+        "nested scope restores outer token on return")
+})
+
+testing.test("withCancel unbinds on exception from fn", lam{ in
+    // The CancelScope is RAII; an exception propagating out of fn
+    // must still restore g_currentCancel. Tests that a subsequent
+    // shouldCancel() outside any scope sees nil rather than the
+    // dangling state pointer of the just-exited scope.
+    let tok = CancellationToken()
+    let caught = nil
+    try {
+        withCancel(tok, lam{ in throw "boom" })
+    } catch (e) { caught = str(e) }
+    testing.assertEqual(caught, "boom", "exception propagated through withCancel")
+    testing.assertEqual(counter._cancelState(), nil,
+        "scope unbound even when fn threw")
+})
+
 testing.test("compute native bails early when cancelled cross-thread", lam{ in
     // Real-world shape: a CPU-bound native runs on a task thread,
     // and the main thread flips the token. The native must see the

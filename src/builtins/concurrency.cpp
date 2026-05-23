@@ -210,21 +210,21 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
                     return Value();
                 }));
 
-            // Hidden _state slot: a PraiaExternal that wraps the same
-            // shared_ptr<CancellationState> the methods above capture.
-            // withCancel reads this to find the address of the atomic
-            // flag without going through a callable invocation. The
-            // External's deleter releases a heap-allocated shared_ptr
-            // holder; ownership is shared with the closures, so the
-            // state stays alive as long as either the External or any
-            // closure is reachable.
-            auto* holder = new std::shared_ptr<CancellationState>(state);
+            // Hidden _state slot: a PraiaExternal whose data points
+            // directly at the same CancellationState the closures
+            // capture. withCancel reads this to find the address of
+            // the atomic flag without going through a callable
+            // invocation. Ownership is anchored by the std::function
+            // deleter, which holds a shared_ptr<CancellationState> in
+            // its capture — that ref keeps the state alive as long as
+            // the External is reachable, paralleling the closures'
+            // own captures. When the External destructs, the deleter
+            // body (a no-op) runs, then the std::function destructor
+            // releases the captured shared_ptr.
             auto ext = gcNew<PraiaExternal>();
-            ext->data = static_cast<void*>(holder);
+            ext->data = static_cast<void*>(state.get());
             ext->typeName = "praia.CancellationState";
-            ext->deleter = [](void* p) {
-                delete static_cast<std::shared_ptr<CancellationState>*>(p);
-            };
+            ext->deleter = [keep = state](void* /*p*/) { (void)keep; };
             tok->entries[Value("_state")] = Value(ext);
 
             return Value(tok);
@@ -263,9 +263,8 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
                     "withCancel(token, ...): first argument must be a CancellationToken "
                     "produced by CancellationToken() (got a map without a _state slot)", 0);
             }
-            auto* holder = static_cast<std::shared_ptr<CancellationState>*>(
+            auto* state = static_cast<CancellationState*>(
                 it->second.asExternal()->data);
-            CancellationState* state = holder->get();
 
             if (!args[1].isCallable())
                 throw RuntimeError(
