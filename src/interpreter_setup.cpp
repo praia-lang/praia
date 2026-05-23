@@ -76,6 +76,14 @@ struct PluginAtExitEntry {
 };
 static std::vector<PluginAtExitEntry> g_pluginAtExitHooks;
 
+// Set once by runPluginExitHooks under g_pluginMutex when teardown
+// begins. loadNative checks it (also under g_pluginMutex) and
+// refuses to register new hooks past that point — so a late call
+// (theoretical under current ordering, possible under future
+// threading-model changes) can't enqueue a hook the drain loop has
+// already passed.
+static bool g_pluginShutdown = false;
+
 static int signalNameToNum(const std::string& name) {
     if (name == "SIGINT"  || name == "INT")  return SIGINT;
     if (name == "SIGTERM" || name == "TERM") return SIGTERM;
@@ -4309,6 +4317,20 @@ Interpreter::Interpreter() {
             // Lock for the entire load to prevent double-loading
             std::lock_guard<std::mutex> lock(g_pluginMutex);
 
+            // Refuse to start a new load once teardown has begun. By
+            // the time runPluginExitHooks flips this flag, the drain
+            // loop has already published the snapshot it intends to
+            // call; a hook pushed after that point would leak. In
+            // practice no engine thread should still be running this
+            // far into exit (the Interpreter destructor blocks on
+            // outstanding futures first), so the throw is a defensive
+            // signal rather than a hot path.
+            if (g_pluginShutdown) {
+                throw RuntimeError(
+                    "loadNative(): cannot load plugins during process "
+                    "exit — '" + path + "'", 0);
+            }
+
             // Check cache
             auto it = g_pluginCache.find(absPath);
             if (it != g_pluginCache.end())
@@ -4449,6 +4471,14 @@ Interpreter::Interpreter() {
 // from individual hooks are logged and swallowed; one bad plugin
 // doesn't strand the others' cleanup.
 void runPluginExitHooks() {
+    // Flip the shutdown flag once, before any drain iteration, so a
+    // concurrent loadNative (theoretical under current ordering)
+    // observes shutdown and refuses to enqueue a new hook the drain
+    // would never reach.
+    {
+        std::lock_guard<std::mutex> lock(g_pluginMutex);
+        g_pluginShutdown = true;
+    }
     while (true) {
         // Hold g_pluginMutex only long enough to pop the next hook.
         // loadNative takes the same mutex for the duration of a load;
