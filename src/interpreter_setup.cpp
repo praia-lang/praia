@@ -4449,12 +4449,35 @@ Interpreter::Interpreter() {
 // from individual hooks are logged and swallowed; one bad plugin
 // doesn't strand the others' cleanup.
 void runPluginExitHooks() {
-    while (!g_pluginAtExitHooks.empty()) {
-        // Pop before invoking so a hook that re-enters loadNative
-        // (shouldn't, but defensively) doesn't observe its own
-        // half-run state.
-        auto entry = g_pluginAtExitHooks.back();
-        g_pluginAtExitHooks.pop_back();
+    while (true) {
+        // Hold g_pluginMutex only long enough to pop the next hook.
+        // loadNative takes the same mutex for the duration of a load;
+        // serialising the pop against the push prevents a data race
+        // if a still-running engine thread (e.g. an unawaited async
+        // task) happens to call loadNative during exit. In practice
+        // Interpreter's destructor blocks on outstanding futures
+        // before PluginExitGuard fires, so the mutex is uncontended
+        // here — but matching the loadNative side's locking
+        // convention is cheap and removes the UB-shaped footgun if
+        // the threading model ever changes.
+        //
+        // CRITICALLY: drop the lock BEFORE invoking entry.fn(). A
+        // hook is plugin-controlled code that may take a long time
+        // (flush, fsync, join worker threads). Holding the mutex
+        // across that call would block any concurrent loadNative
+        // indefinitely; even if the current architecture rules that
+        // out, the lock-then-callback pattern is the kind of latent
+        // deadlock generator we don't want to leave behind.
+        PluginAtExitEntry entry;
+        {
+            std::lock_guard<std::mutex> lock(g_pluginMutex);
+            if (g_pluginAtExitHooks.empty()) return;
+            // Pop before invoking so a hook that re-enters loadNative
+            // (shouldn't, but defensively) doesn't observe its own
+            // half-run state.
+            entry = std::move(g_pluginAtExitHooks.back());
+            g_pluginAtExitHooks.pop_back();
+        }
         try {
             entry.fn();
         } catch (const std::exception& e) {
