@@ -77,6 +77,52 @@ testing.test("manifest.read rejects malformed integrity", lam{ in
     testing.assert(threw, "short sha256 hex must be rejected")
 })
 
+testing.test("manifest.read rejects unknown platform name", lam{ in
+    // 'plan9' isn't in ALLOWED_PLATFORMS — accepted shape, but the
+    // platform allow-list catches it before fetch time.
+    let dir = testing.tempDir(nil)
+    fs.write(path.join(dir, "grain.yaml"),
+        "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  plan9-x86_64:\n    url: https://example.com/x.so\n    integrity: sha256-1111111111111111111111111111111111111111111111111111111111111111\ndependencies:\n")
+    let threw = false
+    try { manifest.read(dir) } catch (e) { threw = true }
+    testing.assert(threw, "unknown platform name must be rejected")
+})
+
+testing.test("manifest.read rejects https URL with empty host", lam{ in
+    let dir = testing.tempDir(nil)
+    fs.write(path.join(dir, "grain.yaml"),
+        "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  linux-x86_64:\n    url: \"https://\"\n    integrity: sha256-1111111111111111111111111111111111111111111111111111111111111111\ndependencies:\n")
+    let threw = false
+    try { manifest.read(dir) } catch (e) { threw = true }
+    testing.assert(threw, "https:// (empty host) must be rejected")
+})
+
+testing.test("manifest.read rejects https URL with dot-only host", lam{ in
+    let dir = testing.tempDir(nil)
+    fs.write(path.join(dir, "grain.yaml"),
+        "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  linux-x86_64:\n    url: \"https://...\"\n    integrity: sha256-1111111111111111111111111111111111111111111111111111111111111111\ndependencies:\n")
+    let threw = false
+    try { manifest.read(dir) } catch (e) { threw = true }
+    testing.assert(threw, "host of only dots must be rejected")
+})
+
+testing.test("manifest.write emits prebuilt keys sorted", lam{ in
+    let dir = testing.tempDir(nil)
+    let m = manifest.create("widget", nil)
+    // Insert in deliberately non-sorted order; expect alpha output.
+    m.prebuilt = {}
+    m.prebuilt["linux-x86_64"] = {url: "https://example.com/a.so",
+                                  integrity: "sha256-1111111111111111111111111111111111111111111111111111111111111111"}
+    m.prebuilt["darwin-arm64"] = {url: "https://example.com/b.dylib",
+                                  integrity: "sha256-2222222222222222222222222222222222222222222222222222222222222222"}
+    manifest.write(dir, m)
+    let text = fs.read(path.join(dir, "grain.yaml"))
+    let darwinIdx = text.indexOf("darwin-arm64")
+    let linuxIdx = text.indexOf("linux-x86_64")
+    testing.assert(darwinIdx >= 0 && linuxIdx >= 0, "both keys present")
+    testing.assert(darwinIdx < linuxIdx, "darwin-arm64 must sort before linux-x86_64")
+})
+
 testing.test("manifest.read rejects upper-case platform key", lam{ in
     let dir = testing.tempDir(nil)
     fs.write(path.join(dir, "grain.yaml"),
@@ -140,6 +186,12 @@ let _serverFuture = async lam{ in
         let firstSp = req.indexOf(" ")
         let after = req.slice(firstSp + 1, len(req))
         let p = after.slice(0, after.indexOf(" "))
+        // Drop any query string so the route table can stay
+        // path-only — the query-string round-trip test relies on
+        // this so a request for `/widget.dylib?token=...` still
+        // returns the body for `/widget.dylib`.
+        let q = p.indexOf("?")
+        if (q >= 0) { p = p.slice(0, q) }
         let body = ""
         let status = "200 OK"
         if (p == "/widget.dylib") { body = _binBytes }
@@ -211,6 +263,21 @@ testing.test("fetchAndStage installs the matching entry", lam{ in
     m.prebuilt[key] = {url: "%{_baseUrl}/widget.dylib", integrity: _binSha}
     testing.assertEqual(prebuilt.fetchAndStage(m, stage, false), true, "match → true")
     testing.assert(fs.exists(path.join(stage, "plugins", "widget.dylib")), "binary written")
+})
+
+testing.test("installEntry strips query string from filename", lam{ in
+    // Presigned-S3 / CDN URLs often carry a query string;
+    // path.basename(url) would otherwise land the binary at
+    // `plugins/widget.dylib?token=abc`, where the runtime loader
+    // (which looks for the plain `widget.dylib`) can't find it.
+    let stage = testing.tempDir(nil)
+    let entry = {url: "%{_baseUrl}/widget.dylib?token=abc&exp=1", integrity: _binSha}
+    let ok = prebuilt.installEntry(entry, stage, false)
+    testing.assert(ok, "install should succeed")
+    testing.assert(fs.exists(path.join(stage, "plugins", "widget.dylib")),
+                   "binary lands at the clean basename")
+    testing.assert(!fs.exists(path.join(stage, "plugins", "widget.dylib?token=abc&exp=1")),
+                   "no garbage-named file")
 })
 
 testing.done()
