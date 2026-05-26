@@ -1,0 +1,414 @@
+// Implementation of the C facade declared in praia_plugin_c.h.
+// Each function is a thin thunk over the existing C++ ABI in
+// praia_plugin.h / praia_runtime.h. The header is the canonical
+// API contract; cross-reference there for lifetime semantics.
+
+// fiber.h transitively pulls in <ucontext.h>, which on glibc/clang
+// requires _XOPEN_SOURCE to be defined before include (the macros
+// are marked deprecated otherwise and clang errors out). The engine
+// Makefile sets this for its own translation units; declare it
+// here too so the file's standalone analysis (LSP, ad-hoc builds)
+// also compiles cleanly.
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 600
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+
+#include "praia_plugin_c.h"
+#include "praia_plugin.h"
+#include "praia_runtime.h"
+
+#include <string>
+#include <vector>
+#include <cstring>
+
+// Every PraiaValue handed across the C boundary is a `new Value(...)`
+// on the heap. PraiaValue == Value*. Casts are encapsulated in the
+// helpers below so the boxing convention is in one spot.
+static inline Value*       unbox(PraiaValue v) { return reinterpret_cast<Value*>(v); }
+static inline PraiaValue   box(Value* v)       { return reinterpret_cast<PraiaValue>(v); }
+
+namespace {
+
+// Thread-local error message staged by praia_throw, consumed by
+// the next return-NULL-from-native check. A second `set` flag
+// distinguishes "no error" from "empty string error" (rare but
+// the C user might pass ""), and lets the thunk tell whether the
+// native bailed via praia_throw or just returned NULL silently.
+thread_local std::string g_last_error;
+thread_local bool        g_last_error_set = false;
+
+void clearLastError() {
+    g_last_error.clear();
+    g_last_error_set = false;
+}
+
+std::string takeLastError() {
+    std::string out = std::move(g_last_error);
+    g_last_error.clear();
+    bool was_set = g_last_error_set;
+    g_last_error_set = false;
+    if (!was_set && out.empty()) {
+        return "<C native returned NULL without calling praia_throw>";
+    }
+    return out;
+}
+
+// PraiaArgs is opaque to C; the implementation holds borrowed Value
+// pointers (one per actual arg, pre-boxed) so praia_args_get can
+// hand back the same pointer on repeated calls. Boxes are freed
+// when the args object goes out of scope at the end of the thunk.
+struct ArgsImpl {
+    std::vector<Value*> boxes;
+    explicit ArgsImpl(const std::vector<Value>& args) {
+        boxes.reserve(args.size());
+        for (const auto& v : args) {
+            // const_cast: the box is read-only as far as the C
+            // plugin is concerned (handles are borrowed). We just
+            // need a non-const Value* to fit the box(...) shape.
+            boxes.push_back(const_cast<Value*>(&v));
+        }
+    }
+};
+
+}  // namespace
+
+extern "C" {
+
+// ─── Value lifecycle ─────────────────────────────────────────────
+
+void praia_value_release(PraiaValue v) {
+    if (!v) return;
+    delete unbox(v);
+}
+
+PraiaValue praia_value_clone(PraiaValue v) {
+    if (!v) return nullptr;
+    return box(new Value(*unbox(v)));
+}
+
+// ─── Constructors ────────────────────────────────────────────────
+
+PraiaValue praia_value_nil(void)                  { return box(new Value()); }
+PraiaValue praia_value_bool(bool b)               { return box(new Value(b)); }
+PraiaValue praia_value_int(int64_t i)             { return box(new Value(i)); }
+PraiaValue praia_value_double(double d)           { return box(new Value(d)); }
+PraiaValue praia_value_string(const char* s)      { return box(new Value(std::string(s ? s : ""))); }
+PraiaValue praia_value_string_n(const char* s, size_t n) {
+    return box(new Value(std::string(s ? s : "", s ? n : 0)));
+}
+PraiaValue praia_value_new_map(void) {
+    return box(new Value(gcNew<PraiaMap>()));
+}
+PraiaValue praia_value_new_array(void) {
+    return box(new Value(gcNew<PraiaArray>()));
+}
+
+// ─── Predicates ──────────────────────────────────────────────────
+
+bool praia_value_is_nil(PraiaValue v)      { return v && unbox(v)->isNil(); }
+bool praia_value_is_bool(PraiaValue v)     { return v && unbox(v)->isBool(); }
+bool praia_value_is_int(PraiaValue v)      { return v && unbox(v)->isInt(); }
+bool praia_value_is_double(PraiaValue v)   { return v && unbox(v)->isDouble(); }
+bool praia_value_is_number(PraiaValue v)   { return v && unbox(v)->isNumber(); }
+bool praia_value_is_string(PraiaValue v)   { return v && unbox(v)->isString(); }
+bool praia_value_is_map(PraiaValue v)      { return v && unbox(v)->isMap(); }
+bool praia_value_is_array(PraiaValue v)    { return v && unbox(v)->isArray(); }
+bool praia_value_is_callable(PraiaValue v) { return v && unbox(v)->isCallable(); }
+bool praia_value_is_external(PraiaValue v) { return v && unbox(v)->isExternal(); }
+
+// ─── Accessors ───────────────────────────────────────────────────
+
+bool praia_value_as_bool(PraiaValue v)       { return v && unbox(v)->asBool(); }
+int64_t praia_value_as_int(PraiaValue v)     { return v ? unbox(v)->asInt() : 0; }
+double  praia_value_as_double(PraiaValue v)  { return v ? unbox(v)->asNumber() : 0.0; }
+
+const char* praia_value_as_string(PraiaValue v, size_t* out_len) {
+    if (!v || !unbox(v)->isString()) {
+        if (out_len) *out_len = 0;
+        return nullptr;
+    }
+    const std::string& s = unbox(v)->asString();
+    if (out_len) *out_len = s.size();
+    return s.data();
+}
+
+// ─── Map ops ─────────────────────────────────────────────────────
+
+void praia_value_map_set(PraiaValue mv, PraiaValue kv, PraiaValue vv) {
+    if (!mv || !kv || !vv) return;
+    if (!unbox(mv)->isMap()) return;
+    unbox(mv)->asMap()->entries[*unbox(kv)] = *unbox(vv);
+}
+
+PraiaValue praia_value_map_get(PraiaValue mv, PraiaValue kv) {
+    if (!mv || !kv || !unbox(mv)->isMap()) return nullptr;
+    auto& entries = unbox(mv)->asMap()->entries;
+    auto it = entries.find(*unbox(kv));
+    if (it == entries.end()) return nullptr;
+    return box(new Value(it->second));
+}
+
+bool praia_value_map_has(PraiaValue mv, PraiaValue kv) {
+    if (!mv || !kv || !unbox(mv)->isMap()) return false;
+    auto& entries = unbox(mv)->asMap()->entries;
+    return entries.find(*unbox(kv)) != entries.end();
+}
+
+size_t praia_value_map_size(PraiaValue mv) {
+    if (!mv || !unbox(mv)->isMap()) return 0;
+    return unbox(mv)->asMap()->entries.size();
+}
+
+PraiaValue praia_value_map_keys(PraiaValue mv) {
+    if (!mv || !unbox(mv)->isMap()) return nullptr;
+    auto arr = gcNew<PraiaArray>();
+    for (const auto& kv : unbox(mv)->asMap()->entries) {
+        arr->elements.push_back(kv.first);
+    }
+    return box(new Value(arr));
+}
+
+// ─── Array ops ───────────────────────────────────────────────────
+
+void praia_value_array_push(PraiaValue av, PraiaValue vv) {
+    if (!av || !vv || !unbox(av)->isArray()) return;
+    unbox(av)->asArray()->elements.push_back(*unbox(vv));
+}
+
+PraiaValue praia_value_array_get(PraiaValue av, size_t i) {
+    if (!av || !unbox(av)->isArray()) return nullptr;
+    auto& es = unbox(av)->asArray()->elements;
+    if (i >= es.size()) return nullptr;
+    return box(new Value(es[i]));
+}
+
+void praia_value_array_set(PraiaValue av, size_t i, PraiaValue vv) {
+    if (!av || !vv || !unbox(av)->isArray()) return;
+    auto& es = unbox(av)->asArray()->elements;
+    if (i >= es.size()) {
+        praia_throw("praia_value_array_set: index out of range");
+        return;
+    }
+    es[i] = *unbox(vv);
+}
+
+size_t praia_value_array_len(PraiaValue av) {
+    if (!av || !unbox(av)->isArray()) return 0;
+    return unbox(av)->asArray()->elements.size();
+}
+
+// ─── Module registration ─────────────────────────────────────────
+
+void praia_module_set(PraiaMapHandle* module, const char* key, PraiaValue value) {
+    if (!module || !key || !value) return;
+    module->entries[Value(std::string(key))] = *unbox(value);
+}
+
+// ─── Native callbacks ────────────────────────────────────────────
+
+PraiaValue praia_make_native(const char* name, int arity,
+                             PraiaNativeFn fn, void* userdata) {
+    if (!fn) return nullptr;
+    std::string sname = name ? name : "<c_native>";
+    auto cppFn = [fn, userdata, sname](const std::vector<Value>& args) -> Value {
+        // Fresh thread-local error slate per call. A stale error
+        // from a *previous* native (if the C user forgot to return
+        // NULL after praia_throw) would otherwise hijack this
+        // call's first NULL return.
+        clearLastError();
+        ArgsImpl ctx(args);
+        PraiaValue raw = fn(reinterpret_cast<PraiaArgs>(&ctx), userdata);
+        if (!raw) {
+            // C side bailed. takeLastError() consumes the message;
+            // RuntimeError(msg, 0) lets the engine fill in the
+            // call-site line number.
+            throw RuntimeError(takeLastError(), 0);
+        }
+        Value out = *unbox(raw);
+        delete unbox(raw);   // ownership transfers to the engine
+        return out;
+    };
+    return box(new Value(makeNative(sname, arity, std::move(cppFn))));
+}
+
+int praia_args_count(PraiaArgs args) {
+    if (!args) return 0;
+    return static_cast<int>(reinterpret_cast<ArgsImpl*>(args)->boxes.size());
+}
+
+PraiaValue praia_args_get(PraiaArgs args, int i) {
+    if (!args) return nullptr;
+    auto& boxes = reinterpret_cast<ArgsImpl*>(args)->boxes;
+    if (i < 0 || static_cast<size_t>(i) >= boxes.size()) return nullptr;
+    return box(boxes[static_cast<size_t>(i)]);
+}
+
+// ─── Error reporting ─────────────────────────────────────────────
+
+void praia_throw(const char* msg) {
+    g_last_error = msg ? msg : "";
+    g_last_error_set = true;
+}
+
+// ─── External handles ────────────────────────────────────────────
+
+PraiaValue praia_value_new_external(void* ptr, const char* type_name,
+                                    PraiaDeleter deleter) {
+    auto ext = gcNew<PraiaExternal>();
+    ext->data = ptr;
+    ext->typeName = type_name ? type_name : "";
+    if (deleter) {
+        // Wrap the C deleter in the std::function the PraiaExternal
+        // destructor invokes during a GC sweep.
+        ext->deleter = [deleter](void* p) { deleter(p); };
+    }
+    return box(new Value(ext));
+}
+
+void* praia_value_external_ptr(PraiaValue v, const char* expected_type_name) {
+    if (!v || !unbox(v)->isExternal()) {
+        praia_throw("praia_value_external_ptr: not an external handle");
+        return nullptr;
+    }
+    auto ext = unbox(v)->asExternal();
+    if (expected_type_name && ext->typeName != expected_type_name) {
+        // Type-confusion guard: a plugin that receives a Value
+        // claiming to be its handle but actually wrapping someone
+        // else's pointer would crash on first dereference. Refuse
+        // here so the error stays inside the plugin boundary.
+        std::string msg = "praia_value_external_ptr: type mismatch (expected '";
+        msg += expected_type_name;
+        msg += "', got '";
+        msg += ext->typeName;
+        msg += "')";
+        praia_throw(msg.c_str());
+        return nullptr;
+    }
+    return ext->data;
+}
+
+const char* praia_value_external_type(PraiaValue v) {
+    if (!v || !unbox(v)->isExternal()) return nullptr;
+    return unbox(v)->asExternal()->typeName.c_str();
+}
+
+// ─── GC pin/unpin ────────────────────────────────────────────────
+
+int praia_pin_value(PraiaValue v) {
+    if (!v) return -1;
+    try {
+        praia::pinValue(*unbox(v));
+        return 0;
+    } catch (const RuntimeError& e) {
+        g_last_error = e.what();
+        g_last_error_set = true;
+        return -1;
+    }
+}
+
+int praia_unpin_value(PraiaValue v) {
+    if (!v) return -1;
+    try {
+        praia::unpinValue(*unbox(v));
+        return 0;
+    } catch (const RuntimeError& e) {
+        g_last_error = e.what();
+        g_last_error_set = true;
+        return -1;
+    }
+}
+
+// ─── Calling back into Praia ─────────────────────────────────────
+
+PraiaValue praia_call(PraiaValue callable, const PraiaValue* args, size_t argc) {
+    if (!callable || !unbox(callable)->isCallable()) {
+        praia_throw("praia_call: target is not callable");
+        return nullptr;
+    }
+    std::vector<Value> cppArgs;
+    cppArgs.reserve(argc);
+    for (size_t i = 0; i < argc; ++i) {
+        if (!args || !args[i]) cppArgs.emplace_back();
+        else                   cppArgs.push_back(*unbox(args[i]));
+    }
+    try {
+        Value result = praia::call(unbox(callable)->asCallable(), cppArgs);
+        return box(new Value(std::move(result)));
+    } catch (const RuntimeError& e) {
+        g_last_error = e.what();
+        g_last_error_set = true;
+        return nullptr;
+    } catch (const std::exception& e) {
+        g_last_error = e.what();
+        g_last_error_set = true;
+        return nullptr;
+    }
+}
+
+// ─── Cross-thread helpers ────────────────────────────────────────
+
+void praia_post_to_engine(void (*fn)(void* userdata), void* userdata) {
+    if (!fn) return;
+    void* exec = praia::currentExecutor();
+    if (!exec) {
+        // Calling from a thread with no executor is a programming
+        // error — the post needs an engine to schedule against.
+        // Mirror praia::call's loud-failure stance: stage an error
+        // the next native-return-NULL will surface.
+        praia_throw("praia_post_to_engine: no Praia executor on this thread "
+                    "(call from the engine thread before spawning the worker, "
+                    "passing the captured executor token)");
+        return;
+    }
+    // Wrap the C function pointer + userdata as a zero-arity
+    // Praia callable. Name "" is fine for tracebacks; this
+    // callable is never user-visible.
+    auto callable = makeNative("", 0,
+        [fn, userdata](const std::vector<Value>&) -> Value {
+            fn(userdata);
+            return Value();
+        });
+    praia::postToEngine(exec, callable, {});
+}
+
+int praia_should_cancel(void) {
+    auto opt = praia::shouldCancel();
+    if (!opt.has_value()) return -1;
+    return *opt ? 1 : 0;
+}
+
+// ─── Promise ─────────────────────────────────────────────────────
+
+PraiaPromise praia_promise_new(void) {
+    try {
+        return reinterpret_cast<PraiaPromise>(new praia::Promise());
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+}
+
+PraiaValue praia_promise_future(PraiaPromise p) {
+    if (!p) return nullptr;
+    return box(new Value(reinterpret_cast<praia::Promise*>(p)->future()));
+}
+
+void praia_promise_resolve(PraiaPromise p, PraiaValue result) {
+    if (!p) return;
+    Value v = result ? *unbox(result) : Value();
+    reinterpret_cast<praia::Promise*>(p)->resolve(std::move(v));
+}
+
+void praia_promise_reject(PraiaPromise p, const char* message) {
+    if (!p) return;
+    reinterpret_cast<praia::Promise*>(p)->reject(message ? message : "");
+}
+
+void praia_promise_release(PraiaPromise p) {
+    if (!p) return;
+    delete reinterpret_cast<praia::Promise*>(p);
+}
+
+}  // extern "C"

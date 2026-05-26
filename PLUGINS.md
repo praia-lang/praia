@@ -37,6 +37,79 @@ let mod = loadNative("./mymodule")
 print(mod.double(21))  // 42
 ```
 
+## Writing plugins in pure C
+
+If you prefer C — or you're binding to Praia from Rust, Zig, Go, Swift, or any other language with a C FFI — `#include "praia_plugin_c.h"` instead. It exposes the same engine functionality as `praia_plugin.h`, but through pure-C signatures: opaque handles (`PraiaValue`, `PraiaPromise`), function pointers + `void* userdata` for callbacks, and explicit `release`/`pin`/`unpin` lifetime calls. Same engine binary, same ABI version, same `loadNative` gate.
+
+**Build (macOS):**
+
+```sh
+gcc -std=c11 -shared -fPIC -I$(praia --include-path) \
+    -undefined dynamic_lookup -o mymodule.dylib mymodule.c
+```
+
+**Build (Linux):**
+
+```sh
+gcc -std=c11 -shared -fPIC -I$(praia --include-path) \
+    -o mymodule.so mymodule.c
+```
+
+**Minimal plugin** (`mymodule.c`):
+
+```c
+#include "praia_plugin_c.h"
+#include <stdio.h>
+
+PRAIA_C_DECLARE_ABI();
+PRAIA_C_PLUGIN_METADATA("mymod", "0.1.0", "Does the thing");
+
+static PraiaValue greet(PraiaArgs args, void* ud) {
+    (void) ud;
+    if (praia_args_count(args) != 1) {
+        praia_throw("greet: expected 1 argument");
+        return NULL;
+    }
+    PraiaValue name = praia_args_get(args, 0);
+    size_t n = 0;
+    const char* s = praia_value_as_string(name, &n);
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf), "hello, %.*s", (int)n, s);
+    return praia_value_string_n(buf, (size_t)len);
+}
+
+void praia_register(PraiaMapHandle* module) {
+    PraiaValue fn = praia_make_native("mymod.greet", 1, greet, NULL);
+    praia_module_set(module, "greet", fn);
+    praia_value_release(fn);
+}
+```
+
+### Lifetime contract
+
+Three rules cover the whole API:
+
+- **Returned handles are owned.** Every `PraiaValue` you receive *from* the facade (constructors, `praia_value_map_get`, `praia_call`, `praia_promise_future`) must be released with `praia_value_release` when you're done.
+- **Setter args are copied.** When you hand a `PraiaValue` to `praia_value_map_set`, `praia_value_array_push`, `praia_module_set`, etc., the engine takes its own reference. You still own (and must release) the handle you passed in.
+- **Callback args are borrowed.** Inside a `PraiaNativeFn`, the handles returned by `praia_args_get` belong to the engine for the duration of the call. Don't release them. If you need them to outlive the call, `praia_value_clone` first.
+
+A native callback's *return value* transfers ownership to the engine — return the `PraiaValue` directly without releasing it.
+
+### Error model
+
+C has no exceptions, so the facade uses a two-step convention:
+
+1. The native calls `praia_throw("message")` to stage an error.
+2. The native returns `NULL`.
+
+The facade thunk picks up the staged message and throws a `RuntimeError` on the C++ side, which propagates to user code identically to a C++ plugin throw. A `NULL` return without a prior `praia_throw` is also caught, with a placeholder message.
+
+### Working example
+
+See [`examples/plugins/cmod.c`](examples/plugins/cmod.c) for a complete pure-C plugin demonstrating string/int ops, error throwing, external handles with deleters, and map construction. The accompanying tests live at [`tests/test_loadnative_c.praia`](tests/test_loadnative_c.praia).
+
+For C++ instead, see [Quick start](#quick-start) above.
+
 ## ABI versioning
 
 The plugin API is versioned. Every plugin must invoke `PRAIA_DECLARE_ABI()` once at file scope:
