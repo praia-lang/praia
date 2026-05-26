@@ -4,16 +4,25 @@ use "testing"
 // plugin at examples/plugins/cmod.c. Each test covers one shape:
 // string round-trip, integer ops + arg-count validation, error
 // throwing, external handles with a deleter, and map construction.
-//
-// The plugin must be built before running this test:
-//   gcc -std=c11 -shared -fPIC -I$(praia --include-path) \
-//       -undefined dynamic_lookup -o examples/plugins/cmod.dylib \
-//       examples/plugins/cmod.c
-//
-// (Makefile target also builds it as part of the suite — see
-// the verification block in the plan.)
 
-let cmod = loadNative("./examples/plugins/cmod")
+let ext = ".dylib"
+if (sys.platform != "darwin") {
+    ext = ".so"
+}
+
+let pluginPath = "examples/plugins/cmod" + ext
+
+if (!fs.exists(pluginPath)) {
+    // Mirror the skip pattern in test_loadnative.praia so CI / a
+    // fresh checkout doesn't fail just because the plugin hasn't
+    // been compiled yet.
+    print("Skipping C-facade tests — plugin not built")
+    print("Build with: gcc -std=c11 -shared -fPIC -I$(praia --include-path) \\")
+    print("            -undefined dynamic_lookup -o examples/plugins/cmod" + ext + " examples/plugins/cmod.c")
+    testing.done()
+}
+
+let cmod = loadNative(pluginPath)
 
 testing.test("C facade: _meta is populated from PRAIA_C_PLUGIN_METADATA", lam{ in
     testing.assertEqual(cmod._meta.name, "cmod", nil)
