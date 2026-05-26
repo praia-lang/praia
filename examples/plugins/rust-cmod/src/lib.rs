@@ -185,7 +185,7 @@ extern "C" fn rcmod_boom(_args: PraiaArgs, _ud: *mut c_void) -> PraiaValue {
 
 #[no_mangle]
 pub extern "C" fn praia_abi_version() -> c_int {
-    5  // matches PRAIA_PLUGIN_ABI_VERSION in praia_plugin_c.h
+    6  // matches PRAIA_PLUGIN_ABI_VERSION in praia_plugin_c.h
 }
 
 #[no_mangle]

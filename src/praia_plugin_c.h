@@ -76,7 +76,7 @@ extern "C" {
  * — same symbol both languages export — and refuses mismatches
  * with a "rebuild required" diagnostic.
  */
-#define PRAIA_PLUGIN_ABI_VERSION 5
+#define PRAIA_PLUGIN_ABI_VERSION 6
 
 /* Macros emit function definitions at the caller's file scope.
  * In a C++ translation unit those definitions would get C++ name

@@ -71,7 +71,13 @@
 //       symbols (Promise ctor / future / resolve / reject); the bump
 //       surfaces the mismatch as the standard "rebuild required"
 //       diagnostic at loadNative time rather than a raw dlerror.
-#define PRAIA_PLUGIN_ABI_VERSION 5
+//   6 — adds the pure-C facade (praia_plugin_c.h). A v5 engine
+//       carries none of the new extern "C" thunks (praia_value_*,
+//       praia_make_native, praia_args_*, praia_throw, pin/unpin,
+//       praia_call, praia_capture_executor + praia_post_to_engine,
+//       the praia_promise_* family, external-handle and error
+//       helpers).
+#define PRAIA_PLUGIN_ABI_VERSION 6
 
 #define PRAIA_DECLARE_ABI()                                             \
     extern "C" int praia_abi_version() {                                \
