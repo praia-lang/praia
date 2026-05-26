@@ -37,18 +37,51 @@ namespace {
 // distinguishes "no error" from "empty string error" (rare but
 // the C user might pass ""), and lets the thunk tell whether the
 // native bailed via praia_throw or just returned NULL silently.
-thread_local std::string g_last_error;
-thread_local bool        g_last_error_set = false;
+//
+// Fixed-size char buffer (not std::string) so the setter is
+// strictly noexcept. The catch blocks below run *while another
+// exception is unwinding* — if staging the message could itself
+// throw std::bad_alloc (which `std::string::operator=` can do
+// for messages longer than SSO under memory pressure), the new
+// exception would escape the catch and propagate across the
+// extern "C" boundary as UB. The buffer rules that out: the
+// setter just memcpys bytes, no allocation. Overlong messages
+// are truncated at 1023 bytes + NUL, which is plenty for any
+// reasonable error diagnostic.
+static constexpr size_t LAST_ERROR_BUFLEN = 1024;
+thread_local char g_last_error[LAST_ERROR_BUFLEN] = {0};
+thread_local bool g_last_error_set = false;
 
-void clearLastError() {
-    g_last_error.clear();
+// noexcept by inspection: only writes to a stack/TLS buffer, no
+// allocations, no throwing operations.
+static void setLastError(const char* msg) noexcept {
+    if (!msg) {
+        g_last_error[0] = '\0';
+    } else {
+        size_t i = 0;
+        while (i + 1 < LAST_ERROR_BUFLEN && msg[i] != '\0') {
+            g_last_error[i] = msg[i];
+            i++;
+        }
+        g_last_error[i] = '\0';
+    }
+    g_last_error_set = true;
+}
+
+void clearLastError() noexcept {
+    g_last_error[0] = '\0';
     g_last_error_set = false;
 }
 
+// takeLastError can throw std::bad_alloc when constructing the
+// std::string under memory pressure — but it's only called from
+// inside the praia_make_native bridge, which is wrapped by the
+// engine's own RuntimeError handler. The catch macros do NOT call
+// this; they use the noexcept setLastError instead.
 std::string takeLastError() {
-    std::string out = std::move(g_last_error);
-    g_last_error.clear();
     bool was_set = g_last_error_set;
+    std::string out(g_last_error);
+    g_last_error[0] = '\0';
     g_last_error_set = false;
     if (!was_set && out.empty()) {
         return "<C native returned NULL without calling praia_throw>";
@@ -102,25 +135,23 @@ struct ArgsImpl {
 // allocate, so they can't throw.
 #define PRAIA_FACADE_CATCH(ret_on_fail)                                  \
     catch (const RuntimeError& e) {                                      \
-        g_last_error = e.what(); g_last_error_set = true;                \
+        setLastError(e.what());                                          \
         return ret_on_fail;                                              \
     } catch (const std::exception& e) {                                  \
-        g_last_error = e.what(); g_last_error_set = true;                \
+        setLastError(e.what());                                          \
         return ret_on_fail;                                              \
     } catch (...) {                                                      \
-        g_last_error = "<unknown C++ exception in plugin facade>";       \
-        g_last_error_set = true;                                         \
+        setLastError("<unknown C++ exception in plugin facade>");        \
         return ret_on_fail;                                              \
     }
 
 #define PRAIA_FACADE_CATCH_VOID                                          \
     catch (const RuntimeError& e) {                                      \
-        g_last_error = e.what(); g_last_error_set = true;                \
+        setLastError(e.what());                                          \
     } catch (const std::exception& e) {                                  \
-        g_last_error = e.what(); g_last_error_set = true;                \
+        setLastError(e.what());                                          \
     } catch (...) {                                                      \
-        g_last_error = "<unknown C++ exception in plugin facade>";       \
-        g_last_error_set = true;                                         \
+        setLastError("<unknown C++ exception in plugin facade>");        \
     }
 
 extern "C" {
@@ -381,14 +412,10 @@ PraiaValue praia_args_get(PraiaArgs args, int i) {
 
 // ─── Error reporting ─────────────────────────────────────────────
 
-// std::string assignment can throw std::bad_alloc on a very long
-// message + low-memory condition. Absorb so the act of staging an
-// error can never itself escape the C ABI as an exception.
+// Already noexcept by construction — setLastError() just memcpys
+// bytes into a thread-local fixed-size buffer.
 void praia_throw(const char* msg) {
-    try {
-        g_last_error = msg ? msg : "";
-        g_last_error_set = true;
-    } PRAIA_FACADE_CATCH_VOID
+    setLastError(msg);
 }
 
 // ─── External handles ────────────────────────────────────────────
@@ -478,21 +505,23 @@ PraiaValue praia_call(PraiaValue callable, const PraiaValue* args, size_t argc) 
 
 // ─── Cross-thread helpers ────────────────────────────────────────
 
-int praia_post_to_engine(void (*fn)(void* userdata), void* userdata) {
+PraiaExecutor praia_capture_executor(void) {
     try {
-        if (!fn) {
-            praia_throw("praia_post_to_engine: NULL function pointer");
+        return reinterpret_cast<PraiaExecutor>(praia::currentExecutor());
+    } PRAIA_FACADE_CATCH(nullptr)
+}
+
+int praia_post_to_engine(PraiaExecutor exec,
+                         void (*fn)(void* userdata), void* userdata) {
+    try {
+        if (!exec) {
+            praia_throw("praia_post_to_engine: NULL executor "
+                        "(call praia_capture_executor() on the engine "
+                        "thread before spawning the worker)");
             return -1;
         }
-        void* exec = praia::currentExecutor();
-        if (!exec) {
-            // Calling from a thread with no executor is a programming
-            // error — the post needs an engine to schedule against.
-            // Stage an error AND surface it via the return code so a
-            // worker thread (which has no native-return point to drain
-            // the lastError slot) can see the failure.
-            praia_throw("praia_post_to_engine: no executor on this thread "
-                        "(must be called from engine thread)");
+        if (!fn) {
+            praia_throw("praia_post_to_engine: NULL function pointer");
             return -1;
         }
         // Wrap the C function pointer + userdata as a zero-arity
@@ -503,7 +532,7 @@ int praia_post_to_engine(void (*fn)(void* userdata), void* userdata) {
                 fn(userdata);
                 return Value();
             });
-        praia::postToEngine(exec, callable, {});
+        praia::postToEngine(reinterpret_cast<void*>(exec), callable, {});
         return 0;
     } PRAIA_FACADE_CATCH(-1)
 }

@@ -15,10 +15,17 @@ let pluginPath = "examples/plugins/cmod" + ext
 if (!fs.exists(pluginPath)) {
     // Mirror the skip pattern in test_loadnative.praia so CI / a
     // fresh checkout doesn't fail just because the plugin hasn't
-    // been compiled yet.
+    // been compiled yet. `-undefined dynamic_lookup` is macOS-only;
+    // GNU ld on Linux doesn't understand it and a copy-paste of the
+    // hint would fail. Emit the flag only where it's needed.
     print("Skipping C-facade tests — plugin not built")
-    print("Build with: gcc -std=c11 -shared -fPIC -I$(praia --include-path) \\")
-    print("            -undefined dynamic_lookup -o examples/plugins/cmod" + ext + " examples/plugins/cmod.c")
+    if (sys.platform == "darwin") {
+        print("Build with: gcc -std=c11 -shared -fPIC -I$(praia --include-path) \\")
+        print("            -undefined dynamic_lookup -o examples/plugins/cmod" + ext + " examples/plugins/cmod.c")
+    } else {
+        print("Build with: gcc -std=c11 -shared -fPIC -I$(praia --include-path) \\")
+        print("            -o examples/plugins/cmod" + ext + " examples/plugins/cmod.c")
+    }
     testing.done()
 }
 

@@ -134,11 +134,20 @@ extern "C" fn rcmod_greet(args: PraiaArgs, _ud: *mut c_void) -> PraiaValue {
             Some(b) => b,
             None => return fail("rcmod.greet: expected a string"),
         };
-        // Format via Rust's own string handling, then hand the
-        // bytes back through the facade. The greeting buffer is
-        // dropped at the end of this scope - fine because
-        // praia_value_string_n copies the bytes into a new Value.
-        let greeting = format!("hello, {}", String::from_utf8_lossy(&bytes));
+        // Build the greeting as a raw Vec<u8> so any bytes in the
+        // input round-trip exactly. Praia strings are byte
+        // sequences (the same type stores text AND binary), so the
+        // input may contain embedded NULs or non-UTF-8 sequences —
+        // both of which `String::from_utf8_lossy` would either drop
+        // (NULs survive but `format!("{}", lossy)` writes U+FFFD
+        // for invalid UTF-8) or quietly corrupt. Concatenating raw
+        // bytes preserves the data byte-for-byte. praia_value_string_n
+        // copies the buffer into the engine, so it's fine for the
+        // local Vec to drop at the end of this scope.
+        const PREFIX: &[u8] = b"hello, ";
+        let mut greeting = Vec::with_capacity(PREFIX.len() + bytes.len());
+        greeting.extend_from_slice(PREFIX);
+        greeting.extend_from_slice(&bytes);
         praia_value_string_n(greeting.as_ptr() as *const c_char, greeting.len())
     }
 }

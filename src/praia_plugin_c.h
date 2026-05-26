@@ -78,18 +78,33 @@ extern "C" {
  */
 #define PRAIA_PLUGIN_ABI_VERSION 5
 
+/* Macros emit function definitions at the caller's file scope.
+ * In a C++ translation unit those definitions would get C++ name
+ * mangling by default, and the engine's dlsym lookup would fail
+ * to find `praia_abi_version` et al. Splice an `extern "C"` in
+ * front of each one when compiled as C++ so the emitted symbol
+ * has C linkage regardless of which language the plugin is in.
+ * The C compiler ignores PRAIA_C_LINKAGE entirely. */
+#ifdef __cplusplus
+#define PRAIA_C_LINKAGE extern "C"
+#else
+#define PRAIA_C_LINKAGE
+#endif
+
 /* Required: place once at file scope. Without it, loadNative
  * refuses to load the plugin. */
 #define PRAIA_C_DECLARE_ABI()                                           \
-    int praia_abi_version(void) { return PRAIA_PLUGIN_ABI_VERSION; }
+    PRAIA_C_LINKAGE int praia_abi_version(void) {                       \
+        return PRAIA_PLUGIN_ABI_VERSION;                                \
+    }
 
 /* Optional: declare module name, version, and description. Exposed
  * to user code as `mod._meta = {name, version, description}` after
  * loadNative returns. */
 #define PRAIA_C_PLUGIN_METADATA(NAME, VERSION, DESC)                    \
-    const char* praia_plugin_name(void)        { return NAME; }         \
-    const char* praia_plugin_version(void)     { return VERSION; }      \
-    const char* praia_plugin_description(void) { return DESC; }
+    PRAIA_C_LINKAGE const char* praia_plugin_name(void)        { return NAME; }    \
+    PRAIA_C_LINKAGE const char* praia_plugin_version(void)     { return VERSION; } \
+    PRAIA_C_LINKAGE const char* praia_plugin_description(void) { return DESC; }
 
 /* ── Opaque handles ───────────────────────────────────────────── */
 
@@ -106,6 +121,12 @@ typedef struct praia_args_s*    PraiaArgs;
 /* Plugin-constructed Future. Used by background-thread plugins
  * that want to resolve a Future from a worker. */
 typedef struct praia_promise_s* PraiaPromise;
+
+/* Opaque executor token. Capture on the engine thread via
+ * praia_capture_executor(), then hand it to a worker thread that
+ * needs to call praia_post_to_engine. See the comments on those
+ * functions for the full pattern. */
+typedef struct praia_executor_s* PraiaExecutor;
 
 /* Engine's PraiaMap struct, threaded through `praia_register`. The
  * facade exposes a setter — plugin code never dereferences. */
@@ -353,22 +374,38 @@ PraiaValue praia_call(PraiaValue callable, const PraiaValue* args, size_t argc);
 
 /* ── Cross-thread helpers ─────────────────────────────────────── */
 
+/* Capture the current engine's executor token. MUST be called
+ * on the engine thread (inside a native callback). Returns an
+ * opaque PraiaExecutor handle that stays valid for the
+ * engine's lifetime, or NULL if no executor is bound to this
+ * thread (programming error — you tried to capture from a
+ * worker). The handle is not refcounted and does not need to
+ * be released; it's a borrowed token, not an owned resource. */
+PraiaExecutor praia_capture_executor(void);
+
 /* Schedule `fn(userdata)` to run on the engine thread. Returns
- * 0 on success, -1 on error. Most error cases are programming
- * mistakes:
- *   • NULL fn — nothing to schedule
- *   • No executor on this thread — you called from a worker but
- *     forgot to capture praia::currentExecutor() (in the C++ ABI)
- *     on the engine thread before spawning the worker. The C
- *     facade currently looks up the executor itself on the
- *     calling thread, so worker calls only succeed via the
- *     dedicated engine-thread wrapper around them.
+ * 0 on success, -1 on error.
+ *
+ *   PraiaExecutor exec — captured earlier via
+ *     praia_capture_executor() on the engine thread. NULL is
+ *     refused (-1, staged "NULL executor" message).
+ *   fn — function to invoke on the engine thread.
+ *   userdata — opaque pointer passed back to fn. Lifetime is
+ *     the caller's responsibility.
+ *
+ * Canonical pattern: the engine-thread native captures the
+ * executor + spawns a worker that holds onto the token; the
+ * worker calls praia_post_to_engine(exec, fn, ud) when its
+ * background work is done. fn then runs on the engine thread
+ * at the next yield point — gcNew, praia_call, and pin/unpin
+ * are all safe inside fn.
  *
  * Returning a value rather than void so the worker can observe
- * the failure — the staged last-error message is consumed by
- * the next native return on the engine thread, but a worker has
- * no such return point and would otherwise lose the diagnostic. */
-int praia_post_to_engine(void (*fn)(void* userdata), void* userdata);
+ * the failure — the worker has no native-return point to drain
+ * the staged last-error slot, and would otherwise lose the
+ * diagnostic. */
+int praia_post_to_engine(PraiaExecutor exec,
+                         void (*fn)(void* userdata), void* userdata);
 
 /* Cooperative cancellation. Returns:
  *   -1  no cancel token bound to this thread (user code didn't
