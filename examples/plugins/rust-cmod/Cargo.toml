@@ -1,0 +1,21 @@
+[package]
+name = "rcmod"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# cdylib: produce a shared library (.dylib on macOS, .so on Linux)
+# rather than a Rust-rlib. The Praia engine loads this via dlopen
+# and resolves symbols through the standard dynamic linker.
+crate-type = ["cdylib"]
+
+[profile.release]
+# A stripped, optimized build keeps the artifact small. The default
+# release profile already does these, but spell them out so readers
+# can lift this Cargo.toml verbatim into their own plugin and not
+# worry about whether `cargo build --release` produces a 100MB
+# debug-info-laden binary.
+lto = true
+codegen-units = 1
+strip = "symbols"
