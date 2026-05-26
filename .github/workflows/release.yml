@@ -157,6 +157,7 @@ jobs:
           chmod 755 dist/sand
           mkdir -p dist/lib/praia/include
           cp src/praia_plugin.h \
+             src/praia_plugin_c.h \
              src/praia_runtime.h \
              src/value.h \
              src/builtins.h \
@@ -383,7 +384,8 @@ jobs:
 
           echo "── 4/4: plugin headers + dlopen ──"
           INC=$(/usr/local/bin/praia --include-path)
-          test -f "$INC/praia_plugin.h" || { echo "missing praia_plugin.h at $INC"; exit 1; }
+          test -f "$INC/praia_plugin.h"   || { echo "missing praia_plugin.h at $INC";   exit 1; }
+          test -f "$INC/praia_plugin_c.h" || { echo "missing praia_plugin_c.h at $INC"; exit 1; }
           # Inline a minimal plugin that exercises Value + PraiaMap.
           cat > smoke_plugin.cpp <<'CPP_EOF'
           #include "praia_plugin.h"

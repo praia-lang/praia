@@ -195,6 +195,7 @@ install:
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
 	install -d $(DESTDIR)$(LIBDIR)/include
 	cp $(SRC_DIR)/praia_plugin.h $(DESTDIR)$(LIBDIR)/include/
+	cp $(SRC_DIR)/praia_plugin_c.h $(DESTDIR)$(LIBDIR)/include/
 	cp $(SRC_DIR)/praia_runtime.h $(DESTDIR)$(LIBDIR)/include/
 	cp $(SRC_DIR)/value.h $(DESTDIR)$(LIBDIR)/include/
 	cp $(SRC_DIR)/builtins.h $(DESTDIR)$(LIBDIR)/include/
