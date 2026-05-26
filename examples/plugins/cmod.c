@@ -157,6 +157,69 @@ static PraiaValue cmod_dict(PraiaArgs args, void* ud) {
     return m;
 }
 
+// ── error_intercept(msg) → "intercepted: <msg>" ─────────────────
+//
+// Demonstrates praia_last_error / praia_take_error: the native
+// stages an error with praia_throw, then immediately reads it
+// back, drains the slot via praia_take_error, and returns the
+// drained text as a normal success value. The user sees a
+// returned string, never an exception — proving that an
+// intercepted/handled error doesn't leak to the next call.
+
+static PraiaValue cmod_error_intercept(PraiaArgs args, void* ud) {
+    (void) ud;
+    if (praia_args_count(args) != 1) {
+        praia_throw("cmod.error_intercept: expected 1 argument");
+        return NULL;
+    }
+    PraiaValue arg = praia_args_get(args, 0);
+    if (!praia_value_is_string(arg)) {
+        praia_throw("cmod.error_intercept: expected a string");
+        return NULL;
+    }
+    size_t n = 0;
+    const char* s = praia_value_as_string(arg, &n);
+    // Stage an error, then read it back to prove the slot works
+    // both for reading (praia_last_error) and draining
+    // (praia_take_error). After the drain the slot is empty, so
+    // we can return non-NULL without the facade surfacing a stale
+    // error to the caller.
+    char staged[256];
+    snprintf(staged, sizeof(staged), "intercepted: %.*s", (int)n, s);
+    praia_throw(staged);
+
+    // Peek without consuming — pointer is borrowed from the
+    // facade's thread-local buffer, valid until the next stage/drain.
+    const char* peek = praia_last_error();
+    (void) peek;   // not used in the demo; just exercising the call
+
+    char drained[256];
+    int had = praia_take_error(drained, sizeof(drained));
+    if (!had) {
+        // Defensive: praia_throw above should have set the slot.
+        return praia_value_string("(no error was staged)");
+    }
+    return praia_value_string(drained);
+}
+
+// ── makeset(a, b, c) → #{a, b, c} ────────────────────────────────
+//
+// Demonstrates the new_set + set_add + set_values API. Variadic
+// arity (-1) so the caller can pass any number of members.
+
+static PraiaValue cmod_makeset(PraiaArgs args, void* ud) {
+    (void) ud;
+    PraiaValue s = praia_value_new_set();
+    int n = praia_args_count(args);
+    for (int i = 0; i < n; i++) {
+        if (praia_value_set_add(s, praia_args_get(args, i)) != 0) {
+            praia_value_release(s);
+            return NULL;
+        }
+    }
+    return s;
+}
+
 // ── Registration ─────────────────────────────────────────────────
 
 // Tiny helper to compress the "make + set + release" triad each
@@ -165,19 +228,44 @@ static PraiaValue cmod_dict(PraiaArgs args, void* ud) {
 // on the module map. We pass both rather than deriving one from
 // the other so a stray missing-prefix typo doesn't quietly read
 // past the start of the name string.
-static void reg(PraiaMapHandle* module, const char* name, const char* key,
-                int arity, PraiaNativeFn fn) {
+//
+// praia_make_native returns NULL on OOM (and stages a message).
+// We check the return + read the staged error via
+// praia_last_error so the user sees *why* a native is missing
+// from the module instead of "praia_register succeeded but
+// cmod.greet doesn't exist." Returns 0 on success, -1 on
+// failure — praia_register itself can't fail the load, but the
+// caller can decide to skip the rest of registration.
+static int reg(PraiaMapHandle* module, const char* name, const char* key,
+               int arity, PraiaNativeFn fn) {
     PraiaValue v = praia_make_native(name, arity, fn, NULL);
+    if (!v) {
+        fprintf(stderr, "cmod: failed to register %s: %s\n",
+                name, praia_last_error());
+        return -1;
+    }
     praia_module_set(module, key, v);
     praia_value_release(v);
+    return 0;
 }
 
+// Bail on the first reg() failure rather than continuing with a
+// partially-registered module. praia_register itself is void —
+// the engine can't be told "the load failed" — but stopping
+// early means the user sees a single "failed to register X"
+// line on stderr and consistently-missing later entries, not a
+// scattergun of partially-present functions whose absence is
+// surprising. Use the `||` short-circuit chain so the failure
+// message comes out at the *first* missing native, not the
+// last.
 void praia_register(PraiaMapHandle* module) {
-    reg(module, "cmod.greet",            "greet",            1,  cmod_greet);
-    reg(module, "cmod.add",              "add",              2,  cmod_add);
-    reg(module, "cmod.boom",             "boom",             0,  cmod_boom);
-    reg(module, "cmod.box",              "box",              0,  cmod_box);
-    reg(module, "cmod.box_unwrap",       "box_unwrap",       1,  cmod_box_unwrap);
-    reg(module, "cmod.box_freed_count",  "box_freed_count",  0,  cmod_box_freed_count);
-    reg(module, "cmod.dict",             "dict",             2,  cmod_dict);
+    if (reg(module, "cmod.greet",            "greet",            1,  cmod_greet))           return;
+    if (reg(module, "cmod.add",              "add",              2,  cmod_add))             return;
+    if (reg(module, "cmod.boom",             "boom",             0,  cmod_boom))            return;
+    if (reg(module, "cmod.box",              "box",              0,  cmod_box))             return;
+    if (reg(module, "cmod.box_unwrap",       "box_unwrap",       1,  cmod_box_unwrap))      return;
+    if (reg(module, "cmod.box_freed_count",  "box_freed_count",  0,  cmod_box_freed_count)) return;
+    if (reg(module, "cmod.dict",             "dict",             2,  cmod_dict))            return;
+    if (reg(module, "cmod.makeset",          "makeset",         -1,  cmod_makeset))         return;
+    if (reg(module, "cmod.error_intercept",  "error_intercept",  1,  cmod_error_intercept)) return;
 }
