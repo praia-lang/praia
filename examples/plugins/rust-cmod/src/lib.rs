@@ -78,12 +78,23 @@ extern "C" {
 
 /// Stage a Praia error and return NULL. Used by every fallible
 /// native so the bail path stays a one-liner at the call site.
+///
+/// `CString::new` rejects strings containing interior NUL bytes.
+/// For the static literals in this file that's impossible, but a
+/// real plugin that formats messages from user input could trip
+/// it — we'd otherwise return NULL without staging an error and
+/// the facade thunk would surface the generic "returned NULL
+/// without praia_throw" placeholder instead of saying what went
+/// wrong. Fall back to a fixed safe diagnostic so praia_throw is
+/// guaranteed to fire on every path through `fail`.
 fn fail(msg: &str) -> PraiaValue {
     // The CString outlives praia_throw's read because the facade
     // copies the message into thread-local storage before returning.
-    if let Ok(c) = CString::new(msg) {
-        unsafe { praia_throw(c.as_ptr()) }
-    }
+    let c = CString::new(msg).unwrap_or_else(|_| {
+        CString::new("rcmod: error message contained an interior NUL byte")
+            .expect("fallback literal has no NULs")
+    });
+    unsafe { praia_throw(c.as_ptr()) }
     ptr::null_mut()
 }
 
@@ -142,8 +153,14 @@ extern "C" fn rcmod_add(args: PraiaArgs, _ud: *mut c_void) -> PraiaValue {
         if !praia_value_is_int(a) || !praia_value_is_int(b) {
             return fail("rcmod.add: both arguments must be ints");
         }
-        let sum = praia_value_as_int(a).wrapping_add(praia_value_as_int(b));
-        praia_value_int(sum)
+        // checked_add mirrors the C version's INT64_MAX/MIN bounds
+        // check (cmod.c). `wrapping_add` would silently wrap, which
+        // makes a fine demo of "doing the wrong thing quietly" but
+        // a bad demo of "how to write a Praia plugin in Rust."
+        match praia_value_as_int(a).checked_add(praia_value_as_int(b)) {
+            Some(sum) => praia_value_int(sum),
+            None => fail("rcmod.add: integer overflow"),
+        }
     }
 }
 
@@ -186,6 +203,7 @@ pub extern "C" fn praia_register(module: *mut PraiaMapHandle) {
     // lives just long enough for the unsafe calls below.
     unsafe fn reg(module: *mut PraiaMapHandle, name: &str,
                   key: &str, arity: c_int, fn_: PraiaNativeFn) {
+        // unwrap is safe: name and key are string literals without NUL bytes
         let cname = CString::new(name).unwrap();
         let ckey  = CString::new(key).unwrap();
         let v = praia_make_native(cname.as_ptr(), arity, fn_, ptr::null_mut());

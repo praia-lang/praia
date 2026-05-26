@@ -60,14 +60,24 @@ std::string takeLastError() {
 // pointers (one per actual arg, pre-boxed) so praia_args_get can
 // hand back the same pointer on repeated calls. Boxes are freed
 // when the args object goes out of scope at the end of the thunk.
+//
+// The const_cast below is a deliberate C-ABI boundary cast, not a
+// hack. The C facade's public `PraiaValue` type is
+// `praia_value_s*` — non-const by definition, because pure C has
+// no clean way to express "borrowed but read-only" without
+// inventing a parallel `const_PraiaValue` typedef and forcing
+// every accessor to come in matched const/non-const pairs (which
+// would double the API surface for no real safety win — the
+// borrowed-vs-owned contract is documented at the API level and
+// the bridge in praia_make_native already enforces "don't return
+// a borrowed arg" before any delete can corrupt these addresses).
+// Treat the cast as the explicit translation point between C++'s
+// const-correctness and C's pointer-only type system.
 struct ArgsImpl {
     std::vector<Value*> boxes;
     explicit ArgsImpl(const std::vector<Value>& args) {
         boxes.reserve(args.size());
         for (const auto& v : args) {
-            // const_cast: the box is read-only as far as the C
-            // plugin is concerned (handles are borrowed). We just
-            // need a non-const Value* to fit the box(...) shape.
             boxes.push_back(const_cast<Value*>(&v));
         }
     }
@@ -194,12 +204,31 @@ const char* praia_value_as_string(PraiaValue v, size_t* out_len) {
 
 // ─── Map ops ─────────────────────────────────────────────────────
 
-void praia_value_map_set(PraiaValue mv, PraiaValue kv, PraiaValue vv) {
+int praia_value_map_set(PraiaValue mv, PraiaValue kv, PraiaValue vv) {
     try {
-        if (!mv || !kv || !vv) return;
-        if (!unbox(mv)->isMap()) return;
-        unbox(mv)->asMap()->entries[*unbox(kv)] = *unbox(vv);
-    } PRAIA_FACADE_CATCH_VOID
+        if (!mv || !kv || !vv) {
+            praia_throw("praia_value_map_set: NULL argument");
+            return -1;
+        }
+        if (!unbox(mv)->isMap()) {
+            praia_throw("praia_value_map_set: target is not a map");
+            return -1;
+        }
+        // Praia maps require hashable keys (nil/bool/int/float/string).
+        // The variant-side ValueHash throws bad_variant_access on
+        // unhashable types and the macro would catch that — but the
+        // resulting message wouldn't mention what actually went wrong.
+        // Check up front so the plugin author sees a diagnostic that
+        // names the constraint directly.
+        const Value& key = *unbox(kv);
+        if (!isHashable(key)) {
+            praia_throw("praia_value_map_set: map keys must be hashable "
+                        "(nil, bool, int, float, or string)");
+            return -1;
+        }
+        unbox(mv)->asMap()->entries[key] = *unbox(vv);
+        return 0;
+    } PRAIA_FACADE_CATCH(-1)
 }
 
 PraiaValue praia_value_map_get(PraiaValue mv, PraiaValue kv) {
@@ -256,16 +285,24 @@ PraiaValue praia_value_array_get(PraiaValue av, size_t i) {
     } PRAIA_FACADE_CATCH(nullptr)
 }
 
-void praia_value_array_set(PraiaValue av, size_t i, PraiaValue vv) {
+int praia_value_array_set(PraiaValue av, size_t i, PraiaValue vv) {
     try {
-        if (!av || !vv || !unbox(av)->isArray()) return;
+        if (!av || !vv) {
+            praia_throw("praia_value_array_set: NULL argument");
+            return -1;
+        }
+        if (!unbox(av)->isArray()) {
+            praia_throw("praia_value_array_set: target is not an array");
+            return -1;
+        }
         auto& es = unbox(av)->asArray()->elements;
         if (i >= es.size()) {
             praia_throw("praia_value_array_set: index out of range");
-            return;
+            return -1;
         }
         es[i] = *unbox(vv);
-    } PRAIA_FACADE_CATCH_VOID
+        return 0;
+    } PRAIA_FACADE_CATCH(-1)
 }
 
 size_t praia_value_array_len(PraiaValue av) {
@@ -304,6 +341,21 @@ PraiaValue praia_make_native(const char* name, int arity,
                 // RuntimeError(msg, 0) lets the engine fill in the
                 // call-site line number.
                 throw RuntimeError(takeLastError(), 0);
+            }
+            // Guard against the most catastrophic plugin bug we can
+            // detect cheaply: returning a borrowed PraiaArgs entry
+            // (i.e. `return praia_args_get(args, i)`) directly. The
+            // boxes in ctx point at addresses on the engine's call
+            // stack; deleting one corrupts the args vector and any
+            // subsequent reads. Compare against each box address up
+            // front and throw a clear error instead of UB. O(argc),
+            // negligible for the typical 0-3 args.
+            for (Value* argBox : ctx.boxes) {
+                if (raw == reinterpret_cast<PraiaValue>(argBox)) {
+                    throw RuntimeError(
+                        "C native returned a borrowed argument Value "
+                        "(use praia_value_clone before returning an arg)", 0);
+                }
             }
             Value out = *unbox(raw);
             delete unbox(raw);   // ownership transfers to the engine
@@ -426,19 +478,22 @@ PraiaValue praia_call(PraiaValue callable, const PraiaValue* args, size_t argc) 
 
 // ─── Cross-thread helpers ────────────────────────────────────────
 
-void praia_post_to_engine(void (*fn)(void* userdata), void* userdata) {
+int praia_post_to_engine(void (*fn)(void* userdata), void* userdata) {
     try {
-        if (!fn) return;
+        if (!fn) {
+            praia_throw("praia_post_to_engine: NULL function pointer");
+            return -1;
+        }
         void* exec = praia::currentExecutor();
         if (!exec) {
             // Calling from a thread with no executor is a programming
             // error — the post needs an engine to schedule against.
-            // Mirror praia::call's loud-failure stance: stage an error
-            // the next native-return-NULL will surface.
-            praia_throw("praia_post_to_engine: no Praia executor on this thread "
-                        "(call from the engine thread before spawning the worker, "
-                        "passing the captured executor token)");
-            return;
+            // Stage an error AND surface it via the return code so a
+            // worker thread (which has no native-return point to drain
+            // the lastError slot) can see the failure.
+            praia_throw("praia_post_to_engine: no executor on this thread "
+                        "(must be called from engine thread)");
+            return -1;
         }
         // Wrap the C function pointer + userdata as a zero-arity
         // Praia callable. Name "" is fine for tracebacks; this
@@ -449,7 +504,8 @@ void praia_post_to_engine(void (*fn)(void* userdata), void* userdata) {
                 return Value();
             });
         praia::postToEngine(exec, callable, {});
-    } PRAIA_FACADE_CATCH_VOID
+        return 0;
+    } PRAIA_FACADE_CATCH(-1)
 }
 
 int praia_should_cancel(void) {

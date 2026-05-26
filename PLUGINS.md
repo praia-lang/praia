@@ -102,7 +102,9 @@ C has no exceptions, so the facade uses a two-step convention:
 1. The native calls `praia_throw("message")` to stage an error.
 2. The native returns `NULL`.
 
-The facade thunk picks up the staged message and throws a `RuntimeError` on the C++ side, which propagates to user code identically to a C++ plugin throw. A `NULL` return without a prior `praia_throw` is also caught, with a placeholder message.
+The facade thunk picks up the staged message and throws a `RuntimeError` on the C++ side, which propagates to user code identically to a C++ plugin throw.
+
+A `NULL` return *without* a prior `praia_throw` is also caught, but the surfaced message is the literal placeholder `<C native returned NULL without calling praia_throw>`. Seeing that in your stack trace means your native bailed without staging a diagnostic — a plugin bug to fix in the C code, not a runtime condition for user code to handle. Always pair every NULL return with a matching `praia_throw` so the user sees a real message.
 
 ### Working examples
 

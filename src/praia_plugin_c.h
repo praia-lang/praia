@@ -117,11 +117,22 @@ typedef struct PraiaMap         PraiaMapHandle;
  * engine thread. Register exports via praia_module_set below. */
 extern void praia_register(PraiaMapHandle* module);
 
-/* Optional teardown hook. If defined, called once at process exit
- * after all async tasks have drained. Use to release any
- * resources the GC won't clean up on its own (open sockets, child
- * processes, etc.). Errors are logged to stderr and swallowed. */
-/* extern void praia_at_exit(void); */
+/* Optional teardown hook. *You* define this function (just like
+ * praia_register); the engine calls it once at process exit, after
+ * every async task has drained. Use it to release resources the
+ * GC can't clean up on its own — open sockets, child processes,
+ * library handles whose deleters block on I/O.
+ *
+ *   void praia_at_exit(void) {
+ *       close_my_sockets();
+ *       free_my_caches();
+ *   }
+ *
+ * Optional — plugins without a teardown hook simply don't define
+ * the symbol, and the engine skips it. Errors thrown from
+ * praia_at_exit are logged to stderr and swallowed; a misbehaving
+ * teardown can't crash the process during shutdown. */
+extern void praia_at_exit(void);
 
 /* ── Value lifecycle ──────────────────────────────────────────── */
 
@@ -177,17 +188,53 @@ int64_t     praia_value_as_int(PraiaValue v);
 double      praia_value_as_double(PraiaValue v);
 
 /* Returns a pointer to the string's bytes and (if out_len is
- * non-NULL) writes the byte count. The pointer is valid for the
- * lifetime of the PraiaValue — clone first if you need to outlive
- * it. NOT guaranteed NUL-terminated; use the length. */
+ * non-NULL) writes the byte count.
+ *
+ * Two contract points that catch real bugs:
+ *
+ *   (a) The pointer is only valid while the PraiaValue is alive.
+ *       Calling praia_value_release(v) (or letting the engine drop
+ *       its last reference) invalidates the pointer immediately —
+ *       any later read is use-after-free.
+ *
+ *   (b) The bytes are NOT NUL-terminated. Praia strings are
+ *       arbitrary byte sequences and may contain embedded NULs.
+ *       Passing this pointer to strlen/strcpy/printf("%s")/etc. is
+ *       wrong on both counts: they'd walk past the end of the
+ *       string into adjacent Praia heap memory.
+ *
+ * Immediate use is fine — write your loop or comparison against
+ * (s, *out_len), no copy needed:
+ *
+ *     size_t n = 0;
+ *     const char* s = praia_value_as_string(v, &n);
+ *     for (size_t i = 0; i < n; ++i) { ... }
+ *
+ * To outlive the PraiaValue OR to pass to a NUL-terminated API,
+ * copy first:
+ *
+ *     size_t n = 0;
+ *     const char* s = praia_value_as_string(v, &n);
+ *     char* owned = malloc(n + 1);
+ *     memcpy(owned, s, n);
+ *     owned[n] = 0;
+ *     // ... use `owned` freely, free(owned) when done.
+ */
 const char* praia_value_as_string(PraiaValue v, size_t* out_len);
 
 /* ── Map ops ──────────────────────────────────────────────────── */
 
 /* Insert. `key` and `value` are copied — caller still owns and
  * must release. Common idiom: praia_value_map_set(m, k=praia_value_string("foo"), v=…),
- * then release k and v immediately. */
-void       praia_value_map_set(PraiaValue map, PraiaValue key, PraiaValue value);
+ * then release k and v immediately.
+ *
+ * Returns 0 on success, -1 on error (NULL args, map isn't a map,
+ * or key isn't hashable — Praia maps only accept nil / bool /
+ * int / float / string keys). On -1, the staged error message
+ * names the cause; map is unchanged. Callers that want the error
+ * to propagate as a Praia RuntimeError should return NULL after
+ * a -1, the same way they would after a praia_throw. */
+int        praia_value_map_set(PraiaValue map, PraiaValue key, PraiaValue value);
 
 /* Lookup. Returns a new owned handle to the value, or NULL if the
  * key isn't present. Caller releases. */
@@ -207,13 +254,13 @@ void       praia_value_array_push(PraiaValue arr, PraiaValue v);
 /* Returns a new owned handle, or NULL if i is out of range. */
 PraiaValue praia_value_array_get(PraiaValue arr, size_t i);
 
-/* Sets arr[i] = v. On out-of-range i, calls praia_throw and
- * leaves arr unchanged — but DOES NOT itself force your native
- * to return NULL. If you want the error to propagate, check
- * praia_value_array_len(arr) first, or return NULL after a set
- * you think might be out of range. Most plugins push instead of
- * set so this is rare. */
-void       praia_value_array_set(PraiaValue arr, size_t i, PraiaValue v);
+/* Sets arr[i] = v. Returns 0 on success, -1 on error
+ * (out-of-range i, NULL args, or arr isn't an array). On error
+ * the staged error message names the cause; arr is unchanged.
+ * Callers that want the error to propagate as a Praia
+ * RuntimeError should return NULL after a -1, the same way they
+ * would after a praia_throw. */
+int        praia_value_array_set(PraiaValue arr, size_t i, PraiaValue v);
 
 size_t     praia_value_array_len(PraiaValue arr);
 
@@ -307,10 +354,21 @@ PraiaValue praia_call(PraiaValue callable, const PraiaValue* args, size_t argc);
 /* ── Cross-thread helpers ─────────────────────────────────────── */
 
 /* Schedule `fn(userdata)` to run on the engine thread. Returns
- * immediately. Use to marshal work back from a worker thread —
- * gcNew, praia_call, and pin/unpin are unsafe off-engine, so
- * accumulate state in the worker and post here to publish it. */
-void praia_post_to_engine(void (*fn)(void* userdata), void* userdata);
+ * 0 on success, -1 on error. Most error cases are programming
+ * mistakes:
+ *   • NULL fn — nothing to schedule
+ *   • No executor on this thread — you called from a worker but
+ *     forgot to capture praia::currentExecutor() (in the C++ ABI)
+ *     on the engine thread before spawning the worker. The C
+ *     facade currently looks up the executor itself on the
+ *     calling thread, so worker calls only succeed via the
+ *     dedicated engine-thread wrapper around them.
+ *
+ * Returning a value rather than void so the worker can observe
+ * the failure — the staged last-error message is consumed by
+ * the next native return on the engine thread, but a worker has
+ * no such return point and would otherwise lose the diagnostic. */
+int praia_post_to_engine(void (*fn)(void* userdata), void* userdata);
 
 /* Cooperative cancellation. Returns:
  *   -1  no cancel token bound to this thread (user code didn't

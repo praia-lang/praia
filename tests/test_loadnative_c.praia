@@ -105,4 +105,16 @@ testing.test("C facade: add overflow guard fires instead of UB-ing", lam{ in
                    "error message identifies the overflow: %{caught}")
 })
 
+testing.test("C facade: non-hashable map key gets a precise diagnostic", lam{ in
+    // cmod.dict's first arg becomes the map key. Praia maps reject
+    // non-hashable keys (maps/arrays); the facade catches that up
+    // front with a specific message rather than letting the
+    // variant-side hash blow up with a generic error.
+    let caught = nil
+    try { cmod.dict([1, 2], "value") } catch (e) { caught = str(e) }
+    testing.assert(caught != nil, "non-hashable key throws")
+    testing.assert(caught.contains("hashable") || caught.contains("hash"),
+                   "diagnostic names the constraint: %{caught}")
+})
+
 testing.done()

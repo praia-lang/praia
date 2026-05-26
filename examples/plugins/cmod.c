@@ -147,7 +147,13 @@ static PraiaValue cmod_dict(PraiaArgs args, void* ud) {
     PraiaValue k = praia_args_get(args, 0);
     PraiaValue v = praia_args_get(args, 1);
     PraiaValue m = praia_value_new_map();
-    praia_value_map_set(m, k, v);
+    // Propagate any staged error from map_set (e.g. non-hashable
+    // key) — without returning NULL we'd silently return an empty
+    // map and the user would never see the diagnostic.
+    if (praia_value_map_set(m, k, v) != 0) {
+        praia_value_release(m);
+        return NULL;
+    }
     return m;
 }
 
