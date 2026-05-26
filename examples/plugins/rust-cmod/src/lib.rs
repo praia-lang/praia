@@ -87,15 +87,28 @@ fn fail(msg: &str) -> PraiaValue {
     ptr::null_mut()
 }
 
-/// Borrow the byte view of a Praia string Value without copying.
-/// Returns None if `v` isn't a string. The slice's lifetime is tied
-/// to `v`'s - fine for the duration of a native call.
-unsafe fn as_str_bytes<'a>(v: PraiaValue) -> Option<&'a [u8]> {
+/// Read a Praia string Value into an owned `Vec<u8>`. Returns
+/// `None` if `v` isn't a string.
+///
+/// We deliberately return an owned buffer rather than a borrowed
+/// slice. A borrowed `&[u8]` would need a lifetime parameter, and
+/// the only honest answer for "how long is this pointer valid?" is
+/// "until the underlying PraiaValue is mutated or released — and
+/// the C facade gives us no way to encode that in Rust's borrow
+/// checker." Returning an unbounded `&'a [u8]` (as an earlier
+/// version of this function did) lets a refactor accidentally
+/// stash the slice past the call boundary, with no compiler
+/// diagnostic. Copying eliminates the footgun at the cost of one
+/// allocation per string read — fine for an example plugin; a
+/// real perf-sensitive plugin would use a closure-bounded
+/// `with_str_bytes(v, |bytes| ...)` instead.
+unsafe fn as_str_bytes(v: PraiaValue) -> Option<Vec<u8>> {
     if !praia_value_is_string(v) { return None; }
     let mut len: usize = 0;
     let ptr = praia_value_as_string(v, &mut len);
     if ptr.is_null() { return None; }
-    Some(std::slice::from_raw_parts(ptr as *const u8, len))
+    let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+    Some(slice.to_vec())
 }
 
 // ── Natives ──────────────────────────────────────────────────────
@@ -114,7 +127,7 @@ extern "C" fn rcmod_greet(args: PraiaArgs, _ud: *mut c_void) -> PraiaValue {
         // bytes back through the facade. The greeting buffer is
         // dropped at the end of this scope - fine because
         // praia_value_string_n copies the bytes into a new Value.
-        let greeting = format!("hello, {}", String::from_utf8_lossy(bytes));
+        let greeting = format!("hello, {}", String::from_utf8_lossy(&bytes));
         praia_value_string_n(greeting.as_ptr() as *const c_char, greeting.len())
     }
 }

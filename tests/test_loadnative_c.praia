@@ -94,4 +94,15 @@ testing.test("C facade: arity mismatch caught by the engine before the callback 
     testing.assert(caught != nil, "engine throws on arity mismatch")
 })
 
+testing.test("C facade: add overflow guard fires instead of UB-ing", lam{ in
+    // INT64_MAX = 9223372036854775807. Adding 1 would overflow,
+    // which used to be silent UB in cmod.add. The guard added in
+    // cmod_add catches it and throws a Praia error.
+    let caught = nil
+    try { cmod.add(9223372036854775807, 1) } catch (e) { caught = str(e) }
+    testing.assert(caught != nil, "overflow throws")
+    testing.assert(caught.contains("overflow"),
+                   "error message identifies the overflow: %{caught}")
+})
+
 testing.done()

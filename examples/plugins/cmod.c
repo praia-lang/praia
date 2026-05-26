@@ -15,6 +15,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 PRAIA_C_DECLARE_ABI();
@@ -63,7 +64,20 @@ static PraiaValue cmod_add(PraiaArgs args, void* ud) {
         praia_throw("cmod.add: both arguments must be ints");
         return NULL;
     }
-    return praia_value_int(praia_value_as_int(a) + praia_value_as_int(b));
+    int64_t ai = praia_value_as_int(a);
+    int64_t bi = praia_value_as_int(b);
+    // Signed-overflow check before adding — `int64_t + int64_t` on
+    // overflow is undefined behavior in C, and a demo plugin
+    // shouldn't leave that landmine for readers to copy. The two
+    // bounds checks below are the canonical portable formulation
+    // (gcc/clang also offer __builtin_add_overflow if you want the
+    // single-call version).
+    if ((bi > 0 && ai > INT64_MAX - bi) ||
+        (bi < 0 && ai < INT64_MIN - bi)) {
+        praia_throw("cmod.add: integer overflow");
+        return NULL;
+    }
+    return praia_value_int(ai + bi);
 }
 
 // ── boom() → throws unconditionally ──────────────────────────────
