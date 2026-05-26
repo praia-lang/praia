@@ -112,6 +112,50 @@ testing.test("C facade: add overflow guard fires instead of UB-ing", lam{ in
                    "error message identifies the overflow: %{caught}")
 })
 
+testing.test("C facade: praia_last_error + praia_take_error round-trip", lam{ in
+    // The native stages an error with praia_throw, drains it via
+    // praia_take_error, and returns the drained string. A
+    // returned string (not a thrown exception) proves both:
+    //   1. praia_take_error successfully read the staged message;
+    //   2. after the drain, the staged slot is empty — so the
+    //      native returning non-NULL doesn't leak a stale error.
+    let s = cmod.error_intercept("hello")
+    testing.assertEqual(s, "intercepted: hello", nil)
+})
+
+testing.test("C facade: error slot is reset between native calls", lam{ in
+    // A native that throws followed immediately by one that
+    // succeeds — the staged error from the first call shouldn't
+    // carry over and corrupt the second call's return.
+    let caught = nil
+    try { cmod.boom() } catch (e) { caught = str(e) }
+    testing.assert(caught.contains("deliberate"), "first call's error surfaced")
+    testing.assertEqual(cmod.add(2, 3), 5,
+                       "second call returns cleanly with no leaked error")
+})
+
+testing.test("C facade: set ops via praia_value_new_set + set_add + set_values", lam{ in
+    // cmod.makeset(a, b, c, …) builds a set with each arg as a
+    // member. Duplicate insertions are no-ops (set semantics).
+    let s = cmod.makeset(1, 2, 3, 2, 1)
+    testing.assertEqual(type(s), "set", "returned value is a set")
+    testing.assertEqual(len(s), 3, "duplicates collapsed: 3 unique members")
+    testing.assert(s.has(1), "set contains 1")
+    testing.assert(s.has(2), "set contains 2")
+    testing.assert(s.has(3), "set contains 3")
+    testing.assert(!s.has(4), "set doesn't contain 4")
+})
+
+testing.test("C facade: non-hashable set element gets a precise diagnostic", lam{ in
+    // Mirrors the map_set hashability check — sets use the same
+    // ValueHash and refuse non-hashable members up front.
+    let caught = nil
+    try { cmod.makeset([1, 2]) } catch (e) { caught = str(e) }
+    testing.assert(caught != nil, "non-hashable set element throws")
+    testing.assert(caught.contains("hashable") || caught.contains("hash"),
+                   "diagnostic names the constraint: %{caught}")
+})
+
 testing.test("C facade: non-hashable map key gets a precise diagnostic", lam{ in
     // cmod.dict's first arg becomes the map key. Praia maps reject
     // non-hashable keys (maps/arrays); the facade catches that up

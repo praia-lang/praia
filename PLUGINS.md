@@ -1,6 +1,13 @@
-# Native C++ Plugins
+# Native Plugins
 
-Praia supports loading native C++ modules at runtime via `loadNative()`. This lets you write performance-critical code or wrap C/C++ libraries without modifying Praia itself.
+Praia loads native modules at runtime via `loadNative()`. There are two SDKs, picked by the `#include` you use:
+
+| SDK | Header | Stability | When to reach for it |
+|-----|--------|-----------|---------------------|
+| C++ source SDK | `praia_plugin.h` | **Source-coupled to the engine's C++ toolchain.** Re-exports `Value` (`std::variant`), `std::shared_ptr` containers, `std::function`, templates, `RuntimeError` exceptions. Variant/shared_ptr/function layouts differ across compilers and minor stdlib releases. | You control the build (same toolchain compiles engine + plugin). Canonical for source builds, the `make plugin` target, and the in-tree `examples/plugins/*.cpp`. |
+| C stable ABI | `praia_plugin_c.h` | **Stable across compilers and languages.** Opaque pointers + plain function-pointer ABI; works from C, Rust, Zig, Go (cgo), Swift, anything with a C FFI. | Distributing prebuilt binaries via the `prebuilt:` block in `grain.yaml`. Writing the plugin in any language other than C++. Building portable artifacts that will load against engines compiled by a different toolchain than yours. |
+
+Both share the same `PRAIA_PLUGIN_ABI_VERSION` gate — a single engine binary loads plugins built with either header. The C++ SDK is documented first below; jump to [Writing plugins in pure C](#writing-plugins-in-pure-c) for the C facade.
 
 ## Quick start
 

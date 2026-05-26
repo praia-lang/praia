@@ -185,6 +185,7 @@ PraiaValue praia_value_string_n(const char* s, size_t len);
 /* GC-tracked empty containers. */
 PraiaValue praia_value_new_map(void);
 PraiaValue praia_value_new_array(void);
+PraiaValue praia_value_new_set(void);
 
 /* ── Type predicates ──────────────────────────────────────────── */
 
@@ -196,6 +197,7 @@ bool praia_value_is_number(PraiaValue v);    /* int OR float */
 bool praia_value_is_string(PraiaValue v);
 bool praia_value_is_map(PraiaValue v);
 bool praia_value_is_array(PraiaValue v);
+bool praia_value_is_set(PraiaValue v);
 bool praia_value_is_callable(PraiaValue v);
 bool praia_value_is_external(PraiaValue v);
 
@@ -285,6 +287,29 @@ int        praia_value_array_set(PraiaValue arr, size_t i, PraiaValue v);
 
 size_t     praia_value_array_len(PraiaValue arr);
 
+/* ── Set ops ──────────────────────────────────────────────────── */
+
+/* Insert. `v` is copied — caller still owns and must release.
+ * Returns 0 on success, -1 on error (NULL args, set isn't a set,
+ * or `v` isn't hashable — same hashability rule as map keys:
+ * nil / bool / int / float / string only). Inserting a value
+ * already in the set is a no-op and returns 0. */
+int        praia_value_set_add(PraiaValue set, PraiaValue v);
+
+bool       praia_value_set_has(PraiaValue set, PraiaValue v);
+
+/* Remove `v` from the set. Returns true if the element was present
+ * and removed, false if the set didn't contain it (or on
+ * unhashable / non-set / NULL inputs). Mirrors
+ * std::unordered_set::erase's "was actually erased" semantics. */
+bool       praia_value_set_remove(PraiaValue set, PraiaValue v);
+
+size_t     praia_value_set_len(PraiaValue set);
+
+/* Returns a new owned array Value containing every member. Order
+ * is implementation-defined (hash order). */
+PraiaValue praia_value_set_values(PraiaValue set);
+
 /* ── Module registration ──────────────────────────────────────── */
 
 /* Set module["key"] = value inside praia_register. Both the key
@@ -328,6 +353,32 @@ PraiaValue praia_args_get(PraiaArgs args, int i);
  * automatically between native calls so an earlier error can't
  * pollute a later one. */
 void praia_throw(const char* msg);
+
+/* Read the currently-staged error message without consuming it.
+ * Returns a pointer to a NUL-terminated string — `""` (not NULL)
+ * when no error is staged. The pointer is valid until the next
+ * praia_throw, native-return, or praia_take_error call rewrites
+ * or clears the slot; do not store it across such calls.
+ *
+ * Use this to introspect failures from APIs that don't have a
+ * status-channel return — typically inside praia_register, where
+ * a failing praia_make_native silently leaves the module entry
+ * missing because praia_register itself is void. */
+const char* praia_last_error(void);
+
+/* Copy the staged error message into `buf` and clear the staged
+ * slot. Returns 1 if a message was staged (and copied), 0 if no
+ * error was set.
+ *
+ *   buf, buflen — caller-provided. When non-NULL with buflen >= 1
+ *     the buffer is always NUL-terminated; overlong messages are
+ *     truncated at buflen-1 + NUL. Passing NULL/0 still clears
+ *     the staged slot and reports whether something was there.
+ *
+ * Use this when you want to take responsibility for handling a
+ * staged error (logging, retry, abort) instead of letting it
+ * propagate to the next native-return drain. */
+int praia_take_error(char* buf, size_t buflen);
 
 /* ── External handles (opaque resources) ──────────────────────── */
 

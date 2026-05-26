@@ -190,6 +190,9 @@ PraiaValue praia_value_new_map(void) {
 PraiaValue praia_value_new_array(void) {
     try { return box(new Value(gcNew<PraiaArray>())); } PRAIA_FACADE_CATCH(nullptr)
 }
+PraiaValue praia_value_new_set(void) {
+    try { return box(new Value(gcNew<PraiaSet>())); } PRAIA_FACADE_CATCH(nullptr)
+}
 
 // ─── Predicates ──────────────────────────────────────────────────
 
@@ -201,6 +204,7 @@ bool praia_value_is_number(PraiaValue v)   { return v && unbox(v)->isNumber(); }
 bool praia_value_is_string(PraiaValue v)   { return v && unbox(v)->isString(); }
 bool praia_value_is_map(PraiaValue v)      { return v && unbox(v)->isMap(); }
 bool praia_value_is_array(PraiaValue v)    { return v && unbox(v)->isArray(); }
+bool praia_value_is_set(PraiaValue v)      { return v && unbox(v)->isSet(); }
 bool praia_value_is_callable(PraiaValue v) { return v && unbox(v)->isCallable(); }
 bool praia_value_is_external(PraiaValue v) { return v && unbox(v)->isExternal(); }
 
@@ -343,6 +347,70 @@ size_t praia_value_array_len(PraiaValue av) {
     } PRAIA_FACADE_CATCH(0)
 }
 
+// ─── Set ops ─────────────────────────────────────────────────────
+
+int praia_value_set_add(PraiaValue sv, PraiaValue vv) {
+    try {
+        if (!sv || !vv) {
+            praia_throw("praia_value_set_add: NULL argument");
+            return -1;
+        }
+        if (!unbox(sv)->isSet()) {
+            praia_throw("praia_value_set_add: target is not a set");
+            return -1;
+        }
+        // Sets share the map-key hashability rule — the underlying
+        // type is unordered_set<Value, ValueHash, ValueKeyEqual>,
+        // so an unhashable insertion would otherwise throw
+        // bad_variant_access from the variant-side hasher with a
+        // generic message. Surface the constraint directly.
+        const Value& v = *unbox(vv);
+        if (!isHashable(v)) {
+            praia_throw("praia_value_set_add: set elements must be hashable "
+                        "(nil, bool, int, float, or string)");
+            return -1;
+        }
+        unbox(sv)->asSet()->elements.insert(v);
+        return 0;
+    } PRAIA_FACADE_CATCH(-1)
+}
+
+bool praia_value_set_has(PraiaValue sv, PraiaValue vv) {
+    try {
+        if (!sv || !vv || !unbox(sv)->isSet()) return false;
+        auto& elements = unbox(sv)->asSet()->elements;
+        return elements.find(*unbox(vv)) != elements.end();
+    } PRAIA_FACADE_CATCH(false)
+}
+
+bool praia_value_set_remove(PraiaValue sv, PraiaValue vv) {
+    try {
+        if (!sv || !vv || !unbox(sv)->isSet()) return false;
+        // erase() returns the number of elements erased — 0 or 1
+        // for unordered_set. Boolean naturally maps to "was the
+        // element present and removed."
+        return unbox(sv)->asSet()->elements.erase(*unbox(vv)) > 0;
+    } PRAIA_FACADE_CATCH(false)
+}
+
+size_t praia_value_set_len(PraiaValue sv) {
+    try {
+        if (!sv || !unbox(sv)->isSet()) return 0;
+        return unbox(sv)->asSet()->elements.size();
+    } PRAIA_FACADE_CATCH(0)
+}
+
+PraiaValue praia_value_set_values(PraiaValue sv) {
+    try {
+        if (!sv || !unbox(sv)->isSet()) return nullptr;
+        auto arr = gcNew<PraiaArray>();
+        for (const auto& e : unbox(sv)->asSet()->elements) {
+            arr->elements.push_back(e);
+        }
+        return box(new Value(arr));
+    } PRAIA_FACADE_CATCH(nullptr)
+}
+
 // ─── Module registration ─────────────────────────────────────────
 
 void praia_module_set(PraiaMapHandle* module, const char* key, PraiaValue value) {
@@ -416,6 +484,29 @@ PraiaValue praia_args_get(PraiaArgs args, int i) {
 // bytes into a thread-local fixed-size buffer.
 void praia_throw(const char* msg) {
     setLastError(msg);
+}
+
+// Returns a borrowed pointer into the thread-local buffer. When no
+// error is staged the buffer's first byte is '\0', so we return
+// that same pointer — callers get a valid NUL-terminated empty
+// string rather than NULL.
+const char* praia_last_error(void) {
+    return g_last_error;
+}
+
+int praia_take_error(char* buf, size_t buflen) {
+    bool was_set = g_last_error_set;
+    if (buf && buflen > 0) {
+        size_t i = 0;
+        while (i + 1 < buflen && g_last_error[i] != '\0') {
+            buf[i] = g_last_error[i];
+            i++;
+        }
+        buf[i] = '\0';
+    }
+    g_last_error[0] = '\0';
+    g_last_error_set = false;
+    return was_set ? 1 : 0;
 }
 
 // ─── External handles ────────────────────────────────────────────

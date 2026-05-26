@@ -1,4 +1,26 @@
-// Praia Native Plugin API
+// Praia Native Plugin API — C++ source SDK.
+//
+// This header is the C++ source-level SDK: it re-exports Value
+// (an std::variant), PraiaMap/Array (std::shared_ptr-managed),
+// makeNative (std::function), RuntimeError (C++ exception), and
+// templated helpers like gcNew<T> / makeExternal<T>. Convenient
+// and expressive, but the surface is **tied to whichever C++
+// compiler and standard library the praia engine was built with**:
+// std::variant's discriminator layout, std::function's storage
+// strategy, and std::shared_ptr's control-block layout all vary
+// across toolchains and even minor compiler releases. Use this
+// header when you control the build environment (you compile both
+// the engine and the plugin yourself, with the same toolchain) —
+// the canonical case for the `make plugin` flow and the
+// in-tree examples/plugins/*.cpp.
+//
+// For **distributing prebuilt binary plugins** across heterogeneous
+// user toolchains, use the pure-C facade in `praia_plugin_c.h`
+// instead. It exposes the same engine functionality through
+// opaque pointers + plain C function-pointer ABI — the lingua
+// franca of FFI, stable across compilers. Both headers share the
+// same `PRAIA_PLUGIN_ABI_VERSION` gate, so a single engine
+// binary loads either flavor.
 //
 // Include this single header in your plugin source file.
 // Every plugin must:
