@@ -564,6 +564,74 @@ Plugin code can be called from one of three contexts. Pick the one that matches 
 - **Inside an `async` task.** Praia ships your function to a worker thread for the task's lifetime, with the GC disabled while the task runs. You can still use `gcNew` for short-lived intermediate containers, but **don't let a `gcNew`-built object escape the task scope** — it isn't tracked by the parent's GC. Either return primitives, deep-copy outside the plugin, or marshal the work back to the parent. See the [async/Lock guide](https://praia.sh/docs/advanced/async) for the matching pattern on the Praia side.
 - **Off-engine threads (e.g. libuv callback, your own `std::thread`).** Both `gcNew` and `praia::call` are unsafe. Use [`praia::postToEngine`](#calling-back-from-background-threads--praiaposttoengine) to schedule the work back on the engine thread.
 
+## Distributing prebuilt binaries
+
+Native plugins normally require the end user to have a C++ toolchain — `sand install` clones the grain, but you (or the user) still have to run `make`. That gates every plugin behind "has g++ and the library headers installed," which is a real wall for casual users.
+
+`sand` supports a `prebuilt:` block in `grain.yaml` that points at per-platform binaries you publish to a GitHub Release (or any HTTPS host). On install, sand picks the entry matching the user's `<platform>-<arch>`, downloads it, verifies the sha256, and drops the binary into the grain's `plugins/` directory — so the existing platform-aware loader in `main.praia` finds it unchanged. On a miss (unsupported platform, no block), sand falls back to today's clone-and-build path.
+
+### Schema
+
+```yaml
+name: curses
+version: 1.1.1
+main: main.praia
+prebuilt:
+  darwin-arm64:
+    url: https://github.com/praia-lang/curses/releases/download/v1.1.1/curses.dylib
+    integrity: sha256-1a2b3c4d…
+  darwin-x86_64:
+    url: https://github.com/praia-lang/curses/releases/download/v1.1.1/curses-x86_64.dylib
+    integrity: sha256-4d5e6f7a…
+  linux-x86_64:
+    url: https://github.com/praia-lang/curses/releases/download/v1.1.1/curses-linux-x86_64.so
+    integrity: sha256-7a8b9c0d…
+  linux-aarch64:
+    url: https://github.com/praia-lang/curses/releases/download/v1.1.1/curses-linux-aarch64.so
+    integrity: sha256-d0e1f2a3…
+```
+
+**Platform key.** `<platform>-<arch>` where platform is `darwin` or `linux` and arch is what `uname -m` returns on the target (`arm64`, `x86_64`, `aarch64`). On macOS you can also publish a single `darwin-universal` entry (a `lipo`-merged Mach-O) — sand consults that as a fallback when no exact `darwin-<arch>` entry matches.
+
+**URL.** Must be HTTPS. http:// and file:// are rejected — the sha256 check provides content integrity, https provides transport integrity, together they make a tampered binary observable before it runs.
+
+**Integrity.** Subresource-integrity-style: `sha256-<64 lowercase hex chars>`. Sand recomputes the hash on the downloaded body and refuses to install on mismatch.
+
+**Destination.** Sand writes the downloaded file to `plugins/<basename(url)>`. Keep your URLs ending in the same filename your `main.praia` loader expects (`<name>.dylib` on darwin, `<name>-linux-<arch>.so` on linux — the convention every existing plugin grain already uses).
+
+### Authoring workflow
+
+```sh
+# 1. Build for each platform you publish.
+make                                                    # macOS host build
+./build-linux.sh                                        # cross-compile via Docker
+
+# 2. Compute hashes — prepend "sha256-" to the digest.
+shasum -a 256 plugins/curses.dylib                      # darwin-arm64
+shasum -a 256 plugins/curses-linux-x86_64.so            # etc.
+
+# 3. Tag and create a release with the binaries attached.
+git tag v1.1.1 && git push --tags
+gh release create v1.1.1 plugins/curses*.{dylib,so} --generate-notes
+
+# 4. Paste the URLs (`gh release view v1.1.1` shows them) and the
+#    sha256 lines into grain.yaml under prebuilt:, commit, push.
+```
+
+End users on a published platform now run `sand install -g github.com/you/your-grain` with no toolchain at all.
+
+### Override flags
+
+- `sand install --build-from-source <grain>` — skips the `prebuilt:` path entirely. Used when you want to audit or patch the native code locally.
+- `sand install --prebuilt-only <grain>` — refuses to install if no `prebuilt:` entry matches your platform, instead of letting you discover the missing toolchain later. Useful for users without `g++`.
+
+### Mismatch behaviour
+
+If a download fails (HTTP error) or the sha256 doesn't match the recorded integrity, sand throws with both expected and actual values and rolls back the install — it never installs an unverified binary. To fix:
+
+- **Download failure** — almost always a wrong URL in `grain.yaml`; double-check the release name and asset filename.
+- **Hash mismatch** — either the upstream release was re-uploaded (force-pushed tag) or someone is MITMing your fetch. Recompute the hash from the canonical release and update `grain.yaml`.
+
 ## Example
 
 - [`examples/plugins/mathext.cpp`](examples/plugins/mathext.cpp) — math functions (gcd, lcm, fibonacci, hypot, sum) plus `filter` showing the `praia::call` callback pattern
