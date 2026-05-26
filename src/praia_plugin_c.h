@@ -207,9 +207,12 @@ void       praia_value_array_push(PraiaValue arr, PraiaValue v);
 /* Returns a new owned handle, or NULL if i is out of range. */
 PraiaValue praia_value_array_get(PraiaValue arr, size_t i);
 
-/* Sets arr[i] = v. Throws (sets last error, sets a flag the next
- * native return will pick up) if i is out of range. Most plugins
- * push instead of set, so this is rare. */
+/* Sets arr[i] = v. On out-of-range i, calls praia_throw and
+ * leaves arr unchanged — but DOES NOT itself force your native
+ * to return NULL. If you want the error to propagate, check
+ * praia_value_array_len(arr) first, or return NULL after a set
+ * you think might be out of range. Most plugins push instead of
+ * set so this is rare. */
 void       praia_value_array_set(PraiaValue arr, size_t i, PraiaValue v);
 
 size_t     praia_value_array_len(PraiaValue arr);
@@ -326,7 +329,10 @@ PraiaPromise praia_promise_new(void);
 PraiaValue praia_promise_future(PraiaPromise p);
 
 /* Fulfil. First call wins; later resolve/reject calls are no-ops.
- * Safe from any thread, including workers without an executor. */
+ * Safe from any thread, including workers without an executor.
+ * `result` is copied (the engine takes its own reference); the
+ * caller still owns the handle they passed in and must release
+ * it. NULL is accepted and stored as a nil value. */
 void praia_promise_resolve(PraiaPromise p, PraiaValue result);
 void praia_promise_reject(PraiaPromise p, const char* message);
 

@@ -140,21 +140,24 @@ static PraiaValue cmod_dict(PraiaArgs args, void* ud) {
 // ── Registration ─────────────────────────────────────────────────
 
 // Tiny helper to compress the "make + set + release" triad each
-// native registration needs. Saves enough boilerplate per entry
-// to be worth it once you're past two natives.
-static void reg(PraiaMapHandle* module, const char* name, int arity,
-                PraiaNativeFn fn) {
+// native registration needs. `name` is the fully-qualified label
+// used in tracebacks; `key` is the bare attribute the user sees
+// on the module map. We pass both rather than deriving one from
+// the other so a stray missing-prefix typo doesn't quietly read
+// past the start of the name string.
+static void reg(PraiaMapHandle* module, const char* name, const char* key,
+                int arity, PraiaNativeFn fn) {
     PraiaValue v = praia_make_native(name, arity, fn, NULL);
-    praia_module_set(module, name + strlen("cmod."), v);  // drop "cmod." prefix on the exported key
+    praia_module_set(module, key, v);
     praia_value_release(v);
 }
 
 void praia_register(PraiaMapHandle* module) {
-    reg(module, "cmod.greet",            1,  cmod_greet);
-    reg(module, "cmod.add",              2,  cmod_add);
-    reg(module, "cmod.boom",             0,  cmod_boom);
-    reg(module, "cmod.box",              0,  cmod_box);
-    reg(module, "cmod.box_unwrap",       1,  cmod_box_unwrap);
-    reg(module, "cmod.box_freed_count",  0,  cmod_box_freed_count);
-    reg(module, "cmod.dict",             2,  cmod_dict);
+    reg(module, "cmod.greet",            "greet",            1,  cmod_greet);
+    reg(module, "cmod.add",              "add",              2,  cmod_add);
+    reg(module, "cmod.boom",             "boom",             0,  cmod_boom);
+    reg(module, "cmod.box",              "box",              0,  cmod_box);
+    reg(module, "cmod.box_unwrap",       "box_unwrap",       1,  cmod_box_unwrap);
+    reg(module, "cmod.box_freed_count",  "box_freed_count",  0,  cmod_box_freed_count);
+    reg(module, "cmod.dict",             "dict",             2,  cmod_dict);
 }
