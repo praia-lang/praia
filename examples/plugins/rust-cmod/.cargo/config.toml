@@ -1,0 +1,12 @@
+# macOS: the plugin references praia_* symbols that live in the
+# engine binary, not in any library this crate links against. Tell
+# the linker that those undefined references will be resolved at
+# dlopen time — without this flag, `cargo build` fails with linker
+# errors for every facade function the plugin uses.
+#
+# Linux's default cdylib build is fine: undefined references in a
+# shared library are normal, and the engine is linked with
+# -rdynamic so its symbols are visible to dlopen'd plugins.
+
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

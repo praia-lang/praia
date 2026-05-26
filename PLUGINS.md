@@ -104,9 +104,10 @@ C has no exceptions, so the facade uses a two-step convention:
 
 The facade thunk picks up the staged message and throws a `RuntimeError` on the C++ side, which propagates to user code identically to a C++ plugin throw. A `NULL` return without a prior `praia_throw` is also caught, with a placeholder message.
 
-### Working example
+### Working examples
 
-See [`examples/plugins/cmod.c`](examples/plugins/cmod.c) for a complete pure-C plugin demonstrating string/int ops, error throwing, external handles with deleters, and map construction. The accompanying tests live at [`tests/test_loadnative_c.praia`](tests/test_loadnative_c.praia).
+- [`examples/plugins/cmod.c`](examples/plugins/cmod.c) — pure-C plugin demonstrating string/int ops, error throwing, external handles with deleters, and map construction. The accompanying tests live at [`tests/test_loadnative_c.praia`](tests/test_loadnative_c.praia).
+- [`examples/plugins/rust-cmod/`](examples/plugins/rust-cmod/) — the same shape in pure Rust (hand-rolled `extern "C"` bindings against `praia_plugin_c.h`). Same approach works for Zig, Go via cgo, Swift, and any other language with a C FFI.
 
 For C++ instead, see [Quick start](#quick-start) above.
 
