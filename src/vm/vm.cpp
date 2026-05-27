@@ -1036,7 +1036,11 @@ VM::Result VM::execute(int baseFrameCount_) {
             if (a.isInstance()) { auto [ok, r] = vmCallDunder(*this, a, "__add", {b}); if (ok) { push(r); break; } }
             if (a.isInt() && b.isInt()) {
                 int64_t r; if (!__builtin_add_overflow(a.asInt(), b.asInt(), &r)) { push(Value(r)); break; }
-                push(Value(a.asNumber() + b.asNumber())); break;
+                // Throw on overflow rather than promote to double —
+                // the promotion path silently merged adjacent int64
+                // map keys via the (double)i collision. Matches the
+                // tree-walker's behaviour.
+                RUNTIME_ERR("integer overflow in '+'");
             }
             if (a.isNumber() && b.isNumber()) { push(Value(a.asNumber() + b.asNumber())); break; }
             if (a.isArray() && b.isArray()) {
@@ -1068,7 +1072,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             if (a.isInstance()) { auto [ok, r] = vmCallDunder(*this, a, "__sub", {b}); if (ok) { push(r); break; } }
             if (a.isInt() && b.isInt()) {
                 int64_t r; if (!__builtin_sub_overflow(a.asInt(), b.asInt(), &r)) { push(Value(r)); break; }
-                push(Value(a.asNumber() - b.asNumber())); break;
+                RUNTIME_ERR("integer overflow in '-'");
             }
             if (a.isNumber() && b.isNumber()) { push(Value(a.asNumber() - b.asNumber())); break; }
             RUNTIME_ERR("Operands of '-' must be numbers");
@@ -1078,7 +1082,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             if (a.isInstance()) { auto [ok, r] = vmCallDunder(*this, a, "__mul", {b}); if (ok) { push(r); break; } }
             if (a.isInt() && b.isInt()) {
                 int64_t r; if (!__builtin_mul_overflow(a.asInt(), b.asInt(), &r)) { push(Value(r)); break; }
-                push(Value(a.asNumber() * b.asNumber())); break;
+                RUNTIME_ERR("integer overflow in '*'");
             }
             if (a.isNumber() && b.isNumber()) { push(Value(a.asNumber() * b.asNumber())); break; }
             if ((a.isString() && b.isInt()) || (a.isInt() && b.isString())) {
@@ -1332,8 +1336,11 @@ VM::Result VM::execute(int baseFrameCount_) {
             Value& val = stack[FRAME.baseSlot + slot];
             if (!val.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
             push(val);
-            if (val.isInt()) { int64_t r; if (!__builtin_add_overflow(val.asInt(), (int64_t)1, &r)) val = Value(r); else val = Value(val.asNumber() + 1); }
-            else val = Value(val.asNumber() + 1);
+            if (val.isInt()) {
+                int64_t r;
+                if (__builtin_add_overflow(val.asInt(), (int64_t)1, &r)) { RUNTIME_ERR("integer overflow in '++'"); }
+                val = Value(r);
+            } else val = Value(val.asNumber() + 1);
             break;
         }
         case OpCode::OP_POST_DEC_LOCAL: {
@@ -1341,8 +1348,11 @@ VM::Result VM::execute(int baseFrameCount_) {
             Value& val = stack[FRAME.baseSlot + slot];
             if (!val.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
             push(val);
-            if (val.isInt()) { int64_t r; if (!__builtin_sub_overflow(val.asInt(), (int64_t)1, &r)) val = Value(r); else val = Value(val.asNumber() - 1); }
-            else val = Value(val.asNumber() - 1);
+            if (val.isInt()) {
+                int64_t r;
+                if (__builtin_sub_overflow(val.asInt(), (int64_t)1, &r)) { RUNTIME_ERR("integer overflow in '--'"); }
+                val = Value(r);
+            } else val = Value(val.asNumber() - 1);
             break;
         }
         case OpCode::OP_POST_INC_GLOBAL:
@@ -1363,10 +1373,11 @@ VM::Result VM::execute(int baseFrameCount_) {
             push(val);
             bool inc = static_cast<OpCode>(instruction) == OpCode::OP_POST_INC_GLOBAL;
             if (val.isInt()) {
-                int64_t r; int64_t delta = inc ? 1 : -1;
+                int64_t r;
                 bool ov = inc ? __builtin_add_overflow(val.asInt(), (int64_t)1, &r)
                               : __builtin_sub_overflow(val.asInt(), (int64_t)1, &r);
-                if (!ov) val = Value(r); else val = Value(val.asNumber() + delta);
+                if (ov) { RUNTIME_ERR(inc ? "integer overflow in '++'" : "integer overflow in '--'"); }
+                val = Value(r);
             } else val = Value(val.asNumber() + (inc ? 1 : -1));
             break;
         }
@@ -1378,10 +1389,11 @@ VM::Result VM::execute(int baseFrameCount_) {
             push(val);
             bool inc = static_cast<OpCode>(instruction) == OpCode::OP_POST_INC_UPVALUE;
             if (val.isInt()) {
-                int64_t r; int64_t delta = inc ? 1 : -1;
+                int64_t r;
                 bool ov = inc ? __builtin_add_overflow(val.asInt(), (int64_t)1, &r)
                               : __builtin_sub_overflow(val.asInt(), (int64_t)1, &r);
-                if (!ov) val = Value(r); else val = Value(val.asNumber() + delta);
+                if (ov) { RUNTIME_ERR(inc ? "integer overflow in '++'" : "integer overflow in '--'"); }
+                val = Value(r);
             } else val = Value(val.asNumber() + (inc ? 1 : -1));
             break;
         }

@@ -65,14 +65,42 @@ testing.test("zero is truthy", lam{ in
     testing.assert(-1, "-1 should be truthy")
 })
 
-testing.test("overflow promotes to float", lam{ in
+testing.test("integer overflow throws (was: silently promoted to float)", lam{ in
+    // Before this regression hardening, +, -, * silently
+    // promoted to double on int64 overflow. The promotion path
+    // rounded INT64_MAX + 1 into a float that compared-equal and
+    // hash-collided with INT64_MAX itself — map keys silently
+    // merged. Throwing surfaces overflow at the operation
+    // instead of leaving a wrong value to corrupt downstream
+    // hashing / equality.
     let MAX = 9223372036854775807
+    let MIN = 0 - 9223372036854775807 - 1
     testing.assertEqual(type(MAX), "int", nil)
-    testing.assertEqual(type(MAX + 1), "float", nil)
-    testing.assertEqual(type(MAX * 2), "float", nil)
-    // Normal arithmetic stays int
+    testing.assertThrows(lam{ in MAX + 1 }, "overflow")
+    testing.assertThrows(lam{ in MAX * 2 }, "overflow")
+    testing.assertThrows(lam{ in MIN - 1 }, "overflow")
+    // Normal arithmetic stays int and doesn't throw.
     testing.assertEqual(type(100 + 200), "int", nil)
     testing.assertEqual(type(50 * 30), "int", nil)
+    testing.assertEqual(100 + 200, 300, nil)
+})
+
+testing.test("int<->float boundary equality + hashing stay consistent", lam{ in
+    // Regression: (double)INT64_MAX rounds up to 2^63, and the
+    // old equality fallback `(double)i == d` returned true for
+    // INT64_MAX vs the float 2^63 even though they aren't
+    // mathematically equal. The hash then disagreed and broke
+    // unordered_map's invariant.
+    let MAX = 9223372036854775807
+    let big_float = 9223372036854775808.0   // 2^63
+    testing.assertEqual(MAX == big_float, false,
+        "INT64_MAX != 2^63 (they differ by 1)")
+    let m = {}
+    m[MAX] = "int"
+    m[big_float] = "float"
+    testing.assertEqual(len(m), 2, "boundary int and 2^63 are distinct keys")
+    testing.assertEqual(m[MAX], "int", nil)
+    testing.assertEqual(m[big_float], "float", nil)
 })
 
 // Regression: comparison, hashing, and bitwise ops on int64 values used

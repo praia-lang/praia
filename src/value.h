@@ -185,10 +185,19 @@ inline bool numbersEqualHelper(const Value& a, const Value& b, bool nanEq) {
         d >= -9223372036854775808.0 && d <  9223372036854775808.0) {
         return i == static_cast<int64_t>(d);
     }
-    // Fractional or out-of-range double: fall back to double compare. This
-    // matches IEEE semantics for non-integer doubles and is the only
-    // sensible answer for doubles outside the i64 envelope.
-    return static_cast<double>(i) == d;
+    // The fallthrough cases all mean "no int64 equals d exactly":
+    //   • d is NaN or ±Inf
+    //   • d is fractional
+    //   • d is integer-valued but outside [-2^63, 2^63) — for
+    //     example d == 2^63, which is what (double)INT64_MAX
+    //     rounds up to.
+    //
+    // The historical `(double)i == d` fallback let case 3 return
+    // true: INT64_MAX compared equal to 2^63 (and hashed to a
+    // different bucket, so map insertion silently overwrote
+    // adjacent ints). Returning false keeps the hash/equality
+    // contract consistent with hashNumber above.
+    return false;
 }
 
 inline bool numbersEqual(const Value& a, const Value& b) {
@@ -216,8 +225,18 @@ inline size_t hashNumber(const Value& v) {
         int64_t n = v.asInt();
         // If n is exactly representable as a double, hash via double so
         // it collides with the equal double value. Otherwise hash int64.
+        //
+        // The double check needs explicit bounds before the int64
+        // cast: (double)INT64_MAX rounds up to 2^63, and casting
+        // 2^63 back to int64 is undefined behaviour. The < 2^63
+        // bound here mirrors the equality logic in numbersEqualHelper
+        // so hash and equality agree on which ints "look like" a
+        // double — without it, n = INT64_MAX would erroneously hash
+        // via double and silently collide with the float 2^63.
         double d = static_cast<double>(n);
-        if (std::isfinite(d) && static_cast<int64_t>(d) == n) {
+        if (std::isfinite(d) &&
+            d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
+            static_cast<int64_t>(d) == n) {
             return std::hash<double>{}(d);
         }
         return std::hash<int64_t>{}(n);

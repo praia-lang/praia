@@ -1030,10 +1030,11 @@ Value Interpreter::evaluate(const Expr* expr) {
             bool overflow = (e->op == TokenType::INCREMENT)
                 ? __builtin_add_overflow(old, (int64_t)1, &next)
                 : __builtin_sub_overflow(old, (int64_t)1, &next);
-            if (overflow)
-                env->set(ident->name, Value(static_cast<double>(old) + (e->op == TokenType::INCREMENT ? 1 : -1)), e->line);
-            else
-                env->set(ident->name, Value(next), e->line);
+            if (overflow) {
+                const char* opname = (e->op == TokenType::INCREMENT) ? "++" : "--";
+                throw RuntimeError(std::string("integer overflow in '") + opname + "'", e->line, e->column);
+            }
+            env->set(ident->name, Value(next), e->line);
             return Value(old);
         }
         double old = cur.asNumber();
@@ -1091,7 +1092,14 @@ Value Interpreter::evaluate(const Expr* expr) {
                 int64_t result;
                 if (!__builtin_add_overflow(left.asInt(), right.asInt(), &result))
                     return Value(result);
-                return Value(left.asNumber() + right.asNumber()); // overflow → promote to double
+                // Throw rather than silently promote to double. The
+                // promotion path used to round INT64_MAX + 1 into a
+                // double that compared-equal to and hash-collided
+                // with INT64_MAX itself (map keys silently merged).
+                // Surface overflow at the operation, the same way
+                // every other language with this lesson learned
+                // (Swift trap, Rust debug panic) handles it.
+                throw RuntimeError("integer overflow in '+'", e->line, e->column);
             }
             if (left.isNumber() && right.isNumber())
                 return Value(left.asNumber() + right.asNumber());
@@ -1122,7 +1130,7 @@ Value Interpreter::evaluate(const Expr* expr) {
                 int64_t result;
                 if (!__builtin_sub_overflow(left.asInt(), right.asInt(), &result))
                     return Value(result);
-                return Value(left.asNumber() - right.asNumber());
+                throw RuntimeError("integer overflow in '-'", e->line, e->column);
             }
             if (left.isNumber() && right.isNumber())
                 return Value(left.asNumber() - right.asNumber());
@@ -1132,7 +1140,7 @@ Value Interpreter::evaluate(const Expr* expr) {
                 int64_t result;
                 if (!__builtin_mul_overflow(left.asInt(), right.asInt(), &result))
                     return Value(result);
-                return Value(left.asNumber() * right.asNumber());
+                throw RuntimeError("integer overflow in '*'", e->line, e->column);
             }
             if (left.isNumber() && right.isNumber())
                 return Value(left.asNumber() * right.asNumber());
