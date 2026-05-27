@@ -66,15 +66,27 @@ testing.test("ensure: nested if-else both terminating counts as terminator", lam
         ensure (x != 0) else {
             if (x > 0) { return "pos" }
             elif (x < 0) { return "neg" }
-            else { throw "unreachable" }
+            else { throw "zero" }
         }
         return "nonzero"
     }
     testing.assertEqual(classify(5), "nonzero", "non-zero path skips the else")
-    // classify(0): ensure fires, inner if/elif both false, the
-    // else throws "unreachable" — assertThrows confirms the
-    // terminator actually runs.
-    testing.assertThrows(lam{ in classify(0) }, "unreachable")
+    // classify(0): outer ensure fires (0 != 0 is false), inner
+    // if/elif both false, the else throws "zero" — assertThrows
+    // confirms that terminator actually runs.
+    testing.assertThrows(lam{ in classify(0) }, "zero")
+})
+
+testing.test("ensure: continue is a valid terminator (inside a loop)", lam{ in
+    // Same recognised-terminator family as break/return — the
+    // else skips to the next iteration. Sums only even values:
+    // 0+2+4+6+8 = 20.
+    let sum = 0
+    for (i in 0..10) {
+        ensure (i % 2 == 0) else { continue }
+        sum = sum + i
+    }
+    testing.assertEqual(sum, 20, "only even iterations contributed")
 })
 
 testing.test("ensure: sys.exit(...) ALONE is NOT a recognised terminator", lam{ in
