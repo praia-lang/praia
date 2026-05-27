@@ -77,15 +77,26 @@ testing.test("ensure: nested if-else both terminating counts as terminator", lam
     testing.assertThrows(lam{ in classify(0) }, "unreachable")
 })
 
-testing.test("ensure: sys.exit(...) is a valid terminator", lam{ in
-    // Sand and other CLI tools use printer.error + sys.exit
-    // rather than throw because the error message would
-    // otherwise round-trip through main.praia's try/catch and
-    // get reformatted. sys.exit calls _exit() and never returns,
-    // so it's structurally a terminator — recognise it.
-    let ok = "func f(x) { ensure (x) else { sys.exit(1) } ; print(\"unreached\") }"
+testing.test("ensure: sys.exit(...) ALONE is NOT a recognised terminator", lam{ in
+    // The earlier draft recognised `sys.exit(...)` structurally
+    // as a terminator. Removed because a shadowed `sys` (or any
+    // user code defining its own `sys.exit`) would silently
+    // sneak past the guard. The shape `sys.exit(1)` on its own
+    // now fails parse — the user must append `return` (or
+    // `throw "unreachable"`) so the syntactic guarantee is
+    // absolute.
+    let bad = "func f(x) { ensure (x) else { sys.exit(1) } ; print(\"unreached\") }"
+    let r = sys.exec(["./praia", "-c", bad])
+    testing.assert(r.exitCode != 0, "bare sys.exit no longer counts: stdout=%{r.stdout} stderr=%{r.stderr}")
+})
+
+testing.test("ensure: sys.exit(...) + return is the canonical CLI bail-out", lam{ in
+    // The idiomatic shape that sand uses for its CLI errors.
+    // sys.exit(1) ends the process; the unreachable `return`
+    // gives the parser the syntactic terminator it requires.
+    let ok = "func f(x) { ensure (x) else { sys.exit(1); return } ; print(\"unreached\") }"
     let r = sys.exec(["./praia", "-c", ok])
-    testing.assertEqual(r.exitCode, 0, "sys.exit-terminated ensure parses cleanly: %{r.stderr}")
+    testing.assertEqual(r.exitCode, 0, "sys.exit+return parses: stderr=%{r.stderr}")
 })
 
 testing.test("ensure: parser rejects non-terminating else block", lam{ in

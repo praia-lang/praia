@@ -587,50 +587,37 @@ StmtPtr Parser::tryCatchStatement() {
     return stmt;
 }
 
-// `sys.exit(...)` is recognised as a terminator alongside the
-// syntactic ones below. It's a function call rather than a
-// keyword, but it's the canonical "CLI bails out" idiom — sand
-// and other tools use it instead of `throw` so the error doesn't
-// have to round-trip through a try/catch boundary that would
-// reformat the message. The match is structural: the expression
-// must be a CallExpr whose callee is `sys.exit` exactly
-// (IdentifierExpr "sys" + DotExpr field "exit"). User code that
-// shadows `sys` or defines `sys.exit` differently is rare enough
-// to ignore; the worst case there is they get a confusing
-// terminator behaviour they can fix by adding `throw "...";` after.
-static bool isSysExitCall(const Expr* e) {
-    if (!e || e->type != ExprType::Call) return false;
-    const auto* call = static_cast<const CallExpr*>(e);
-    if (!call->callee || call->callee->type != ExprType::Dot) return false;
-    const auto* dot = static_cast<const DotExpr*>(call->callee.get());
-    if (dot->field != "exit") return false;
-    if (!dot->object || dot->object->type != ExprType::Identifier) return false;
-    return static_cast<const IdentifierExpr*>(dot->object.get())->name == "sys";
-}
-
 // Does this statement unconditionally divert control off the
 // enclosing scope along *every* execution path?
 //
 // `ensure (cond) else { body }` is a guard (Swift's `guard`):
-// the else block must be a dead-end — return, throw, break,
-// continue, or `sys.exit(...)` — so reading the code, you know
-// the post-`ensure` continuation only runs when the condition
-// held. We enforce that here, parse-side, rather than letting
-// `ensure` silently degrade into "if (!cond) { body }" sugar.
+// the else block must be a dead-end — return, throw, break, or
+// continue — so reading the code, you know the post-`ensure`
+// continuation only runs when the condition held. We enforce
+// that here, parse-side, rather than letting `ensure` silently
+// degrade into "if (!cond) { body }" sugar.
 //
-// Recognised terminators:
+// Recognised terminators are strictly syntactic:
 //   • return / throw / break / continue          (always terminate)
-//   • sys.exit(...)                              (CLI bail-out idiom)
 //   • { ... terminator }                         (last stmt terminates)
 //   • if (c) { A } [elif... ]  else { B }        (every branch terminates,
 //                                                  AND an else exists)
 //
-// Deliberately NOT recognised (yet):
-//   • match arms — would be additive; no existing site needs it
+// **No function calls are recognised**, even ones that
+// conventionally never return (`sys.exit`, `os.abort`, …). A
+// structural match like "is this a CallExpr whose callee is
+// `sys.exit`?" can be silently subverted by shadowing — `let sys
+// = { exit: lam{x in nil } }` then `sys.exit(1)` would pass the
+// match but fall through. The whole value proposition of
+// `ensure` is "the post-block code only runs if the condition
+// held"; tolerating a structural hole that adversarial (or
+// careless) code can poke a return through erodes that
+// guarantee. The escape hatch is a one-liner: append `return`
+// (or `throw "unreachable"`) after the call.
+//
+// Also deliberately NOT recognised:
+//   • match arms — additive; no existing site needs it
 //   • `while (true) { ... }` with no break — fiddly, low value
-//   • general function calls — slippery slope
-// The escape hatch for any of those: append an explicit
-// `throw "unreachable"`.
 static bool stmtTerminates(const Stmt* s) {
     if (!s) return false;
     switch (s->type) {
@@ -639,10 +626,6 @@ static bool stmtTerminates(const Stmt* s) {
         case StmtType::Break:
         case StmtType::Continue:
             return true;
-        case StmtType::Expr: {
-            const auto* es = static_cast<const ExprStmt*>(s);
-            return isSysExitCall(es->expr.get());
-        }
         case StmtType::Block: {
             const auto* b = static_cast<const BlockStmt*>(s);
             if (b->statements.empty()) return false;

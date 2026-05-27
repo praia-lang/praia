@@ -1047,13 +1047,15 @@ If a defer itself throws, it doesn't prevent other defers from running.
 
 ### ensure
 
-`ensure` is an early-exit guard, modelled on Swift's `guard`. If the condition is falsy, the `else` block runs — and the `else` block **must** terminate. The parser enforces this: code after the `ensure` only runs when the condition held. Recognised terminators:
+`ensure` is an early-exit guard, modelled on Swift's `guard`. If the condition is falsy, the `else` block runs — and the `else` block **must** terminate. The parser enforces this: code after the `ensure` only runs when the condition held. Recognised terminators (strictly syntactic):
 
 - `return` (with or without a value)
 - `throw`
 - `break` or `continue` (inside a loop)
 - a nested `if`/`elif`/`else` where every branch terminates the same way
 - a block whose last statement terminates
+
+Function calls like `sys.exit(1)` are *not* recognised on their own — a shadowed `sys` could silently subvert the guarantee. For CLI bail-out write `sys.exit(1); return` — the unreachable `return` gives the parser its terminator while preserving the exit-with-code behaviour.
 
 Anything else is a parse error:
 
