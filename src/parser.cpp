@@ -587,9 +587,69 @@ StmtPtr Parser::tryCatchStatement() {
     return stmt;
 }
 
+// Does this statement unconditionally divert control off the
+// enclosing scope along *every* execution path?
+//
+// `ensure (cond) else { body }` is a guard (Swift's `guard`):
+// the else block must be a dead-end — return, throw, break, or
+// continue — so reading the code, you know the post-`ensure`
+// continuation only runs when the condition held. We enforce
+// that here, parse-side, rather than letting `ensure` silently
+// degrade into "if (!cond) { body }" sugar.
+//
+// Recognised terminators are strictly syntactic:
+//   • return / throw / break / continue          (always terminate)
+//   • { ... terminator }                         (last stmt terminates)
+//   • if (c) { A } [elif... ]  else { B }        (every branch terminates,
+//                                                  AND an else exists)
+//
+// **No function calls are recognised**, even ones that
+// conventionally never return (`sys.exit`, `os.abort`, …). A
+// structural match like "is this a CallExpr whose callee is
+// `sys.exit`?" can be silently subverted by shadowing — `let sys
+// = { exit: lam{x in nil } }` then `sys.exit(1)` would pass the
+// match but fall through. The whole value proposition of
+// `ensure` is "the post-block code only runs if the condition
+// held"; tolerating a structural hole that adversarial (or
+// careless) code can poke a return through erodes that
+// guarantee. The escape hatch is a one-liner: append `return`
+// (or `throw "unreachable"`) after the call.
+//
+// Also deliberately NOT recognised:
+//   • match arms — additive; no existing site needs it
+//   • `while (true) { ... }` with no break — fiddly, low value
+static bool stmtTerminates(const Stmt* s) {
+    if (!s) return false;
+    switch (s->type) {
+        case StmtType::Return:
+        case StmtType::Throw:
+        case StmtType::Break:
+        case StmtType::Continue:
+            return true;
+        case StmtType::Block: {
+            const auto* b = static_cast<const BlockStmt*>(s);
+            if (b->statements.empty()) return false;
+            return stmtTerminates(b->statements.back().get());
+        }
+        case StmtType::If: {
+            const auto* i = static_cast<const IfStmt*>(s);
+            // No else → there's a fall-through path. Not a terminator.
+            if (!i->elseBranch) return false;
+            if (!stmtTerminates(i->thenBranch.get())) return false;
+            for (const auto& el : i->elifBranches) {
+                if (!stmtTerminates(el.body.get())) return false;
+            }
+            return stmtTerminates(i->elseBranch.get());
+        }
+        default:
+            return false;
+    }
+}
+
 StmtPtr Parser::ensureStatement() {
-    int ln = previous().line;
-    int lnCol = previous().column;
+    Token ensureTok = previous();   // the `ensure` keyword
+    int ln = ensureTok.line;
+    int lnCol = ensureTok.column;
     consume(TokenType::LPAREN, "Expected '(' after 'ensure'");
     auto condition = expression();
     consume(TokenType::RPAREN, "Expected ')' after condition");
@@ -602,6 +662,18 @@ StmtPtr Parser::ensureStatement() {
     stmt->column = lnCol;
     stmt->condition = std::move(condition);
     stmt->elseBody = std::move(elseBody);
+
+    // Enforce the guard contract: an else that falls through
+    // would let post-`ensure` code run with the guarded
+    // condition false — exactly the bug the keyword exists to
+    // prevent. Plain `if (!cond) { body }` is the right shape
+    // for log-and-continue.
+    if (!stmtTerminates(stmt->elseBody.get())) {
+        throw error(ensureTok,
+            "ensure: else block must terminate via 'return', 'throw', "
+            "'break', or 'continue' (use 'if' for log-and-continue)");
+    }
+
     return stmt;
 }
 

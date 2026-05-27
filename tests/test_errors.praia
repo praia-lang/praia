@@ -40,6 +40,102 @@ testing.test("ensure early exit", lam{ in
     testing.assertThrows(lam{ in check(-1) }, nil)
 })
 
+testing.test("ensure: return is a valid terminator", lam{ in
+    func bounded(x) {
+        ensure (x >= 0) else { return nil }
+        return x * 2
+    }
+    testing.assertEqual(bounded(5), 10, nil)
+    testing.assertEqual(bounded(-1), nil, "else's return is taken")
+})
+
+testing.test("ensure: break is a valid terminator (inside a loop)", lam{ in
+    let last_i = -1
+    for (i in 0..10) {
+        ensure (i < 3) else { break }
+        last_i = i
+    }
+    testing.assertEqual(last_i, 2, "loop broke on the first ensure failure")
+})
+
+testing.test("ensure: nested if-else both terminating counts as terminator", lam{ in
+    // Exercises the recursive case of stmtTerminates — every
+    // branch (then + elif + else) of the nested if terminates,
+    // so the whole else block terminates.
+    func classify(x) {
+        ensure (x != 0) else {
+            if (x > 0) { return "pos" }
+            elif (x < 0) { return "neg" }
+            else { throw "zero" }
+        }
+        return "nonzero"
+    }
+    testing.assertEqual(classify(5), "nonzero", "non-zero path skips the else")
+    // classify(0): outer ensure fires (0 != 0 is false), inner
+    // if/elif both false, the else throws "zero" — assertThrows
+    // confirms that terminator actually runs.
+    testing.assertThrows(lam{ in classify(0) }, "zero")
+})
+
+testing.test("ensure: continue is a valid terminator (inside a loop)", lam{ in
+    // Same recognised-terminator family as break/return — the
+    // else skips to the next iteration. Sums only even values:
+    // 0+2+4+6+8 = 20.
+    let sum = 0
+    for (i in 0..10) {
+        ensure (i % 2 == 0) else { continue }
+        sum = sum + i
+    }
+    testing.assertEqual(sum, 20, "only even iterations contributed")
+})
+
+testing.test("ensure: sys.exit(...) ALONE is NOT a recognised terminator", lam{ in
+    // The earlier draft recognised `sys.exit(...)` structurally
+    // as a terminator. Removed because a shadowed `sys` (or any
+    // user code defining its own `sys.exit`) would silently
+    // sneak past the guard. The shape `sys.exit(1)` on its own
+    // now fails parse — the user must append `return` (or
+    // `throw "unreachable"`) so the syntactic guarantee is
+    // absolute.
+    let bad = "func f(x) { ensure (x) else { sys.exit(1) } ; print(\"unreached\") }"
+    let r = sys.exec(["./praia", "-c", bad])
+    testing.assert(r.exitCode != 0, "bare sys.exit no longer counts: stdout=%{r.stdout} stderr=%{r.stderr}")
+})
+
+testing.test("ensure: sys.exit(...) + return is the canonical CLI bail-out", lam{ in
+    // The idiomatic shape that sand uses for its CLI errors.
+    // sys.exit(1) ends the process; the unreachable `return`
+    // gives the parser the syntactic terminator it requires.
+    let ok = "func f(x) { ensure (x) else { sys.exit(1); return } ; print(\"unreached\") }"
+    let r = sys.exec(["./praia", "-c", ok])
+    testing.assertEqual(r.exitCode, 0, "sys.exit+return parses: stderr=%{r.stderr}")
+})
+
+testing.test("ensure: parser rejects non-terminating else block", lam{ in
+    // A separate Praia subprocess parses the snippet. We assert
+    // it dies with a non-zero exit AND that stderr names the
+    // ensure-guard contract. Mirrors the parse-error checks in
+    // test_lex_parse.praia and friends.
+    let bad = "func f(x) { ensure (x) else { print(\"hi\") } }"
+    let r = sys.exec(["./praia", "-c", bad])
+    testing.assert(r.exitCode != 0, "non-terminating ensure must fail parse")
+    let blob = r.stdout + r.stderr
+    testing.assert(blob.contains("ensure"),
+                   "error names the construct: %{blob}")
+    testing.assert(blob.contains("terminate") || blob.contains("return") ||
+                   blob.contains("throw"),
+                   "error names the required action: %{blob}")
+})
+
+testing.test("ensure: parser rejects nested if without else (fall-through)", lam{ in
+    // The inner `if (true) { return }` has no else — a non-true
+    // path would fall through. stmtTerminates correctly refuses
+    // to call this a terminator.
+    let bad = "func f(x) { ensure (x) else { if (x) { return } } }"
+    let r = sys.exec(["./praia", "-c", bad])
+    testing.assert(r.exitCode != 0, "fall-through nested if must fail parse")
+})
+
 testing.test("try in try", lam{ in
     let outer = nil
     try {

@@ -93,7 +93,10 @@ func readFile(path) {
 }
 
 let content = readFile("/tmp/nonexistent_file_12345.txt")
-ensure (content) else {
+// Plain `if` — not `ensure`. This block falls through to keep
+// running with a default; `ensure` is for early-exit guards
+// where the else block must return/throw/break/continue.
+if (!content) {
     print("file not found, using default")
     content = "default value"
 }

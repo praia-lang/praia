@@ -1047,7 +1047,23 @@ If a defer itself throws, it doesn't prevent other defers from running.
 
 ### ensure
 
-`ensure` is an early-exit guard (like Swift's `guard`). If the condition is falsy, the `else` block runs — which should exit the scope (typically `return` or `throw`).
+`ensure` is an early-exit guard, modelled on Swift's `guard`. If the condition is falsy, the `else` block runs — and the `else` block **must** terminate. The parser enforces this: code after the `ensure` only runs when the condition held. Recognised terminators (strictly syntactic):
+
+- `return` (with or without a value)
+- `throw`
+- `break` or `continue` (inside a loop)
+- a nested `if`/`elif`/`else` where every branch terminates (the parser only checks each branch terminates — mixing kinds is fine, e.g. one branch can `return` while another `throw`s)
+- a block whose last statement terminates
+
+Function calls like `sys.exit(1)` are *not* recognised on their own — a shadowed `sys` could silently subvert the guarantee. For CLI bail-out write `sys.exit(1); return` — the unreachable `return` gives the parser its terminator while preserving the exit-with-code behaviour.
+
+Anything else is a parse error:
+
+```text
+[line 3:col 5] Error at 'ensure': ensure: else block must terminate
+via 'return', 'throw', 'break', or 'continue' (use 'if' for log-
+and-continue)
+```
 
 ```praia
 func greet(name) {
@@ -1075,6 +1091,19 @@ func processAge(age) {
     print("valid age: %{age}")
 }
 ```
+
+**When to use `if` instead.** `ensure` is exclusively for early-exit guards. If your check is "log a warning and keep going with a default," reach for plain `if`:
+
+```praia
+let content = readFile("config.json")
+if (!content) {
+    print("config missing, using defaults")
+    content = "{}"
+}
+// continues with content set either way
+```
+
+Writing this as `ensure (content) else { content = "{}" }` is a parse error — the else block doesn't terminate.
 
 ### Interrupts (Ctrl+C)
 
