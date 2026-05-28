@@ -134,7 +134,7 @@ classes, control flow, error handling, pipes/closures, and JSON.
 * async/await with true parallelism, queues, futures.all/race
 * Module system ("grains") with import/export
 * Package manager ([sand](https://github.com/praia-lang/sand))
-* File I/O, directories, copy/move (`sys` namespace)
+* File I/O, directories, copy/move (`fs` namespace)
 * Cycle-collecting garbage collector (refcounting + mark-and-sweep)
 * Bytecode VM (default, `--tree` for tree-walker fallback)
 * REPL with readline history and multi-line input

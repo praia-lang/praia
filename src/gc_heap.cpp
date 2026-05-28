@@ -317,6 +317,8 @@ void GcHeap::sweep() {
             case GcType::Class: {
                 auto* cls = static_cast<PraiaClass*>(item.rawPtr);
                 cls->vmMethods.clear();
+                cls->vmStaticMethods.clear();
+                cls->methodDecorators.clear();
                 cls->superclass.reset();
                 cls->closure.reset();
                 break;
