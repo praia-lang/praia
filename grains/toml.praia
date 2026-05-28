@@ -130,13 +130,24 @@ func _parseValue(val) {
         return _parseInlineTable(val)
     }
 
-    // Integer
-    if (val.test("^-?[0-9_]+$")) {
+    // Integer. Per TOML spec, underscores must sit BETWEEN two
+    // digits (`1_000` ok, `1_`, `_1`, `1__2` not), so we anchor a
+    // single leading digit and allow `_?` only between digit runs.
+    if (val.test("^-?[0-9](_?[0-9])*$")) {
         return num(val.replace("_", ""))
     }
 
-    // Float
-    if (val.test("^-?[0-9_]*\\.[0-9_]+$") || val.test("^-?[0-9_]+[eE][+-]?[0-9]+$")) {
+    // Float. Same digit-underscore-digit rule on each digit run
+    // (integer part, fractional part, exponent). Two alternatives:
+    //   1. Decimal only — `1.5`, `-3.14`, `1_000.5`.
+    //   2. Exponent (with optional decimal) — `1e10`, `1.5e10`,
+    //      `1e1_0`, `-1.5e-2`. The decimal part is optional so
+    //      forms combining `.` and `e` match; the exponent digits
+    //      themselves follow the same `[0-9](_?[0-9])*` rule so
+    //      `1e1_0` is accepted per the TOML spec ("each underscore
+    //      must be surrounded by at least one digit on each side").
+    if (val.test("^-?[0-9](_?[0-9])*\\.[0-9](_?[0-9])*$") ||
+        val.test("^-?[0-9](_?[0-9])*(\\.[0-9](_?[0-9])*)?[eE][+-]?[0-9](_?[0-9])*$")) {
         return num(val.replace("_", ""))
     }
 

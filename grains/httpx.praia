@@ -56,7 +56,18 @@ class Session {
         if (!opts) { throw "httpx.Session.request() requires an options map" }
         let method = opts.method ?? "GET"
         let url    = opts.url
-        if (!url) { throw "httpx.Session.request() requires opts.url" }
+        // Type-check before `len`: Praia's `len` throws on non-
+        // collection / non-string values, so a caller passing
+        // `{url: 42}` would otherwise surface a confusing
+        // "no len() for int" error from inside the wrapper. `type`
+        // short-circuits the `len` call to produce our own clear
+        // diagnostic. (`type(nil) == "nil"` so this also catches
+        // nil.) We strip before measuring length so a whitespace-
+        // only URL (`"   "`) is rejected on the same code path
+        // rather than reaching the http layer to fail less clearly.
+        if (type(url) != "string" || len(url.strip()) == 0) {
+            throw "httpx.Session.request() requires opts.url (non-empty string)"
+        }
         let body   = opts.body
         return this._dispatch(method, url, body, opts)
     }

@@ -46,4 +46,167 @@ testing.test("highlightCSS exists", lam{ in
     testing.expect(len(markdown.highlightCSS) > 0, "should have CSS content")
 })
 
+// XSS guards: link/image href and src must be escaped so a URL
+// containing `"><script>...` can't break out of the attribute, and
+// `javascript:` / `vbscript:` / `data:text/html` schemes must
+// collapse to `#` so they don't execute on click. These pin the
+// markdown.praia fix that switched from `replacePattern` (which
+// substitutes captures verbatim) to `html.a` / `html.img` plus a
+// `_safeUrl` scheme guard.
+testing.test("link attribute breakout is escaped", lam{ in
+    let result = markdown.render("[ok](x\"><script>alert(1)</script>)")
+    testing.expect(!result.contains("<script>alert"),
+                   "raw <script> must not appear inside the link attribute")
+    testing.expect(result.contains("&quot;") && result.contains("&lt;"),
+                   "href quote/bracket must be html-escaped")
+})
+
+testing.test("image attribute breakout is escaped", lam{ in
+    let result = markdown.render("![alt](x\"><script>alert(1)</script>)")
+    testing.expect(!result.contains("<script>alert"),
+                   "raw <script> must not appear inside the img attribute")
+    testing.expect(result.contains("&quot;") && result.contains("&lt;"),
+                   "src quote/bracket must be html-escaped")
+})
+
+testing.test("javascript: URL collapses to # in links", lam{ in
+    let result = markdown.render("[click](javascript:alert(1))")
+    testing.expect(result.contains("href=\"#\""),
+                   "javascript: scheme must be replaced with #")
+    testing.expect(!result.contains("javascript:alert"),
+                   "raw javascript: payload must not survive")
+})
+
+testing.test("dangerous schemes are blocked case-insensitively", lam{ in
+    // Browsers lowercase the scheme before dispatch, so the guard
+    // must too. Also: ASCII whitespace and control bytes inside the
+    // scheme are stripped by browsers, so the guard strips them too.
+    let cases = [
+        "[a](JavaScript:alert(1))",
+        "[a](  javascript:alert(1))",
+        "[a](java\tscript:alert(1))",
+        "[a](VBScript:msgbox(1))",
+        "[a](data:text/html,<script>alert(1)</script>)",
+        // SVG is the one image data: scheme that can run code,
+        // because <svg> accepts <script> and on* event handlers.
+        // Pin both the raw and the parameterized form.
+        "[a](data:image/svg+xml,<svg onload=alert(1)/>)",
+        "[a](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSkvPg==)"
+    ]
+    for (c in cases) {
+        let out = markdown.render(c)
+        testing.expect(out.contains("href=\"#\""),
+                       "should neutralize: " + c)
+    }
+})
+
+testing.test("benign links/images render unchanged", lam{ in
+    let r1 = markdown.render("[Praia](https://praia.sh)")
+    testing.expect(r1.contains("href=\"https://praia.sh\""), nil)
+    let r2 = markdown.render("![logo](/img/logo.png)")
+    testing.expect(r2.contains("src=\"/img/logo.png\""), nil)
+    let r3 = markdown.render("[top](#top)")
+    testing.expect(r3.contains("href=\"#top\""), nil)
+    let r4 = markdown.render("[mail](mailto:hi@example.com)")
+    testing.expect(r4.contains("href=\"mailto:hi@example.com\""), nil)
+})
+
+testing.test("multi-byte input keeps link stitching correct", lam{ in
+    // Regression: matchAll reports `index` in graphemes (same unit
+    // slice/len use), so the stitch arithmetic stays correct even
+    // when the prefix contains an emoji.
+    let result = markdown.render("👋 [hi](https://x.com) 🎉")
+    testing.expect(result.contains("👋"), "leading emoji preserved")
+    testing.expect(result.contains("🎉"), "trailing emoji preserved")
+    testing.expect(result.contains("href=\"https://x.com\""), "link still emitted")
+})
+
+// Safe-by-default body escaping: with no `opts` (or `allowHTML`
+// false / nil / non-true), raw HTML inside any inline body
+// position must be html-escaped so untrusted markdown can't
+// inject `<script>` etc. These tests pin the safe path; the
+// `allowHTML: true` opt-in tests below pin the escape hatch.
+testing.test("safe-by-default escapes <script> in paragraph", lam{ in
+    let result = markdown.render("hi <script>alert(1)</script>")
+    testing.expect(!result.contains("<script>alert"),
+                   "raw <script> must not survive into the paragraph")
+    testing.expect(result.contains("&lt;script&gt;"),
+                   "the script tag must appear as escaped text")
+})
+
+testing.test("safe-by-default escapes raw HTML in headings and lists", lam{ in
+    let h = markdown.render("# hello <em>raw</em>")
+    testing.expect(h.contains("&lt;em&gt;raw&lt;/em&gt;"), "heading body escaped")
+    testing.expect(!h.contains("<em>raw</em>"), "no raw <em> emitted")
+    let l = markdown.render("- one <b>bold</b>\n- two")
+    testing.expect(l.contains("&lt;b&gt;bold&lt;/b&gt;"), "list item body escaped")
+})
+
+testing.test("safe-by-default escapes inside emphasis and inline code", lam{ in
+    let r1 = markdown.render("**<i>x</i>**")
+    testing.expect(r1.contains("<strong>&lt;i&gt;x&lt;/i&gt;</strong>"),
+                   "bold body content must be escaped")
+    let r2 = markdown.render("hello `<b>bold</b>` world")
+    testing.expect(r2.contains("<code>&lt;b&gt;bold&lt;/b&gt;</code>"),
+                   "inline code content must be escaped")
+})
+
+testing.test("safe-by-default still detects blockquotes (> isn't pre-escaped)", lam{ in
+    // Regression: the pre-escape pass lives inside `_inline`, not at
+    // the top of `render`, specifically so that block-level `>`
+    // detection still sees the raw character.
+    let result = markdown.render("> first\n> second")
+    testing.expect(result.contains("<blockquote>"), "blockquote element emitted")
+    testing.expect(result.contains("first") && result.contains("second"),
+                   "quoted body text preserved")
+})
+
+testing.test("safe mode does not double-escape ampersands in URLs", lam{ in
+    // `?a=1&b=2` -> pre-escape -> `?a=1&amp;b=2` -> html.a re-escape
+    // would have produced `&amp;amp;` if we didn't unescape captures
+    // before passing to html.a. We do, so a single `&amp;` survives.
+    let result = markdown.render("[a](https://x.com?a=1&b=2)")
+    testing.expect(result.contains("href=\"https://x.com?a=1&amp;b=2\""),
+                   "single &amp; in href, not &amp;amp;")
+    testing.expect(!result.contains("&amp;amp;"),
+                   "no double-escape allowed")
+})
+
+// allowHTML: true preserves today's CommonMark-style behaviour
+// for trusted-author content.
+testing.test("allowHTML: true preserves raw HTML in body", lam{ in
+    let result = markdown.render("<details>foo</details>", {allowHTML: true})
+    testing.expect(result.contains("<details>foo</details>"),
+                   "raw HTML survives end-to-end with allowHTML")
+})
+
+testing.test("allowHTML: true threads through blockquotes (recursive case)", lam{ in
+    // The blockquote walker recurses into render() with the same
+    // opts; this pins that the allowHTML flag isn't lost on the
+    // inner pass.
+    let result = markdown.render("> <kbd>tab</kbd>", {allowHTML: true})
+    testing.expect(result.contains("<blockquote>"), "still a blockquote")
+    testing.expect(result.contains("<kbd>tab</kbd>"),
+                   "raw <kbd> survives inside the quote")
+})
+
+testing.test("non-true `allowHTML` values stay in safe mode", lam{ in
+    // Strict `== true` check means anything else (nil, false, 1,
+    // "true" string, etc.) keeps the safe default. Avoids a footgun
+    // where a truthy non-bool slipped through.
+    let cases = [
+        markdown.render("<b>x</b>", nil),
+        markdown.render("<b>x</b>", {}),
+        markdown.render("<b>x</b>", {allowHTML: false}),
+        markdown.render("<b>x</b>", {allowHTML: 1}),
+        markdown.render("<b>x</b>", {allowHTML: "true"})
+    ]
+    for (c in cases) {
+        testing.expect(c.contains("&lt;b&gt;x&lt;/b&gt;"),
+                       "only literal true should opt into raw HTML")
+        testing.expect(!c.contains("<b>x</b>"),
+                       "raw <b> must not leak through non-true opts")
+    }
+})
+
 testing.done()

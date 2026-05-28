@@ -60,8 +60,19 @@ let LEVEL_NAMES = ["debug", "info", "warn", "error", "none"]
 //   color: true  — wrap the LEVEL token in ANSI color
 //   timeFormat: strftime-style override (default "%Y-%m-%d %H:%M:%S")
 func textFormatter(opts) {
-    let o = opts || {}
-    let timeFmt = o.timeFormat || "%Y-%m-%d %H:%M:%S"
+    // `??` (not `||`) for the timeFormat default: `??` triggers the
+    // default only when `o.timeFormat` is literally `nil` (i.e. the
+    // caller didn't set it). `||` would additionally swallow a
+    // literal `false`, since Praia's falsy values are `nil` and
+    // `false`. For a string-typed option that's a theoretical
+    // distinction, but `??` is the more precise idiom for "user
+    // didn't supply this field." Note `""` flows through under
+    // both operators in Praia — `""` is truthy here — so callers
+    // passing an explicit empty timeFormat get empty timestamps
+    // regardless of operator choice. Defend against that
+    // upstream if it matters.
+    let o = opts ?? {}
+    let timeFmt = o.timeFormat ?? "%Y-%m-%d %H:%M:%S"
     let useColor = o.color == true
     return {
         format: lam{ rec in
@@ -113,8 +124,21 @@ func _defaultFormatter() {
     return textFormatter(nil)
 }
 
+// Resolve the formatter arg shared by every sink: nil → default,
+// otherwise verify it shapes like a formatter (map with a callable
+// `.format`). Fail-fast at sink-construction time so a misuse is
+// caught at the call site rather than crashing inside `.format(rec)`
+// the first time the sink is written to.
+func _resolveFormatter(formatter) {
+    if (formatter == nil) { return _defaultFormatter() }
+    if (type(formatter) != "map" || type(formatter.format) != "function") {
+        throw "logger sink: formatter must be a map with a .format(rec) function"
+    }
+    return formatter
+}
+
 func stdoutSink(formatter) {
-    let fmt = formatter || _defaultFormatter()
+    let fmt = _resolveFormatter(formatter)
     return {
         write: lam{ rec in print(fmt.format(rec)) },
         close: lam{ in nil }
@@ -126,7 +150,7 @@ func stdoutSink(formatter) {
 // abstract this further because Praia doesn't currently expose a stderr
 // builtin.
 func stderrSink(formatter) {
-    let fmt = formatter || _defaultFormatter()
+    let fmt = _resolveFormatter(formatter)
     let fh = fs.open("/dev/stderr", "a")
     return {
         write: lam{ rec in fh.write(fmt.format(rec) + "\n") },
@@ -138,7 +162,7 @@ func stderrSink(formatter) {
 // loses at most one in-flight write. Call `.close()` to release the fd
 // during clean shutdown (otherwise the fd leaks until process exit).
 func fileSink(path, formatter) {
-    let fmt = formatter || _defaultFormatter()
+    let fmt = _resolveFormatter(formatter)
     let fh = fs.open(path, "a")
     return {
         write: lam{ rec in
@@ -241,8 +265,8 @@ func _makeLogger(name, levelRef, sink, fields) {
 //   formatter — convenience when you just want to override the default
 //               stdout formatter (e.g. JSON). Ignored if `sink` is set.
 func create(name, options) {
-    let o = options || {}
-    let levelName = o.level || "info"
+    let o = options ?? {}
+    let levelName = o.level ?? "info"
     ensure (LEVELS[levelName] != nil) else {
         throw "logger.create: invalid level '%{levelName}'"
     }

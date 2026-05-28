@@ -373,7 +373,7 @@ jobs:
           cat > smoke.praia <<'PRAIA_EOF'
           use "testing"
           testing.test("smoke", lam{ in
-              testing.assertEqual(1 + 1, 2, nil)
+              testing.expectEqual(1 + 1, 2, nil)
           })
           testing.done()
           PRAIA_EOF
