@@ -34,13 +34,23 @@ testing.test("hmac sha256", lam{ in
 })
 
 testing.test("hmac sha1", lam{ in
-    let result = crypto.hmac("key", "message", "sha1")
-    testing.expectEqual(len(result), 40, "hmac-sha1 produces 40 hex chars")
+    // Canonical HMAC-SHA1("key", "message"); cross-checks against
+    // `openssl dgst -sha1 -hmac key` of the same input. Asserting
+    // the exact digest catches regressions where the engine returns
+    // a length-correct but content-wrong digest.
+    testing.expectEqual(
+        crypto.hmac("key", "message", "sha1"),
+        "2088df74d5f2146b48146caf4965377e9d0be3a4",
+        nil
+    )
 })
 
 testing.test("hmac sha512", lam{ in
-    let result = crypto.hmac("key", "message", "sha512")
-    testing.expectEqual(len(result), 128, "hmac-sha512 produces 128 hex chars")
+    testing.expectEqual(
+        crypto.hmac("key", "message", "sha512"),
+        "e477384d7ca229dd1426e64b63ebf2d36ebd6d7e669a6735424e72ea6c01d3f8b56eb39c36d8232f5427999b8d1a3f9cd1128fc69f4d75b434216810fa367e98",
+        nil
+    )
 })
 
 // ── Random bytes ──

@@ -1870,7 +1870,7 @@ assert(input != nil, "input is required")          // "assertion failed: input i
 assert(arr.len() > 0, {code: "EMPTY", at: ctx})    // message accepts non-string values
 ```
 
-Praia's `assert` is **always on** — there's no strip-in-release flag (Rust's `assert!`, not `debug_assert!`). Use it for invariants whose violation should never reach production. For unit-test assertions that count pass/fail instead of throwing, see [`testing.expect`](#testing-grain).
+Praia's `assert` is **always on** — there's no strip-in-release flag (Rust's `assert!`, not `debug_assert!`). Use it for invariants whose violation should never reach production. For unit-test assertions that count pass/fail instead of throwing, see the [Testing](#testing) section's `expect` / `expectEqual` / `expectThrows` / `expectContains` family.
 
 Praia's truthiness rules: only `nil` and `false` are falsy. `0`, `""`, and `[]` are truthy and pass `assert` cleanly.
 
