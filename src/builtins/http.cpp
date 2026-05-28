@@ -8,6 +8,7 @@
 #include <list>
 #include <csignal>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <poll.h>
 #include <sstream>
@@ -191,6 +192,71 @@ ParsedUrl parseUrl(const std::string& url) {
     return r;
 }
 
+// SSRF gate: classify a resolved address as private/loopback/link-local/
+// reserved. We reject the *whole* connection if ANY candidate matches,
+// not just the one we'd try — DNS rebinding can return both a public
+// and a private record, and a "filter to public" approach would still
+// fall through to the private one on first failure.
+//
+// Covered IPv4 ranges (RFC 1918 / 6890):
+//   0.0.0.0/8, 10/8, 100.64/10 (CGNAT), 127/8 (loopback),
+//   169.254/16 (link-local incl. cloud metadata 169.254.169.254),
+//   172.16/12, 192.0.0/24, 192.0.2/24, 192.168/16, 198.18/15,
+//   198.51.100/24, 203.0.113/24, 224/4 (multicast), 240/4 (reserved).
+// Covered IPv6 ranges (RFC 4291 / 6890):
+//   ::/128, ::1, fc00::/7 (ULA), fe80::/10 (link-local),
+//   fec0::/10 (deprecated site-local), ff00::/8 (multicast),
+//   ::ffff:0:0/96 (IPv4-mapped — recurses into the IPv4 check).
+static bool isPrivateOrLocalAddr(const struct sockaddr* sa) {
+    if (sa->sa_family == AF_INET) {
+        uint32_t addr = ntohl(reinterpret_cast<const struct sockaddr_in*>(sa)->sin_addr.s_addr);
+        if ((addr & 0xFF000000u) == 0x00000000u) return true; // 0.0.0.0/8
+        if ((addr & 0xFF000000u) == 0x0A000000u) return true; // 10.0.0.0/8
+        if ((addr & 0xFFC00000u) == 0x64400000u) return true; // 100.64.0.0/10
+        if ((addr & 0xFF000000u) == 0x7F000000u) return true; // 127.0.0.0/8
+        if ((addr & 0xFFFF0000u) == 0xA9FE0000u) return true; // 169.254.0.0/16
+        if ((addr & 0xFFF00000u) == 0xAC100000u) return true; // 172.16.0.0/12
+        if ((addr & 0xFFFFFF00u) == 0xC0000000u) return true; // 192.0.0.0/24
+        if ((addr & 0xFFFFFF00u) == 0xC0000200u) return true; // 192.0.2.0/24
+        if ((addr & 0xFFFF0000u) == 0xC0A80000u) return true; // 192.168.0.0/16
+        if ((addr & 0xFFFE0000u) == 0xC6120000u) return true; // 198.18.0.0/15
+        if ((addr & 0xFFFFFF00u) == 0xC6336400u) return true; // 198.51.100.0/24
+        if ((addr & 0xFFFFFF00u) == 0xCB007100u) return true; // 203.0.113.0/24
+        if ((addr & 0xF0000000u) == 0xE0000000u) return true; // 224/4 multicast
+        if ((addr & 0xF0000000u) == 0xF0000000u) return true; // 240/4 reserved (incl. 255.255.255.255)
+        return false;
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct in6_addr& a6 = reinterpret_cast<const struct sockaddr_in6*>(sa)->sin6_addr;
+        if (IN6_IS_ADDR_UNSPECIFIED(&a6)) return true;
+        if (IN6_IS_ADDR_LOOPBACK(&a6))    return true;
+        if (IN6_IS_ADDR_LINKLOCAL(&a6))   return true;
+        if (IN6_IS_ADDR_SITELOCAL(&a6))   return true;
+        if (IN6_IS_ADDR_MULTICAST(&a6))   return true;
+        if (IN6_IS_ADDR_V4MAPPED(&a6)) {
+            struct sockaddr_in v4{};
+            v4.sin_family = AF_INET;
+            std::memcpy(&v4.sin_addr, &a6.s6_addr[12], 4);
+            return isPrivateOrLocalAddr(reinterpret_cast<const struct sockaddr*>(&v4));
+        }
+        if ((a6.s6_addr[0] & 0xFE) == 0xFC) return true; // fc00::/7 ULA
+        return false;
+    }
+    return false;
+}
+
+static std::string sockaddrToString(const struct sockaddr* sa) {
+    char buf[INET6_ADDRSTRLEN] = {0};
+    const void* src = nullptr;
+    if (sa->sa_family == AF_INET)
+        src = &reinterpret_cast<const struct sockaddr_in*>(sa)->sin_addr;
+    else if (sa->sa_family == AF_INET6)
+        src = &reinterpret_cast<const struct sockaddr_in6*>(sa)->sin6_addr;
+    if (src && inet_ntop(sa->sa_family, src, buf, sizeof(buf)))
+        return std::string(buf);
+    return "<unknown>";
+}
+
 // Non-blocking connect with poll-based timeout. Tries each address
 // returned by getaddrinfo in order until one connects (matches what
 // libcurl/Python/Go do for happy-eyeballs-lite handling of multi-A
@@ -199,7 +265,11 @@ ParsedUrl parseUrl(const std::string& url) {
 // timeoutMs of -1 means no timeout (block forever); 0 is effectively
 // "give up immediately on EINPROGRESS" which is mostly useful for
 // testing.
-int connectToHost(const std::string& host, int port, int timeoutMs) {
+//
+// blockPrivate: when true, refuses to connect if ANY resolved address is
+// private/loopback/link-local/reserved (SSRF protection). Re-applies per
+// call so the redirect loop in doHttpRequest naturally gates every hop.
+int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPrivate) {
     struct addrinfo hints = {};
     // AF_UNSPEC lets the resolver return both IPv4 and IPv6 records;
     // pre-Phase-2 this was hard-coded to AF_INET, which made IPv6-only
@@ -209,6 +279,23 @@ int connectToHost(const std::string& host, int port, int timeoutMs) {
     praia::AddrGuard ag;
     if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &ag.res) != 0)
         throw RuntimeError("Cannot resolve host: " + host, 0);
+
+    // SSRF gate. Iterate all resolved addresses (including IPv4 + IPv6
+    // variants) and reject if any matches a private/reserved range —
+    // DNS rebinding tricks that return [public, private] addresses
+    // would otherwise slip through if the public one were unreachable.
+    if (blockPrivate) {
+        for (struct addrinfo* ai = ag.res; ai != nullptr; ai = ai->ai_next) {
+            if (isPrivateOrLocalAddr(ai->ai_addr)) {
+                throw RuntimeError(
+                    "Refusing to connect: " + host + " resolves to " +
+                    sockaddrToString(ai->ai_addr) +
+                    " (private/loopback/link-local/reserved). "
+                    "Pass {blockPrivateHosts: false} to override (SSRF protection).",
+                    0);
+            }
+        }
+    }
 
     std::string lastErr;
     for (struct addrinfo* ai = ag.res; ai != nullptr; ai = ai->ai_next) {
@@ -341,9 +428,17 @@ static ResponseHeaderFields parseResponseHeaders(const std::string& headerSectio
     // expose the full list as a dedicated `cookies` array (in arrival
     // order). For back-compat the headers map still carries the
     // last value at "set-cookie" too.
+    //
+    // Framing-conflict detection (RFC 7230 §3.3.3): track all
+    // Content-Length and Transfer-Encoding values seen on this
+    // response. Both-present, multiple TE, or CL.CL with conflicting
+    // values are response-smuggling vectors — reject the response
+    // outright rather than silently picking one.
     std::istringstream hs(headerSection);
     std::string line;
     std::getline(hs, line);
+    std::vector<std::string> clSeen;
+    int teCount = 0;
     while (std::getline(hs, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         // RFC 7230 §3.2: field-name ":" OWS field-value OWS. We find the
@@ -366,8 +461,32 @@ static ResponseHeaderFields parseResponseHeaders(const std::string& headerSectio
                        [](char c) { return (char)std::tolower((unsigned char)c); });
         if (key == "set-cookie")
             out.cookies->elements.push_back(Value(val));
+        else if (key == "content-length")
+            clSeen.push_back(val);
+        else if (key == "transfer-encoding")
+            teCount++;
         out.headers->entries[Value(key)] = Value(val);
     }
+
+    bool hasTE = teCount > 0 ||
+                 out.headers->entries.count(Value(std::string("transfer-encoding"))) > 0;
+    bool hasCL = !clSeen.empty();
+
+    if (hasTE && hasCL)
+        throw RuntimeError(
+            "HTTP response has both Content-Length and Transfer-Encoding "
+            "(response-smuggling vector — refusing to parse)", 0);
+    if (teCount > 1)
+        throw RuntimeError(
+            "HTTP response has multiple Transfer-Encoding headers", 0);
+    if (clSeen.size() > 1) {
+        for (size_t i = 1; i < clSeen.size(); ++i) {
+            if (clSeen[i] != clSeen[0])
+                throw RuntimeError(
+                    "HTTP response has conflicting Content-Length values", 0);
+        }
+    }
+
     return out;
 }
 
@@ -401,38 +520,182 @@ static bool responseIsChunked(const std::shared_ptr<PraiaMap>& headers) {
 static constexpr size_t MAX_HEADER_SIZE = 64 * 1024;   // 64 KB headers
 static constexpr int    RECV_TIMEOUT_SECS = 30;
 
-// Case-insensitive search for a header name in raw header text.
-// Returns the value or empty string if not found.
-static std::string findHeaderValue(const std::string& headers, const std::string& name) {
-    // Search for "\nName:" (case-insensitive) — the first line has no \n prefix, handle separately
+// Collect ALL values of a header (one entry per occurrence). Lets us
+// detect duplicate Content-Length and Transfer-Encoding.
+static std::vector<std::string> findAllHeaderValues(const std::string& headers,
+                                                    const std::string& name) {
+    std::vector<std::string> out;
     for (size_t searchFrom = 0; ;) {
         size_t pos = headers.find(':', searchFrom);
         if (pos == std::string::npos) break;
-        // Walk back to find the start of this header name
         size_t lineStart = headers.rfind('\n', pos);
         lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
         std::string key = headers.substr(lineStart, pos - lineStart);
-        // Trim trailing \r
         if (!key.empty() && key.back() == '\r') key.pop_back();
-        // Case-insensitive compare
-        if (key.size() == name.size()) {
-            bool match = true;
-            for (size_t i = 0; i < key.size(); i++) {
-                if (std::tolower((unsigned char)key[i]) !=
-                    std::tolower((unsigned char)name[i])) { match = false; break; }
-            }
-            if (match) {
-                size_t valStart = pos + 1;
-                while (valStart < headers.size() && headers[valStart] == ' ') valStart++;
-                size_t valEnd = headers.find('\r', valStart);
-                if (valEnd == std::string::npos) valEnd = headers.find('\n', valStart);
-                if (valEnd == std::string::npos) valEnd = headers.size();
-                return headers.substr(valStart, valEnd - valStart);
-            }
+        bool match = key.size() == name.size();
+        for (size_t i = 0; match && i < key.size(); i++) {
+            if (std::tolower((unsigned char)key[i]) !=
+                std::tolower((unsigned char)name[i])) match = false;
+        }
+        if (match) {
+            size_t valStart = pos + 1;
+            while (valStart < headers.size() && headers[valStart] == ' ') valStart++;
+            size_t valEnd = headers.find('\r', valStart);
+            if (valEnd == std::string::npos) valEnd = headers.find('\n', valStart);
+            if (valEnd == std::string::npos) valEnd = headers.size();
+            out.push_back(headers.substr(valStart, valEnd - valStart));
         }
         searchFrom = pos + 1;
     }
-    return "";
+    return out;
+}
+
+// Strict Content-Length parser. RFC 7230 §3.3.2: a single decimal integer,
+// no sign, no whitespace inside, no leading zeros required but no garbage.
+// Returns false on any non-conforming input; on success writes the value
+// to *out. We use this rather than std::stoul (which silently accepts
+// signs, trailing garbage, and overflows to ULONG_MAX on negative input).
+static bool parseContentLengthStrict(const std::string& s, size_t* out) {
+    if (s.empty()) return false;
+    size_t v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        size_t d = static_cast<size_t>(c - '0');
+        // Overflow-safe accumulate.
+        if (v > (std::numeric_limits<size_t>::max() - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    *out = v;
+    return true;
+}
+
+// Does this Transfer-Encoding value end in "chunked"? RFC 7230 §3.3.1
+// requires chunked to be the FINAL coding (so the receiver can frame).
+// Multiple chained codings ("gzip, chunked") are legal; we recognize
+// chunked-as-final and reject the rest.
+static bool transferEncodingIsChunkedFinal(const std::string& teLine) {
+    std::string te = teLine;
+    std::transform(te.begin(), te.end(), te.begin(),
+                   [](char c) { return (char)std::tolower((unsigned char)c); });
+    // Find the last comma-separated token.
+    size_t last = te.find_last_of(',');
+    std::string tok = (last == std::string::npos) ? te : te.substr(last + 1);
+    size_t s = 0;
+    while (s < tok.size() && (tok[s] == ' ' || tok[s] == '\t')) s++;
+    size_t e = tok.size();
+    while (e > s && (tok[e - 1] == ' ' || tok[e - 1] == '\t')) e--;
+    return (e - s == 7) && tok.compare(s, 7, "chunked") == 0;
+}
+
+// Forward decl — definition is further down in the same file.
+void sendHttpResponse(int client, int status, const std::string& body,
+                       const std::unordered_map<std::string, std::string>& headers);
+
+// Send a minimal 400-response, ignoring send errors. Used when the server
+// rejects a malformed request before invoking the user handler. We send
+// Connection: close so the client doesn't try to pipeline on a socket we
+// just turned hostile to.
+static void sendBadRequest(int client, const std::string& reason) {
+    std::unordered_map<std::string, std::string> hdrs;
+    sendHttpResponse(client, 400, "Bad Request: " + reason + "\r\n", hdrs);
+}
+
+// Drain N more bytes from the socket into `data`, appending to whatever
+// is already buffered. Returns false on EOF or socket error before
+// reaching `needed`. Caller is responsible for any per-fd timeout.
+static bool recvAtLeast(int client, std::string& data, size_t needed) {
+    char buf[8192];
+    while (data.size() < needed) {
+        ssize_t n = recv(client, buf, sizeof(buf), 0);
+        if (n <= 0) return false;
+        data.append(buf, n);
+    }
+    return true;
+}
+
+// Decode a chunked-encoded request body. `data` holds bytes already read
+// (some after the headers); position `pos` is where the chunked body
+// begins inside `data`. On success, returns the decoded body string and
+// updates `pos` past the trailer terminator. Throws RuntimeError on any
+// protocol violation — caller catches and replies 400.
+//
+// Cap on total decoded size is the same MAX_CHUNKED_BODY constant below.
+// Without it, an attacker can pour gigabytes of zeroes through chunked.
+static constexpr size_t MAX_CHUNKED_BODY = 64ull * 1024 * 1024;
+static std::string decodeChunkedBody(int client, std::string& data, size_t& pos) {
+    std::string body;
+    while (true) {
+        // Find the size-line terminator. recv more if needed.
+        size_t eol;
+        while ((eol = data.find("\r\n", pos)) == std::string::npos) {
+            // Cap the size-line length to a sane limit so a peer can't
+            // make us buffer forever waiting for \r\n.
+            if (data.size() - pos > 1024)
+                throw RuntimeError("chunk size line too long", 0);
+            if (!recvAtLeast(client, data, data.size() + 1))
+                throw RuntimeError("connection closed mid-chunk-size", 0);
+        }
+        std::string sizeLine = data.substr(pos, eol - pos);
+        pos = eol + 2;
+        // Strip chunk extensions after ';'.
+        auto semi = sizeLine.find(';');
+        std::string hex = (semi == std::string::npos) ? sizeLine : sizeLine.substr(0, semi);
+        // Trim whitespace.
+        size_t s0 = 0, e0 = hex.size();
+        while (s0 < e0 && (hex[s0] == ' ' || hex[s0] == '\t')) s0++;
+        while (e0 > s0 && (hex[e0 - 1] == ' ' || hex[e0 - 1] == '\t')) e0--;
+        hex = hex.substr(s0, e0 - s0);
+        if (hex.empty())
+            throw RuntimeError("empty chunk size", 0);
+        // Parse hex.
+        size_t chunkSize = 0;
+        for (char c : hex) {
+            int d;
+            if      (c >= '0' && c <= '9') d = c - '0';
+            else if (c >= 'a' && c <= 'f') d = 10 + (c - 'a');
+            else if (c >= 'A' && c <= 'F') d = 10 + (c - 'A');
+            else throw RuntimeError("invalid hex in chunk size: " + hex, 0);
+            if (chunkSize > (std::numeric_limits<size_t>::max() >> 4))
+                throw RuntimeError("chunk size overflow", 0);
+            chunkSize = (chunkSize << 4) | static_cast<size_t>(d);
+        }
+        // Subtractive check — body.size() + chunkSize as a forward sum
+        // could wrap size_t when chunkSize is near SIZE_MAX. After this
+        // passes, chunkSize <= MAX_CHUNKED_BODY, so all later additions
+        // involving chunkSize (`pos + chunkSize + 2` below) are bounded.
+        if (chunkSize > MAX_CHUNKED_BODY - body.size())
+            throw RuntimeError(
+                "chunked body exceeds server limit (" +
+                std::to_string(MAX_CHUNKED_BODY) + " bytes)", 0);
+        if (chunkSize == 0) {
+            // Drain trailer section: zero or more header-lines, then \r\n.
+            // We discard trailer values — request handlers don't expect
+            // them and propagating them would invite TE.TE attacks on
+            // any middleware that reads `headers`.
+            while (true) {
+                while ((eol = data.find("\r\n", pos)) == std::string::npos) {
+                    if (data.size() - pos > 8192)
+                        throw RuntimeError("chunk trailer line too long", 0);
+                    if (!recvAtLeast(client, data, data.size() + 1))
+                        throw RuntimeError("connection closed in trailers", 0);
+                }
+                if (eol == pos) { pos += 2; break; }   // empty line — done
+                pos = eol + 2;
+            }
+            return body;
+        }
+        // Need chunkSize + 2 bytes (data + \r\n).
+        size_t needed = pos + chunkSize + 2;
+        if (data.size() < needed) {
+            if (!recvAtLeast(client, data, needed))
+                throw RuntimeError("connection closed mid-chunk-data", 0);
+        }
+        body.append(data, pos, chunkSize);
+        pos += chunkSize;
+        if (data.compare(pos, 2, "\r\n") != 0)
+            throw RuntimeError("missing CRLF after chunk data", 0);
+        pos += 2;
+    }
 }
 
 // Parse a raw HTTP request from a client socket.
@@ -446,37 +709,102 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
     setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     std::string data;
-    char buf[8192];
-    while (true) {
-        ssize_t n = recv(client, buf, sizeof(buf), 0);
-        if (n <= 0) break;
-        data.append(buf, n);
-
-        // Enforce header size limit before we find the end of headers
-        auto hend = data.find("\r\n\r\n");
-        if (hend == std::string::npos) {
-            if (data.size() > MAX_HEADER_SIZE) return nullptr; // headers too large
-            continue;
-        }
-
-        // Headers complete — check for body
-        std::string hdr = data.substr(0, hend);
-        std::string clVal = findHeaderValue(hdr, "content-length");
-        if (!clVal.empty()) {
-            size_t clen = 0;
-            try { clen = std::stoul(clVal); } catch (...) {}
-            size_t bodyStart = hend + 4;
-            while (data.size() - bodyStart < clen) {
-                n = recv(client, buf, sizeof(buf), 0);
-                if (n <= 0) break;
-                data.append(buf, n);
+    // Read until we see the end of headers (or hit the header size cap).
+    {
+        char buf[8192];
+        while (true) {
+            auto hend = data.find("\r\n\r\n");
+            if (hend != std::string::npos) break;
+            if (data.size() > MAX_HEADER_SIZE) {
+                sendBadRequest(client, "headers exceed limit");
+                return nullptr;
             }
+            ssize_t n = recv(client, buf, sizeof(buf), 0);
+            if (n <= 0) return nullptr;   // EOF or error — drop quietly
+            data.append(buf, n);
         }
-        break;
     }
 
-    if (data.empty()) return nullptr;
+    size_t hend = data.find("\r\n\r\n");
+    std::string hdr = data.substr(0, hend);
 
+    // ── Framing-header validation (RFC 7230 §3.3 / §3.3.3) ──
+    //
+    // The two ways a request can declare body length are Content-Length
+    // and Transfer-Encoding: chunked. They MUST NOT coexist (TE.CL
+    // request-smuggling), MUST NOT be duplicated with conflicting
+    // values (CL.CL smuggling), and MUST parse as the strict syntax
+    // their respective RFCs define. Anything else gets 400 + drop.
+    auto teValues = findAllHeaderValues(hdr, "transfer-encoding");
+    auto clValues = findAllHeaderValues(hdr, "content-length");
+
+    bool hasTE = !teValues.empty();
+    bool hasCL = !clValues.empty();
+
+    if (hasTE && hasCL) {
+        sendBadRequest(client, "both Transfer-Encoding and Content-Length present");
+        return nullptr;
+    }
+    if (clValues.size() > 1) {
+        // RFC 7230 allows a single CL header with comma-separated equal
+        // values, but rejects mismatches. Easier and safer: reject any
+        // duplication — every modern client emits exactly one.
+        for (size_t i = 1; i < clValues.size(); ++i) {
+            if (clValues[i] != clValues[0]) {
+                sendBadRequest(client, "conflicting Content-Length values");
+                return nullptr;
+            }
+        }
+    }
+    if (teValues.size() > 1) {
+        sendBadRequest(client, "multiple Transfer-Encoding headers");
+        return nullptr;
+    }
+
+    size_t clen = 0;
+    bool chunked = false;
+    if (hasCL) {
+        if (!parseContentLengthStrict(clValues[0], &clen)) {
+            sendBadRequest(client, "malformed Content-Length");
+            return nullptr;
+        }
+    }
+    if (hasTE) {
+        if (!transferEncodingIsChunkedFinal(teValues[0])) {
+            sendBadRequest(client, "unsupported Transfer-Encoding (chunked must be last)");
+            return nullptr;
+        }
+        chunked = true;
+    }
+
+    // ── Body acquisition ──
+    std::string reqBody;
+    size_t bodyStart = hend + 4;
+    if (chunked) {
+        try {
+            size_t pos = bodyStart;
+            reqBody = decodeChunkedBody(client, data, pos);
+        } catch (RuntimeError& e) {
+            sendBadRequest(client, std::string("chunked decode: ") + e.what());
+            return nullptr;
+        }
+    } else if (hasCL) {
+        if (clen > 0) {
+            // parseContentLengthStrict caps overflow during parsing but
+            // clen can still be near SIZE_MAX. Guard `bodyStart + clen`
+            // before adding so we don't wrap and silently misread.
+            if (clen > std::numeric_limits<size_t>::max() - bodyStart) {
+                sendBadRequest(client, "Content-Length too large");
+                return nullptr;
+            }
+            size_t needed = bodyStart + clen;
+            if (!recvAtLeast(client, data, needed)) return nullptr;
+            reqBody.assign(data, bodyStart, clen);
+        }
+    }
+    // else: no body framing → body is empty (matches RFC for GET/DELETE).
+
+    // ── Request line ──
     auto firstLine = data.substr(0, data.find("\r\n"));
     std::string method, path;
     auto sp1 = firstLine.find(' ');
@@ -493,14 +821,13 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
         path = path.substr(0, qpos);
     }
 
-    auto hend = data.find("\r\n\r\n");
+    // ── Header map (case-folded keys; last value wins on duplicate) ──
     auto reqHeaders = gcNew<PraiaMap>();
-    std::istringstream hs(data.substr(0, hend));
+    std::istringstream hs(hdr);
     std::string line;
     std::getline(hs, line); // skip request line
     while (std::getline(hs, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        // Accept "Key: Value" or "Key:Value" (colon with optional space)
         auto c = line.find(':');
         if (c != std::string::npos) {
             std::string key = line.substr(0, c);
@@ -514,8 +841,6 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
             reqHeaders->entries[Value(key)] = Value(line.substr(valStart));
         }
     }
-
-    std::string reqBody = (hend != std::string::npos) ? data.substr(hend + 4) : "";
 
     auto req = gcNew<PraiaMap>();
     req->entries[Value("method")] = Value(method);
@@ -837,7 +1162,7 @@ static void validateRequestParts(
 // On any failure the conn's resources are cleaned up before throwing.
 static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
                              const HttpOptions& opts) {
-    conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs);
+    conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs, opts.blockPrivateHosts);
     // After connect, apply the read/write timeout to the socket so
     // subsequent recv()/send() calls (and the SSL_read/SSL_write
     // wrappers around them) bound their wait.
@@ -1078,6 +1403,11 @@ struct HttpSession {
     HttpOptions defaultOpts;
     std::unordered_map<std::string, std::string> defaultHeaders;
     bool closed = false;
+    // Guards idleList / idleIndex / closed. A session is naturally shared
+    // across fibers/threads (that's the whole point — keepalive reuse), so
+    // any access to the pool's data structures must be serialized. Held
+    // only across short data-structure mutations; never around network I/O.
+    std::mutex mu;
 };
 static constexpr const char* kHttpSessionTypeTag = "http.session";
 
@@ -1113,6 +1443,7 @@ static std::string sessionPoolKey(const ParsedUrl& p, const HttpOptions& opts) {
 //      where the peer closes between this probe and our first write.
 static std::unique_ptr<SocketConn> sessionTakeIdle(HttpSession& s,
                                                    const std::string& key) {
+    std::lock_guard<std::mutex> lock(s.mu);
     auto it = s.idleIndex.find(key);
     if (it == s.idleIndex.end()) return nullptr;
     auto listIt = it->second;
@@ -1155,27 +1486,50 @@ static std::unique_ptr<SocketConn> sessionTakeIdle(HttpSession& s,
 // reuses the existing list slot (and moves it to the front so it's
 // marked most-recently-used); a new key gets pushed to the front and
 // triggers LRU eviction off the back if we're now over capacity.
+//
+// SSL_shutdown does a close_notify exchange — a blocking write
+// (sometimes a read) we don't want serialized behind every concurrent
+// sessionTakeIdle / sessionReturnIdle. So all the data-structure work
+// happens under s.mu, displaced connections are moved into a local
+// `toClose` list, and the actual shutdown_close() calls run AFTER the
+// lock is released.
 static void sessionReturnIdle(HttpSession& s, const std::string& key,
                               std::unique_ptr<SocketConn> conn) {
-    auto now = std::chrono::steady_clock::now();
-    auto it = s.idleIndex.find(key);
-    if (it != s.idleIndex.end()) {
-        // Same-key replace: tear down the old conn, swap in the new
-        // one, splice the slot to the front to mark it MRU.
-        it->second->conn->shutdown_close();
-        it->second->conn = std::move(conn);
-        it->second->insertedAt = now;
-        s.idleList.splice(s.idleList.begin(), s.idleList, it->second);
-        return;
+    std::vector<std::unique_ptr<SocketConn>> toClose;
+    {
+        std::lock_guard<std::mutex> lock(s.mu);
+        // Close-race guard: an in-flight request that started before
+        // httpSessionClose ran may try to return its conn after
+        // closed=true. Drop the conn rather than re-pooling.
+        if (s.closed) {
+            toClose.push_back(std::move(conn));
+        } else {
+            auto now = std::chrono::steady_clock::now();
+            auto it = s.idleIndex.find(key);
+            if (it != s.idleIndex.end()) {
+                // Same-key replace: stash the old conn for post-unlock
+                // teardown, swap in the new one, splice to the front
+                // to mark it MRU.
+                toClose.push_back(std::move(it->second->conn));
+                it->second->conn = std::move(conn);
+                it->second->insertedAt = now;
+                s.idleList.splice(s.idleList.begin(), s.idleList, it->second);
+            } else {
+                s.idleList.push_front({key, std::move(conn), now});
+                s.idleIndex[key] = s.idleList.begin();
+                while (static_cast<int>(s.idleList.size()) > s.poolMaxSize) {
+                    auto& victim = s.idleList.back();
+                    toClose.push_back(std::move(victim.conn));
+                    s.idleIndex.erase(victim.key);
+                    s.idleList.pop_back();
+                }
+            }
+        }
     }
-    s.idleList.push_front({key, std::move(conn), now});
-    s.idleIndex[key] = s.idleList.begin();
-
-    while (static_cast<int>(s.idleList.size()) > s.poolMaxSize) {
-        auto& victim = s.idleList.back();
-        victim.conn->shutdown_close();
-        s.idleIndex.erase(victim.key);
-        s.idleList.pop_back();
+    // Lock released — perform the blocking SSL/TCP teardown now that
+    // we're not blocking other pool users.
+    for (auto& c : toClose) {
+        if (c) c->shutdown_close();
     }
 }
 
@@ -1224,6 +1578,7 @@ httpSessionGetDefaultHeaders(const Value& session) {
 
 void httpSessionClose(const Value& session) {
     auto* s = sessionFromValue(session);
+    std::lock_guard<std::mutex> lock(s->mu);
     if (s->closed) return;
     for (auto& entry : s->idleList) {
         if (entry.conn) entry.conn->shutdown_close();
@@ -1294,7 +1649,10 @@ Value httpSessionRequest(const Value& session,
                          const std::unordered_map<std::string, std::string>& headers,
                          const HttpOptions& opts) {
     auto* s = sessionFromValue(session);
-    if (s->closed) throw RuntimeError("http session is closed", 0);
+    {
+        std::lock_guard<std::mutex> lock(s->mu);
+        if (s->closed) throw RuntimeError("http session is closed", 0);
+    }
 
     // Mirror doHttpRequest's redirect loop. Cross-host redirects pick
     // up a different pool key automatically; same-host redirects reuse
@@ -1895,7 +2253,7 @@ Value httpOpenStream(const std::string& method, const std::string& url,
         }
 
         auto conn = std::make_shared<SocketConn>();
-        conn->fd = connectToHost(p.host, p.port, perReq.connectTimeoutMs);
+        conn->fd = connectToHost(p.host, p.port, perReq.connectTimeoutMs, perReq.blockPrivateHosts);
         setSocketTimeouts(conn->fd, perReq.readTimeoutMs);
 
 #ifdef HAVE_OPENSSL

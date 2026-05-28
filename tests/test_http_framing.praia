@@ -1,0 +1,219 @@
+use "testing"
+
+// HTTP/1.1 framing hardening. Two halves:
+//
+//   1. Server side: reject conflicting/duplicate Content-Length /
+//      Transfer-Encoding combinations (request smuggling), reject
+//      malformed Content-Length, decode chunked requests properly.
+//
+//   2. Client side: refuse to parse responses with conflicting framing
+//      (the reverse direction of the same smuggling attack).
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+// Hand-built TCP raw send/recv against a Praia http.createServer.
+// We send malicious request bytes, then read the server's response
+// status line. The handler is irrelevant — these checks fire BEFORE
+// the handler is invoked.
+
+func startEchoServer() {
+    // Start an http.createServer on an ephemeral port. The handler
+    // mirrors method + body back so chunked-decode tests can verify
+    // the assembled body shape.
+    let listener = net.listen(0)
+    let port = net.localAddr(listener).port
+    net.close(listener)
+
+    let server = http.createServer(lam{ req in
+        return {status: 200,
+                headers: {"Content-Type": "text/plain"},
+                body: req.method + ":" + req.body}
+    })
+    async server.listen(port)
+    time.sleep(50)   // give the server a moment to bind
+    return {server: server, port: port}
+}
+
+func rawRequest(port, payload) {
+    let sock = net.connect("127.0.0.1", port)
+    net.send(sock, payload)
+    // Drain until peer closes (server always sends Connection: close
+    // on 400, and our echo handler does too via http.createServer
+    // default).
+    let resp = ""
+    while (true) {
+        let chunk = net.recv(sock, 4096)
+        if (chunk == nil || len(chunk) == 0) { break }
+        resp = resp + chunk
+    }
+    net.close(sock)
+    return resp
+}
+
+func statusOf(resp) {
+    // "HTTP/1.1 NNN ..." — pull NNN. Defensive: any test failure is
+    // already noisy enough; report what the wire actually said when
+    // the response shape is wrong rather than a generic index error.
+    let eol = resp.indexOf("\r\n")
+    ensure (eol > 0) else { throw "statusOf: no status line in response: %{resp}" }
+    let line = resp.slice(0, eol)
+    let parts = line.split(" ")
+    ensure (len(parts) >= 2) else { throw "statusOf: malformed status line: %{line}" }
+    let n = nil
+    try { n = num(parts[1]) } catch (e) {
+        throw "statusOf: non-numeric status code in %{line}"
+    }
+    return n
+}
+
+// ── Server: framing-conflict rejection ───────────────────────────
+
+testing.test("server rejects request with both Content-Length and Transfer-Encoding", lam{ in
+    let s = startEchoServer()
+    let body = "5\r\nhello\r\n0\r\n\r\n"
+    let req = "POST / HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Content-Length: 5\r\n" +
+              "Transfer-Encoding: chunked\r\n" +
+              "\r\n" + body
+    let resp = rawRequest(s.port, req)
+    testing.expectEqual(statusOf(resp), 400, "TE+CL must be rejected")
+
+})
+
+testing.test("server rejects duplicate Content-Length with conflicting values", lam{ in
+    let s = startEchoServer()
+    let req = "POST / HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Content-Length: 5\r\n" +
+              "Content-Length: 7\r\n" +
+              "\r\nhellobad"
+    let resp = rawRequest(s.port, req)
+    testing.expectEqual(statusOf(resp), 400, "conflicting CL.CL rejected")
+
+})
+
+testing.test("server rejects malformed Content-Length", lam{ in
+    let s = startEchoServer()
+    // "Content-Length: -1" used to wrap to ULONG_MAX via std::stoul.
+    let req = "POST / HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Content-Length: -1\r\n" +
+              "\r\nbody"
+    let resp = rawRequest(s.port, req)
+    testing.expectEqual(statusOf(resp), 400, "negative CL rejected")
+
+})
+
+testing.test("server rejects Content-Length with trailing garbage", lam{ in
+    let s = startEchoServer()
+    let req = "POST / HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Content-Length: 5garbage\r\n" +
+              "\r\nhello"
+    let resp = rawRequest(s.port, req)
+    testing.expectEqual(statusOf(resp), 400, "non-integer CL rejected")
+
+})
+
+testing.test("server rejects Transfer-Encoding where chunked is not last", lam{ in
+    let s = startEchoServer()
+    let req = "POST / HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Transfer-Encoding: chunked, gzip\r\n" +
+              "\r\n"
+    let resp = rawRequest(s.port, req)
+    testing.expectEqual(statusOf(resp), 400, "chunked must be the last coding")
+
+})
+
+// ── Server: chunked request body decoding ────────────────────────
+
+testing.test("server decodes a chunked request body", lam{ in
+    let s = startEchoServer()
+    // Three chunks: "hello", " ", "world", followed by the 0-length
+    // terminator. Echo handler returns "POST:hello world".
+    let body = "5\r\nhello\r\n" +
+               "1\r\n \r\n" +
+               "5\r\nworld\r\n" +
+               "0\r\n\r\n"
+    let req = "POST /echo HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Transfer-Encoding: chunked\r\n" +
+              "\r\n" + body
+    let resp = rawRequest(s.port, req)
+    testing.expectEqual(statusOf(resp), 200, nil)
+    testing.expect(resp.contains("POST:hello world"),
+                   "echoed assembled body")
+
+})
+
+testing.test("server ignores chunk extensions", lam{ in
+    let s = startEchoServer()
+    let body = "5;ext=ignored\r\nhello\r\n" +
+               "0\r\n\r\n"
+    let req = "POST /echo HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Transfer-Encoding: chunked\r\n" +
+              "\r\n" + body
+    let resp = rawRequest(s.port, req)
+    testing.expectEqual(statusOf(resp), 200, nil)
+    testing.expect(resp.contains("POST:hello"), "extensions don't break decode")
+
+})
+
+testing.test("server rejects chunked body with invalid hex size", lam{ in
+    let s = startEchoServer()
+    let body = "ZZ\r\nhello\r\n0\r\n\r\n"
+    let req = "POST / HTTP/1.1\r\n" +
+              "Host: 127.0.0.1\r\n" +
+              "Transfer-Encoding: chunked\r\n" +
+              "\r\n" + body
+    let resp = rawRequest(s.port, req)
+    testing.expectEqual(statusOf(resp), 400, "invalid chunk size hex rejected")
+
+})
+
+// ── Client: response framing rejection ───────────────────────────
+
+func mockServeOnce(listener, response) {
+    return async lam{ in
+        let conn = net.accept(listener)
+        net.recv(conn, 4096)
+        net.send(conn, response)
+        net.close(conn)
+    }()
+}
+
+testing.test("client rejects response with both Content-Length and Transfer-Encoding", lam{ in
+    let listener = net.listen(0)
+    defer net.close(listener)
+    let port = net.localAddr(listener).port
+    mockServeOnce(listener,
+        "HTTP/1.1 200 OK\r\n" +
+        "Content-Length: 5\r\n" +
+        "Transfer-Encoding: chunked\r\n" +
+        "Connection: close\r\n\r\n" +
+        "5\r\nhello\r\n0\r\n\r\n")
+    testing.expectThrows(
+        lam{ in http.get("http://127.0.0.1:" + str(port) + "/",
+                         {blockPrivateHosts: false}) },
+        "response-smuggling")
+})
+
+testing.test("client rejects response with conflicting duplicate Content-Length", lam{ in
+    let listener = net.listen(0)
+    defer net.close(listener)
+    let port = net.localAddr(listener).port
+    mockServeOnce(listener,
+        "HTTP/1.1 200 OK\r\n" +
+        "Content-Length: 5\r\n" +
+        "Content-Length: 7\r\n" +
+        "Connection: close\r\n\r\nhellobad")
+    testing.expectThrows(
+        lam{ in http.get("http://127.0.0.1:" + str(port) + "/",
+                         {blockPrivateHosts: false}) },
+        "conflicting Content-Length")
+})
+
+testing.done()

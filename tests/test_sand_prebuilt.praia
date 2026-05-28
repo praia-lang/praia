@@ -220,7 +220,7 @@ let _baseUrl = "http://127.0.0.1:%{_port}"
 testing.test("installEntry downloads, hashes, writes plugins/<basename>", lam{ in
     let stage = testing.tempDir(nil)
     let entry = {url: "%{_baseUrl}/widget.dylib", integrity: _binSha}
-    let ok = prebuilt.installEntry(entry, stage, false)
+    let ok = prebuilt.installEntry(entry, stage, false, {blockPrivateHosts: false})
     testing.expect(ok, "installEntry must return true on success")
     let dest = path.join(stage, "plugins", "widget.dylib")
     testing.expect(fs.exists(dest), "binary should land at plugins/widget.dylib")
@@ -233,7 +233,7 @@ testing.test("installEntry throws on hash mismatch", lam{ in
                             "0123456789abcdef" + "0123456789abcdef"
     let entry = {url: "%{_baseUrl}/widget.dylib", integrity: wrong}
     let threw = false
-    try { prebuilt.installEntry(entry, stage, false) } catch (e) { threw = true }
+    try { prebuilt.installEntry(entry, stage, false, {blockPrivateHosts: false}) } catch (e) { threw = true }
     testing.expect(threw, "mismatched hash must throw")
     testing.expect(!fs.exists(path.join(stage, "plugins", "widget.dylib")),
                    "no binary should be written on mismatch")
@@ -243,7 +243,7 @@ testing.test("installEntry throws on HTTP 404", lam{ in
     let stage = testing.tempDir(nil)
     let entry = {url: "%{_baseUrl}/missing.dylib", integrity: _binSha}
     let threw = false
-    try { prebuilt.installEntry(entry, stage, false) } catch (e) { threw = true }
+    try { prebuilt.installEntry(entry, stage, false, {blockPrivateHosts: false}) } catch (e) { threw = true }
     testing.expect(threw, "404 must throw, not silently install garbage")
 })
 
@@ -252,7 +252,7 @@ testing.test("installEntry throws on HTTP 404", lam{ in
 testing.test("fetchAndStage returns false when no entry matches", lam{ in
     let stage = testing.tempDir(nil)
     let m = {prebuilt: {"freebsd-riscv64": {url: "%{_baseUrl}/widget.dylib", integrity: _binSha}}}
-    testing.expectEqual(prebuilt.fetchAndStage(m, stage, false), false,
+    testing.expectEqual(prebuilt.fetchAndStage(m, stage, false, {blockPrivateHosts: false}), false,
                        "no-match must return false (caller falls back to source)")
 })
 
@@ -261,7 +261,7 @@ testing.test("fetchAndStage installs the matching entry", lam{ in
     let key = prebuilt.platformKey()
     let m = {prebuilt: {}}
     m.prebuilt[key] = {url: "%{_baseUrl}/widget.dylib", integrity: _binSha}
-    testing.expectEqual(prebuilt.fetchAndStage(m, stage, false), true, "match → true")
+    testing.expectEqual(prebuilt.fetchAndStage(m, stage, false, {blockPrivateHosts: false}), true, "match → true")
     testing.expect(fs.exists(path.join(stage, "plugins", "widget.dylib")), "binary written")
 })
 
@@ -272,7 +272,7 @@ testing.test("installEntry strips query string from filename", lam{ in
     // (which looks for the plain `widget.dylib`) can't find it.
     let stage = testing.tempDir(nil)
     let entry = {url: "%{_baseUrl}/widget.dylib?token=abc&exp=1", integrity: _binSha}
-    let ok = prebuilt.installEntry(entry, stage, false)
+    let ok = prebuilt.installEntry(entry, stage, false, {blockPrivateHosts: false})
     testing.expect(ok, "install should succeed")
     testing.expect(fs.exists(path.join(stage, "plugins", "widget.dylib")),
                    "binary lands at the clean basename")

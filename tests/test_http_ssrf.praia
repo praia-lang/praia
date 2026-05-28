@@ -1,0 +1,73 @@
+use "testing"
+
+// SSRF gate: http.* refuses to connect to private / loopback /
+// link-local / reserved addresses by default. Each call must opt out
+// with {blockPrivateHosts: false} when the target is intentionally
+// local — modeling the API for developers.
+
+testing.test("loopback IPv4 is blocked by default", lam{ in
+    testing.expectThrows(
+        lam{ in http.get("http://127.0.0.1:1/") },
+        "private/loopback/link-local")
+})
+
+testing.test("loopback hostname is blocked by default", lam{ in
+    testing.expectThrows(
+        lam{ in http.get("http://localhost:1/") },
+        "private/loopback/link-local")
+})
+
+testing.test("RFC1918 10/8 is blocked by default", lam{ in
+    testing.expectThrows(
+        lam{ in http.request({url: "http://10.255.255.1/",
+                              connectTimeout: 1}) },
+        "private/loopback/link-local")
+})
+
+testing.test("RFC1918 192.168/16 is blocked by default", lam{ in
+    testing.expectThrows(
+        lam{ in http.request({url: "http://192.168.1.1/",
+                              connectTimeout: 1}) },
+        "private/loopback/link-local")
+})
+
+testing.test("link-local 169.254/16 (cloud metadata) is blocked", lam{ in
+    // 169.254.169.254 = the EC2 / GCP / Azure metadata service.
+    // This is the highest-impact SSRF target in the wild.
+    testing.expectThrows(
+        lam{ in http.request({url: "http://169.254.169.254/latest/meta-data/",
+                              connectTimeout: 1}) },
+        "private/loopback/link-local")
+})
+
+// Server helper: accept one connection, drain its request, send a tiny
+// 200 OK with body "ok". Used to confirm we got past the SSRF gate
+// rather than stalled before connect.
+let _serveOnce = lam{ listener in
+    defer net.close(listener)
+    let conn = net.accept(listener)
+    net.recv(conn, 4096)
+    net.send(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+    net.close(conn)
+}
+
+testing.test("blockPrivateHosts:false opts out", lam{ in
+    let listener = net.listen(0)
+    let port = net.localAddr(listener).port
+    async _serveOnce(listener)
+    let r = http.get("http://127.0.0.1:" + str(port) + "/",
+                     {blockPrivateHosts: false})
+    testing.expectEqual(r.body, "ok", nil)
+})
+
+testing.test("session with blockPrivateHosts:false inherits opt-out", lam{ in
+    let listener = net.listen(0)
+    let port = net.localAddr(listener).port
+    async _serveOnce(listener)
+    let s = http.session({blockPrivateHosts: false})
+    defer http.close(s)
+    let r = http.get(s, "http://127.0.0.1:" + str(port) + "/")
+    testing.expectEqual(r.body, "ok", nil)
+})
+
+testing.done()
