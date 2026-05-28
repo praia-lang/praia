@@ -12,6 +12,13 @@ testing.test("multiplication and division", lam{ in
     testing.expectEqual(10 / 3, 3.3333333333333335, nil)
 })
 
+testing.test("division always returns float, even when exact", lam{ in
+    testing.expectEqual(type(6 / 2), "float", "exact divide is float, not int")
+    testing.expectEqual(type(7 / 2), "float", "non-exact divide is float")
+    testing.expectEqual(6 / 2, 3.0, "value still equals 3.0 numerically")
+    testing.expectEqual(0 / 5, 0.0, "zero numerator")
+})
+
 testing.test("modulo", lam{ in
     testing.expectEqual(10 % 3, 1, nil)
     testing.expectEqual(14 % 7, 0, nil)

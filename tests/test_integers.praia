@@ -14,12 +14,13 @@ testing.test("large integer arithmetic", lam{ in
 })
 
 testing.test("integer division", lam{ in
-    // Exact division returns int
+    // `/` always returns float, regardless of whether the divisor goes
+    // in exactly. Numeric equality (5 == 5.0) keeps the value checks
+    // green; use math.idiv() when an int result is required.
     testing.expectEqual(10 / 2, 5, nil)
-    testing.expectEqual(type(10 / 2), "int", nil)
+    testing.expectEqual(type(10 / 2), "float", nil)
     testing.expectEqual(10 / 5, 2, nil)
     testing.expectEqual(-6 / 3, -2, nil)
-    // Inexact division returns float
     testing.expectEqual(7 / 2, 3.5, nil)
     testing.expectEqual(type(7 / 2), "float", nil)
 })

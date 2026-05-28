@@ -1102,10 +1102,6 @@ VM::Result VM::execute(int baseFrameCount_) {
             if (a.isInstance()) { auto [ok, r] = vmCallDunder(*this, a, "__div", {b}); if (ok) { push(r); break; } }
             if (a.isNumber() && b.isNumber()) {
                 if (b.asNumber() == 0) { RUNTIME_ERR("Division by zero"); }
-                if (a.isInt() && b.isInt()) {
-                    int64_t ai = a.asInt(), bi = b.asInt();
-                    if (ai % bi == 0) { push(Value(ai / bi)); break; }
-                }
                 push(Value(a.asNumber() / b.asNumber())); break;
             }
             RUNTIME_ERR("Operands of '/' must be numbers");
