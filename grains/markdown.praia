@@ -311,17 +311,28 @@ func _highlightPraia(code) {
     let i = 0
     let n = len(code)
 
-    let kw = ["let", "func", "class", "enum", "extends", "if", "elif", "else",
-              "while", "for", "in", "break", "continue", "return", "yield",
-              "try", "catch", "throw", "ensure", "async", "await",
-              "use", "export", "as", "lam", "this", "super"]
+    // Keep these in sync with the canonical lexer at
+    // src/lexer.cpp (keywords), src/interpreter_setup.cpp +
+    // src/vm/vm_natives.cpp (global builtins / namespaces), and
+    // src/builtins/concurrency.cpp (concurrency primitives).
+    let kw = ["let", "func", "class", "enum", "extends", "static",
+              "if", "elif", "else", "match", "when", "while", "for",
+              "in", "is", "break", "continue", "return", "yield",
+              "try", "catch", "throw", "finally", "ensure", "defer",
+              "async", "await", "use", "export", "as", "lam",
+              "this", "super"]
     let consts = ["true", "false", "nil"]
-    let builtins = ["print", "len", "push", "pop", "type", "str", "num", "int",
-                    "fromCharCode", "sort", "filter", "map", "each", "keys",
-                    "values", "loadNative", "Lock", "Queue",
+    let builtins = ["print", "assert", "len", "push", "pop", "type",
+                    "str", "num", "int", "fromCharCode", "sort",
+                    "filter", "map", "each", "keys", "values",
+                    "reduce", "any", "all", "flatMap", "unique",
+                    "zip", "enumerate", "groupBy", "findIndex",
+                    "flatten", "loadNative", "Lock", "Queue",
                     "SharedMap", "CancellationToken"]
-    let nss = ["sys", "http", "json", "yaml", "net", "bytes", "crypto",
-               "random", "time", "math", "base64", "path", "url", "futures", "sqlite"]
+    let nss = ["sys", "fs", "http", "json", "yaml", "net", "bytes",
+               "crypto", "secrets", "random", "time", "math", "fmt",
+               "unicode", "base64", "path", "url", "futures",
+               "sqlite", "zlib", "xml", "plist"]
 
     while (i < n) {
         let ch = code[i]
