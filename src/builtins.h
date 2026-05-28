@@ -73,6 +73,12 @@ struct HttpOptions {
     int maxRedirects     = 10;
     bool insecure        = false;   // skip TLS cert verification (testing only!)
     std::string caBundle;           // path to custom CA bundle PEM (empty = system defaults)
+    // SSRF protection: refuse to connect to loopback, RFC1918, link-local
+    // (incl. cloud metadata at 169.254.169.254), IPv4-mapped, multicast,
+    // and reserved address ranges. Re-applies per redirect hop. Set to
+    // false only when you are deliberately targeting internal hosts
+    // (local development, internal microservices, etc.).
+    bool blockPrivateHosts = true;
 };
 
 Value doHttpRequest(const std::string& method, const std::string& url,

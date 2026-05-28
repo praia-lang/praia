@@ -1,5 +1,7 @@
 use "testing"
 
+let _LH = {blockPrivateHosts: false}
+
 // Redirect, lifecycle, argument-validation, and RAII tests for
 // http.openStream. Carved out of test_http_stream.praia: that file
 // hit a tree-walker-only issue (cumulative async-server state after
@@ -52,14 +54,14 @@ let base = "http://localhost:" + str(_state.get("port", 0))
 // ── Redirect following ───────────────────────────────────────
 
 testing.test("openStream follows 302 to the final body by default", lam{ in
-    let s = http.openStream({url: base + "/redirect"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/redirect"})
     testing.expectEqual(s.status, 200, "ended at /contentlength")
     testing.expect(s.readAll().contains("Hello streaming world"), nil)
     s.close()
 })
 
 testing.test("followRedirects: false returns the 3xx stream", lam{ in
-    let s = http.openStream({url: base + "/redirect", followRedirects: false})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/redirect", followRedirects: false})
     testing.expectEqual(s.status, 302, nil)
     testing.expectEqual(s.headers["location"], "/contentlength", nil)
     s.close()
@@ -68,7 +70,7 @@ testing.test("followRedirects: false returns the 3xx stream", lam{ in
 // ── Lifecycle ────────────────────────────────────────────────
 
 testing.test("read / readLine / readAll / eof after close throw", lam{ in
-    let s = http.openStream({url: base + "/contentlength"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/contentlength"})
     s.close()
     testing.expectThrows(lam{ in s.read(1) },    "is closed")
     testing.expectThrows(lam{ in s.readLine() }, "is closed")
@@ -77,14 +79,14 @@ testing.test("read / readLine / readAll / eof after close throw", lam{ in
 })
 
 testing.test("close is idempotent", lam{ in
-    let s = http.openStream({url: base + "/contentlength"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/contentlength"})
     s.close()
     s.close()
     testing.expect(true, "second close did not throw")
 })
 
 testing.test("openStream requires a url", lam{ in
-    testing.expectThrows(lam{ in http.openStream({}) }, "'url'")
+    testing.expectThrows(lam{ in http.openStream({blockPrivateHosts: false, }) }, "'url'")
 })
 
 testing.test("openStream requires a map", lam{ in
@@ -101,7 +103,7 @@ testing.test("dropped stream handles release their fd (RAII cleanup)", lam{ in
     // macOS), so without the dtor this loop would EMFILE long
     // before completing.
     for (i in 0..300) {
-        let s = http.openStream({url: base + "/contentlength"})
+        let s = http.openStream({blockPrivateHosts: false, url: base + "/contentlength"})
         let _ = s.readAll()
         // intentionally NO s.close() — relies on RAII
     }

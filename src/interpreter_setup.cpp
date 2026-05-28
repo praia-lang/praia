@@ -1786,6 +1786,8 @@ Interpreter::Interpreter() {
             opts.insecure = m.at("insecure").asBool();
         if (m.count("caBundle") && m.at("caBundle").isString())
             opts.caBundle = m.at("caBundle").asString();
+        if (m.count("blockPrivateHosts") && m.at("blockPrivateHosts").isBool())
+            opts.blockPrivateHosts = m.at("blockPrivateHosts").asBool();
     };
 
     // Layer per-call headers on top of session defaults (or {} for
@@ -1801,11 +1803,28 @@ Interpreter::Interpreter() {
     };
 
     httpMap->entries[Value("get")] = Value(makeNative("http.get", -1,
-        [](const std::vector<Value>& args) -> Value {
-            // http.get(url)              → stateless
-            // http.get(session, url)     → session-bound
+        [applyHttpOpts, layerHeaders](const std::vector<Value>& args) -> Value {
+            // http.get(url)                  → stateless
+            // http.get(url, opts)            → stateless with per-call opts
+            // http.get(session, url)         → session-bound
+            // http.get(session, url, opts)   → session-bound with per-call opts
+            auto applyOptsArg = [&applyHttpOpts, &layerHeaders](
+                                    const Value& v, HttpOptions& opts,
+                                    std::unordered_map<std::string, std::string>& headers) {
+                if (!v.isMap()) return;
+                auto& m = v.asMap()->entries;
+                applyHttpOpts(opts, m);
+                headers = layerHeaders(headers, m);
+            };
+
             if (args.size() == 1 && args[0].isString()) {
                 return doHttpRequest("GET", args[0].asString(), "", {});
+            }
+            if (args.size() == 2 && args[0].isString() && args[1].isMap()) {
+                HttpOptions opts;
+                std::unordered_map<std::string, std::string> headers;
+                applyOptsArg(args[1], opts, headers);
+                return doHttpRequest("GET", args[0].asString(), "", headers, opts);
             }
             if (args.size() == 2 && httpIsSession(args[0]) && args[1].isString()) {
                 auto opts = httpSessionGetDefaultOpts(args[0]);
@@ -1813,8 +1832,15 @@ Interpreter::Interpreter() {
                 return httpSessionRequest(args[0], "GET", args[1].asString(),
                                           "", hdrs, opts);
             }
+            if (args.size() == 3 && httpIsSession(args[0]) && args[1].isString() && args[2].isMap()) {
+                auto opts = httpSessionGetDefaultOpts(args[0]);
+                auto hdrs = httpSessionGetDefaultHeaders(args[0]);
+                applyOptsArg(args[2], opts, hdrs);
+                return httpSessionRequest(args[0], "GET", args[1].asString(),
+                                          "", hdrs, opts);
+            }
             throw RuntimeError(
-                "http.get() requires either (url) or (session, url)", 0);
+                "http.get() requires (url), (url, opts), (session, url), or (session, url, opts)", 0);
         }));
 
     httpMap->entries[Value("post")] = Value(makeNative("http.post", -1,

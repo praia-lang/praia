@@ -1,5 +1,7 @@
 use "testing"
 
+let _LH = {blockPrivateHosts: false}
+
 // Regression: HTTP redirects with relative Location values (RFC 3986
 // §5.2 reference resolution) must be followed. Earlier the client
 // rejected `Location: final` / `Location: ../login` and threw
@@ -70,33 +72,33 @@ time.sleep(200)
 let base = "http://localhost:" + str(TEST_PORT)
 
 testing.test("relative sibling Location follows to merged path", lam{ in
-    let r = http.get(base + "/a/start")
+    let r = http.get(base + "/a/start", _LH)
     testing.expectEqual(r.status, 200, nil)
     testing.expectEqual(r.body, "/a/final",
         "Location: final from /a/start must merge to /a/final")
 })
 
 testing.test("../login resolves against parent", lam{ in
-    let r = http.get(base + "/a/dotdot")
+    let r = http.get(base + "/a/dotdot", _LH)
     testing.expectEqual(r.status, 200, nil)
     testing.expectEqual(r.body, "/login",
         "Location: ../login from /a/dotdot must resolve to /login")
 })
 
 testing.test("../../top walks up two levels", lam{ in
-    let r = http.get(base + "/a/b/dotdot2")
+    let r = http.get(base + "/a/b/dotdot2", _LH)
     testing.expectEqual(r.body, "/top",
         "Location: ../../top from /a/b/dotdot2 must resolve to /top")
 })
 
 testing.test("./other normalizes to the current directory sibling", lam{ in
-    let r = http.get(base + "/a/dotslash")
+    let r = http.get(base + "/a/dotslash", _LH)
     testing.expectEqual(r.body, "/a/other",
         "Location: ./other from /a/dotslash must resolve to /a/other")
 })
 
 testing.test("query-only Location keeps the base path, replaces the query", lam{ in
-    let r = http.get(base + "/a/qonly")
+    let r = http.get(base + "/a/qonly", _LH)
     testing.expectEqual(r.body, "/a/qonly?q=1",
         "Location: ?q=1 must inherit the base path and use the new query")
 })

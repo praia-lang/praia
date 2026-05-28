@@ -1,5 +1,7 @@
 use "testing"
 
+let _LH = {blockPrivateHosts: false}
+
 // http.openStream — response-body streaming. Decodes Content-Length,
 // Transfer-Encoding: chunked, and the close-delimited fallback. Uses
 // a hand-rolled net.* mock server so we can emit exact wire bytes
@@ -111,7 +113,7 @@ let base = "http://localhost:" + str(TEST_PORT)
 // ── Headers + status surfaced before body is read ─────────────
 
 testing.test("openStream exposes status / headers / cookies up front", lam{ in
-    let s = http.openStream({url: base + "/contentlength"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/contentlength"})
     testing.expectEqual(s.status, 200, nil)
     testing.expectEqual(s.headers["content-length"], "1150", nil)
     testing.expectEqual(type(s.cookies), "array", "cookies is an array")
@@ -121,7 +123,7 @@ testing.test("openStream exposes status / headers / cookies up front", lam{ in
 // ── Content-Length decoding ──────────────────────────────────
 
 testing.test("Content-Length: read(n) returns up to n bytes", lam{ in
-    let s = http.openStream({url: base + "/contentlength"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/contentlength"})
     let first = s.read(20)
     testing.expectEqual(first, "Hello streaming worl", nil)
     let rest = s.readAll()
@@ -131,7 +133,7 @@ testing.test("Content-Length: read(n) returns up to n bytes", lam{ in
 })
 
 testing.test("Content-Length: readAll returns the full body", lam{ in
-    let s = http.openStream({url: base + "/contentlength"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/contentlength"})
     let all = s.readAll()
     testing.expectEqual(len(all.bytes()), 1150, "23 * 50 = 1150 bytes")
     testing.expectEqual(all.slice(0, 23), "Hello streaming world. ", nil)
@@ -139,7 +141,7 @@ testing.test("Content-Length: readAll returns the full body", lam{ in
 })
 
 testing.test("Content-Length: zero-length body", lam{ in
-    let s = http.openStream({url: base + "/empty"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/empty"})
     testing.expectEqual(s.status, 204, nil)
     testing.expectEqual(s.readAll(), "", nil)
     testing.expect(s.eof(), nil)
@@ -148,7 +150,7 @@ testing.test("Content-Length: zero-length body", lam{ in
 
 testing.test("Content-Length: large body streams without slurping", lam{ in
     // 100 KiB body — read in 1 KiB chunks, count total.
-    let s = http.openStream({url: base + "/large"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/large"})
     let total = 0
     while (!s.eof()) {
         let chunk = s.read(1024)
@@ -161,14 +163,14 @@ testing.test("Content-Length: large body streams without slurping", lam{ in
 // ── Chunked decoding ────────────────────────────────────────
 
 testing.test("Transfer-Encoding: chunked decodes correctly", lam{ in
-    let s = http.openStream({url: base + "/chunked"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/chunked"})
     testing.expectEqual(s.headers["transfer-encoding"], "chunked", nil)
     testing.expectEqual(s.readAll(), "Hello streaming world", nil)
     s.close()
 })
 
 testing.test("Chunked: chunk extensions after ';' are ignored", lam{ in
-    let s = http.openStream({url: base + "/chunked-with-ext"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/chunked-with-ext"})
     testing.expectEqual(s.readAll(), "hello", nil)
     s.close()
 })
@@ -177,7 +179,7 @@ testing.test("Chunked: openStream survives a packet-boundary mid-chunk", lam{ in
     // Regression: bodyPrefix used to be passed through parseHttpResponse
     // which eagerly decoded chunked bodies — a partial first chunk
     // would throw "chunk data truncated" before openStream returned.
-    let s = http.openStream({url: base + "/chunked-split"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/chunked-split"})
     testing.expectEqual(s.status, 200, "headers parsed before any body bytes")
     testing.expectEqual(s.readAll(), "hello",
         "streaming decoder reassembles across the TCP split")
@@ -187,7 +189,7 @@ testing.test("Chunked: openStream survives a packet-boundary mid-chunk", lam{ in
 // ── Close-delimited (no framing headers) ─────────────────────
 
 testing.test("Close-delimited body reads until EOF", lam{ in
-    let s = http.openStream({url: base + "/close-delimited"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/close-delimited"})
     testing.expectEqual(s.readAll(), "body-by-close", nil)
     s.close()
 })
@@ -195,7 +197,7 @@ testing.test("Close-delimited body reads until EOF", lam{ in
 // ── readLine ─────────────────────────────────────────────────
 
 testing.test("readLine returns one line at a time, nil at EOF", lam{ in
-    let s = http.openStream({url: base + "/multiline"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/multiline"})
     testing.expectEqual(s.readLine(), "alpha", nil)
     testing.expectEqual(s.readLine(), "beta", nil)
     testing.expectEqual(s.readLine(), "gamma",
@@ -209,7 +211,7 @@ testing.test("readLine returns one line at a time, nil at EOF", lam{ in
 testing.test("json.parser consumes the stream end-to-end", lam{ in
     // The stream handle exposes .read(n), so json.parser accepts it
     // as a source without any glue.
-    let s = http.openStream({url: base + "/ndjson"})
+    let s = http.openStream({blockPrivateHosts: false, url: base + "/ndjson"})
     let p = json.parser(s)
     let sum = 0
     while (!p.eof()) {

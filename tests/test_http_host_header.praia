@@ -1,5 +1,7 @@
 use "testing"
 
+let _LH = {blockPrivateHosts: false}
+
 // Regression: the HTTP client must include the URL's explicit port in
 // the Host: header so virtual-host routing and reverse proxies see the
 // correct authority. Earlier, http://localhost:PORT/x sent `Host:
@@ -40,7 +42,7 @@ let _serverFuture = async lam{ in
 time.sleep(200)
 
 testing.test("Host header includes the explicit non-default port", lam{ in
-    let r = http.get("http://localhost:" + str(TEST_PORT) + "/x")
+    let r = http.get("http://localhost:" + str(TEST_PORT) + "/x", _LH)
     testing.expectEqual(r.body, "localhost:" + str(TEST_PORT),
         "Host: must carry the user-written port for vhost/proxy routing")
 })

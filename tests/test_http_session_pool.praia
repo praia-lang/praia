@@ -1,5 +1,7 @@
 use "testing"
 
+let _LH = {blockPrivateHosts: false}
+
 // Pool bounds + idle TTL + openStream-session. Separated from
 // test_http_session.praia because `praia test` subprocess-isolates
 // between files — gives this file fresh OS-level networking state
@@ -62,7 +64,7 @@ let base = "http://localhost:" + str(TEST_PORT)
 // ── openStream(session, opts) ─────────────────────────────────
 
 testing.test("openStream(session, opts) inherits session default headers", lam{ in
-    let s = http.session({headers: {"User-Agent": "praia-pool-test/1.0"}})
+    let s = http.session({blockPrivateHosts: false, headers: {"User-Agent": "praia-pool-test/1.0"}})
     let stream = http.openStream(s, {url: base + "/x"})
     testing.expectEqual(stream.status, 200, nil)
     let body = stream.readAll()
@@ -73,7 +75,7 @@ testing.test("openStream(session, opts) inherits session default headers", lam{ 
 })
 
 testing.test("openStream() stateless path still works (one-arg)", lam{ in
-    let stream = http.openStream({url: base + "/x",
+    let stream = http.openStream({blockPrivateHosts: false, url: base + "/x",
                                     headers: {"User-Agent": "stateless-stream"}})
     testing.expectEqual(stream.status, 200, nil)
     let body = stream.readAll()
@@ -96,7 +98,7 @@ testing.test("poolIdleSecs drops a stale idle entry on next take", lam{ in
     // server's X-Conn-Id header that request 2 landed on a *new* TCP
     // accept rather than reusing the pool entry — the proof that the
     // TTL fired.
-    let s = http.session({poolIdleSecs: 0.1})
+    let s = http.session({blockPrivateHosts: false, poolIdleSecs: 0.1})
     let r1 = http.get(s, base + "/ping")
     testing.expectEqual(r1.status, 200, nil)
     time.sleep(200)
@@ -114,7 +116,7 @@ testing.test("poolIdleSecs: 0 disables the TTL (kept indefinitely)", lam{ in
     // pooled conn → same X-Conn-Id. (No sleep between requests, so
     // no time-based discard could have fired anyway; the load-bearing
     // bit is that disabling the TTL doesn't break reuse.)
-    let s = http.session({poolIdleSecs: 0})
+    let s = http.session({blockPrivateHosts: false, poolIdleSecs: 0})
     let r1 = http.get(s, base + "/ping")
     let r2 = http.get(s, base + "/ping")
     testing.expectEqual(r1.headers["x-conn-id"], r2.headers["x-conn-id"],
@@ -195,7 +197,7 @@ testing.test("poolSize=2 evicts the LRU host when a third arrives", lam{ in
     // X-Conn-Id from server A must therefore differ between rA (the
     // first conn) and rA2 (after eviction). Same-id would mean the
     // eviction didn't fire and we reused the original entry.
-    let s = http.session({poolSize: 2})
+    let s = http.session({blockPrivateHosts: false, poolSize: 2})
     let baseB = "http://localhost:" + str(p2)
     let baseC = "http://localhost:" + str(p3)
 
@@ -219,7 +221,7 @@ testing.test("poolSize: 1 still works (degenerate case)", lam{ in
     // Pool of 1 means every distinct-host request evicts the previous
     // one. Sequential same-host requests still reuse. Just check the
     // wiring doesn't crash under repeated eviction.
-    let s = http.session({poolSize: 1})
+    let s = http.session({blockPrivateHosts: false, poolSize: 1})
     let baseB = "http://localhost:" + str(p2)
     for (i in 0..3) {
         let rA = http.get(s, base + "/x")
