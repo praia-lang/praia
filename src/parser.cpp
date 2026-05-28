@@ -650,24 +650,37 @@ StmtPtr Parser::ensureStatement() {
     Token ensureTok = previous();   // the `ensure` keyword
     int ln = ensureTok.line;
     int lnCol = ensureTok.column;
-    consume(TokenType::LPAREN, "Expected '(' after 'ensure'");
-    auto condition = expression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
-    consume(TokenType::ELSE, "Expected 'else' after ensure condition");
-    consume(TokenType::LBRACE, "Expected '{' after 'else'");
-    auto elseBody = block();
 
     auto stmt = std::make_unique<EnsureStmt>();
     stmt->line = ln;
     stmt->column = lnCol;
-    stmt->condition = std::move(condition);
-    stmt->elseBody = std::move(elseBody);
+
+    // Two grammars share this statement:
+    //   ensure (<expr>) else { ... }                 — conditional
+    //   ensure let <name> = <expr> else { ... }      — Swift-style
+    //                                                  optional unwrap
+    // The `let` token after `ensure` is the discriminator.
+    if (match(TokenType::LET)) {
+        Token nameTok = consume(TokenType::IDENTIFIER,
+            "Expected identifier after 'ensure let'");
+        stmt->bindingName = nameTok.lexeme;
+        consume(TokenType::ASSIGN, "Expected '=' after binding name");
+        stmt->condition = expression();
+        consume(TokenType::ELSE, "Expected 'else' after ensure-let expression");
+    } else {
+        consume(TokenType::LPAREN, "Expected '(' after 'ensure'");
+        stmt->condition = expression();
+        consume(TokenType::RPAREN, "Expected ')' after condition");
+        consume(TokenType::ELSE, "Expected 'else' after ensure condition");
+    }
+    consume(TokenType::LBRACE, "Expected '{' after 'else'");
+    stmt->elseBody = block();
 
     // Enforce the guard contract: an else that falls through
     // would let post-`ensure` code run with the guarded
     // condition false — exactly the bug the keyword exists to
     // prevent. Plain `if (!cond) { body }` is the right shape
-    // for log-and-continue.
+    // for log-and-continue. Same check applies to both grammars.
     if (!stmtTerminates(stmt->elseBody.get())) {
         throw error(ensureTok,
             "ensure: else block must terminate via 'return', 'throw', "

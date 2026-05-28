@@ -1092,6 +1092,20 @@ func processAge(age) {
 }
 ```
 
+**Optional unwrap binding — `ensure let`.** Praia also supports Swift-style `guard let` for the "bail on nil, otherwise bind the value" pattern:
+
+```praia
+func printName(name) {
+    ensure let unwrapped = name else {
+        print("you need to provide a name")
+        return
+    }
+    print(unwrapped)   // `unwrapped` is in scope here
+}
+```
+
+The `else` block runs *only* when the right-hand expression is `nil`. Any other value — including falsy ones like `false`, `0`, `""` — binds to the name and the surrounding scope continues. This is the key divergence from the conditional form `ensure (cond) else`, which fires on any falsy value. Use the binding form when you mean "is the optional present?"; the conditional form when you mean "is this truthy?". The else-must-terminate rule applies to both.
+
 **When to use `if` instead.** `ensure` is exclusively for early-exit guards. If your check is "log a warning and keep going with a default," reach for plain `if`:
 
 ```praia
