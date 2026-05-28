@@ -138,9 +138,15 @@ func _parseValue(val) {
     }
 
     // Float. Same digit-underscore-digit rule on each digit run
-    // (integer part, fractional part, exponent).
+    // (integer part, fractional part, exponent). Two alternatives:
+    //   1. Decimal only — `1.5`, `-3.14`, `1_000.5`.
+    //   2. Exponent (with optional decimal) — `1e10`, `1.5e10`,
+    //      `-1.5e-2`. The decimal part is optional so `1.5e10` (both
+    //      forms combined) matches; the original regex required the
+    //      `[eE]` to sit right after the integer part, so anything
+    //      like `1.5e10` fell through to the datetime string branch.
     if (val.test("^-?[0-9](_?[0-9])*\\.[0-9](_?[0-9])*$") ||
-        val.test("^-?[0-9](_?[0-9])*[eE][+-]?[0-9]+$")) {
+        val.test("^-?[0-9](_?[0-9])*(\\.[0-9](_?[0-9])*)?[eE][+-]?[0-9]+$")) {
         return num(val.replace("_", ""))
     }
 

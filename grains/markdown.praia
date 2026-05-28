@@ -205,7 +205,14 @@ func _safeUrl(url) {
         }
         i = i + 1
     }
-    let blocked = ["javascript:", "vbscript:", "data:text/html", "data:application"]
+    // SVG is the one image data: URI that can run script — `<svg>`
+    // accepts `<script>` and event-handler attributes — so it's
+    // blocked here alongside the HTML/JS data: variants. `data:image/png`,
+    // `data:image/jpeg`, etc. stay allowed since they're inert.
+    // Trailing `;` (parameters) and `,` (payload) are captured by
+    // the prefix match since `startsWith` is a prefix predicate.
+    let blocked = ["javascript:", "vbscript:", "data:text/html",
+                   "data:application", "data:image/svg+xml"]
     for (b in blocked) {
         if (stripped.startsWith(b)) { return "#" }
     }

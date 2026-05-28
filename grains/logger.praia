@@ -60,10 +60,17 @@ let LEVEL_NAMES = ["debug", "info", "warn", "error", "none"]
 //   color: true  — wrap the LEVEL token in ANSI color
 //   timeFormat: strftime-style override (default "%Y-%m-%d %H:%M:%S")
 func textFormatter(opts) {
-    // `??` not `||`: in Praia `""` is truthy, so a caller passing
-    // an explicit empty timeFormat would have erased the default
-    // under `||` and produced empty timestamps. `??` keeps the
-    // default only when the field is actually missing (nil).
+    // `??` (not `||`) for the timeFormat default: `??` triggers the
+    // default only when `o.timeFormat` is literally `nil` (i.e. the
+    // caller didn't set it). `||` would additionally swallow a
+    // literal `false`, since Praia's falsy values are `nil` and
+    // `false`. For a string-typed option that's a theoretical
+    // distinction, but `??` is the more precise idiom for "user
+    // didn't supply this field." Note `""` flows through under
+    // both operators in Praia — `""` is truthy here — so callers
+    // passing an explicit empty timeFormat get empty timestamps
+    // regardless of operator choice. Defend against that
+    // upstream if it matters.
     let o = opts ?? {}
     let timeFmt = o.timeFormat ?? "%Y-%m-%d %H:%M:%S"
     let useColor = o.color == true
