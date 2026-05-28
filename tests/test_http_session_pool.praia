@@ -64,9 +64,9 @@ let base = "http://localhost:" + str(TEST_PORT)
 testing.test("openStream(session, opts) inherits session default headers", lam{ in
     let s = http.session({headers: {"User-Agent": "praia-pool-test/1.0"}})
     let stream = http.openStream(s, {url: base + "/x"})
-    testing.assertEqual(stream.status, 200, nil)
+    testing.expectEqual(stream.status, 200, nil)
     let body = stream.readAll()
-    testing.assertEqual(body, "praia-pool-test/1.0",
+    testing.expectEqual(body, "praia-pool-test/1.0",
         "stream request carried the session-default User-Agent")
     stream.close()
     http.close(s)
@@ -75,17 +75,17 @@ testing.test("openStream(session, opts) inherits session default headers", lam{ 
 testing.test("openStream() stateless path still works (one-arg)", lam{ in
     let stream = http.openStream({url: base + "/x",
                                     headers: {"User-Agent": "stateless-stream"}})
-    testing.assertEqual(stream.status, 200, nil)
+    testing.expectEqual(stream.status, 200, nil)
     let body = stream.readAll()
-    testing.assertEqual(body, "stateless-stream", nil)
+    testing.expectEqual(body, "stateless-stream", nil)
     stream.close()
 })
 
 testing.test("openStream() with bad arg shape throws", lam{ in
     let err = nil
     try { http.openStream(42) } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw on non-opts first arg")
-    testing.assert(err.contains("requires"), str(err))
+    testing.expect(err != nil, "must throw on non-opts first arg")
+    testing.expect(err.contains("requires"), str(err))
 })
 
 // ── Idle TTL ──────────────────────────────────────────────────
@@ -98,11 +98,11 @@ testing.test("poolIdleSecs drops a stale idle entry on next take", lam{ in
     // TTL fired.
     let s = http.session({poolIdleSecs: 0.1})
     let r1 = http.get(s, base + "/ping")
-    testing.assertEqual(r1.status, 200, nil)
+    testing.expectEqual(r1.status, 200, nil)
     time.sleep(200)
     let r2 = http.get(s, base + "/ping")
-    testing.assertEqual(r2.status, 200, nil)
-    testing.assert(r1.headers["x-conn-id"] != r2.headers["x-conn-id"],
+    testing.expectEqual(r2.status, 200, nil)
+    testing.expect(r1.headers["x-conn-id"] != r2.headers["x-conn-id"],
         "TTL must evict: second request should not reuse the stale conn " +
         "(r1=" + str(r1.headers["x-conn-id"]) +
         ", r2=" + str(r2.headers["x-conn-id"]) + ")")
@@ -117,7 +117,7 @@ testing.test("poolIdleSecs: 0 disables the TTL (kept indefinitely)", lam{ in
     let s = http.session({poolIdleSecs: 0})
     let r1 = http.get(s, base + "/ping")
     let r2 = http.get(s, base + "/ping")
-    testing.assertEqual(r1.headers["x-conn-id"], r2.headers["x-conn-id"],
+    testing.expectEqual(r1.headers["x-conn-id"], r2.headers["x-conn-id"],
         "TTL=0 must reuse the pooled conn between back-to-back requests")
     http.close(s)
 })
@@ -200,15 +200,15 @@ testing.test("poolSize=2 evicts the LRU host when a third arrives", lam{ in
     let baseC = "http://localhost:" + str(p3)
 
     let rA = http.get(s, base + "/x")
-    testing.assertEqual(rA.status, 200, nil)
+    testing.expectEqual(rA.status, 200, nil)
     let rB = http.get(s, baseB + "/x")
-    testing.assertEqual(rB.body, "B", nil)
+    testing.expectEqual(rB.body, "B", nil)
     let rC = http.get(s, baseC + "/x")
-    testing.assertEqual(rC.body, "C", nil)
+    testing.expectEqual(rC.body, "C", nil)
     // The LRU-proof assertion.
     let rA2 = http.get(s, base + "/x")
-    testing.assertEqual(rA2.status, 200, nil)
-    testing.assert(rA.headers["x-conn-id"] != rA2.headers["x-conn-id"],
+    testing.expectEqual(rA2.status, 200, nil)
+    testing.expect(rA.headers["x-conn-id"] != rA2.headers["x-conn-id"],
         "LRU must evict host A when C overflows the pool: rA2 should be " +
         "a fresh accept (rA=" + str(rA.headers["x-conn-id"]) +
         ", rA2=" + str(rA2.headers["x-conn-id"]) + ")")
@@ -223,9 +223,9 @@ testing.test("poolSize: 1 still works (degenerate case)", lam{ in
     let baseB = "http://localhost:" + str(p2)
     for (i in 0..3) {
         let rA = http.get(s, base + "/x")
-        testing.assertEqual(rA.status, 200, nil)
+        testing.expectEqual(rA.status, 200, nil)
         let rB = http.get(s, baseB + "/x")
-        testing.assertEqual(rB.body, "B", nil)
+        testing.expectEqual(rB.body, "B", nil)
     }
     http.close(s)
 })

@@ -11,10 +11,10 @@ testing.test("Stack", lam{ in
     s.push(1)
     s.push(2)
     s.push(3)
-    testing.assertEqual(s.peek(), 3, "peek should be 3")
-    testing.assertEqual(s.pop(), 3, "pop should be 3")
-    testing.assertEqual(s.size(), 2, "size should be 2")
-    testing.assert(!s.isEmpty(), "should not be empty")
+    testing.expectEqual(s.peek(), 3, "peek should be 3")
+    testing.expectEqual(s.pop(), 3, "pop should be 3")
+    testing.expectEqual(s.size(), 2, "size should be 2")
+    testing.expect(!s.isEmpty(), "should not be empty")
 })
 
 testing.test("Queue", lam{ in
@@ -22,9 +22,9 @@ testing.test("Queue", lam{ in
     q.enqueue("a")
     q.enqueue("b")
     q.enqueue("c")
-    testing.assertEqual(q.dequeue(), "a", "dequeue should be a")
-    testing.assertEqual(q.peek(), "b", "peek should be b")
-    testing.assertEqual(q.size(), 2, "size should be 2")
+    testing.expectEqual(q.dequeue(), "a", "dequeue should be a")
+    testing.expectEqual(q.peek(), "b", "peek should be b")
+    testing.expectEqual(q.size(), 2, "size should be 2")
 })
 
 testing.test("Set", lam{ in
@@ -33,10 +33,10 @@ testing.test("Set", lam{ in
     s.add(2)
     s.add(2)
     s.add(3)
-    testing.assertEqual(s.size(), 3, "set size should be 3 (no dupes)")
-    testing.assert(s.has(2), "should have 2")
+    testing.expectEqual(s.size(), 3, "set size should be 3 (no dupes)")
+    testing.expect(s.has(2), "should have 2")
     s.remove(2)
-    testing.assert(!s.has(2), "should not have 2 after remove")
+    testing.expect(!s.has(2), "should not have 2 after remove")
 
     let s2 = collections.Set()
     s2.add(2)
@@ -45,17 +45,17 @@ testing.test("Set", lam{ in
     s.add(2)
     s.add(3)
     let u = s.union(s2)
-    testing.assertEqual(u.size(), 4, "union should have 4 elements")
+    testing.expectEqual(u.size(), 4, "union should have 4 elements")
 })
 
 // ── CSV ──
 testing.test("CSV parse", lam{ in
     let text = "name,age,active\nAlice,30,true\nBob,17,false"
     let data = csv.parse(text)
-    testing.assertEqual(len(data), 2, "should have 2 rows")
-    testing.assertEqual(data[0].name, "Alice", "first name")
-    testing.assertEqual(data[0].age, 30, "first age as number")
-    testing.assertEqual(data[1].active, false, "second active as bool")
+    testing.expectEqual(len(data), 2, "should have 2 rows")
+    testing.expectEqual(data[0].name, "Alice", "first name")
+    testing.expectEqual(data[0].age, 30, "first age as number")
+    testing.expectEqual(data[1].active, false, "second active as bool")
 })
 
 testing.test("CSV stringify", lam{ in
@@ -64,29 +64,29 @@ testing.test("CSV stringify", lam{ in
         {name: "Bob", age: 17}
     ]
     let text = csv.stringify(data, ["name", "age"])
-    testing.assert(text.contains("Alice"), "should contain Alice")
-    testing.assert(text.contains("name,age"), "should have header")
+    testing.expect(text.contains("Alice"), "should contain Alice")
+    testing.expect(text.contains("name,age"), "should have header")
 })
 
 testing.test("CSV quoted fields", lam{ in
     let text = "name,bio\nAlice,\"likes cats, dogs\"\nBob,\"said \"\"hello\"\"\""
     let data = csv.parse(text)
-    testing.assertEqual(data[0].bio, "likes cats, dogs", "comma in quotes")
+    testing.expectEqual(data[0].bio, "likes cats, dogs", "comma in quotes")
 })
 
 // ── UUID ──
 testing.test("UUID v4", lam{ in
     let id1 = uuid.v4()
     let id2 = uuid.v4()
-    testing.assertEqual(len(id1), 36, "UUID should be 36 chars")
-    testing.assertNotEqual(id1, id2, "UUIDs should be unique")
-    testing.assertEqual(id1[14], "4", "version should be 4")
+    testing.expectEqual(len(id1), 36, "UUID should be 36 chars")
+    testing.expectNotEqual(id1, id2, "UUIDs should be unique")
+    testing.expectEqual(id1[14], "4", "version should be 4")
     print("  sample:", id1)
 })
 
 // ── Testing framework itself ──
 testing.test("assertThrows", lam{ in
-    testing.assertThrows(lam{ in throw "boom" }, "should catch throw")
+    testing.expectThrows(lam{ in throw "boom" }, "should catch throw")
 })
 
 testing.summary()

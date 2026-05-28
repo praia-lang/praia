@@ -4,7 +4,7 @@ testing.test("if/else", lam{ in
     let x = 10
     let result = ""
     if (x > 5) { result = "big" } else { result = "small" }
-    testing.assertEqual(result, "big", nil)
+    testing.expectEqual(result, "big", nil)
 })
 
 testing.test("elif chain", lam{ in
@@ -14,10 +14,10 @@ testing.test("elif chain", lam{ in
         elif (n < 10) { return "small" }
         else { return "large" }
     }
-    testing.assertEqual(classify(-5), "negative", nil)
-    testing.assertEqual(classify(0), "zero", nil)
-    testing.assertEqual(classify(3), "small", nil)
-    testing.assertEqual(classify(100), "large", nil)
+    testing.expectEqual(classify(-5), "negative", nil)
+    testing.expectEqual(classify(0), "zero", nil)
+    testing.expectEqual(classify(3), "small", nil)
+    testing.expectEqual(classify(100), "large", nil)
 })
 
 testing.test("while loop", lam{ in
@@ -27,7 +27,7 @@ testing.test("while loop", lam{ in
         sum = sum + i
         i = i + 1
     }
-    testing.assertEqual(sum, 10, nil)
+    testing.expectEqual(sum, 10, nil)
 })
 
 testing.test("for range loop", lam{ in
@@ -35,7 +35,7 @@ testing.test("for range loop", lam{ in
     for (i in 1 .. 11) {
         sum = sum + i
     }
-    testing.assertEqual(sum, 55, nil)
+    testing.expectEqual(sum, 55, nil)
 })
 
 testing.test("break", lam{ in
@@ -46,7 +46,7 @@ testing.test("break", lam{ in
             break
         }
     }
-    testing.assertEqual(found, 42, nil)
+    testing.expectEqual(found, 42, nil)
 })
 
 testing.test("continue", lam{ in
@@ -55,28 +55,28 @@ testing.test("continue", lam{ in
         if (i % 2 != 0) { continue }
         evens.push(i)
     }
-    testing.assertEqual(len(evens), 5, nil)
-    testing.assertEqual(evens[0], 0, nil)
-    testing.assertEqual(evens[4], 8, nil)
+    testing.expectEqual(len(evens), 5, nil)
+    testing.expectEqual(evens[0], 0, nil)
+    testing.expectEqual(evens[4], 8, nil)
 })
 
 testing.test("truthiness", lam{ in
     // Only nil and false are falsy — everything else is truthy
-    testing.assert(1, nil)
-    testing.assert("hello", nil)
-    testing.assert([1], nil)
-    testing.assert(0, "0 is truthy")
-    testing.assert("", "empty string is truthy")
-    testing.assert([], "empty array is truthy")
-    testing.assert(!nil, "nil is falsy")
-    testing.assert(!false, "false is falsy")
+    testing.expect(1, nil)
+    testing.expect("hello", nil)
+    testing.expect([1], nil)
+    testing.expect(0, "0 is truthy")
+    testing.expect("", "empty string is truthy")
+    testing.expect([], "empty array is truthy")
+    testing.expect(!nil, "nil is falsy")
+    testing.expect(!false, "false is falsy")
 })
 
 testing.test("short-circuit or", lam{ in
     let x = nil || "default"
-    testing.assertEqual(x, "default", nil)
+    testing.expectEqual(x, "default", nil)
     let y = "set" || "default"
-    testing.assertEqual(y, "set", nil)
+    testing.expectEqual(y, "set", nil)
 })
 
 testing.done()

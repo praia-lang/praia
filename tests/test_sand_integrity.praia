@@ -16,9 +16,9 @@ testing.test("compute rejects a symlink under the grain dir", lam{ in
     // sys.exec — fs doesn't have a symlink-create builtin, but `ln -s`
     // is universally available on the platforms praia targets.
     let r = sys.exec(["ln", "-s", external, path.join(grain, "leak.praia")])
-    testing.assertEqual(r.exitCode, 0, "ln -s setup: " + r.stderr)
+    testing.expectEqual(r.exitCode, 0, "ln -s setup: " + r.stderr)
 
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in integrity.compute(grain) },
         "symlink in grain dir is rejected (no transparent follow)")
 })
@@ -30,7 +30,7 @@ testing.test("compute accepts a grain with only regular files and dirs", lam{ in
     fs.mkdir(path.join(grain, "sub"))
     fs.write(path.join(grain, "sub", "nested.praia"), "let n = 2\n")
     let h = integrity.compute(grain)
-    testing.assert(h.startsWith("sha256-"),
+    testing.expect(h.startsWith("sha256-"),
         "returns the expected prefixed hash: " + h)
 })
 
@@ -42,7 +42,7 @@ testing.test("compute reports the same hash for the same content twice", lam{ in
     fs.mkdir(b)
     fs.write(path.join(a, "x.praia"), "let v = 1\n")
     fs.write(path.join(b, "x.praia"), "let v = 1\n")
-    testing.assertEqual(integrity.compute(a), integrity.compute(b),
+    testing.expectEqual(integrity.compute(a), integrity.compute(b),
         "identical content → identical hash")
 })
 
@@ -52,7 +52,7 @@ testing.test("compute reports a different hash when file content changes", lam{ 
     let h1 = integrity.compute(grain)
     fs.write(path.join(grain, "main.praia"), "let v = 2\n")
     let h2 = integrity.compute(grain)
-    testing.assertNotEqual(h1, h2,
+    testing.expectNotEqual(h1, h2,
         "content change must change the hash")
 })
 

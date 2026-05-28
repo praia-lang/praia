@@ -12,30 +12,30 @@ testing.test("fs.stat returns the full metadata shape", lam{ in
     let p = d + "/file.txt"
     fs.write(p, "hello")
     let s = fs.stat(p)
-    testing.assertEqual(s.type, "file", nil)
-    testing.assertEqual(s.size, 5, nil)
+    testing.expectEqual(s.type, "file", nil)
+    testing.expectEqual(s.size, 5, nil)
     // mode is masked to permission bits; default 0o644 (decimal 420)
     // is what fs.write produces on most umasks. Just sanity-check it's
     // in the plausible range rather than asserting exact bits — umask
     // varies by CI environment.
-    testing.assert(s.mode > 0 && s.mode <= 511, "mode in 0..0o777")
-    testing.assert(s.mtime > 0, "mtime is a unix timestamp")
-    testing.assert(s.nlink >= 1, "nlink is at least 1")
-    testing.assertEqual(type(s.uid), "int", "uid is an int")
-    testing.assertEqual(type(s.gid), "int", "gid is an int")
-    testing.assertEqual(type(s.ino), "int", "ino is an int")
-    testing.assertEqual(type(s.dev), "int", "dev is an int")
+    testing.expect(s.mode > 0 && s.mode <= 511, "mode in 0..0o777")
+    testing.expect(s.mtime > 0, "mtime is a unix timestamp")
+    testing.expect(s.nlink >= 1, "nlink is at least 1")
+    testing.expectEqual(type(s.uid), "int", "uid is an int")
+    testing.expectEqual(type(s.gid), "int", "gid is an int")
+    testing.expectEqual(type(s.ino), "int", "ino is an int")
+    testing.expectEqual(type(s.dev), "int", "dev is an int")
     fs.remove(d)
 })
 
 testing.test("fs.stat reports directories", lam{ in
     let d = fs.tempDir("p2-statdir")
-    testing.assertEqual(fs.stat(d).type, "dir", nil)
+    testing.expectEqual(fs.stat(d).type, "dir", nil)
     fs.remove(d)
 })
 
 testing.test("fs.stat on missing path throws", lam{ in
-    testing.assertThrows(lam{ in fs.stat("/var/no/such/file/xyz") }, "fs.stat()")
+    testing.expectThrows(lam{ in fs.stat("/var/no/such/file/xyz") }, "fs.stat()")
 })
 
 testing.test("fs.lstat reports symlink while fs.stat follows it", lam{ in
@@ -44,8 +44,8 @@ testing.test("fs.lstat reports symlink while fs.stat follows it", lam{ in
     let link = d + "/link"
     fs.write(p, "x")
     fs.symlink(p, link)
-    testing.assertEqual(fs.lstat(link).type, "symlink", "lstat sees the link")
-    testing.assertEqual(fs.stat(link).type,  "file",    "stat follows to file")
+    testing.expectEqual(fs.lstat(link).type, "symlink", "lstat sees the link")
+    testing.expectEqual(fs.stat(link).type,  "file",    "stat follows to file")
     fs.remove(d)
 })
 
@@ -56,9 +56,9 @@ testing.test("fs.chmod changes permission bits", lam{ in
     let p = d + "/file"
     fs.write(p, "x")
     fs.chmod(p, 384)   // 0o600
-    testing.assertEqual(fs.stat(p).mode, 384, "mode is exactly 0o600")
+    testing.expectEqual(fs.stat(p).mode, 384, "mode is exactly 0o600")
     fs.chmod(p, 420)   // 0o644
-    testing.assertEqual(fs.stat(p).mode, 420, "mode is exactly 0o644")
+    testing.expectEqual(fs.stat(p).mode, 420, "mode is exactly 0o644")
     fs.remove(d)
 })
 
@@ -71,7 +71,7 @@ testing.test("fs.chmod masks high bits (file-type bits ignored)", lam{ in
     // accidentally hand stat-shape modes back to chmod.
     fs.chmod(p, 33188)  // 0o100644: S_IFREG | 0o644
     // After masking, this becomes plain 0o644 = 420.
-    testing.assertEqual(fs.stat(p).mode, 420, nil)
+    testing.expectEqual(fs.stat(p).mode, 420, nil)
     fs.remove(d)
 })
 
@@ -83,7 +83,7 @@ testing.test("fs.symlink + fs.readlink roundtrip", lam{ in
     let link = d + "/link"
     fs.write(target, "payload")
     fs.symlink(target, link)
-    testing.assertEqual(fs.readlink(link), target,
+    testing.expectEqual(fs.readlink(link), target,
                         "readlink returns the exact stored target")
     fs.remove(d)
 })
@@ -95,9 +95,9 @@ testing.test("fs.symlink stores the target verbatim (dangling OK)", lam{ in
     // anywhere. fs.exists on the link follows it and returns false
     // because the target's missing, but lstat sees the link itself.
     fs.symlink("/intentionally/missing/target", link)
-    testing.assertEqual(fs.readlink(link), "/intentionally/missing/target", nil)
-    testing.assertEqual(fs.lstat(link).type, "symlink", nil)
-    testing.assertEqual(fs.exists(link), false, "exists follows -> dangling")
+    testing.expectEqual(fs.readlink(link), "/intentionally/missing/target", nil)
+    testing.expectEqual(fs.lstat(link).type, "symlink", nil)
+    testing.expectEqual(fs.exists(link), false, "exists follows -> dangling")
     fs.remove(d)
 })
 
@@ -105,7 +105,7 @@ testing.test("fs.readlink on a non-link throws", lam{ in
     let d = fs.tempDir("p2-readlink-bad")
     let p = d + "/regular.txt"
     fs.write(p, "x")
-    testing.assertThrows(lam{ in fs.readlink(p) }, "fs.readlink")
+    testing.expectThrows(lam{ in fs.readlink(p) }, "fs.readlink")
     fs.remove(d)
 })
 
@@ -115,7 +115,7 @@ testing.test("fs.atomicWrite creates a new file with the right content", lam{ in
     let d = fs.tempDir("p2-atomic-new")
     let p = d + "/cfg.txt"
     fs.atomicWrite(p, "fresh content\n")
-    testing.assertEqual(fs.read(p), "fresh content\n", nil)
+    testing.expectEqual(fs.read(p), "fresh content\n", nil)
     fs.remove(d)
 })
 
@@ -124,7 +124,7 @@ testing.test("fs.atomicWrite atomically replaces an existing file", lam{ in
     let p = d + "/cfg.txt"
     fs.write(p, "old content")
     fs.atomicWrite(p, "new content")
-    testing.assertEqual(fs.read(p), "new content", nil)
+    testing.expectEqual(fs.read(p), "new content", nil)
     fs.remove(d)
 })
 
@@ -135,8 +135,8 @@ testing.test("fs.atomicWrite leaves no .tmp residue on success", lam{ in
     let d = fs.tempDir("p2-atomic-clean")
     fs.atomicWrite(d + "/cfg.txt", "x")
     let entries = fs.readDir(d)
-    testing.assertEqual(len(entries), 1, "only the target remains")
-    testing.assertEqual(entries[0], "cfg.txt", nil)
+    testing.expectEqual(len(entries), 1, "only the target remains")
+    testing.expectEqual(entries[0], "cfg.txt", nil)
     fs.remove(d)
 })
 
@@ -145,11 +145,11 @@ testing.test("fs.atomicWrite leaves no .tmp residue on success", lam{ in
 testing.test("fs.mktemp creates a unique empty file at mode 0600", lam{ in
     let a = fs.mktemp("p2-test")
     let b = fs.mktemp("p2-test")
-    testing.assert(a != b, "two mktemp calls produce distinct names")
-    testing.assertEqual(fs.exists(a), true, "file exists after mktemp")
-    testing.assertEqual(fs.stat(a).size, 0, "file is empty")
-    testing.assertEqual(fs.stat(a).mode, 384, "mode is exactly 0o600")
-    testing.assertEqual(fs.stat(a).type, "file", nil)
+    testing.expect(a != b, "two mktemp calls produce distinct names")
+    testing.expectEqual(fs.exists(a), true, "file exists after mktemp")
+    testing.expectEqual(fs.stat(a).size, 0, "file is empty")
+    testing.expectEqual(fs.stat(a).mode, 384, "mode is exactly 0o600")
+    testing.expectEqual(fs.stat(a).type, "file", nil)
     fs.remove(a)
     fs.remove(b)
 })
@@ -159,7 +159,7 @@ testing.test("fs.mktemp default prefix is praia", lam{ in
     // The basename starts with "praia." — don't pin the exact suffix
     // since mkstemp picks 6 random chars.
     let name = path.basename(p)
-    testing.assert(name.startsWith("praia."), "default prefix is 'praia'")
+    testing.expect(name.startsWith("praia."), "default prefix is 'praia'")
     fs.remove(p)
 })
 

@@ -4,27 +4,27 @@ use "diff"
 testing.test("lines identical", lam{ in
     let changes = diff.lines("hello\nworld", "hello\nworld")
     let s = diff.stats(changes)
-    testing.assertEqual(s.added, 0, nil)
-    testing.assertEqual(s.removed, 0, nil)
+    testing.expectEqual(s.added, 0, nil)
+    testing.expectEqual(s.removed, 0, nil)
 })
 
 testing.test("lines added", lam{ in
     let changes = diff.lines("a\nb", "a\nb\nc")
     let s = diff.stats(changes)
-    testing.assert(s.added > 0, "should have additions")
+    testing.expect(s.added > 0, "should have additions")
 })
 
 testing.test("lines removed", lam{ in
     let changes = diff.lines("a\nb\nc", "a\nc")
     let s = diff.stats(changes)
-    testing.assert(s.removed > 0, "should have removals")
+    testing.expect(s.removed > 0, "should have removals")
 })
 
 testing.test("format output", lam{ in
     let changes = diff.lines("a\nb", "a\nc")
     let output = diff.format(changes)
-    testing.assert(output.contains("- b"), nil)
-    testing.assert(output.contains("+ c"), nil)
+    testing.expect(output.contains("- b"), nil)
+    testing.expect(output.contains("+ c"), nil)
 })
 
 testing.done()

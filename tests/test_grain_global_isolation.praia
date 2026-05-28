@@ -21,8 +21,8 @@ testing.test("two grains with same `let` name stay isolated", lam{ in
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
-    testing.assertEqual(r.exitCode, 0, r.stderr)
-    testing.assertEqual(r.stdout.strip(), "a/b",
+    testing.expectEqual(r.exitCode, 0, r.stderr)
+    testing.expectEqual(r.stdout.strip(), "a/b",
         "VM grain globals must not collide on name")
 })
 
@@ -41,8 +41,8 @@ testing.test("class with same name in two grains stays isolated", lam{ in
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
-    testing.assertEqual(r.exitCode, 0, r.stderr)
-    testing.assertEqual(r.stdout.strip(), "a/b",
+    testing.expectEqual(r.exitCode, 0, r.stderr)
+    testing.expectEqual(r.stdout.strip(), "a/b",
         "Grain-scoped class names must not collide across grains")
 })
 
@@ -61,8 +61,8 @@ testing.test("mutating a grain's module state doesn't leak across grains", lam{ 
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
-    testing.assertEqual(r.exitCode, 0, r.stderr)
-    testing.assertEqual(r.stdout.strip(), "3/101",
+    testing.expectEqual(r.exitCode, 0, r.stderr)
+    testing.expectEqual(r.stdout.strip(), "3/101",
         "OP_SET_GLOBAL must write through to the grain's own slots")
 })
 
@@ -84,8 +84,8 @@ testing.test("a transitive grain is only executed once across siblings", lam{ in
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
-    testing.assertEqual(r.exitCode, 0, r.stderr)
-    testing.assertEqual(r.stdout.strip(), "load c\n2",
+    testing.expectEqual(r.exitCode, 0, r.stderr)
+    testing.expectEqual(r.stdout.strip(), "load c\n2",
         "Shared grain dep must execute exactly once")
 })
 
@@ -112,10 +112,10 @@ testing.test("async tasks observe a COW snapshot of a grain's module globals", l
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
-    testing.assertEqual(r.exitCode, 0, r.stderr)
+    testing.expectEqual(r.exitCode, 0, r.stderr)
     // Both tasks see their own COW snapshot of n=2 → bump to 3.
     // Parent's n stays at 2 because task mutations don't leak back.
-    testing.assertEqual(r.stdout.strip(), "3/3/2",
+    testing.expectEqual(r.stdout.strip(), "3/3/2",
         "async grain tasks must observe COW snapshots, not live grain state")
 })
 
@@ -139,8 +139,8 @@ testing.test("shared grain dep returns the same export value to both importers",
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(dir, "main.praia")])
-    testing.assertEqual(r.exitCode, 0, r.stderr)
-    testing.assertEqual(r.stdout.strip(), "1/2/3",
+    testing.expectEqual(r.exitCode, 0, r.stderr)
+    testing.expectEqual(r.stdout.strip(), "1/2/3",
         "Both importers must observe the same singleton dep")
 })
 

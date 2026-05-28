@@ -2,45 +2,45 @@ use "testing"
 use "html"
 
 testing.test("escape", lam{ in
-    testing.assertEqual(html.escape("<b>hi</b>"), "&lt;b&gt;hi&lt;/b&gt;", nil)
-    testing.assertEqual(html.escape("a & b"), "a &amp; b", nil)
-    testing.assertEqual(html.escape("\"quoted\""), "&quot;quoted&quot;", nil)
+    testing.expectEqual(html.escape("<b>hi</b>"), "&lt;b&gt;hi&lt;/b&gt;", nil)
+    testing.expectEqual(html.escape("a & b"), "a &amp; b", nil)
+    testing.expectEqual(html.escape("\"quoted\""), "&quot;quoted&quot;", nil)
 })
 
 testing.test("unescape", lam{ in
-    testing.assertEqual(html.unescape("&lt;b&gt;"), "<b>", nil)
-    testing.assertEqual(html.unescape("&amp;"), "&", nil)
-    testing.assertEqual(html.unescape("&quot;"), "\"", nil)
+    testing.expectEqual(html.unescape("&lt;b&gt;"), "<b>", nil)
+    testing.expectEqual(html.unescape("&amp;"), "&", nil)
+    testing.expectEqual(html.unescape("&quot;"), "\"", nil)
 })
 
 testing.test("escape unescape roundtrip", lam{ in
     let original = "<script>alert('xss')</script>"
-    testing.assertEqual(html.unescape(html.escape(original)), original, nil)
+    testing.expectEqual(html.unescape(html.escape(original)), original, nil)
 })
 
 testing.test("stripTags", lam{ in
-    testing.assertEqual(html.stripTags("<p>hello <b>world</b></p>"), "hello world", nil)
-    testing.assertEqual(html.stripTags("no tags"), "no tags", nil)
+    testing.expectEqual(html.stripTags("<p>hello <b>world</b></p>"), "hello world", nil)
+    testing.expectEqual(html.stripTags("no tags"), "no tags", nil)
 })
 
 testing.test("element", lam{ in
     let result = html.element("div", {class: "box"}, "content")
-    testing.assert(result.contains("<div"), nil)
-    testing.assert(result.contains("class=\"box\""), nil)
-    testing.assert(result.contains("content"), nil)
-    testing.assert(result.contains("</div>"), nil)
+    testing.expect(result.contains("<div"), nil)
+    testing.expect(result.contains("class=\"box\""), nil)
+    testing.expect(result.contains("content"), nil)
+    testing.expect(result.contains("</div>"), nil)
 })
 
 testing.test("a helper", lam{ in
     let link = html.a("https://example.com", "click")
-    testing.assert(link.contains("href=\"https://example.com\""), nil)
-    testing.assert(link.contains("click"), nil)
+    testing.expect(link.contains("href=\"https://example.com\""), nil)
+    testing.expect(link.contains("click"), nil)
 })
 
 testing.test("img helper", lam{ in
     let image = html.img("/logo.png", "Logo")
-    testing.assert(image.contains("src=\"/logo.png\""), nil)
-    testing.assert(image.contains("alt=\"Logo\""), nil)
+    testing.expect(image.contains("src=\"/logo.png\""), nil)
+    testing.expect(image.contains("alt=\"Logo\""), nil)
 })
 
 // ── XSS hardening (Medium audit finding) ────────────────────────
@@ -48,51 +48,51 @@ testing.test("img helper", lam{ in
 // name. text(), raw(), and name validation close that gap.
 
 testing.test("text() is an alias for escape with str coercion", lam{ in
-    testing.assertEqual(html.text("a & b"), html.escape("a & b"), nil)
+    testing.expectEqual(html.text("a & b"), html.escape("a & b"), nil)
     // Non-string input is stringified first instead of throwing.
-    testing.assertEqual(html.text(42), "42", nil)
+    testing.expectEqual(html.text(42), "42", nil)
 })
 
 testing.test("element escapes content by default", lam{ in
     let r = html.element("p", {}, "<script>alert(1)</script>")
-    testing.assert(!r.contains("<script>"), "raw <script> must not appear")
-    testing.assert(r.contains("&lt;script&gt;"), "content must be escaped")
+    testing.expect(!r.contains("<script>"), "raw <script> must not appear")
+    testing.expect(r.contains("&lt;script&gt;"), "content must be escaped")
 })
 
 testing.test("element emits raw() verbatim", lam{ in
     let r = html.element("div", {}, html.raw("<b>trusted</b>"))
-    testing.assertEqual(r, "<div><b>trusted</b></div>", nil)
+    testing.expectEqual(r, "<div><b>trusted</b></div>", nil)
 })
 
 testing.test("element composes mixed array content", lam{ in
     let r = html.element("p", {}, [html.text("hi "), html.raw("<em>x</em>"), " & y"])
-    testing.assertEqual(r, "<p>hi <em>x</em> &amp; y</p>", nil)
+    testing.expectEqual(r, "<p>hi <em>x</em> &amp; y</p>", nil)
 })
 
 testing.test("element rejects bad tag names", lam{ in
-    testing.assertThrows(lam{ in html.element("scr ipt", {}, "x") }, "invalid tag name")
-    testing.assertThrows(lam{ in html.element("a><b", {}, "x") }, "invalid tag name")
-    testing.assertThrows(lam{ in html.element("1bad", {}, "x") }, "must start with a letter")
-    testing.assertThrows(lam{ in html.element("", {}, "x") }, "non-empty")
+    testing.expectThrows(lam{ in html.element("scr ipt", {}, "x") }, "invalid tag name")
+    testing.expectThrows(lam{ in html.element("a><b", {}, "x") }, "invalid tag name")
+    testing.expectThrows(lam{ in html.element("1bad", {}, "x") }, "must start with a letter")
+    testing.expectThrows(lam{ in html.element("", {}, "x") }, "non-empty")
 })
 
 testing.test("element rejects bad attribute names", lam{ in
-    testing.assertThrows(lam{ in html.element("a", {"on click": "x"}, "y") },
+    testing.expectThrows(lam{ in html.element("a", {"on click": "x"}, "y") },
                          "invalid attribute name")
-    testing.assertThrows(lam{ in html.element("a", {"x=y onerror": "z"}, "y") },
+    testing.expectThrows(lam{ in html.element("a", {"x=y onerror": "z"}, "y") },
                          "invalid attribute name")
 })
 
 testing.test("element still escapes attribute values", lam{ in
     let r = html.element("a", {href: "\" onerror=\"alert(1)"}, "x")
-    testing.assert(!r.contains("\" onerror=\"alert(1)"), "raw quote must not leak")
-    testing.assert(r.contains("&quot;"), "quote must be entity-encoded")
+    testing.expect(!r.contains("\" onerror=\"alert(1)"), "raw quote must not leak")
+    testing.expect(r.contains("&quot;"), "quote must be entity-encoded")
 })
 
 testing.test("void elements self-close when content is nil", lam{ in
-    testing.assertEqual(html.element("br", nil, nil), "<br />", nil)
+    testing.expectEqual(html.element("br", nil, nil), "<br />", nil)
     let img = html.element("img", {src: "/x.png", alt: "x"}, nil)
-    testing.assert(img.endsWith(" />"), "img must self-close")
+    testing.expect(img.endsWith(" />"), "img must self-close")
 })
 
 testing.done()

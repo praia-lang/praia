@@ -2,38 +2,38 @@ use "testing"
 use "hex"
 
 testing.test("hex.encode and decode", lam{ in
-    testing.assertEqual(hex.encode("ABC"), "414243", nil)
-    testing.assertEqual(hex.decode("414243"), "ABC", nil)
-    testing.assertEqual(hex.decode(hex.encode("hello")), "hello", nil)
+    testing.expectEqual(hex.encode("ABC"), "414243", nil)
+    testing.expectEqual(hex.decode("414243"), "ABC", nil)
+    testing.expectEqual(hex.decode(hex.encode("hello")), "hello", nil)
 })
 
 testing.test("hex.fromInt", lam{ in
-    testing.assertEqual(hex.fromInt(255), "ff", nil)
-    testing.assertEqual(hex.fromInt(0), "0", nil)
-    testing.assertEqual(hex.fromInt(255, 4), "00ff", nil)
-    testing.assertEqual(hex.fromInt(0, 2), "00", nil)
+    testing.expectEqual(hex.fromInt(255), "ff", nil)
+    testing.expectEqual(hex.fromInt(0), "0", nil)
+    testing.expectEqual(hex.fromInt(255, 4), "00ff", nil)
+    testing.expectEqual(hex.fromInt(0, 2), "00", nil)
 })
 
 testing.test("hex.toInt", lam{ in
-    testing.assertEqual(hex.toInt("ff"), 255, nil)
-    testing.assertEqual(hex.toInt("FF"), 255, nil)
-    testing.assertEqual(hex.toInt("0xFF"), 255, nil)
-    testing.assertEqual(hex.toInt("0"), 0, nil)
+    testing.expectEqual(hex.toInt("ff"), 255, nil)
+    testing.expectEqual(hex.toInt("FF"), 255, nil)
+    testing.expectEqual(hex.toInt("0xFF"), 255, nil)
+    testing.expectEqual(hex.toInt("0"), 0, nil)
 })
 
 testing.test("hex.toInt roundtrip", lam{ in
-    testing.assertEqual(hex.toInt(hex.fromInt(12345)), 12345, nil)
+    testing.expectEqual(hex.toInt(hex.fromInt(12345)), 12345, nil)
 })
 
 testing.test("hex.toInt rejects invalid", lam{ in
-    testing.assertThrows(lam{ in hex.toInt("zz") }, "should reject invalid hex")
-    testing.assertThrows(lam{ in hex.toInt("") }, "should reject empty")
+    testing.expectThrows(lam{ in hex.toInt("zz") }, "should reject invalid hex")
+    testing.expectThrows(lam{ in hex.toInt("") }, "should reject empty")
 })
 
 testing.test("hex.dump", lam{ in
     let d = hex.dump("AB")
-    testing.assert(d.contains("41 42"), "dump should contain hex bytes")
-    testing.assert(d.contains("AB"), "dump should contain ASCII")
+    testing.expect(d.contains("41 42"), "dump should contain hex bytes")
+    testing.expect(d.contains("AB"), "dump should contain ASCII")
 })
 
 testing.done()

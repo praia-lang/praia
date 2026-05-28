@@ -1,35 +1,35 @@
 use "testing"
 
 testing.test("comparison type errors", lam{ in
-    testing.assertThrows(lam{ in "a" < 1 }, nil)
-    testing.assertThrows(lam{ in "a" > 1 }, nil)
-    testing.assertThrows(lam{ in "a" <= 1 }, nil)
-    testing.assertThrows(lam{ in "a" >= 1 }, nil)
+    testing.expectThrows(lam{ in "a" < 1 }, nil)
+    testing.expectThrows(lam{ in "a" > 1 }, nil)
+    testing.expectThrows(lam{ in "a" <= 1 }, nil)
+    testing.expectThrows(lam{ in "a" >= 1 }, nil)
 })
 
 testing.test("arithmetic type errors", lam{ in
-    testing.assertThrows(lam{ in "a" - 1 }, nil)
-    testing.assertThrows(lam{ in "a" * "b" }, nil)
-    testing.assertThrows(lam{ in "a" / 1 }, nil)
-    testing.assertThrows(lam{ in "a" % 1 }, nil)
+    testing.expectThrows(lam{ in "a" - 1 }, nil)
+    testing.expectThrows(lam{ in "a" * "b" }, nil)
+    testing.expectThrows(lam{ in "a" / 1 }, nil)
+    testing.expectThrows(lam{ in "a" % 1 }, nil)
 })
 
 testing.test("bitwise type errors", lam{ in
-    testing.assertThrows(lam{ in "a" & 1 }, nil)
-    testing.assertThrows(lam{ in "a" | 1 }, nil)
-    testing.assertThrows(lam{ in "a" ^ 1 }, nil)
-    testing.assertThrows(lam{ in ~"a" }, nil)
-    testing.assertThrows(lam{ in "a" << 1 }, nil)
-    testing.assertThrows(lam{ in "a" >> 1 }, nil)
+    testing.expectThrows(lam{ in "a" & 1 }, nil)
+    testing.expectThrows(lam{ in "a" | 1 }, nil)
+    testing.expectThrows(lam{ in "a" ^ 1 }, nil)
+    testing.expectThrows(lam{ in ~"a" }, nil)
+    testing.expectThrows(lam{ in "a" << 1 }, nil)
+    testing.expectThrows(lam{ in "a" >> 1 }, nil)
 })
 
 testing.test("negate type error", lam{ in
-    testing.assertThrows(lam{ in -"hello" }, nil)
+    testing.expectThrows(lam{ in -"hello" }, nil)
 })
 
 testing.test("index type errors", lam{ in
-    testing.assertThrows(lam{ in let a = [1,2,3]; a["x"] }, nil)
-    testing.assertThrows(lam{ in let a = [1,2,3]; a[99] }, nil)
+    testing.expectThrows(lam{ in let a = [1,2,3]; a["x"] }, nil)
+    testing.expectThrows(lam{ in let a = [1,2,3]; a[99] }, nil)
 })
 
 testing.test("caught errors don't leak stack frames", lam{ in
@@ -40,7 +40,7 @@ testing.test("caught errors don't leak stack frames", lam{ in
     }
     let caught = ""
     try { g() } catch (e) { caught = e }
-    testing.assertEqual(caught, "outer", nil)
+    testing.expectEqual(caught, "outer", nil)
 })
 
 testing.test("runtime error caught in try/catch", lam{ in
@@ -50,7 +50,7 @@ testing.test("runtime error caught in try/catch", lam{ in
     } catch (e) {
         caught = true
     }
-    testing.assert(caught, "should catch type error")
+    testing.expect(caught, "should catch type error")
 })
 
 testing.test("division by zero caught", lam{ in
@@ -60,7 +60,7 @@ testing.test("division by zero caught", lam{ in
     } catch (e) {
         caught = true
     }
-    testing.assert(caught, "should catch division by zero")
+    testing.expect(caught, "should catch division by zero")
 })
 
 testing.done()

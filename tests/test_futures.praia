@@ -3,21 +3,21 @@ use "testing"
 testing.test("async native function", lam{ in
     let f = async sys.exec("echo hello")
     let r = await f
-    testing.assertEqual(r.stdout, "hello", nil)
-    testing.assertEqual(r.exitCode, 0, nil)
+    testing.expectEqual(r.stdout, "hello", nil)
+    testing.expectEqual(r.exitCode, 0, nil)
 })
 
 testing.test("async Praia function", lam{ in
     func add(a, b) { return a + b }
     let f = async add(3, 4)
-    testing.assertEqual(await f, 7, nil)
+    testing.expectEqual(await f, 7, nil)
 })
 
 testing.test("async closure captures globals", lam{ in
     let base = 100
     func addBase(x) { return x + base }
     let f = async addBase(42)
-    testing.assertEqual(await f, 142, nil)
+    testing.expectEqual(await f, 142, nil)
 })
 
 testing.test("multiple async in parallel", lam{ in
@@ -25,30 +25,30 @@ testing.test("multiple async in parallel", lam{ in
     let f1 = async double(5)
     let f2 = async double(10)
     let f3 = async double(15)
-    testing.assertEqual(await f1, 10, nil)
-    testing.assertEqual(await f2, 20, nil)
-    testing.assertEqual(await f3, 30, nil)
+    testing.expectEqual(await f1, 10, nil)
+    testing.expectEqual(await f2, 20, nil)
+    testing.expectEqual(await f3, 30, nil)
 })
 
 testing.test("futures.all", lam{ in
     func square(n) { return n * n }
     let fs = map([1, 2, 3, 4, 5], lam{ n in async square(n) })
     let results = futures.all(fs)
-    testing.assertEqual(results, [1, 4, 9, 16, 25], nil)
+    testing.expectEqual(results, [1, 4, 9, 16, 25], nil)
 })
 
 testing.test("futures.all with native", lam{ in
     let f1 = async sys.exec("echo a")
     let f2 = async sys.exec("echo b")
     let results = futures.all([f1, f2])
-    testing.assertEqual(results[0].stdout, "a", nil)
-    testing.assertEqual(results[1].stdout, "b", nil)
+    testing.expectEqual(results[0].stdout, "a", nil)
+    testing.expectEqual(results[1].stdout, "b", nil)
 })
 
 testing.test("future prints as <future>", lam{ in
     func noop() { return nil }
     let f = async noop()
-    testing.assertEqual(str(f), "<future>", nil)
+    testing.expectEqual(str(f), "<future>", nil)
     await f
 })
 

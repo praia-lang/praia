@@ -9,44 +9,44 @@ use "testing"
 
 testing.test("sys.currentFile returns this script's path", lam{ in
     let f = sys.currentFile()
-    testing.assert(f != nil, "should not be nil")
-    testing.assert(f.endsWith("test_sys.praia"), "should end with test_sys.praia")
+    testing.expect(f != nil, "should not be nil")
+    testing.expect(f.endsWith("test_sys.praia"), "should end with test_sys.praia")
 })
 
 testing.test("sys.setenv and sys.env", lam{ in
     sys.setenv("PRAIA_TEST_KEY", "test_value")
-    testing.assertEqual(sys.env("PRAIA_TEST_KEY"), "test_value", nil)
+    testing.expectEqual(sys.env("PRAIA_TEST_KEY"), "test_value", nil)
 })
 
 testing.test("sys.env returns nil for missing var", lam{ in
-    testing.assertEqual(sys.env("PRAIA_NONEXISTENT_VAR_XYZ"), nil, nil)
+    testing.expectEqual(sys.env("PRAIA_NONEXISTENT_VAR_XYZ"), nil, nil)
 })
 
 testing.test("sys.cwd returns string", lam{ in
-    testing.assertEqual(type(sys.cwd()), "string", nil)
-    testing.assert(len(sys.cwd()) > 0, "cwd should not be empty")
+    testing.expectEqual(type(sys.cwd()), "string", nil)
+    testing.expect(len(sys.cwd()) > 0, "cwd should not be empty")
 })
 
 testing.test("sys.platform", lam{ in
     let p = sys.platform
-    testing.assert(p == "darwin" || p == "linux" || p == "windows", "platform should be valid")
+    testing.expect(p == "darwin" || p == "linux" || p == "windows", "platform should be valid")
 })
 
 testing.test("sys.exec returns map", lam{ in
     let r = sys.exec("echo hello")
-    testing.assertEqual(r.stdout, "hello", nil)
-    testing.assertEqual(r.exitCode, 0, nil)
+    testing.expectEqual(r.stdout, "hello", nil)
+    testing.expectEqual(r.exitCode, 0, nil)
 })
 
 testing.test("sys.exec captures stderr", lam{ in
     let r = sys.exec("echo err >&2")
-    testing.assertEqual(r.stderr, "err", nil)
-    testing.assertEqual(r.exitCode, 0, nil)
+    testing.expectEqual(r.stderr, "err", nil)
+    testing.expectEqual(r.exitCode, 0, nil)
 })
 
 testing.test("sys.exec captures exit code", lam{ in
     let r = sys.exec("exit 42")
-    testing.assertEqual(r.exitCode, 42, nil)
+    testing.expectEqual(r.exitCode, 42, nil)
 })
 
 testing.done()

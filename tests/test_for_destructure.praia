@@ -5,10 +5,10 @@ testing.test("for ({key, value} in map)", lam{ in
     for ({key, value} in {a: 1, b: 2, c: 3}) {
         push(result, key + "=" + str(value))
     }
-    testing.assertEqual(len(result), 3, nil)
-    testing.assert(result.contains("a=1"), nil)
-    testing.assert(result.contains("b=2"), nil)
-    testing.assert(result.contains("c=3"), nil)
+    testing.expectEqual(len(result), 3, nil)
+    testing.expect(result.contains("a=1"), nil)
+    testing.expect(result.contains("b=2"), nil)
+    testing.expect(result.contains("c=3"), nil)
 })
 
 testing.test("for ({key, value} in map) with break", lam{ in
@@ -17,7 +17,7 @@ testing.test("for ({key, value} in map) with break", lam{ in
         count += 1
         if (count == 2) { break }
     }
-    testing.assertEqual(count, 2, nil)
+    testing.expectEqual(count, 2, nil)
 })
 
 testing.test("for ({key, value} in map) with continue", lam{ in
@@ -26,16 +26,16 @@ testing.test("for ({key, value} in map) with continue", lam{ in
         if (value == 2) { continue }
         push(result, key)
     }
-    testing.assertEqual(len(result), 2, nil)
+    testing.expectEqual(len(result), 2, nil)
 })
 
 testing.test("old style for-in map still works", lam{ in
     let count = 0
     for (entry in {x: 10, y: 20}) {
-        testing.assert(entry.key == "x" || entry.key == "y", nil)
+        testing.expect(entry.key == "x" || entry.key == "y", nil)
         count += 1
     }
-    testing.assertEqual(count, 2, nil)
+    testing.expectEqual(count, 2, nil)
 })
 
 testing.test("destructure with partial keys", lam{ in
@@ -44,19 +44,19 @@ testing.test("destructure with partial keys", lam{ in
     for ({key} in {name: "Ada", age: 36}) {
         push(names, key)
     }
-    testing.assertEqual(len(names), 2, nil)
+    testing.expectEqual(len(names), 2, nil)
 })
 
 testing.test("for-in array unchanged", lam{ in
     let sum = 0
     for (x in [1, 2, 3]) { sum += x }
-    testing.assertEqual(sum, 6, nil)
+    testing.expectEqual(sum, 6, nil)
 })
 
 testing.test("for-in string unchanged", lam{ in
     let chars = []
     for (c in "abc") { push(chars, c) }
-    testing.assertEqual(chars, ["a", "b", "c"], nil)
+    testing.expectEqual(chars, ["a", "b", "c"], nil)
 })
 
 testing.done()

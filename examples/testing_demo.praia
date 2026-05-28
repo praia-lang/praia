@@ -22,14 +22,14 @@ func formatRow(cells, sep) {
 // ── 1. Plain assertions ──────────────────────────────────────
 
 testing.test("formatRow: basic join", lam{ in
-    testing.assertEqual(formatRow(["a", "b", "c"], ","), "a,b,c", nil)
+    testing.expectEqual(formatRow(["a", "b", "c"], ","), "a,b,c", nil)
 })
 
 // assertContains: substring, array element, or map key.
 testing.test("assertContains: three shapes", lam{ in
-    testing.assertContains("hello world", "lo w", nil)
-    testing.assertContains([1, 2, 3], 2, nil)
-    testing.assertContains({maybe: nil, real: 1}, "maybe",
+    testing.expectContains("hello world", "lo w", nil)
+    testing.expectContains([1, 2, 3], 2, nil)
+    testing.expectContains({maybe: nil, real: 1}, "maybe",
         "key with nil value still counts as present")
 })
 
@@ -38,7 +38,7 @@ testing.test("assertContains: three shapes", lam{ in
 testing.test("tempDir: auto-removed at end of test", lam{ in
     let dir = testing.tempDir()       // registered for cleanup automatically
     fs.write(dir + "/sample.csv", "name,age\nada,30\n")
-    testing.assert(fs.exists(dir + "/sample.csv"), "file exists during test")
+    testing.expect(fs.exists(dir + "/sample.csv"), "file exists during test")
     // tempDir + everything under it is removed when this test returns.
 })
 
@@ -48,10 +48,10 @@ let _testCount = 0
 testing.beforeEach(lam{ in _testCount = _testCount + 1 })
 
 testing.test("beforeEach incremented the counter — pass 1", lam{ in
-    testing.assert(_testCount > 0, "beforeEach ran")
+    testing.expect(_testCount > 0, "beforeEach ran")
 })
 testing.test("beforeEach incremented the counter — pass 2", lam{ in
-    testing.assert(_testCount > 1, "beforeEach ran again")
+    testing.expect(_testCount > 1, "beforeEach ran again")
 })
 
 // ── 4. Subtests + table-driven cases ─────────────────────────
@@ -61,15 +61,15 @@ testing.testEach("formatRow with different separators", [
     {name: "tab",     sep: "\t", want: "a\tb\tc"},
     {name: "pipe",    sep: "|",  want: "a|b|c"}
 ], lam{ t, c in
-    t.assertEqual(formatRow(["a", "b", "c"], c.sep), c.want, c.name)
+    t.expectEqual(formatRow(["a", "b", "c"], c.sep), c.want, c.name)
 })
 
 testing.test("manual subtests inside a parent test", lam{ in
     testing.subtest("empty input", lam{ t in
-        t.assertEqual(formatRow([], ","), "", nil)
+        t.expectEqual(formatRow([], ","), "", nil)
     })
     testing.subtest("single cell", lam{ t in
-        t.assertEqual(formatRow(["x"], ","), "x", nil)
+        t.expectEqual(formatRow(["x"], ","), "x", nil)
     })
 })
 

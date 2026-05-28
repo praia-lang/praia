@@ -2,30 +2,30 @@ use "testing"
 
 testing.test("construction and printing", lam{ in
     let ok = Ok(42)
-    testing.assertEqual(str(ok), "Ok(42)", nil)
-    testing.assertEqual(str(Point(1, 2)), "Point(1, 2)", nil)
-    testing.assertEqual(str(None()), "None()", nil)
+    testing.expectEqual(str(ok), "Ok(42)", nil)
+    testing.expectEqual(str(Point(1, 2)), "Point(1, 2)", nil)
+    testing.expectEqual(str(None()), "None()", nil)
 })
 
 testing.test("type is tagged", lam{ in
-    testing.assertEqual(type(Ok(1)), "tagged", nil)
+    testing.expectEqual(type(Ok(1)), "tagged", nil)
 })
 
 testing.test("tag and values fields", lam{ in
     let ok = Ok(42)
-    testing.assertEqual(ok.tag, "Ok", nil)
-    testing.assertEqual(ok.values, [42], nil)
+    testing.expectEqual(ok.tag, "Ok", nil)
+    testing.expectEqual(ok.values, [42], nil)
     let pt = Point(1, 2)
-    testing.assertEqual(pt.tag, "Point", nil)
-    testing.assertEqual(pt.values, [1, 2], nil)
+    testing.expectEqual(pt.tag, "Point", nil)
+    testing.expectEqual(pt.values, [1, 2], nil)
 })
 
 testing.test("equality", lam{ in
-    testing.assert(Ok(1) == Ok(1), nil)
-    testing.assert(Ok(1) != Ok(2), nil)
-    testing.assert(Ok(1) != Err(1), nil)
-    testing.assert(None() == None(), nil)
-    testing.assert(Point(1, 2) == Point(1, 2), nil)
+    testing.expect(Ok(1) == Ok(1), nil)
+    testing.expect(Ok(1) != Ok(2), nil)
+    testing.expect(Ok(1) != Err(1), nil)
+    testing.expect(None() == None(), nil)
+    testing.expect(Point(1, 2) == Point(1, 2), nil)
 })
 
 testing.test("match single value", lam{ in
@@ -34,7 +34,7 @@ testing.test("match single value", lam{ in
         Ok(val) { result = str(val) }
         Err(msg) { result = msg }
     }
-    testing.assertEqual(result, "42", nil)
+    testing.expectEqual(result, "42", nil)
 })
 
 testing.test("match multiple values", lam{ in
@@ -42,7 +42,7 @@ testing.test("match multiple values", lam{ in
     match (Point(3, 4)) {
         Point(x, y) { sum = x + y }
     }
-    testing.assertEqual(sum, 7, nil)
+    testing.expectEqual(sum, 7, nil)
 })
 
 testing.test("match with fallthrough", lam{ in
@@ -51,7 +51,7 @@ testing.test("match with fallthrough", lam{ in
         Ok(val) { result = "ok" }
         Err(msg) { result = msg }
     }
-    testing.assertEqual(result, "oops", nil)
+    testing.expectEqual(result, "oops", nil)
 })
 
 testing.test("match three values", lam{ in
@@ -59,12 +59,12 @@ testing.test("match three values", lam{ in
     match (RGB(10, 20, 30)) {
         RGB(r2, g, b) { r = r2 + g + b }
     }
-    testing.assertEqual(r, 60, nil)
+    testing.expectEqual(r, 60, nil)
 })
 
 testing.test("class construction still works", lam{ in
     class Foo {}
-    testing.assertEqual(type(Foo()), "instance", nil)
+    testing.expectEqual(type(Foo()), "instance", nil)
 })
 
 testing.done()

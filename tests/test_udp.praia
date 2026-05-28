@@ -6,9 +6,9 @@ testing.test("UDP send and receive", lam{ in
     net.setTimeout(server, 2000)
     net.sendTo(client, "127.0.0.1", 19876, "hello udp")
     let msg = net.recvFrom(server)
-    testing.assertEqual(msg.data, "hello udp", nil)
-    testing.assertEqual(msg.host, "127.0.0.1", nil)
-    testing.assert(msg.port > 0, "sender port should be positive")
+    testing.expectEqual(msg.data, "hello udp", nil)
+    testing.expectEqual(msg.host, "127.0.0.1", nil)
+    testing.expect(msg.port > 0, "sender port should be positive")
     net.close(server)
     net.close(client)
 })
@@ -21,17 +21,17 @@ testing.test("UDP multiple datagrams", lam{ in
     net.sendTo(client, "127.0.0.1", 19877, "msg2")
     let r1 = net.recvFrom(server)
     let r2 = net.recvFrom(server)
-    testing.assertEqual(r1.data, "msg1", nil)
-    testing.assertEqual(r2.data, "msg2", nil)
+    testing.expectEqual(r1.data, "msg1", nil)
+    testing.expectEqual(r2.data, "msg2", nil)
     net.close(server)
     net.close(client)
 })
 
 testing.test("DNS resolve localhost", lam{ in
     let ips = net.resolve("localhost")
-    testing.assert(len(ips) > 0, "should resolve at least one address")
+    testing.expect(len(ips) > 0, "should resolve at least one address")
     // May return IPv4 (127.0.0.1) and/or IPv6 (::1) depending on the system
-    testing.assert(ips.contains("127.0.0.1") || ips.contains("::1"),
+    testing.expect(ips.contains("127.0.0.1") || ips.contains("::1"),
         "should contain 127.0.0.1 or ::1")
 })
 
@@ -39,7 +39,7 @@ testing.test("net.setTimeout", lam{ in
     let sock = net.udpBind(19878)
     net.setTimeout(sock, 100)
     let result = net.recvFrom(sock)
-    testing.assert(result == nil, "recvFrom should return nil on timeout")
+    testing.expect(result == nil, "recvFrom should return nil on timeout")
     net.close(sock)
 })
 

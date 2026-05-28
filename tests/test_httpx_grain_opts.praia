@@ -58,12 +58,12 @@ testing.test("opts.jar lets callers supply a pre-existing jar", lam{ in
     let s1 = httpx.session()
     s1.get(base + "/login")                // sid=abc123 lands in s1.jar
     let savedJar = s1.jar()
-    testing.assertEqual(savedJar.size(), 1, "one cookie in saved jar")
+    testing.expectEqual(savedJar.size(), 1, "one cookie in saved jar")
     s1.close()
 
     let s2 = httpx.session({jar: savedJar})
     let r = s2.get(base + "/x")
-    testing.assert(r.status == 200,
+    testing.expect(r.status == 200,
         "second session reached the server")
     // The cookie should have been attached to s2's request — but the
     // mock server doesn't echo Cookie in this file (kept minimal).
@@ -77,7 +77,7 @@ testing.test("session-default headers don't break the request pipeline", lam{ in
     // accepts an opts.headers map without crashing.
     let s = httpx.session({headers: {"X-Trace": "abc"}})
     let r = s.get(base + "/")
-    testing.assertEqual(r.status, 200, nil)
+    testing.expectEqual(r.status, 200, nil)
     s.close()
 })
 
@@ -85,7 +85,7 @@ testing.test("request({method, url, body, headers}) round-trips", lam{ in
     let s = httpx.session()
     let r = s.request({method: "GET", url: base + "/",
                         headers: {"X-Test": "abc"}})
-    testing.assertEqual(r.status, 200, nil)
+    testing.expectEqual(r.status, 200, nil)
     s.close()
 })
 
@@ -97,7 +97,7 @@ testing.test("explicit per-call Cookie header overrides the jar", lam{ in
     // with the jar's value.
     let r = s.request({url: base + "/x",
                         headers: {Cookie: "manual=override"}})
-    testing.assertEqual(r.body, "manual=override",
+    testing.expectEqual(r.body, "manual=override",
         "per-call Cookie wins over jar")
     s.close()
 })
@@ -110,9 +110,9 @@ testing.test("Session.stream(url) threads cookies into the streamed request", la
     // jar's Cookie header — the stream handle's body echoes back
     // what the server received, so we can assert directly.
     let stream = s.stream(base + "/x")
-    testing.assertEqual(stream.status, 200, nil)
+    testing.expectEqual(stream.status, 200, nil)
     let body = stream.readAll()
-    testing.assertEqual(body, "sid=abc123",
+    testing.expectEqual(body, "sid=abc123",
         "stream request carried the jar's Cookie header")
     stream.close()
     s.close()
@@ -123,11 +123,11 @@ testing.test("Session.stream() also ingests Set-Cookie from the response", lam{ 
     let s = httpx.session()
     let stream = s.stream(base + "/login")
     stream.close()
-    testing.assertEqual(s.jar().size(), 1,
+    testing.expectEqual(s.jar().size(), 1,
         "stream response's Set-Cookie landed in the jar")
     // Follow-up request — buffered or streamed — should see it.
     let r = s.get(base + "/x")
-    testing.assertEqual(r.body, "sid=abc123",
+    testing.expectEqual(r.body, "sid=abc123",
         "next request inherits cookies that arrived via the stream")
     s.close()
 })
@@ -141,7 +141,7 @@ testing.test("lowercase 'cookie' per-call header is honored (case-insensitive)",
     s.get(base + "/login")        // sid=abc123 in jar
     let r = s.request({url: base + "/x",
                         headers: {"cookie": "lc=wins"}})
-    testing.assertEqual(r.body, "lc=wins",
+    testing.expectEqual(r.body, "lc=wins",
         "lowercase cookie still beats the jar")
     s.close()
 })

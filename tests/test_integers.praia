@@ -1,68 +1,68 @@
 use "testing"
 
 testing.test("integer type", lam{ in
-    testing.assertEqual(type(42), "int", nil)
-    testing.assertEqual(type(3.14), "float", nil)
-    testing.assertEqual(type(0), "int", nil)
+    testing.expectEqual(type(42), "int", nil)
+    testing.expectEqual(type(3.14), "float", nil)
+    testing.expectEqual(type(0), "int", nil)
 })
 
 testing.test("large integer arithmetic", lam{ in
-    testing.assertEqual(1000000000 * 1000000000, 1000000000000000000, nil)
+    testing.expectEqual(1000000000 * 1000000000, 1000000000000000000, nil)
     // Verify large int subtraction stays exact
     let big = 1000000000000000000
-    testing.assertEqual(big - 1, 999999999999999999, nil)
+    testing.expectEqual(big - 1, 999999999999999999, nil)
 })
 
 testing.test("integer division", lam{ in
     // Exact division returns int
-    testing.assertEqual(10 / 2, 5, nil)
-    testing.assertEqual(type(10 / 2), "int", nil)
-    testing.assertEqual(10 / 5, 2, nil)
-    testing.assertEqual(-6 / 3, -2, nil)
+    testing.expectEqual(10 / 2, 5, nil)
+    testing.expectEqual(type(10 / 2), "int", nil)
+    testing.expectEqual(10 / 5, 2, nil)
+    testing.expectEqual(-6 / 3, -2, nil)
     // Inexact division returns float
-    testing.assertEqual(7 / 2, 3.5, nil)
-    testing.assertEqual(type(7 / 2), "float", nil)
+    testing.expectEqual(7 / 2, 3.5, nil)
+    testing.expectEqual(type(7 / 2), "float", nil)
 })
 
 testing.test("integer modulo stays int", lam{ in
-    testing.assertEqual(17 % 5, 2, nil)
-    testing.assertEqual(type(17 % 5), "int", nil)
+    testing.expectEqual(17 % 5, 2, nil)
+    testing.expectEqual(type(17 % 5), "int", nil)
 })
 
 testing.test("compound assignment", lam{ in
     let x = 10
     x += 5
-    testing.assertEqual(x, 15, nil)
+    testing.expectEqual(x, 15, nil)
     x -= 3
-    testing.assertEqual(x, 12, nil)
+    testing.expectEqual(x, 12, nil)
     x *= 2
-    testing.assertEqual(x, 24, nil)
+    testing.expectEqual(x, 24, nil)
     x /= 4
-    testing.assertEqual(x, 6, nil)
+    testing.expectEqual(x, 6, nil)
     x %= 4
-    testing.assertEqual(x, 2, nil)
+    testing.expectEqual(x, 2, nil)
 })
 
 testing.test("postfix increment/decrement", lam{ in
     let i = 0
     i++
-    testing.assertEqual(i, 1, nil)
+    testing.expectEqual(i, 1, nil)
     i--
-    testing.assertEqual(i, 0, nil)
+    testing.expectEqual(i, 0, nil)
 })
 
 testing.test("ternary operator", lam{ in
-    testing.assertEqual(true ? "yes" : "no", "yes", nil)
-    testing.assertEqual(false ? "yes" : "no", "no", nil)
+    testing.expectEqual(true ? "yes" : "no", "yes", nil)
+    testing.expectEqual(false ? "yes" : "no", "no", nil)
     let x = 5
-    testing.assertEqual(x > 3 ? "big" : "small", "big", nil)
+    testing.expectEqual(x > 3 ? "big" : "small", "big", nil)
 })
 
 testing.test("zero is truthy", lam{ in
     // Only nil and false are falsy
-    testing.assert(0, "0 should be truthy")
-    testing.assert(1, "1 should be truthy")
-    testing.assert(-1, "-1 should be truthy")
+    testing.expect(0, "0 should be truthy")
+    testing.expect(1, "1 should be truthy")
+    testing.expect(-1, "-1 should be truthy")
 })
 
 testing.test("integer overflow throws (was: silently promoted to float)", lam{ in
@@ -75,14 +75,14 @@ testing.test("integer overflow throws (was: silently promoted to float)", lam{ i
     // hashing / equality.
     let MAX = 9223372036854775807
     let MIN = 0 - 9223372036854775807 - 1
-    testing.assertEqual(type(MAX), "int", nil)
-    testing.assertThrows(lam{ in MAX + 1 }, "overflow")
-    testing.assertThrows(lam{ in MAX * 2 }, "overflow")
-    testing.assertThrows(lam{ in MIN - 1 }, "overflow")
+    testing.expectEqual(type(MAX), "int", nil)
+    testing.expectThrows(lam{ in MAX + 1 }, "overflow")
+    testing.expectThrows(lam{ in MAX * 2 }, "overflow")
+    testing.expectThrows(lam{ in MIN - 1 }, "overflow")
     // Normal arithmetic stays int and doesn't throw.
-    testing.assertEqual(type(100 + 200), "int", nil)
-    testing.assertEqual(type(50 * 30), "int", nil)
-    testing.assertEqual(100 + 200, 300, nil)
+    testing.expectEqual(type(100 + 200), "int", nil)
+    testing.expectEqual(type(50 * 30), "int", nil)
+    testing.expectEqual(100 + 200, 300, nil)
 })
 
 testing.test("int<->float boundary equality + hashing stay consistent", lam{ in
@@ -93,14 +93,14 @@ testing.test("int<->float boundary equality + hashing stay consistent", lam{ in
     // unordered_map's invariant.
     let MAX = 9223372036854775807
     let big_float = 9223372036854775808.0   // 2^63
-    testing.assertEqual(MAX == big_float, false,
+    testing.expectEqual(MAX == big_float, false,
         "INT64_MAX != 2^63 (they differ by 1)")
     let m = {}
     m[MAX] = "int"
     m[big_float] = "float"
-    testing.assertEqual(len(m), 2, "boundary int and 2^63 are distinct keys")
-    testing.assertEqual(m[MAX], "int", nil)
-    testing.assertEqual(m[big_float], "float", nil)
+    testing.expectEqual(len(m), 2, "boundary int and 2^63 are distinct keys")
+    testing.expectEqual(m[MAX], "int", nil)
+    testing.expectEqual(m[big_float], "float", nil)
 })
 
 // Regression: comparison, hashing, and bitwise ops on int64 values used
@@ -112,13 +112,13 @@ testing.test("int<->float boundary equality + hashing stay consistent", lam{ in
 testing.test("adjacent ints above 2^53 distinguishable", lam{ in
     let a = 9007199254740992   // 2^53
     let b = 9007199254740993   // 2^53 + 1 — same double as a if routed via double
-    testing.assertEqual(a == b, false, "ints differ at int64 precision")
-    testing.assertEqual(a != b, true, nil)
-    testing.assertEqual(a < b, true, nil)
-    testing.assertEqual(b > a, true, nil)
-    testing.assertEqual(a <= b, true, nil)
-    testing.assertEqual(b >= a, true, nil)
-    testing.assertEqual(a < a, false, nil)
+    testing.expectEqual(a == b, false, "ints differ at int64 precision")
+    testing.expectEqual(a != b, true, nil)
+    testing.expectEqual(a < b, true, nil)
+    testing.expectEqual(b > a, true, nil)
+    testing.expectEqual(a <= b, true, nil)
+    testing.expectEqual(b >= a, true, nil)
+    testing.expectEqual(a < a, false, nil)
 })
 
 testing.test("big ints don't collapse as map keys", lam{ in
@@ -127,53 +127,53 @@ testing.test("big ints don't collapse as map keys", lam{ in
     let m = {}
     m[a] = "A"
     m[b] = "B"
-    testing.assertEqual(len(m), 2, "distinct keys")
-    testing.assertEqual(m[a], "A", nil)
-    testing.assertEqual(m[b], "B", nil)
+    testing.expectEqual(len(m), 2, "distinct keys")
+    testing.expectEqual(m[a], "A", nil)
+    testing.expectEqual(m[b], "B", nil)
 })
 
 testing.test("int 1 and double 1.0 still equate and share map slot", lam{ in
     // Option B preserves the conventional `1 == 1.0` from dynamic
     // languages. Hash must agree so map lookups collide.
-    testing.assertEqual(1 == 1.0, true, nil)
-    testing.assertEqual(1 < 1.5, true, nil)
-    testing.assertEqual(2 > 1.5, true, nil)
+    testing.expectEqual(1 == 1.0, true, nil)
+    testing.expectEqual(1 < 1.5, true, nil)
+    testing.expectEqual(2 > 1.5, true, nil)
     let m = {}
     m[1] = "int"
     m[1.0] = "double"
-    testing.assertEqual(len(m), 1, "1 and 1.0 share a map slot")
+    testing.expectEqual(len(m), 1, "1 and 1.0 share a map slot")
 })
 
 testing.test("bitwise ops preserve int64 precision", lam{ in
     let a = 9007199254740992  // 2^53, even
     let b = 9007199254740993  // 2^53 + 1, odd
-    testing.assertEqual(a & 1, 0, "2^53 is even")
-    testing.assertEqual(b & 1, 1, "2^53+1 is odd")
-    testing.assertEqual(a | 1, b, "OR with 1 distinguishes adjacent ints")
-    testing.assertEqual(b ^ 1, a, "XOR with 1 toggles the low bit")
+    testing.expectEqual(a & 1, 0, "2^53 is even")
+    testing.expectEqual(b & 1, 1, "2^53+1 is odd")
+    testing.expectEqual(a | 1, b, "OR with 1 distinguishes adjacent ints")
+    testing.expectEqual(b ^ 1, a, "XOR with 1 toggles the low bit")
 })
 
 // int() builtin — converts to int64. Useful for keeping int precision
 // when mixing with whole-number doubles: `bigInt + int(1.0)` stays int.
 testing.test("int() identity and bool", lam{ in
-    testing.assertEqual(int(42), 42, nil)
-    testing.assertEqual(type(int(42)), "int", nil)
-    testing.assertEqual(int(true), 1, nil)
-    testing.assertEqual(int(false), 0, nil)
+    testing.expectEqual(int(42), 42, nil)
+    testing.expectEqual(type(int(42)), "int", nil)
+    testing.expectEqual(int(true), 1, nil)
+    testing.expectEqual(int(false), 0, nil)
 })
 
 testing.test("int() truncates doubles toward zero", lam{ in
-    testing.assertEqual(int(3.7), 3, nil)
-    testing.assertEqual(int(-3.7), -3, nil)
-    testing.assertEqual(int(0.0), 0, nil)
-    testing.assertEqual(type(int(3.7)), "int", "result is int, not double")
+    testing.expectEqual(int(3.7), 3, nil)
+    testing.expectEqual(int(-3.7), -3, nil)
+    testing.expectEqual(int(0.0), 0, nil)
+    testing.expectEqual(type(int(3.7)), "int", "result is int, not double")
 })
 
 testing.test("int() parses string forms", lam{ in
-    testing.assertEqual(int("123"), 123, nil)
-    testing.assertEqual(int("-42"), -42, nil)
-    testing.assertEqual(int("3.7"), 3, "decimal string truncated")
-    testing.assertEqual(int("9223372036854775807"), 9223372036854775807,
+    testing.expectEqual(int("123"), 123, nil)
+    testing.expectEqual(int("-42"), -42, nil)
+    testing.expectEqual(int("3.7"), 3, "decimal string truncated")
+    testing.expectEqual(int("9223372036854775807"), 9223372036854775807,
                        "INT64_MAX round-trips through string")
 })
 
@@ -181,15 +181,15 @@ testing.test("int() recovers precision in mixed arithmetic", lam{ in
     // The motivating use case: int(1.0) keeps the operation on int64
     // rails instead of routing through double.
     let big = 9007199254740993
-    testing.assertEqual(big + int(1.0), 9007199254740994, nil)
-    testing.assertEqual(type(big + int(1.0)), "int", nil)
+    testing.expectEqual(big + int(1.0), 9007199254740994, nil)
+    testing.expectEqual(type(big + int(1.0)), "int", nil)
 })
 
 testing.test("int() rejects bad inputs", lam{ in
-    testing.assertThrows(lam{ in int(nil) }, "int")
-    testing.assertThrows(lam{ in int([1, 2]) }, "int")
-    testing.assertThrows(lam{ in int({a: 1}) }, "int")
-    testing.assertThrows(lam{ in int("abc") }, "int")
+    testing.expectThrows(lam{ in int(nil) }, "int")
+    testing.expectThrows(lam{ in int([1, 2]) }, "int")
+    testing.expectThrows(lam{ in int({a: 1}) }, "int")
+    testing.expectThrows(lam{ in int("abc") }, "int")
 })
 
 testing.done()

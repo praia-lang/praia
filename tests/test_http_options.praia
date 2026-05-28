@@ -109,38 +109,38 @@ let base = "http://localhost:" + str(TEST_PORT)
 
 testing.test("follows a single redirect by default", lam{ in
     let r = http.get(base + "/redirect-once")
-    testing.assertEqual(r.status, 200, nil)
-    testing.assertEqual(r.body, "destination", "ended at /final")
+    testing.expectEqual(r.status, 200, nil)
+    testing.expectEqual(r.body, "destination", "ended at /final")
 })
 
 testing.test("follows a chain of redirects", lam{ in
     let r = http.get(base + "/redirect-chain")
-    testing.assertEqual(r.status, 200, nil)
-    testing.assertEqual(r.body, "destination", "two-hop chain landed at /final")
+    testing.expectEqual(r.status, 200, nil)
+    testing.expectEqual(r.body, "destination", "two-hop chain landed at /final")
 })
 
 testing.test("followRedirects: false returns the 3xx as-is", lam{ in
     let r = http.request({url: base + "/redirect-once", followRedirects: false})
-    testing.assertEqual(r.status, 302, nil)
-    testing.assertEqual(r.headers.location, "/final", "Location preserved")
+    testing.expectEqual(r.status, 302, nil)
+    testing.expectEqual(r.headers.location, "/final", "Location preserved")
 })
 
 testing.test("maxRedirects: 3 caps a loop", lam{ in
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in http.request({url: base + "/redirect-loop", maxRedirects: 3}) },
         "redirect limit exceeded")
 })
 
 testing.test("3xx without Location is returned as-is", lam{ in
     let r = http.get(base + "/redirect-no-location")
-    testing.assertEqual(r.status, 302, "no Location → not a redirect")
-    testing.assertEqual(r.body, "no location", nil)
+    testing.expectEqual(r.status, 302, "no Location → not a redirect")
+    testing.expectEqual(r.body, "no location", nil)
 })
 
 testing.test("absolute-URL Location follows correctly", lam{ in
     let r = http.get(base + "/redirect-absolute")
-    testing.assertEqual(r.status, 200, nil)
-    testing.assertEqual(r.body, "destination", nil)
+    testing.expectEqual(r.status, 200, nil)
+    testing.expectEqual(r.body, "destination", nil)
 })
 
 testing.test("303 switches method to GET and drops the body", lam{ in
@@ -149,7 +149,7 @@ testing.test("303 switches method to GET and drops the body", lam{ in
                           body: "stuff"})
     // /echo-method-body returns "METHOD:BODY"; after 303 the follow-up
     // request is a GET with no body, so we expect "GET:".
-    testing.assertEqual(r.body, "GET:", nil)
+    testing.expectEqual(r.body, "GET:", nil)
 })
 
 testing.test("307 preserves both method and body", lam{ in
@@ -157,7 +157,7 @@ testing.test("307 preserves both method and body", lam{ in
                           url: base + "/redirect-307",
                           body: "carry-me",
                           headers: {"Content-Type": "text/plain"}})
-    testing.assertEqual(r.body, "POST:carry-me", nil)
+    testing.expectEqual(r.body, "POST:carry-me", nil)
 })
 
 // ── Timeouts ─────────────────────────────────────────────────
@@ -168,28 +168,28 @@ testing.test("connectTimeout fires on an unroutable IP", lam{ in
     // is well under the 30s default so we get a deterministic, fast
     // failure.
     let t0 = time.now()
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in http.request({url: "http://10.255.255.1/", connectTimeout: 1}) },
         "timed out")
     let elapsed = time.now() - t0
-    testing.assert(elapsed < 2000,
+    testing.expect(elapsed < 2000,
         "should have given up after ~1s, took " + str(elapsed) + "ms")
 })
 
 testing.test("totalTimeout caps a redirect loop", lam{ in
     let t0 = time.now()
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in http.request({url: base + "/redirect-loop", totalTimeout: 1}) },
         "timeout")
     let elapsed = time.now() - t0
-    testing.assert(elapsed < 2500, "fired in " + str(elapsed) + "ms")
+    testing.expect(elapsed < 2500, "fired in " + str(elapsed) + "ms")
 })
 
 testing.test("shorthand timeout sets all three", lam{ in
     // `timeout` is the convenience form — same number applied to
     // connect/read/total. Verify by triggering the connect path
     // with the shorthand.
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in http.request({url: "http://10.255.255.1/", timeout: 1}) },
         "timed out")
 })
@@ -205,13 +205,13 @@ testing.test("insecure: true is accepted without error on a plain HTTP request",
     // only affects TLS verification. Should still produce a normal
     // response.
     let r = http.request({url: base + "/", insecure: true})
-    testing.assertEqual(r.status, 200, nil)
+    testing.expectEqual(r.status, 200, nil)
 })
 
 testing.test("caBundle: missing file rejected for HTTPS request", lam{ in
     // The bad bundle path only matters for TLS; pointing at a
     // nonexistent file with an https URL should fail at load time.
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in http.request({
             url: "https://example.invalid/",
             caBundle: "/nonexistent/ca.pem",
@@ -225,11 +225,11 @@ testing.test("caBundle: missing file rejected for HTTPS request", lam{ in
 
 testing.test("readTimeout fires on a deliberately slow server", lam{ in
     let t0 = time.now()
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in http.request({url: base + "/slow", readTimeout: 1}) },
         "timed out")
     let elapsed = time.now() - t0
-    testing.assert(elapsed < 2500,
+    testing.expect(elapsed < 2500,
         "should have fired around 1s, took " + str(elapsed) + "ms")
 })
 

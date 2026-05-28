@@ -2,29 +2,29 @@ use "testing"
 
 testing.test("basic enum", lam{ in
     enum Color { Red, Green, Blue }
-    testing.assertEqual(Color.Red, 0, nil)
-    testing.assertEqual(Color.Green, 1, nil)
-    testing.assertEqual(Color.Blue, 2, nil)
+    testing.expectEqual(Color.Red, 0, nil)
+    testing.expectEqual(Color.Green, 1, nil)
+    testing.expectEqual(Color.Blue, 2, nil)
 })
 
 testing.test("enum with explicit values", lam{ in
     enum Status { OK = 200, NotFound = 404, Error = 500 }
-    testing.assertEqual(Status.OK, 200, nil)
-    testing.assertEqual(Status.NotFound, 404, nil)
-    testing.assertEqual(Status.Error, 500, nil)
+    testing.expectEqual(Status.OK, 200, nil)
+    testing.expectEqual(Status.NotFound, 404, nil)
+    testing.expectEqual(Status.Error, 500, nil)
 })
 
 testing.test("enum auto-increment after explicit", lam{ in
     enum Level { Low = 10, Medium, High }
-    testing.assertEqual(Level.Low, 10, nil)
-    testing.assertEqual(Level.Medium, 11, nil)
-    testing.assertEqual(Level.High, 12, nil)
+    testing.expectEqual(Level.Low, 10, nil)
+    testing.expectEqual(Level.Medium, 11, nil)
+    testing.expectEqual(Level.High, 12, nil)
 })
 
 testing.test("enum is a map", lam{ in
     enum Dir { Up, Down, Left, Right }
-    testing.assertEqual(type(Dir), "map", nil)
-    testing.assertEqual(len(keys(Dir)), 4, nil)
+    testing.expectEqual(type(Dir), "map", nil)
+    testing.expectEqual(len(keys(Dir)), 4, nil)
 })
 
 testing.done()

@@ -1,45 +1,45 @@
 use "testing"
 
 testing.test("addition and subtraction", lam{ in
-    testing.assertEqual(1 + 2, 3, nil)
-    testing.assertEqual(10 - 7, 3, nil)
-    testing.assertEqual(-5 + 5, 0, nil)
+    testing.expectEqual(1 + 2, 3, nil)
+    testing.expectEqual(10 - 7, 3, nil)
+    testing.expectEqual(-5 + 5, 0, nil)
 })
 
 testing.test("multiplication and division", lam{ in
-    testing.assertEqual(6 * 7, 42, nil)
-    testing.assertEqual(20 / 4, 5, nil)
-    testing.assertEqual(10 / 3, 3.3333333333333335, nil)
+    testing.expectEqual(6 * 7, 42, nil)
+    testing.expectEqual(20 / 4, 5, nil)
+    testing.expectEqual(10 / 3, 3.3333333333333335, nil)
 })
 
 testing.test("modulo", lam{ in
-    testing.assertEqual(10 % 3, 1, nil)
-    testing.assertEqual(14 % 7, 0, nil)
+    testing.expectEqual(10 % 3, 1, nil)
+    testing.expectEqual(14 % 7, 0, nil)
 })
 
 testing.test("precedence", lam{ in
-    testing.assertEqual(2 + 3 * 4, 14, nil)
-    testing.assertEqual((2 + 3) * 4, 20, nil)
-    testing.assertEqual(20 - 4 / 2, 18, nil)
+    testing.expectEqual(2 + 3 * 4, 14, nil)
+    testing.expectEqual((2 + 3) * 4, 20, nil)
+    testing.expectEqual(20 - 4 / 2, 18, nil)
 })
 
 testing.test("unary negation", lam{ in
-    testing.assertEqual(-42, 0 - 42, nil)
+    testing.expectEqual(-42, 0 - 42, nil)
     let x = 5
-    testing.assertEqual(-x, -5, nil)
+    testing.expectEqual(-x, -5, nil)
 })
 
 testing.test("bitwise operators", lam{ in
-    testing.assertEqual(240 & 60, 48, nil)
-    testing.assertEqual(15 | 240, 255, nil)
-    testing.assertEqual(255 ^ 15, 240, nil)
-    testing.assertEqual(1 << 4, 16, nil)
-    testing.assertEqual(32 >> 2, 8, nil)
+    testing.expectEqual(240 & 60, 48, nil)
+    testing.expectEqual(15 | 240, 255, nil)
+    testing.expectEqual(255 ^ 15, 240, nil)
+    testing.expectEqual(1 << 4, 16, nil)
+    testing.expectEqual(32 >> 2, 8, nil)
 })
 
 testing.test("division by zero throws", lam{ in
-    testing.assertThrows(lam{ in 10 / 0 }, nil)
-    testing.assertThrows(lam{ in 5 % 0 }, nil)
+    testing.expectThrows(lam{ in 10 / 0 }, nil)
+    testing.expectThrows(lam{ in 5 % 0 }, nil)
 })
 
 testing.done()

@@ -10,8 +10,8 @@ testing.test("manifest round-trips bin: entries", lam{ in
     m.bin = {prscan: "bin/prscan.praia", helper: "bin/helper.praia"}
     manifest.write(dir, m)
     let r = manifest.read(dir)
-    testing.assertEqual(r.bin.prscan, "bin/prscan.praia", nil)
-    testing.assertEqual(r.bin.helper, "bin/helper.praia", nil)
+    testing.expectEqual(r.bin.prscan, "bin/prscan.praia", nil)
+    testing.expectEqual(r.bin.helper, "bin/helper.praia", nil)
 })
 
 testing.test("manifest write skips empty bin: map", lam{ in
@@ -20,35 +20,35 @@ testing.test("manifest write skips empty bin: map", lam{ in
     // no m.bin field — write shouldn't emit a bin: section
     manifest.write(dir, m)
     let written = fs.read(path.join(dir, "grain.yaml"))
-    testing.assert(!written.contains("bin:"), "no bin: section without entries")
+    testing.expect(!written.contains("bin:"), "no bin: section without entries")
 })
 
 // ── validators ────────────────────────────────────────────────
 
 testing.test("bin name validator: alphanumeric, _, -", lam{ in
-    testing.assertEqual(manifest.isValidBinName("prscan"), true, nil)
-    testing.assertEqual(manifest.isValidBinName("prscan-cli"), true, nil)
-    testing.assertEqual(manifest.isValidBinName("pr_scan"), true, nil)
+    testing.expectEqual(manifest.isValidBinName("prscan"), true, nil)
+    testing.expectEqual(manifest.isValidBinName("prscan-cli"), true, nil)
+    testing.expectEqual(manifest.isValidBinName("pr_scan"), true, nil)
 })
 
 testing.test("bin name validator rejects unsafe forms", lam{ in
-    testing.assertEqual(manifest.isValidBinName(""), false, nil)
-    testing.assertEqual(manifest.isValidBinName("../escape"), false, nil)
-    testing.assertEqual(manifest.isValidBinName("foo/bar"), false, nil)
-    testing.assertEqual(manifest.isValidBinName(".hidden"), false, "leading dot")
-    testing.assertEqual(manifest.isValidBinName("-flag"), false, "leading dash")
+    testing.expectEqual(manifest.isValidBinName(""), false, nil)
+    testing.expectEqual(manifest.isValidBinName("../escape"), false, nil)
+    testing.expectEqual(manifest.isValidBinName("foo/bar"), false, nil)
+    testing.expectEqual(manifest.isValidBinName(".hidden"), false, "leading dot")
+    testing.expectEqual(manifest.isValidBinName("-flag"), false, "leading dash")
 })
 
 testing.test("bin path validator: relative .praia files only", lam{ in
-    testing.assertEqual(manifest.isValidBinPath("bin/foo.praia"), true, nil)
-    testing.assertEqual(manifest.isValidBinPath("main.praia"), true, nil)
+    testing.expectEqual(manifest.isValidBinPath("bin/foo.praia"), true, nil)
+    testing.expectEqual(manifest.isValidBinPath("main.praia"), true, nil)
 })
 
 testing.test("bin path validator rejects unsafe forms", lam{ in
-    testing.assertEqual(manifest.isValidBinPath("/abs/path.praia"), false, nil)
-    testing.assertEqual(manifest.isValidBinPath("a/../b.praia"), false, nil)
-    testing.assertEqual(manifest.isValidBinPath("x.txt"), false, "wrong extension")
-    testing.assertEqual(manifest.isValidBinPath(""), false, nil)
+    testing.expectEqual(manifest.isValidBinPath("/abs/path.praia"), false, nil)
+    testing.expectEqual(manifest.isValidBinPath("a/../b.praia"), false, nil)
+    testing.expectEqual(manifest.isValidBinPath("x.txt"), false, "wrong extension")
+    testing.expectEqual(manifest.isValidBinPath(""), false, nil)
 })
 
 testing.test("manifest.read throws on invalid bin name", lam{ in
@@ -57,7 +57,7 @@ testing.test("manifest.read throws on invalid bin name", lam{ in
     // through manifest.write because the validator there would reject.
     fs.write(path.join(dir, "grain.yaml"),
         "name: bad\nversion: 0.1.0\nbin:\n  ../escape: bin/x.praia\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in manifest.read(dir) },
         "rejected: bad bin name")
 })
@@ -66,7 +66,7 @@ testing.test("manifest.read throws on invalid bin path", lam{ in
     let dir = testing.tempDir(nil)
     fs.write(path.join(dir, "grain.yaml"),
         "name: bad\nversion: 0.1.0\nbin:\n  x: /etc/passwd\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in manifest.read(dir) },
         "rejected: absolute path")
 })
@@ -89,14 +89,14 @@ testing.test("bin.wrapperContent format matches the Makefile bootstrap", lam{ in
                    "# sand-managed wrapper for sand\n" +
                    "exec '/usr/local/bin/praia' " +
                    "'/usr/local/lib/praia/ext_grains/sand/main.praia' \"$@\"\n"
-    testing.assertEqual(w, expected, "wrapper byte-identical to bootstrap form")
+    testing.expectEqual(w, expected, "wrapper byte-identical to bootstrap form")
 })
 
 testing.test("bin.wrapperContent escapes single quotes in paths", lam{ in
     // POSIX escape: `'O'\''Brien'` for a path with a single quote.
     let w = bin.wrapperContent("foo", "/usr/local/bin/praia",
                                 "/Users/O'Brien/foo.praia")
-    testing.assert(w.contains("'/Users/O'\\''Brien/foo.praia'"),
+    testing.expect(w.contains("'/Users/O'\\''Brien/foo.praia'"),
                     "single quote inside path is POSIX-escaped: " + w)
 })
 
@@ -110,20 +110,20 @@ testing.test("bin.wrapperContent neutralizes shell metachars in paths", lam{ in
     let evil = "/tmp/grain/evil\"; rm -rf ~; \".praia"
     let w = bin.wrapperContent("evil", "/usr/local/bin/praia", evil)
     // The evil path is preserved verbatim inside the single-quoted arg.
-    testing.assert(w.contains("'" + evil + "'"),
+    testing.expect(w.contains("'" + evil + "'"),
                     "evil path wrapped in single quotes verbatim: " + w)
     // And the wrapper contains exactly two single-quoted args before
     // "$@" — no extra `;` or unbalanced quote sneaks in.
     let execLine = "exec '/usr/local/bin/praia' '" + evil + "' \"$@\"\n"
-    testing.assert(w.endsWith(execLine),
+    testing.expect(w.endsWith(execLine),
                     "exec line uses single-quoted form, ends correctly: " + w)
 })
 
 testing.test("bin.isReserved blocks praia and sand only", lam{ in
-    testing.assertEqual(bin.isReserved("praia"), true, nil)
-    testing.assertEqual(bin.isReserved("sand"), true, nil)
-    testing.assertEqual(bin.isReserved("prscan"), false, nil)
-    testing.assertEqual(bin.isReserved(""), false, nil)
+    testing.expectEqual(bin.isReserved("praia"), true, nil)
+    testing.expectEqual(bin.isReserved("sand"), true, nil)
+    testing.expectEqual(bin.isReserved("prscan"), false, nil)
+    testing.expectEqual(bin.isReserved(""), false, nil)
 })
 
 // ── install / remove cycle, in-memory only (no PATH side effects) ──
@@ -136,14 +136,14 @@ testing.test("bin.install writes wrappers, bin.remove cleans up", lam{ in
 
     let m = {name: "demo", version: "0.1.0", bin: {ok: "bin/ok.praia"}}
     let result = bin.install(grainDir, m, binDir)
-    testing.assertEqual(len(result.written), 1, "one wrapper written")
-    testing.assert(fs.exists(result.written[0]), "wrapper exists on disk")
-    testing.assert(bin.isSandManaged(result.written[0]), "wrapper carries sentinel")
-    testing.assertEqual(len(result.restorable), 0,
+    testing.expectEqual(len(result.written), 1, "one wrapper written")
+    testing.expect(fs.exists(result.written[0]), "wrapper exists on disk")
+    testing.expect(bin.isSandManaged(result.written[0]), "wrapper carries sentinel")
+    testing.expectEqual(len(result.restorable), 0,
         "fresh install has nothing to restore (no prior wrappers overwritten)")
 
     bin.remove(m, binDir)
-    testing.assert(!fs.exists(result.written[0]), "wrapper removed")
+    testing.expect(!fs.exists(result.written[0]), "wrapper removed")
 })
 
 testing.test("bin.install rejects reserved names without allowReserved", lam{ in
@@ -152,7 +152,7 @@ testing.test("bin.install rejects reserved names without allowReserved", lam{ in
     fs.mkdir(path.join(grainDir, "bin"))
     fs.write(path.join(grainDir, "bin", "x.praia"), "print(\"x\")\n")
     let m = {name: "evil", version: "0.1.0", bin: {sand: "bin/x.praia"}}
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in bin.install(grainDir, m, binDir) },
         "reserved name rejected")
 })
@@ -168,10 +168,10 @@ testing.test("bin.install rolls back partial writes on failure", lam{ in
         name: "demo", version: "0.1.0",
         bin: {a: "bin/a.praia", b: "bin/missing.praia"}
     }
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in bin.install(grainDir, m, binDir) },
         "throws on missing script")
-    testing.assert(!fs.exists(path.join(binDir, "a")),
+    testing.expect(!fs.exists(path.join(binDir, "a")),
                     "first wrapper was rolled back")
 })
 
@@ -195,18 +195,18 @@ testing.test("bin.install restores prior sand-managed wrapper on rollback", lam{
     fs.write(target, prior)
     fs.chmod(target, 0o755)
 
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in bin.install(grainDir, m, binDir) },
         "throws on missing second script")
-    testing.assert(fs.exists(target),
+    testing.expect(fs.exists(target),
                     "prior wrapper restored (not unlinked)")
-    testing.assertEqual(fs.read(target), prior,
+    testing.expectEqual(fs.read(target), prior,
                          "prior wrapper bytes restored exactly")
     // Catch chmod regressions in the rollback path — bytes alone
     // don't tell us if the file became unexecutable. Mask to 0o777
     // because fs.stat may report setuid/setgid/sticky bits we don't
     // care about here.
-    testing.assertEqual(fs.stat(target).mode & 0o777, 0o755,
+    testing.expectEqual(fs.stat(target).mode & 0o777, 0o755,
                          "prior wrapper mode (0o755) restored exactly")
 })
 
@@ -218,11 +218,11 @@ testing.test("bin.install refuses to overwrite foreign files", lam{ in
     // Plant a hand-written script with the same name as our bin entry.
     fs.write(path.join(binDir, "ok"), "#!/bin/sh\necho not ours\n")
     let m = {name: "demo", version: "0.1.0", bin: {ok: "bin/ok.praia"}}
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in bin.install(grainDir, m, binDir) },
         "foreign file protected")
     // Foreign file untouched.
-    testing.assertEqual(fs.read(path.join(binDir, "ok")),
+    testing.expectEqual(fs.read(path.join(binDir, "ok")),
                          "#!/bin/sh\necho not ours\n", nil)
 })
 

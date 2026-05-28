@@ -16,29 +16,29 @@ if (!fs.exists(pluginPath)) {
 let mathext = loadNative(pluginPath)
 
 testing.test("gcd", lam{ in
-    testing.assertEqual(mathext.gcd(48, 18), 6, nil)
-    testing.assertEqual(mathext.gcd(100, 75), 25, nil)
-    testing.assertEqual(mathext.gcd(7, 13), 1, nil)
+    testing.expectEqual(mathext.gcd(48, 18), 6, nil)
+    testing.expectEqual(mathext.gcd(100, 75), 25, nil)
+    testing.expectEqual(mathext.gcd(7, 13), 1, nil)
 })
 
 testing.test("lcm", lam{ in
-    testing.assertEqual(mathext.lcm(12, 8), 24, nil)
-    testing.assertEqual(mathext.lcm(0, 5), 0, nil)
+    testing.expectEqual(mathext.lcm(12, 8), 24, nil)
+    testing.expectEqual(mathext.lcm(0, 5), 0, nil)
 })
 
 testing.test("fibonacci", lam{ in
-    testing.assertEqual(mathext.fibonacci(0), 0, nil)
-    testing.assertEqual(mathext.fibonacci(1), 1, nil)
-    testing.assertEqual(mathext.fibonacci(10), 55, nil)
+    testing.expectEqual(mathext.fibonacci(0), 0, nil)
+    testing.expectEqual(mathext.fibonacci(1), 1, nil)
+    testing.expectEqual(mathext.fibonacci(10), 55, nil)
 })
 
 testing.test("hypot", lam{ in
-    testing.assertEqual(mathext.hypot(3, 4), 5, nil)
+    testing.expectEqual(mathext.hypot(3, 4), 5, nil)
 })
 
 testing.test("sum", lam{ in
-    testing.assertEqual(mathext.sum([1, 2, 3, 4, 5]), 15, nil)
-    testing.assertEqual(mathext.sum([]), 0, nil)
+    testing.expectEqual(mathext.sum([1, 2, 3, 4, 5]), 15, nil)
+    testing.expectEqual(mathext.sum([]), 0, nil)
 })
 
 testing.test("filter — plugin invokes a Praia callback via praia::call", lam{ in
@@ -47,25 +47,25 @@ testing.test("filter — plugin invokes a Praia callback via praia::call", lam{ 
     // where the predicate returns truthy. If the helper or its
     // engine-dispatch shim breaks, this fails.
     let kept = mathext.filter([1, 2, 3, 4, 5, 6], lam{ x in x > 3 })
-    testing.assertEqual(kept, [4, 5, 6], nil)
+    testing.expectEqual(kept, [4, 5, 6], nil)
     // Empty input — predicate is never called.
-    testing.assertEqual(mathext.filter([], lam{ x in true }), [], nil)
+    testing.expectEqual(mathext.filter([], lam{ x in true }), [], nil)
     // Named function (not just inline lambda).
     func isEven(n) { return n % 2 == 0 }
-    testing.assertEqual(mathext.filter([1, 2, 3, 4, 5], isEven), [2, 4], nil)
+    testing.expectEqual(mathext.filter([1, 2, 3, 4, 5], isEven), [2, 4], nil)
 })
 
 testing.test("filter — non-callable predicate throws cleanly", lam{ in
-    testing.assertThrows(lam{ in mathext.filter([1, 2, 3], 42) }, nil)
+    testing.expectThrows(lam{ in mathext.filter([1, 2, 3], 42) }, nil)
 })
 
 testing.test("plugin metadata surfaces on _meta", lam{ in
     // PRAIA_PLUGIN_METADATA() in mathext.cpp populates these.
     // Plugins that don't declare metadata get no `_meta` key —
     // tested implicitly by every other test that ignores it.
-    testing.assertEqual(mathext._meta.name, "mathext", nil)
-    testing.assertEqual(mathext._meta.version, "0.1.0", nil)
-    testing.assert(mathext._meta.description.contains("math"),
+    testing.expectEqual(mathext._meta.name, "mathext", nil)
+    testing.expectEqual(mathext._meta.version, "0.1.0", nil)
+    testing.expect(mathext._meta.description.contains("math"),
         "description present: " + str(mathext._meta.description))
 })
 
@@ -73,11 +73,11 @@ testing.test("native function accepts named arguments", lam{ in
     // gcd declares paramNames {a, b} via the trailing arg of
     // makeNative — without that, this call would fail with
     // "Named arguments not supported for 'mathext.gcd'".
-    testing.assertEqual(mathext.gcd(a: 48, b: 18), 6, nil)
-    testing.assertEqual(mathext.gcd(b: 18, a: 48), 6,
+    testing.expectEqual(mathext.gcd(a: 48, b: 18), 6, nil)
+    testing.expectEqual(mathext.gcd(b: 18, a: 48), 6,
         "order-independent named call")
     // Positional dispatch still works (back-compat).
-    testing.assertEqual(mathext.gcd(48, 18), 6, nil)
+    testing.expectEqual(mathext.gcd(48, 18), 6, nil)
 })
 
 testing.test("require helpers produce canonical error wording", lam{ in
@@ -85,8 +85,8 @@ testing.test("require helpers produce canonical error wording", lam{ in
     // number" — matches the wording the engine's own builtins use.
     let err = nil
     try { mathext.gcd("not a number", 5) } catch (e) { err = str(e) }
-    testing.assert(err != nil, "type mismatch must throw")
-    testing.assert(err.contains("mathext.gcd() argument 1 must be a number"),
+    testing.expect(err != nil, "type mismatch must throw")
+    testing.expect(err.contains("mathext.gcd() argument 1 must be a number"),
         "canonical wording: " + str(err))
 })
 
@@ -94,13 +94,13 @@ testing.test("gcd rejects floats that don't safely cast to int64", lam{ in
     // Plain static_cast<int64_t> on a double is UB for NaN, ±Inf,
     // non-integer values, and values outside int64 range. gcd's
     // toInt64 helper guards each case and throws a clean error.
-    testing.assertThrows(lam{ in mathext.gcd(3.5, 2) }, nil)
-    testing.assertThrows(lam{ in mathext.gcd(1e308, 2) }, nil)
+    testing.expectThrows(lam{ in mathext.gcd(3.5, 2) }, nil)
+    testing.expectThrows(lam{ in mathext.gcd(1e308, 2) }, nil)
     // 9.22e18 ≈ 2^63 — exactly representable as a double, but one
     // past INT64_MAX (which itself can't be represented). Must reject.
-    testing.assertThrows(lam{ in mathext.gcd(9223372036854775807, 2) }, nil)
+    testing.expectThrows(lam{ in mathext.gcd(9223372036854775807, 2) }, nil)
     // Integer-valued floats still cast cleanly.
-    testing.assertEqual(mathext.gcd(48.0, 18), 6, nil)
+    testing.expectEqual(mathext.gcd(48.0, 18), 6, nil)
 })
 
 testing.test("A1 regression — isNumber-guarded plugin accepts floats", lam{ in
@@ -109,21 +109,21 @@ testing.test("A1 regression — isNumber-guarded plugin accepts floats", lam{ in
     // float argument. mathext.gcd is similarly isNumber-guarded
     // and now does `static_cast<int64_t>(asNumber())` — so a
     // float-valued integer flows through without surprises.
-    testing.assertEqual(mathext.gcd(48.0, 18), 6, nil)
-    testing.assertEqual(mathext.hypot(3.0, 4.0), 5, nil)
+    testing.expectEqual(mathext.gcd(48.0, 18), 6, nil)
+    testing.expectEqual(mathext.hypot(3.0, 4.0), 5, nil)
 })
 
 testing.test("cached load returns same module", lam{ in
     let mathext2 = loadNative(pluginPath)
-    testing.assertEqual(mathext2.gcd(100, 75), 25, nil)
+    testing.expectEqual(mathext2.gcd(100, 75), 25, nil)
 })
 
 testing.test("bad path throws", lam{ in
-    testing.assertThrows(lam{ in loadNative("nonexistent.so") }, nil)
+    testing.expectThrows(lam{ in loadNative("nonexistent.so") }, nil)
 })
 
 testing.test("non-string throws", lam{ in
-    testing.assertThrows(lam{ in loadNative(42) }, nil)
+    testing.expectThrows(lam{ in loadNative(42) }, nil)
 })
 
 testing.test("ABI version: missing declaration is rejected", lam{ in
@@ -169,14 +169,14 @@ testing.test("ABI version: missing declaration is rejected", lam{ in
     let r = sys.exec(cmd)
     // A compile failure here means a header/flag regression — surface
     // both stdout and stderr instead of silently skipping past it.
-    testing.assertEqual(r.exitCode, 0,
+    testing.expectEqual(r.exitCode, 0,
         "c++ compile of the no-ABI fixture failed:\n" +
         "stderr: " + r.stderr + "\nstdout: " + r.stdout)
 
     let err = nil
     try { loadNative(out) } catch (e) { err = str(e) }
-    testing.assert(err != nil, "loadNative must reject the no-ABI plugin")
-    testing.assert(err.contains("ABI"),
+    testing.expect(err != nil, "loadNative must reject the no-ABI plugin")
+    testing.expect(err.contains("ABI"),
         "error message mentions ABI: " + str(err))
 })
 
@@ -193,16 +193,16 @@ let counter = loadNative(counterPath)
 
 testing.test("opaque handle: round-trip via inc/value/reset", lam{ in
     let h = counter.new()
-    testing.assertEqual(counter.value(h), 0, "fresh handle starts at 0")
+    testing.expectEqual(counter.value(h), 0, "fresh handle starts at 0")
     counter.inc(h); counter.inc(h); counter.inc(h)
-    testing.assertEqual(counter.value(h), 3, "three inc steps land at 3")
+    testing.expectEqual(counter.value(h), 3, "three inc steps land at 3")
     counter.reset(h)
-    testing.assertEqual(counter.value(h), 0, "reset returns to 0")
+    testing.expectEqual(counter.value(h), 0, "reset returns to 0")
 })
 
 testing.test("opaque handle: toString shows the type tag", lam{ in
     let h = counter.new()
-    testing.assertEqual(str(h), "<external:counter.handle>",
+    testing.expectEqual(str(h), "<external:counter.handle>",
         "tag format includes type name")
 })
 
@@ -211,16 +211,16 @@ testing.test("opaque handle: getExternal rejects non-external values", lam{ in
     // throws with a clear "expected an external handle of type X".
     let err = nil
     try { counter.value("not a handle") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw on non-external")
-    testing.assert(err.contains("external handle") && err.contains("counter.handle"),
+    testing.expect(err != nil, "must throw on non-external")
+    testing.expect(err.contains("external handle") && err.contains("counter.handle"),
         "error names the expected type: " + str(err))
 })
 
 testing.test("opaque handle: getExternal rejects int Values", lam{ in
     let err = nil
     try { counter.value(42) } catch (e) { err = str(e) }
-    testing.assert(err != nil, nil)
-    testing.assert(err.contains("external handle"), str(err))
+    testing.expect(err != nil, nil)
+    testing.expect(err.contains("external handle"), str(err))
 })
 
 testing.test("opaque handle: destructor fires when reference drops", lam{ in
@@ -233,7 +233,7 @@ testing.test("opaque handle: destructor fires when reference drops", lam{ in
     counter.inc(h)
     h = nil
     let after = counter._destructorCount()
-    testing.assertEqual(after - before, 1,
+    testing.expectEqual(after - before, 1,
         "exactly one destructor fired between create and drop")
 })
 
@@ -250,7 +250,7 @@ testing.test("opaque handle: destructor fires under GC pressure", lam{ in
     }
     h = nil   // drop the final retained handle too
     let after = counter._destructorCount()
-    testing.assertEqual(after - before, 600,
+    testing.expectEqual(after - before, 600,
         "600 handles created, 600 destructors fired")
 })
 
@@ -283,7 +283,7 @@ testing.test("stashed callback survives GC pressure with its upvalue", lam{ in
         h = counter.new()   // pure allocation churn — trips the GC
     }
     h = nil
-    testing.assertEqual(counter.callStored(), "alive",
+    testing.expectEqual(counter.callStored(), "alive",
         "pinned closure + upvalue survived the sweep")
     counter.clearStored()
 })
@@ -307,7 +307,7 @@ testing.test("postToEngine: worker thread can marshal a callback back", lam{ in
         let _x = counter.new()       // allocate, also yields to drain
         time.sleep(2)
     }
-    testing.assert(state.received,
+    testing.expect(state.received,
         "callback should have fired before the busy-wait gave up")
 })
 
@@ -323,7 +323,7 @@ testing.test("postToEngine: trailing args ride the queue across threads", lam{ i
         let _x = counter.new()
         time.sleep(2)
     }
-    testing.assertEqual(result.value, "from-worker",
+    testing.expectEqual(result.value, "from-worker",
         "argument value crossed the post intact")
 })
 
@@ -337,8 +337,8 @@ testing.test("callStored after clearStored throws (slot cleared)", lam{ in
     counter.clearStored()
     let err = nil
     try { counter.callStored() } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw after clearStored")
-    testing.assert(err.contains("no callback stored"), str(err))
+    testing.expect(err != nil, "must throw after clearStored")
+    testing.expect(err.contains("no callback stored"), str(err))
 })
 
 testing.test("shouldCancel returns nil outside withCancel scope", lam{ in
@@ -346,7 +346,7 @@ testing.test("shouldCancel returns nil outside withCancel scope", lam{ in
     // on the C++ side, which the plugin surfaces as Praia nil. This
     // is the default state plugin code must handle as "no
     // cancellation requested" (run to completion).
-    testing.assertEqual(counter._cancelState(), nil,
+    testing.expectEqual(counter._cancelState(), nil,
         "nil before any withCancel scope")
 })
 
@@ -357,10 +357,10 @@ testing.test("shouldCancel returns false inside withCancel, not cancelled", lam{
     // token IS in scope but no cancel has been requested.
     let tok = CancellationToken()
     let inside = withCancel(tok, lam{ in return counter._cancelState() })
-    testing.assertEqual(inside, false,
+    testing.expectEqual(inside, false,
         "false while withCancel scope is active and uncancelled")
     // And the scope unbinds on exit — should be back to nil.
-    testing.assertEqual(counter._cancelState(), nil,
+    testing.expectEqual(counter._cancelState(), nil,
         "nil restored after withCancel returns")
 })
 
@@ -370,7 +370,7 @@ testing.test("shouldCancel returns true after token.cancel()", lam{ in
     let tok = CancellationToken()
     tok.cancel()
     let seen = withCancel(tok, lam{ in return counter._cancelState() })
-    testing.assertEqual(seen, true,
+    testing.expectEqual(seen, true,
         "true when scope's token is already cancelled")
 })
 
@@ -386,7 +386,7 @@ testing.test("nested withCancel restores outer scope on inner return", lam{ in
         let afterInner = counter._cancelState()  // false again (outer restored)
         return [beforeInner, duringInner, afterInner]
     })
-    testing.assertEqual(observed, [false, true, false],
+    testing.expectEqual(observed, [false, true, false],
         "nested scope restores outer token on return")
 })
 
@@ -400,8 +400,8 @@ testing.test("withCancel unbinds on exception from fn", lam{ in
     try {
         withCancel(tok, lam{ in throw "boom" })
     } catch (e) { caught = str(e) }
-    testing.assertEqual(caught, "boom", "exception propagated through withCancel")
-    testing.assertEqual(counter._cancelState(), nil,
+    testing.expectEqual(caught, "boom", "exception propagated through withCancel")
+    testing.expectEqual(counter._cancelState(), nil,
         "scope unbound even when fn threw")
 })
 
@@ -420,12 +420,12 @@ testing.test("praia_at_exit hook fires once at process exit", lam{ in
     let praiaBin = path.join(sys.cwd(), "praia")
     let result = sys.exec(["env", "PRAIA_COUNTER_AT_EXIT_MARKER=" + marker,
         praiaBin, "-c", "loadNative('./examples/plugins/counter')"])
-    testing.assertEqual(result.exitCode, 0,
+    testing.expectEqual(result.exitCode, 0,
         "child exited cleanly (stderr: " + result.stderr + ")")
-    testing.assert(fs.exists(marker),
+    testing.expect(fs.exists(marker),
         "marker file written by the at_exit hook")
     let contents = fs.read(marker)
-    testing.assertEqual(contents, "counter.at_exit ran\n",
+    testing.expectEqual(contents, "counter.at_exit ran\n",
         "hook wrote the expected marker line")
     if (fs.exists(marker)) { fs.remove(marker) }
 })
@@ -440,8 +440,8 @@ testing.test("praia_at_exit hook fires on sys.exit() too", lam{ in
     let praiaBin = path.join(sys.cwd(), "praia")
     let result = sys.exec(["env", "PRAIA_COUNTER_AT_EXIT_MARKER=" + marker,
         praiaBin, "-c", "loadNative('./examples/plugins/counter'); sys.exit(0)"])
-    testing.assertEqual(result.exitCode, 0, "sys.exit(0) → clean exit")
-    testing.assert(fs.exists(marker),
+    testing.expectEqual(result.exitCode, 0, "sys.exit(0) → clean exit")
+    testing.expect(fs.exists(marker),
         "marker present even when child exited via sys.exit")
     if (fs.exists(marker)) { fs.remove(marker) }
 })
@@ -458,7 +458,7 @@ testing.test("compute native bails early when cancelled cross-thread", lam{ in
     time.sleep(50)
     tok.cancel()
     let done = await fut
-    testing.assert(done < 10000000000,
+    testing.expect(done < 10000000000,
         "bailed out before completing the full loop (got " + str(done) + ")")
 })
 
@@ -467,7 +467,7 @@ testing.test("Promise: resolve-before-await delivers the value", lam{ in
     // await, but await must work either way (it just observes the
     // already-fulfilled future). This covers the happy path.
     let v = await counter.fetch(0, "hello")
-    testing.assertEqual(v, "hello", "fetch round-tripped the value")
+    testing.expectEqual(v, "hello", "fetch round-tripped the value")
 })
 
 testing.test("Promise: resolve-after-await blocks until fulfilled", lam{ in
@@ -477,8 +477,8 @@ testing.test("Promise: resolve-after-await blocks until fulfilled", lam{ in
     let startMs = time.now()
     let v = await counter.fetch(50, "delayed")
     let elapsedMs = time.now() - startMs
-    testing.assertEqual(v, "delayed", "delayed fetch returned the right value")
-    testing.assert(elapsedMs >= 40,
+    testing.expectEqual(v, "delayed", "delayed fetch returned the right value")
+    testing.expect(elapsedMs >= 40,
         "await blocked for the delay (elapsed " + str(elapsedMs) + "ms)")
 })
 
@@ -490,7 +490,7 @@ testing.test("Promise: reject surfaces the message verbatim", lam{ in
     try {
         await counter.fetchReject(0, "io error: connection refused")
     } catch (e) { caught = str(e) }
-    testing.assertEqual(caught, "io error: connection refused",
+    testing.expectEqual(caught, "io error: connection refused",
         "reject message round-tripped through await")
 })
 
@@ -502,7 +502,7 @@ testing.test("Promise: dropped without resolve/reject throws cleanly", lam{ in
     try {
         await counter.fetchDrop()
     } catch (e) { caught = str(e) }
-    testing.assertEqual(caught,
+    testing.expectEqual(caught,
         "plugin Promise was dropped before resolve or reject",
         "dropped promise produced the documented error")
 })
@@ -515,8 +515,8 @@ testing.test("Promise: same future supports multiple awaiters", lam{ in
     func awaiter() { return await fut }
     let a = async awaiter()
     let b = async awaiter()
-    testing.assertEqual(await a, "shared", "first awaiter")
-    testing.assertEqual(await b, "shared", "second awaiter")
+    testing.expectEqual(await a, "shared", "first awaiter")
+    testing.expectEqual(await b, "shared", "second awaiter")
 })
 
 testing.done()

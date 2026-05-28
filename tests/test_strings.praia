@@ -1,16 +1,16 @@
 use "testing"
 
 testing.test("concatenation and length", lam{ in
-    testing.assertEqual("hello" + " " + "world", "hello world", nil)
-    testing.assertEqual(len("praia"), 5, nil)
-    testing.assertEqual(len(""), 0, nil)
+    testing.expectEqual("hello" + " " + "world", "hello world", nil)
+    testing.expectEqual(len("praia"), 5, nil)
+    testing.expectEqual(len(""), 0, nil)
 })
 
 testing.test("interpolation", lam{ in
     let name = "Ada"
     let age = 36
-    testing.assertEqual("%{name} is %{age}", "Ada is 36", nil)
-    testing.assertEqual("%{1 + 1}", "2", nil)
+    testing.expectEqual("%{name} is %{age}", "Ada is 36", nil)
+    testing.expectEqual("%{1 + 1}", "2", nil)
 })
 
 testing.test("interpolation: quotes inside an interpolation don't need escaping", lam{ in
@@ -18,60 +18,60 @@ testing.test("interpolation: quotes inside an interpolation don't need escaping"
     // The inner `", "` is correctly recognized as a string without the
     // user having to write `\", \"`.
     let xs = ["a", "b", "c"]
-    testing.assertEqual("joined: %{xs.join(", ")}", "joined: a, b, c", nil)
+    testing.expectEqual("joined: %{xs.join(", ")}", "joined: a, b, c", nil)
     // Same form, single-quoted outer string.
-    testing.assertEqual('joined: %{xs.join(", ")}', "joined: a, b, c", nil)
+    testing.expectEqual('joined: %{xs.join(", ")}', "joined: a, b, c", nil)
     // Literal `"` in an inner string (legitimate `\"` escape) still
     // works — this is the case that constrains the lexer from
     // unconditionally stripping backslashes inside interpolations.
-    testing.assertEqual("opener: %{"\""}", "opener: \"", nil)
+    testing.expectEqual("opener: %{"\""}", "opener: \"", nil)
 })
 
 testing.test("case conversion", lam{ in
-    testing.assertEqual("Hello".upper(), "HELLO", nil)
-    testing.assertEqual("HELLO".lower(), "hello", nil)
-    testing.assertEqual("hello world".title(), "Hello World", nil)
-    testing.assertEqual("hello".capitalize(), "Hello", nil)
+    testing.expectEqual("Hello".upper(), "HELLO", nil)
+    testing.expectEqual("HELLO".lower(), "hello", nil)
+    testing.expectEqual("hello world".title(), "Hello World", nil)
+    testing.expectEqual("hello".capitalize(), "Hello", nil)
 })
 
 testing.test("strip and split", lam{ in
-    testing.assertEqual("  hi  ".strip(), "hi", nil)
+    testing.expectEqual("  hi  ".strip(), "hi", nil)
     let parts = "a,b,c".split(",")
-    testing.assertEqual(len(parts), 3, nil)
-    testing.assertEqual(parts[0], "a", nil)
-    testing.assertEqual(parts[2], "c", nil)
+    testing.expectEqual(len(parts), 3, nil)
+    testing.expectEqual(parts[0], "a", nil)
+    testing.expectEqual(parts[2], "c", nil)
 })
 
 testing.test("replace and contains", lam{ in
-    testing.assertEqual("hello world".replace("world", "praia"), "hello praia", nil)
-    testing.assert("foobar".contains("oob"), nil)
-    testing.assert(!"foobar".contains("xyz"), nil)
+    testing.expectEqual("hello world".replace("world", "praia"), "hello praia", nil)
+    testing.expect("foobar".contains("oob"), nil)
+    testing.expect(!"foobar".contains("xyz"), nil)
 })
 
 testing.test("startsWith / endsWith", lam{ in
-    testing.assert("foobar".startsWith("foo"), nil)
-    testing.assert(!"foobar".startsWith("bar"), nil)
-    testing.assert("foobar".endsWith("bar"), nil)
-    testing.assert(!"foobar".endsWith("foo"), nil)
+    testing.expect("foobar".startsWith("foo"), nil)
+    testing.expect(!"foobar".startsWith("bar"), nil)
+    testing.expect("foobar".endsWith("bar"), nil)
+    testing.expect(!"foobar".endsWith("foo"), nil)
 })
 
 testing.test("indexing", lam{ in
-    testing.assertEqual("hello"[0], "h", nil)
-    testing.assertEqual("hello"[4], "o", nil)
-    testing.assertEqual("hello"[-1], "o", nil)
+    testing.expectEqual("hello"[0], "h", nil)
+    testing.expectEqual("hello"[4], "o", nil)
+    testing.expectEqual("hello"[-1], "o", nil)
 })
 
 testing.test("regex", lam{ in
-    testing.assert("abc123".test("[0-9]+"), nil)
+    testing.expect("abc123".test("[0-9]+"), nil)
     let m = "year 2026".match("[0-9]+")
-    testing.assertEqual(m.match, "2026", nil)
+    testing.expectEqual(m.match, "2026", nil)
 })
 
 testing.test("string multiplication", lam{ in
-    testing.assertEqual("ab" * 3, "ababab", nil)
-    testing.assertEqual(3 * "ha", "hahaha", nil)
-    testing.assertEqual("x" * 0, "", nil)
-    testing.assertEqual("hi" * 1, "hi", nil)
+    testing.expectEqual("ab" * 3, "ababab", nil)
+    testing.expectEqual(3 * "ha", "hahaha", nil)
+    testing.expectEqual("x" * 0, "", nil)
+    testing.expectEqual("hi" * 1, "hi", nil)
 })
 
 testing.done()

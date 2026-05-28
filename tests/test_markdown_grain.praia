@@ -3,47 +3,47 @@ use "markdown"
 
 testing.test("headings", lam{ in
     let result = markdown.render("# Hello")
-    testing.assert(result.contains("<h1>Hello</h1>"), nil)
+    testing.expect(result.contains("<h1>Hello</h1>"), nil)
     let r2 = markdown.render("## Sub")
-    testing.assert(r2.contains("<h2>Sub</h2>"), nil)
+    testing.expect(r2.contains("<h2>Sub</h2>"), nil)
 })
 
 testing.test("paragraphs", lam{ in
     let result = markdown.render("hello world")
-    testing.assert(result.contains("<p>hello world</p>"), nil)
+    testing.expect(result.contains("<p>hello world</p>"), nil)
 })
 
 testing.test("bold and italic", lam{ in
     let result = markdown.render("**bold** and *italic*")
-    testing.assert(result.contains("<strong>bold</strong>"), nil)
-    testing.assert(result.contains("<em>italic</em>"), nil)
+    testing.expect(result.contains("<strong>bold</strong>"), nil)
+    testing.expect(result.contains("<em>italic</em>"), nil)
 })
 
 testing.test("code blocks", lam{ in
     let result = markdown.render("```\nlet x = 1\n```")
-    testing.assert(result.contains("<pre>"), nil)
-    testing.assert(result.contains("<code>"), nil)
+    testing.expect(result.contains("<pre>"), nil)
+    testing.expect(result.contains("<code>"), nil)
 })
 
 testing.test("inline code", lam{ in
     let result = markdown.render("use `print()` to output")
-    testing.assert(result.contains("<code>print()</code>"), nil)
+    testing.expect(result.contains("<code>print()</code>"), nil)
 })
 
 testing.test("links", lam{ in
     let result = markdown.render("[click](https://example.com)")
-    testing.assert(result.contains("href=\"https://example.com\""), nil)
-    testing.assert(result.contains("click"), nil)
+    testing.expect(result.contains("href=\"https://example.com\""), nil)
+    testing.expect(result.contains("click"), nil)
 })
 
 testing.test("unordered list", lam{ in
     let result = markdown.render("- one\n- two\n- three")
-    testing.assert(result.contains("<ul>"), nil)
-    testing.assert(result.contains("<li>one</li>"), nil)
+    testing.expect(result.contains("<ul>"), nil)
+    testing.expect(result.contains("<li>one</li>"), nil)
 })
 
 testing.test("highlightCSS exists", lam{ in
-    testing.assert(len(markdown.highlightCSS) > 0, "should have CSS content")
+    testing.expect(len(markdown.highlightCSS) > 0, "should have CSS content")
 })
 
 testing.done()

@@ -12,9 +12,9 @@ use "testing"
 testing.test("fs.tempDir creates a unique directory", lam{ in
     let a = fs.tempDir("praia-test")
     let b = fs.tempDir("praia-test")
-    testing.assert(a != b, "two tempDirs must differ")
-    testing.assert(fs.exists(a), "first tempDir exists")
-    testing.assert(fs.exists(b), "second tempDir exists")
+    testing.expect(a != b, "two tempDirs must differ")
+    testing.expect(fs.exists(a), "first tempDir exists")
+    testing.expect(fs.exists(b), "second tempDir exists")
     fs.remove(a)
     fs.remove(b)
 })
@@ -23,7 +23,7 @@ testing.test("fs.write then fs.read roundtrip", lam{ in
     let d = fs.tempDir("praia-write")
     let p = d + "/note.txt"
     fs.write(p, "hello\nworld\n")
-    testing.assertEqual(fs.read(p), "hello\nworld\n", nil)
+    testing.expectEqual(fs.read(p), "hello\nworld\n", nil)
     fs.remove(d)
 })
 
@@ -33,7 +33,7 @@ testing.test("fs.append accumulates", lam{ in
     fs.write(p, "one\n")
     fs.append(p, "two\n")
     fs.append(p, "three\n")
-    testing.assertEqual(fs.read(p), "one\ntwo\nthree\n", nil)
+    testing.expectEqual(fs.read(p), "one\ntwo\nthree\n", nil)
     fs.remove(d)
 })
 
@@ -42,17 +42,17 @@ testing.test("fs.readLines returns array of lines (no trailing newline)", lam{ i
     let p = d + "/lines.txt"
     fs.write(p, "alpha\nbeta\ngamma\n")
     let lines = fs.readLines(p)
-    testing.assertEqual(lines, ["alpha", "beta", "gamma"], nil)
+    testing.expectEqual(lines, ["alpha", "beta", "gamma"], nil)
     fs.remove(d)
 })
 
 testing.test("fs.exists reports true/false", lam{ in
     let d = fs.tempDir("praia-exists")
     let p = d + "/file.txt"
-    testing.assertEqual(fs.exists(p), false, "missing file → false")
+    testing.expectEqual(fs.exists(p), false, "missing file → false")
     fs.write(p, "x")
-    testing.assertEqual(fs.exists(p), true, "present file → true")
-    testing.assertEqual(fs.exists(d), true, "directory → true")
+    testing.expectEqual(fs.exists(p), true, "present file → true")
+    testing.expectEqual(fs.exists(d), true, "directory → true")
     fs.remove(d)
 })
 
@@ -60,7 +60,7 @@ testing.test("fs.mkdir creates nested dirs", lam{ in
     let d = fs.tempDir("praia-mkdir")
     let nested = d + "/a/b/c"
     fs.mkdir(nested)
-    testing.assert(fs.exists(nested), "nested dir created")
+    testing.expect(fs.exists(nested), "nested dir created")
     fs.remove(d)
 })
 
@@ -71,10 +71,10 @@ testing.test("fs.readDir lists entries", lam{ in
     fs.mkdir(d + "/sub")
     let entries = fs.readDir(d)
     // Order isn't specified by the filesystem; check membership.
-    testing.assertEqual(len(entries), 3, "3 entries")
-    testing.assert(entries.contains("one.txt"), nil)
-    testing.assert(entries.contains("two.txt"), nil)
-    testing.assert(entries.contains("sub"), nil)
+    testing.expectEqual(len(entries), 3, "3 entries")
+    testing.expect(entries.contains("one.txt"), nil)
+    testing.expect(entries.contains("two.txt"), nil)
+    testing.expect(entries.contains("sub"), nil)
     fs.remove(d)
 })
 
@@ -82,9 +82,9 @@ testing.test("fs.copy duplicates files", lam{ in
     let d = fs.tempDir("praia-copy")
     fs.write(d + "/src.txt", "payload")
     fs.copy(d + "/src.txt", d + "/dst.txt")
-    testing.assertEqual(fs.read(d + "/dst.txt"), "payload", nil)
+    testing.expectEqual(fs.read(d + "/dst.txt"), "payload", nil)
     // Source still exists after copy.
-    testing.assert(fs.exists(d + "/src.txt"), nil)
+    testing.expect(fs.exists(d + "/src.txt"), nil)
     fs.remove(d)
 })
 
@@ -92,8 +92,8 @@ testing.test("fs.move renames", lam{ in
     let d = fs.tempDir("praia-move")
     fs.write(d + "/src.txt", "payload")
     fs.move(d + "/src.txt", d + "/dst.txt")
-    testing.assertEqual(fs.read(d + "/dst.txt"), "payload", nil)
-    testing.assertEqual(fs.exists(d + "/src.txt"), false, "src is gone after move")
+    testing.expectEqual(fs.read(d + "/dst.txt"), "payload", nil)
+    testing.expectEqual(fs.exists(d + "/src.txt"), false, "src is gone after move")
     fs.remove(d)
 })
 
@@ -103,7 +103,7 @@ testing.test("fs.remove recurses on directories", lam{ in
     fs.mkdir(d + "/sub")
     fs.write(d + "/sub/nested", "y")
     fs.remove(d)
-    testing.assertEqual(fs.exists(d), false, "dir + contents are gone")
+    testing.expectEqual(fs.exists(d), false, "dir + contents are gone")
 })
 
 // ── Back-compat: sys.* aliases still work ────────────────────────
@@ -113,10 +113,10 @@ testing.test("fs.remove recurses on directories", lam{ in
 testing.test("sys.* aliases still function (back-compat)", lam{ in
     let d = fs.tempDir("praia-syscompat")
     sys.write(d + "/a.txt", "via sys")
-    testing.assertEqual(sys.read(d + "/a.txt"), "via sys", nil)
-    testing.assertEqual(sys.exists(d + "/a.txt"), true, nil)
+    testing.expectEqual(sys.read(d + "/a.txt"), "via sys", nil)
+    testing.expectEqual(sys.exists(d + "/a.txt"), true, nil)
     sys.remove(d)
-    testing.assertEqual(fs.exists(d), false, nil)
+    testing.expectEqual(fs.exists(d), false, nil)
 })
 
 testing.done()

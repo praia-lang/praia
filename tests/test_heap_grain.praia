@@ -12,7 +12,7 @@ testing.test("push + pop sorts ascending", lam{ in
     for (v in [5, 3, 8, 1, 9, 2, 7, 4, 6]) { heap.push(h, v) }
     let out = []
     while (!heap.isEmpty(h)) { out.push(heap.pop(h)) }
-    testing.assertEqual(out, [1, 2, 3, 4, 5, 6, 7, 8, 9], nil)
+    testing.expectEqual(out, [1, 2, 3, 4, 5, 6, 7, 8, 9], nil)
 })
 
 testing.test("push + pop handles duplicates", lam{ in
@@ -20,23 +20,23 @@ testing.test("push + pop handles duplicates", lam{ in
     for (v in [3, 1, 3, 1, 3, 1]) { heap.push(h, v) }
     let out = []
     while (!heap.isEmpty(h)) { out.push(heap.pop(h)) }
-    testing.assertEqual(out, [1, 1, 1, 3, 3, 3], nil)
+    testing.expectEqual(out, [1, 1, 1, 3, 3, 3], nil)
 })
 
 testing.test("push + pop on negative numbers", lam{ in
     let h = []
     for (v in [-5, 0, -100, 50, -1]) { heap.push(h, v) }
-    testing.assertEqual(heap.pop(h), -100, nil)
-    testing.assertEqual(heap.pop(h), -5, nil)
-    testing.assertEqual(heap.pop(h), -1, nil)
-    testing.assertEqual(heap.pop(h), 0, nil)
+    testing.expectEqual(heap.pop(h), -100, nil)
+    testing.expectEqual(heap.pop(h), -5, nil)
+    testing.expectEqual(heap.pop(h), -1, nil)
+    testing.expectEqual(heap.pop(h), 0, nil)
 })
 
 testing.test("push + pop on strings (lexicographic)", lam{ in
     let h = []
     for (v in ["pear", "apple", "cherry", "banana"]) { heap.push(h, v) }
-    testing.assertEqual(heap.pop(h), "apple", nil)
-    testing.assertEqual(heap.pop(h), "banana", nil)
+    testing.expectEqual(heap.pop(h), "apple", nil)
+    testing.expectEqual(heap.pop(h), "banana", nil)
 })
 
 testing.test("peek shows the min without removing it", lam{ in
@@ -44,14 +44,14 @@ testing.test("peek shows the min without removing it", lam{ in
     heap.push(h, 5)
     heap.push(h, 2)
     heap.push(h, 8)
-    testing.assertEqual(heap.peek(h), 2, nil)
-    testing.assertEqual(heap.size(h), 3, "peek doesn't shrink")
-    testing.assertEqual(heap.peek(h), 2, "peek is idempotent")
+    testing.expectEqual(heap.peek(h), 2, nil)
+    testing.expectEqual(heap.size(h), 3, "peek doesn't shrink")
+    testing.expectEqual(heap.peek(h), 2, "peek is idempotent")
 })
 
 testing.test("pop / peek on empty throw", lam{ in
-    testing.assertThrows(lam{ in heap.pop([]) },  "empty heap")
-    testing.assertThrows(lam{ in heap.peek([]) }, "empty heap")
+    testing.expectThrows(lam{ in heap.pop([]) },  "empty heap")
+    testing.expectThrows(lam{ in heap.peek([]) }, "empty heap")
 })
 
 // ── keyFn (priority queue) ────────────────────────────────────
@@ -63,19 +63,19 @@ testing.test("keyFn enables priority-queue style use", lam{ in
     heap.push(pq, {prio: 1, task: "lint"},  keyFn)
     heap.push(pq, {prio: 2, task: "test"},  keyFn)
     heap.push(pq, {prio: 0, task: "fmt"},   keyFn)
-    testing.assertEqual(heap.pop(pq, keyFn).task, "fmt",   nil)
-    testing.assertEqual(heap.pop(pq, keyFn).task, "lint",  nil)
-    testing.assertEqual(heap.pop(pq, keyFn).task, "test",  nil)
-    testing.assertEqual(heap.pop(pq, keyFn).task, "build", nil)
+    testing.expectEqual(heap.pop(pq, keyFn).task, "fmt",   nil)
+    testing.expectEqual(heap.pop(pq, keyFn).task, "lint",  nil)
+    testing.expectEqual(heap.pop(pq, keyFn).task, "test",  nil)
+    testing.expectEqual(heap.pop(pq, keyFn).task, "build", nil)
 })
 
 testing.test("negated keyFn produces a max-heap", lam{ in
     let neg = lam{ x in -x }
     let h = []
     for (v in [5, 3, 8, 1, 9, 2, 7]) { heap.push(h, v, neg) }
-    testing.assertEqual(heap.pop(h, neg), 9, "max comes out first")
-    testing.assertEqual(heap.pop(h, neg), 8, nil)
-    testing.assertEqual(heap.pop(h, neg), 7, nil)
+    testing.expectEqual(heap.pop(h, neg), 9, "max comes out first")
+    testing.expectEqual(heap.pop(h, neg), 8, nil)
+    testing.expectEqual(heap.pop(h, neg), 7, nil)
 })
 
 // ── heapify ────────────────────────────────────────────────────
@@ -83,22 +83,22 @@ testing.test("negated keyFn produces a max-heap", lam{ in
 testing.test("heapify makes an arbitrary array into a heap", lam{ in
     let a = [9, 4, 7, 1, -3, 12, 0, 5, 2]
     heap.heapify(a)
-    testing.assertEqual(a[0], -3, "min is at the root after heapify")
+    testing.expectEqual(a[0], -3, "min is at the root after heapify")
     // Drain and check ascending order.
     let out = []
     while (!heap.isEmpty(a)) { out.push(heap.pop(a)) }
-    testing.assertEqual(out, [-3, 0, 1, 2, 4, 5, 7, 9, 12], nil)
+    testing.expectEqual(out, [-3, 0, 1, 2, 4, 5, 7, 9, 12], nil)
 })
 
 testing.test("heapify on empty / single-element arrays", lam{ in
     let empty = []
     heap.heapify(empty)
-    testing.assertEqual(empty, [], "empty stays empty")
+    testing.expectEqual(empty, [], "empty stays empty")
 
     let one = [42]
     heap.heapify(one)
-    testing.assertEqual(one, [42], "single element stays put")
-    testing.assertEqual(heap.peek(one), 42, nil)
+    testing.expectEqual(one, [42], "single element stays put")
+    testing.expectEqual(heap.peek(one), 42, nil)
 })
 
 // ── pushPop and replace ───────────────────────────────────────
@@ -106,16 +106,16 @@ testing.test("heapify on empty / single-element arrays", lam{ in
 testing.test("pushPop with smaller val just returns val (no mutation)", lam{ in
     let h = [3, 5, 7]
     heap.heapify(h)
-    testing.assertEqual(heap.pushPop(h, 1), 1, "val itself is smaller than root")
-    testing.assertEqual(h, [3, 5, 7], "heap unchanged")
+    testing.expectEqual(heap.pushPop(h, 1), 1, "val itself is smaller than root")
+    testing.expectEqual(h, [3, 5, 7], "heap unchanged")
 })
 
 testing.test("pushPop with larger val swaps in and returns the old min", lam{ in
     let h = [3, 5, 7]
     heap.heapify(h)
-    testing.assertEqual(heap.pushPop(h, 10), 3, nil)
-    testing.assertEqual(heap.peek(h), 5, "new root is the next smallest")
-    testing.assertEqual(heap.size(h), 3, nil)
+    testing.expectEqual(heap.pushPop(h, 10), 3, nil)
+    testing.expectEqual(heap.peek(h), 5, "new root is the next smallest")
+    testing.expectEqual(heap.size(h), 3, nil)
 })
 
 testing.test("pushPop maintains a top-K accumulator", lam{ in
@@ -130,30 +130,30 @@ testing.test("pushPop maintains a top-K accumulator", lam{ in
     }
     // topK holds the three smallest. Sort to assert deterministically.
     let result = sort(topK)
-    testing.assertEqual(result, [1, 2, 3], "the three smallest of the stream")
+    testing.expectEqual(result, [1, 2, 3], "the three smallest of the stream")
 })
 
 testing.test("replace returns old min and inserts new", lam{ in
     let h = [1, 5, 3]
     heap.heapify(h)
-    testing.assertEqual(heap.replace(h, 4), 1, nil)
-    testing.assertEqual(heap.peek(h), 3, nil)
-    testing.assertEqual(heap.size(h), 3, "size unchanged")
+    testing.expectEqual(heap.replace(h, 4), 1, nil)
+    testing.expectEqual(heap.peek(h), 3, nil)
+    testing.expectEqual(heap.size(h), 3, "size unchanged")
 })
 
 testing.test("replace on empty throws", lam{ in
-    testing.assertThrows(lam{ in heap.replace([], 1) }, "empty heap")
+    testing.expectThrows(lam{ in heap.replace([], 1) }, "empty heap")
 })
 
 // ── Size / isEmpty ────────────────────────────────────────────
 
 testing.test("size and isEmpty track the array", lam{ in
     let h = []
-    testing.assert(heap.isEmpty(h), nil)
-    testing.assertEqual(heap.size(h), 0, nil)
+    testing.expect(heap.isEmpty(h), nil)
+    testing.expectEqual(heap.size(h), 0, nil)
     heap.push(h, 7)
-    testing.assert(!heap.isEmpty(h), nil)
-    testing.assertEqual(heap.size(h), 1, nil)
+    testing.expect(!heap.isEmpty(h), nil)
+    testing.expectEqual(heap.size(h), 1, nil)
 })
 
 // ── Larger-scale correctness ──────────────────────────────────
@@ -172,7 +172,7 @@ testing.test("heap-sort of 1000 random-ish items matches array.sort", lam{ in
     heap.heapify(copy)
     while (!heap.isEmpty(copy)) { viaHeap.push(heap.pop(copy)) }
     let viaSort = sort(arr)
-    testing.assertEqual(viaHeap, viaSort, "heap-sort matches reference sort")
+    testing.expectEqual(viaHeap, viaSort, "heap-sort matches reference sort")
 })
 
 testing.done()

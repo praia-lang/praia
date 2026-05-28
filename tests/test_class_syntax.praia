@@ -7,7 +7,7 @@ testing.test("class requires func before methods", lam{ in
         func speak() { return this.name + " speaks" }
     }
     let a = Animal("Rex")
-    testing.assertEqual(a.speak(), "Rex speaks", nil)
+    testing.expectEqual(a.speak(), "Rex speaks", nil)
 })
 
 testing.test("class with default params", lam{ in
@@ -18,12 +18,12 @@ testing.test("class with default params", lam{ in
         }
     }
     let c1 = Config()
-    testing.assertEqual(c1.host, "localhost", nil)
-    testing.assertEqual(c1.port, 8080, nil)
+    testing.expectEqual(c1.host, "localhost", nil)
+    testing.expectEqual(c1.port, 8080, nil)
 
     let c2 = Config("0.0.0.0", 3000)
-    testing.assertEqual(c2.host, "0.0.0.0", nil)
-    testing.assertEqual(c2.port, 3000, nil)
+    testing.expectEqual(c2.host, "0.0.0.0", nil)
+    testing.expectEqual(c2.port, 3000, nil)
 })
 
 testing.test("inheritance with func syntax", lam{ in
@@ -33,7 +33,7 @@ testing.test("inheritance with func syntax", lam{ in
     class Child extends Base {
         func greet() { return "child+" + super.greet() }
     }
-    testing.assertEqual(Child().greet(), "child+base", nil)
+    testing.expectEqual(Child().greet(), "child+base", nil)
 })
 
 testing.test("str() calls toString()", lam{ in
@@ -41,25 +41,25 @@ testing.test("str() calls toString()", lam{ in
         func init(x, y) { this.x = x; this.y = y }
         func toString() { return "%{this.x},%{this.y}" }
     }
-    testing.assertEqual(str(Point(3, 4)), "3,4", nil)
+    testing.expectEqual(str(Point(3, 4)), "3,4", nil)
 })
 
 testing.test("type() returns int and float", lam{ in
-    testing.assertEqual(type(42), "int", nil)
-    testing.assertEqual(type(3.14), "float", nil)
-    testing.assertEqual(type(0), "int", nil)
-    testing.assertEqual(type(7 / 2), "float", nil)
+    testing.expectEqual(type(42), "int", nil)
+    testing.expectEqual(type(3.14), "float", nil)
+    testing.expectEqual(type(0), "int", nil)
+    testing.expectEqual(type(7 / 2), "float", nil)
 })
 
 testing.test("only nil and false are falsy", lam{ in
     // All non-nil, non-false values are truthy
-    testing.assert("", "empty string should be truthy")
-    testing.assert("x", "non-empty string should be truthy")
-    testing.assert([], "empty array should be truthy")
-    testing.assert([0], "non-empty array should be truthy")
-    testing.assert(0, "zero should be truthy")
-    testing.assert(!nil, "nil should be falsy")
-    testing.assert(!false, "false should be falsy")
+    testing.expect("", "empty string should be truthy")
+    testing.expect("x", "non-empty string should be truthy")
+    testing.expect([], "empty array should be truthy")
+    testing.expect([0], "non-empty array should be truthy")
+    testing.expect(0, "zero should be truthy")
+    testing.expect(!nil, "nil should be falsy")
+    testing.expect(!false, "false should be falsy")
 })
 
 testing.done()

@@ -45,9 +45,9 @@ testing.test("recordKnownLatest rewrites the notifier cache", lam{ in
 
     updateCheck.recordKnownLatest("9.9.9")
     let after = _readCacheRaw()
-    testing.assert(after.contains("latest: 9.9.9"),
+    testing.expect(after.contains("latest: 9.9.9"),
         "cache updated with the new latest: " + after)
-    testing.assert(!after.contains("latest: 0.0.1"),
+    testing.expect(!after.contains("latest: 0.0.1"),
         "stale value gone: " + after)
 })
 
@@ -58,7 +58,7 @@ testing.test("recordKnownLatest is a no-op when latest is nil", lam{ in
     fs.write(cachePath, "checkedAt: 1\nlatest: 0.0.1\n")
     updateCheck.recordKnownLatest(nil)
     let after = _readCacheRaw()
-    testing.assertEqual(after, "checkedAt: 1\nlatest: 0.0.1\n",
+    testing.expectEqual(after, "checkedAt: 1\nlatest: 0.0.1\n",
         "cache untouched on nil input")
 })
 

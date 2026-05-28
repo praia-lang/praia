@@ -1,35 +1,35 @@
 use "testing"
 
 testing.test("base64.encode and decode", lam{ in
-    testing.assertEqual(base64.encode("hello"), "aGVsbG8=", nil)
-    testing.assertEqual(base64.decode("aGVsbG8="), "hello", nil)
-    testing.assertEqual(base64.decode(base64.encode("test")), "test", nil)
+    testing.expectEqual(base64.encode("hello"), "aGVsbG8=", nil)
+    testing.expectEqual(base64.decode("aGVsbG8="), "hello", nil)
+    testing.expectEqual(base64.decode(base64.encode("test")), "test", nil)
 })
 
 testing.test("base64 empty string", lam{ in
-    testing.assertEqual(base64.encode(""), "", nil)
-    testing.assertEqual(base64.decode(""), "", nil)
+    testing.expectEqual(base64.encode(""), "", nil)
+    testing.expectEqual(base64.decode(""), "", nil)
 })
 
 testing.test("base64.encodeURL", lam{ in
     let encoded = base64.encodeURL("hello")
-    testing.assertEqual(encoded, "aGVsbG8", "no padding")
-    testing.assert(!encoded.contains("="), "URL-safe has no padding")
-    testing.assert(!encoded.contains("+"), "URL-safe has no +")
-    testing.assert(!encoded.contains("/"), "URL-safe has no /")
+    testing.expectEqual(encoded, "aGVsbG8", "no padding")
+    testing.expect(!encoded.contains("="), "URL-safe has no padding")
+    testing.expect(!encoded.contains("+"), "URL-safe has no +")
+    testing.expect(!encoded.contains("/"), "URL-safe has no /")
 })
 
 testing.test("base64.decodeURL", lam{ in
-    testing.assertEqual(base64.decodeURL("aGVsbG8"), "hello", nil)
-    testing.assertEqual(base64.decodeURL(base64.encodeURL("test 123")), "test 123", nil)
+    testing.expectEqual(base64.decodeURL("aGVsbG8"), "hello", nil)
+    testing.expectEqual(base64.decodeURL(base64.encodeURL("test 123")), "test 123", nil)
 })
 
 testing.test("base64 URL-safe roundtrip with special chars", lam{ in
     let data = bytes.from([0xFB, 0xFF, 0xFE])
     let encoded = base64.encodeURL(data)
-    testing.assert(encoded.contains("-") || encoded.contains("_"),
+    testing.expect(encoded.contains("-") || encoded.contains("_"),
         "should use URL-safe chars")
-    testing.assertEqual(base64.decodeURL(encoded), data, nil)
+    testing.expectEqual(base64.decodeURL(encoded), data, nil)
 })
 
 testing.done()

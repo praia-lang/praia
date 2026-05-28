@@ -2,57 +2,57 @@ use "testing"
 use "re"
 
 testing.test("re.test", lam{ in
-    testing.assert(re.test("hello123", "\\d+"), "digits found")
-    testing.assert(!re.test("hello", "\\d+"), "no digits")
+    testing.expect(re.test("hello123", "\\d+"), "digits found")
+    testing.expect(!re.test("hello", "\\d+"), "no digits")
 })
 
 testing.test("re.find basic", lam{ in
     let m = re.find("age: 25", "(\\w+): (\\d+)")
-    testing.assertEqual(m.match, "age: 25", nil)
-    testing.assertEqual(m.groups, ["age", "25"], nil)
-    testing.assertEqual(m.index, 0, nil)
+    testing.expectEqual(m.match, "age: 25", nil)
+    testing.expectEqual(m.groups, ["age", "25"], nil)
+    testing.expectEqual(m.index, 0, nil)
 })
 
 testing.test("re.find nil on no match", lam{ in
-    testing.assertEqual(re.find("hello", "\\d+"), nil, nil)
+    testing.expectEqual(re.find("hello", "\\d+"), nil, nil)
 })
 
 testing.test("re.find named groups", lam{ in
     let m = re.find("2026-04-22", "(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})")
-    testing.assertEqual(m.named.year, "2026", nil)
-    testing.assertEqual(m.named.month, "04", nil)
-    testing.assertEqual(m.named.day, "22", nil)
+    testing.expectEqual(m.named.year, "2026", nil)
+    testing.expectEqual(m.named.month, "04", nil)
+    testing.expectEqual(m.named.day, "22", nil)
 })
 
 testing.test("re.findAll", lam{ in
     let matches = re.findAll("a1b2c3", "\\d")
-    testing.assertEqual(len(matches), 3, nil)
-    testing.assertEqual(matches[0].match, "1", nil)
-    testing.assertEqual(matches[2].match, "3", nil)
+    testing.expectEqual(len(matches), 3, nil)
+    testing.expectEqual(matches[0].match, "1", nil)
+    testing.expectEqual(matches[2].match, "3", nil)
 })
 
 testing.test("re.findAll named groups", lam{ in
     let text = "x=1 y=2"
     let matches = re.findAll(text, "(?<key>\\w)=(?<val>\\d)")
-    testing.assertEqual(len(matches), 2, nil)
-    testing.assertEqual(matches[0].named.key, "x", nil)
-    testing.assertEqual(matches[1].named.val, "2", nil)
+    testing.expectEqual(len(matches), 2, nil)
+    testing.expectEqual(matches[0].named.key, "x", nil)
+    testing.expectEqual(matches[1].named.val, "2", nil)
 })
 
 testing.test("re.split", lam{ in
-    testing.assertEqual(re.split("a,b,,c", ",+"), ["a", "b", "c"], nil)
-    testing.assertEqual(re.split("hello world", "\\s+"), ["hello", "world"], nil)
-    testing.assertEqual(re.split("nosep", ","), ["nosep"], nil)
+    testing.expectEqual(re.split("a,b,,c", ",+"), ["a", "b", "c"], nil)
+    testing.expectEqual(re.split("hello world", "\\s+"), ["hello", "world"], nil)
+    testing.expectEqual(re.split("nosep", ","), ["nosep"], nil)
 })
 
 testing.test("re.replace", lam{ in
-    testing.assertEqual(re.replace("a  b  c", "\\s+", " "), "a b c", nil)
+    testing.expectEqual(re.replace("a  b  c", "\\s+", " "), "a b c", nil)
 })
 
 testing.test("re.escape", lam{ in
     let escaped = re.escape("(test)")
-    testing.assert(re.test("(test)", escaped), "escaped matches literal")
-    testing.assert(!re.test("test", escaped), "escaped rejects partial")
+    testing.expect(re.test("(test)", escaped), "escaped matches literal")
+    testing.expect(!re.test("test", escaped), "escaped rejects partial")
 })
 
 testing.done()

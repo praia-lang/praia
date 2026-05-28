@@ -7,7 +7,7 @@ testing.test("self-referencing array collected", lam{ in
         push(a, a)
         // a goes out of scope — cycle should be collected
     }
-    testing.assert(true, "survived 1000 self-ref array cycles")
+    testing.expect(true, "survived 1000 self-ref array cycles")
 })
 
 testing.test("self-referencing map collected", lam{ in
@@ -15,7 +15,7 @@ testing.test("self-referencing map collected", lam{ in
         let m = {}
         m.self = m
     }
-    testing.assert(true, "survived 1000 self-ref map cycles")
+    testing.expect(true, "survived 1000 self-ref map cycles")
 })
 
 testing.test("instance with closure capturing this", lam{ in
@@ -28,7 +28,7 @@ testing.test("instance with closure capturing this", lam{ in
         let f = Foo()
         // f.cb captures this (f) — cycle: instance -> cb -> closure -> instance
     }
-    testing.assert(true, "survived 1000 instance-closure cycles")
+    testing.expect(true, "survived 1000 instance-closure cycles")
 })
 
 testing.test("mutual instance references", lam{ in
@@ -44,7 +44,7 @@ testing.test("mutual instance references", lam{ in
         a.next = b
         b.next = a
     }
-    testing.assert(true, "survived 1000 mutual-ref cycles")
+    testing.expect(true, "survived 1000 mutual-ref cycles")
 })
 
 testing.test("function-environment cycle", lam{ in
@@ -55,7 +55,7 @@ testing.test("function-environment cycle", lam{ in
         }
         let f = make()
     }
-    testing.assert(true, "survived 1000 function-env cycles")
+    testing.expect(true, "survived 1000 function-env cycles")
 })
 
 testing.test("class-environment cycle", lam{ in
@@ -68,7 +68,7 @@ testing.test("class-environment cycle", lam{ in
         }
         let C = make()
     }
-    testing.assert(true, "survived 1000 class-env cycles")
+    testing.expect(true, "survived 1000 class-env cycles")
 })
 
 testing.test("deeply nested cycle", lam{ in
@@ -80,7 +80,7 @@ testing.test("deeply nested cycle", lam{ in
         b.next = c
         c.next = a
     }
-    testing.assert(true, "survived 500 three-node ring cycles")
+    testing.expect(true, "survived 500 three-node ring cycles")
 })
 
 testing.test("GC does not collect reachable objects", lam{ in
@@ -92,9 +92,9 @@ testing.test("GC does not collect reachable objects", lam{ in
         push(temp, temp) // cycle — will be collected
     }
     // Original objects should still be intact
-    testing.assertEqual(arr, [1, 2, 3], nil)
-    testing.assertEqual(m.x, 10, nil)
-    testing.assertEqual(m.y, 20, nil)
+    testing.expectEqual(arr, [1, 2, 3], nil)
+    testing.expectEqual(m.x, 10, nil)
+    testing.expectEqual(m.y, 20, nil)
 })
 
 testing.test("GC preserves generator state", lam{ in
@@ -104,15 +104,15 @@ testing.test("GC preserves generator state", lam{ in
         yield 3
     }
     let g = gen()
-    testing.assertEqual(g.next().value, 1, nil)
+    testing.expectEqual(g.next().value, 1, nil)
     // Force GC activity
     for (i in 0..1000) {
         let temp = []
         push(temp, temp)
     }
     // Generator should still work
-    testing.assertEqual(g.next().value, 2, nil)
-    testing.assertEqual(g.next().value, 3, nil)
+    testing.expectEqual(g.next().value, 2, nil)
+    testing.expectEqual(g.next().value, 3, nil)
 })
 
 // Regression: tagged values used to be tracked as GcType::Array, so
@@ -123,9 +123,9 @@ testing.test("GC preserves generator state", lam{ in
 testing.test("tagged value children survive GC", lam{ in
     let v = Ok([1, 2])
     for (i in 0..2000) { let a = [i] }
-    testing.assertEqual(v.values, [[1, 2]], "inner array reachable through tag")
-    testing.assertEqual(v.values[0][0], 1, nil)
-    testing.assertEqual(v.values[0][1], 2, nil)
+    testing.expectEqual(v.values, [[1, 2]], "inner array reachable through tag")
+    testing.expectEqual(v.values[0][0], 1, nil)
+    testing.expectEqual(v.values[0][1], 2, nil)
 })
 
 testing.test("tagged cycles are collected without crashing", lam{ in
@@ -136,7 +136,7 @@ testing.test("tagged cycles are collected without crashing", lam{ in
         let t = Ok(arr)
         push(arr, t)
     }
-    testing.assert(true, "1000 tagged cycles broken without crash")
+    testing.expect(true, "1000 tagged cycles broken without crash")
 })
 
 // Regression: markClass used to skip vmStaticMethods. A class with only its
@@ -154,7 +154,7 @@ testing.test("static method upvalue survives GC", lam{ in
         let temp = []
         push(temp, temp)
     }
-    testing.assertEqual(cls.get(), [10, 20, 30], "captured static-method upvalue intact")
+    testing.expectEqual(cls.get(), [10, 20, 30], "captured static-method upvalue intact")
 })
 
 // Regression: markClass used to skip methodDecorators. A decorator callable
@@ -181,7 +181,7 @@ testing.test("method decorator closure survives GC", lam{ in
         let temp = []
         push(temp, temp)
     }
-    testing.assertEqual(f.greet(), "[tagged] hello", "decorator closure reachable through class")
+    testing.expectEqual(f.greet(), "[tagged] hello", "decorator closure reachable through class")
 })
 
 testing.done()

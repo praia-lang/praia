@@ -2,58 +2,58 @@ use "testing"
 
 testing.test("array literals and indexing", lam{ in
     let a = [10, 20, 30]
-    testing.assertEqual(len(a), 3, nil)
-    testing.assertEqual(a[0], 10, nil)
-    testing.assertEqual(a[-1], 30, nil)
+    testing.expectEqual(len(a), 3, nil)
+    testing.expectEqual(a[0], 10, nil)
+    testing.expectEqual(a[-1], 30, nil)
 })
 
 testing.test("push and pop", lam{ in
     let a = [1, 2]
     push(a, 3)
-    testing.assertEqual(len(a), 3, nil)
-    testing.assertEqual(pop(a), 3, nil)
-    testing.assertEqual(len(a), 2, nil)
+    testing.expectEqual(len(a), 3, nil)
+    testing.expectEqual(pop(a), 3, nil)
+    testing.expectEqual(len(a), 2, nil)
 })
 
 testing.test("array methods", lam{ in
     let a = [1, 2, 3]
     a.push(4)
-    testing.assertEqual(len(a), 4, nil)
-    testing.assert(a.contains(2), nil)
-    testing.assert(!a.contains(99), nil)
-    testing.assertEqual([1, 2, 3].join("-"), "1-2-3", nil)
+    testing.expectEqual(len(a), 4, nil)
+    testing.expect(a.contains(2), nil)
+    testing.expect(!a.contains(99), nil)
+    testing.expectEqual([1, 2, 3].join("-"), "1-2-3", nil)
     let b = [1, 2, 3]
     b.reverse()
-    testing.assertEqual(b[0], 3, nil)
+    testing.expectEqual(b[0], 3, nil)
 })
 
 testing.test("index assignment", lam{ in
     let a = [1, 2, 3]
     a[0] = 99
-    testing.assertEqual(a[0], 99, nil)
+    testing.expectEqual(a[0], 99, nil)
 })
 
 testing.test("pop on empty throws", lam{ in
-    testing.assertThrows(lam{ in pop([]) }, nil)
+    testing.expectThrows(lam{ in pop([]) }, nil)
 })
 
 testing.test("index out of bounds throws", lam{ in
-    testing.assertThrows(lam{ in [1, 2][5] }, nil)
+    testing.expectThrows(lam{ in [1, 2][5] }, nil)
 })
 
 testing.test("maps", lam{ in
     let m = {name: "Ada", age: 36}
-    testing.assertEqual(m.name, "Ada", nil)
-    testing.assertEqual(m["age"], 36, nil)
+    testing.expectEqual(m.name, "Ada", nil)
+    testing.expectEqual(m["age"], 36, nil)
     m.age = 37
-    testing.assertEqual(m.age, 37, nil)
-    testing.assertEqual(len(m), 2, nil)
+    testing.expectEqual(m.age, 37, nil)
+    testing.expectEqual(len(m), 2, nil)
 })
 
 testing.test("keys and values", lam{ in
     let m = {a: 1, b: 2, c: 3}
-    testing.assertEqual(len(keys(m)), 3, nil)
-    testing.assertEqual(len(values(m)), 3, nil)
+    testing.expectEqual(len(keys(m)), 3, nil)
+    testing.expectEqual(len(values(m)), 3, nil)
 })
 
 testing.test("for-in loops", lam{ in
@@ -61,7 +61,7 @@ testing.test("for-in loops", lam{ in
     for (x in [1, 2, 3, 4, 5]) {
         sum = sum + x
     }
-    testing.assertEqual(sum, 15, nil)
+    testing.expectEqual(sum, 15, nil)
 })
 
 // ── Value keys for maps ──
@@ -70,8 +70,8 @@ testing.test("integer map keys", lam{ in
     let m = {}
     m[1] = "one"
     m[2] = "two"
-    testing.assertEqual(m[1], "one", nil)
-    testing.assertEqual(m[2], "two", nil)
+    testing.expectEqual(m[1], "one", nil)
+    testing.expectEqual(m[2], "two", nil)
 })
 
 testing.test("boolean and nil map keys", lam{ in
@@ -79,22 +79,22 @@ testing.test("boolean and nil map keys", lam{ in
     m[true] = "yes"
     m[false] = "no"
     m[nil] = "nothing"
-    testing.assertEqual(m[true], "yes", nil)
-    testing.assertEqual(m[false], "no", nil)
-    testing.assertEqual(m[nil], "nothing", nil)
+    testing.expectEqual(m[true], "yes", nil)
+    testing.expectEqual(m[false], "no", nil)
+    testing.expectEqual(m[nil], "nothing", nil)
 })
 
 testing.test("computed keys in map literals", lam{ in
     let x = 10
     let m = {[x]: "ten", [x + 1]: "eleven", name: "test"}
-    testing.assertEqual(m[10], "ten", nil)
-    testing.assertEqual(m[11], "eleven", nil)
-    testing.assertEqual(m.name, "test", nil)
+    testing.expectEqual(m[10], "ten", nil)
+    testing.expectEqual(m[11], "eleven", nil)
+    testing.expectEqual(m.name, "test", nil)
 })
 
 testing.test("mixed key types", lam{ in
     let m = {[1]: "int", [true]: "bool", name: "string"}
-    testing.assertEqual(len(keys(m)), 3, nil)
+    testing.expectEqual(len(keys(m)), 3, nil)
 })
 
 testing.test("for-in with non-string keys", lam{ in
@@ -103,11 +103,11 @@ testing.test("for-in with non-string keys", lam{ in
     for ({key, value} in m) {
         push(result, value)
     }
-    testing.assertEqual(len(result), 2, nil)
+    testing.expectEqual(len(result), 2, nil)
 })
 
 testing.test("unhashable key throws", lam{ in
-    testing.assertThrows(lam{ in
+    testing.expectThrows(lam{ in
         let m = {}
         m[[1, 2]] = "array key"
     }, nil)
@@ -116,7 +116,7 @@ testing.test("unhashable key throws", lam{ in
 testing.test("keys() returns value keys", lam{ in
     let m = {[42]: "answer", name: "Ada"}
     let k = keys(m)
-    testing.assertEqual(len(k), 2, nil)
+    testing.expectEqual(len(k), 2, nil)
 })
 
 // Regression: print / equality / json.stringify / yaml.stringify on
@@ -127,19 +127,19 @@ testing.test("keys() returns value keys", lam{ in
 testing.test("print on self-referential array doesn't crash", lam{ in
     let a = []
     push(a, a)
-    testing.assertEqual(str(a), "[[...]]", "self-array marker")
+    testing.expectEqual(str(a), "[[...]]", "self-array marker")
 })
 
 testing.test("print on self-referential map doesn't crash", lam{ in
     let m = {}
     m.self = m
-    testing.assertEqual(str(m), "{self: {...}}", "self-map marker")
+    testing.expectEqual(str(m), "{self: {...}}", "self-map marker")
 })
 
 testing.test("print on cyclic tagged doesn't crash", lam{ in
     let t = Ok([])
     push(t.values[0], t)
-    testing.assertEqual(str(t), "Ok([Ok(...)])", "tagged cycle marker")
+    testing.expectEqual(str(t), "Ok([Ok(...)])", "tagged cycle marker")
 })
 
 testing.test("shared-but-not-cyclic prints fully", lam{ in
@@ -148,25 +148,25 @@ testing.test("shared-but-not-cyclic prints fully", lam{ in
     // active recursion path.
     let inner = [1, 2]
     let outer = [inner, inner]
-    testing.assertEqual(str(outer), "[[1, 2], [1, 2]]", nil)
+    testing.expectEqual(str(outer), "[[1, 2], [1, 2]]", nil)
 })
 
 testing.test("equality on cyclic array (identity)", lam{ in
     let c = []
     push(c, c)
-    testing.assert(c == c, "a == a for cyclic a")
+    testing.expect(c == c, "a == a for cyclic a")
 })
 
 testing.test("json.stringify rejects cycles cleanly", lam{ in
     let a = []
     push(a, a)
-    testing.assertThrows(lam{ in json.stringify(a) }, "cyclic")
+    testing.expectThrows(lam{ in json.stringify(a) }, "cyclic")
 })
 
 testing.test("yaml.stringify rejects cycles cleanly", lam{ in
     let m = {}
     m.self = m
-    testing.assertThrows(lam{ in yaml.stringify(m) }, "cyclic")
+    testing.expectThrows(lam{ in yaml.stringify(m) }, "cyclic")
 })
 
 testing.done()

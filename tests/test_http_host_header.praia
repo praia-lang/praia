@@ -41,7 +41,7 @@ time.sleep(200)
 
 testing.test("Host header includes the explicit non-default port", lam{ in
     let r = http.get("http://localhost:" + str(TEST_PORT) + "/x")
-    testing.assertEqual(r.body, "localhost:" + str(TEST_PORT),
+    testing.expectEqual(r.body, "localhost:" + str(TEST_PORT),
         "Host: must carry the user-written port for vhost/proxy routing")
 })
 
@@ -52,7 +52,7 @@ testing.test("Host header includes the explicit non-default port", lam{ in
 // of the bracket-and-port path.
 testing.test("authority format brackets IPv6 host and appends port", lam{ in
     let h = url.build({scheme: "http", host: "::1", port: 8080, path: "/"})
-    testing.assertEqual(h, "http://[::1]:8080/",
+    testing.expectEqual(h, "http://[::1]:8080/",
         "IPv6 literals must be bracketed before the colon-port suffix")
 })
 

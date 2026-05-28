@@ -3,47 +3,47 @@ use "toml"
 
 testing.test("parse simple", lam{ in
     let data = toml.parse("name = \"Ada\"\nage = 36")
-    testing.assertEqual(data.name, "Ada", nil)
-    testing.assertEqual(data.age, 36, nil)
+    testing.expectEqual(data.name, "Ada", nil)
+    testing.expectEqual(data.age, 36, nil)
 })
 
 testing.test("parse booleans", lam{ in
     let data = toml.parse("a = true\nb = false")
-    testing.assertEqual(data.a, true, nil)
-    testing.assertEqual(data.b, false, nil)
+    testing.expectEqual(data.a, true, nil)
+    testing.expectEqual(data.b, false, nil)
 })
 
 testing.test("parse tables", lam{ in
     let data = toml.parse("[server]\nhost = \"localhost\"\nport = 8080")
-    testing.assertEqual(data.server.host, "localhost", nil)
-    testing.assertEqual(data.server.port, 8080, nil)
+    testing.expectEqual(data.server.host, "localhost", nil)
+    testing.expectEqual(data.server.port, 8080, nil)
 })
 
 testing.test("parse arrays", lam{ in
     let data = toml.parse("nums = [1, 2, 3]")
-    testing.assertEqual(data.nums, [1, 2, 3], nil)
+    testing.expectEqual(data.nums, [1, 2, 3], nil)
 })
 
 testing.test("stringify", lam{ in
     let result = toml.stringify({name: "Ada", age: 36})
-    testing.assert(result.contains("name = \"Ada\""), nil)
-    testing.assert(result.contains("age = 36"), nil)
+    testing.expect(result.contains("name = \"Ada\""), nil)
+    testing.expect(result.contains("age = 36"), nil)
 })
 
 testing.test("section header tolerates inline comment", lam{ in
     let data = toml.parse("[section] # comment\nkey = 1")
-    testing.assertEqual(keys(data)[0], "section", nil)
-    testing.assertEqual(data.section.key, 1, nil)
+    testing.expectEqual(keys(data)[0], "section", nil)
+    testing.expectEqual(data.section.key, 1, nil)
 })
 
 testing.test("string escape sequences are order-independent", lam{ in
     // Input bytes:  k = "a\\nb"   → value should be a\nb (literal backslash + n + b)
     let d1 = toml.parse("k = \"a\\\\nb\"")
-    testing.assertEqual(d1.k, "a\\nb", "double-backslash + n stays literal")
+    testing.expectEqual(d1.k, "a\\nb", "double-backslash + n stays literal")
 
     // Input bytes:  k = "a\nb"    → value should contain a real newline
     let d2 = toml.parse("k = \"a\\nb\"")
-    testing.assertEqual(d2.k, "a\nb", "single-backslash + n becomes newline")
+    testing.expectEqual(d2.k, "a\nb", "single-backslash + n becomes newline")
 })
 
 testing.done()

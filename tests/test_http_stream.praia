@@ -112,9 +112,9 @@ let base = "http://localhost:" + str(TEST_PORT)
 
 testing.test("openStream exposes status / headers / cookies up front", lam{ in
     let s = http.openStream({url: base + "/contentlength"})
-    testing.assertEqual(s.status, 200, nil)
-    testing.assertEqual(s.headers["content-length"], "1150", nil)
-    testing.assertEqual(type(s.cookies), "array", "cookies is an array")
+    testing.expectEqual(s.status, 200, nil)
+    testing.expectEqual(s.headers["content-length"], "1150", nil)
+    testing.expectEqual(type(s.cookies), "array", "cookies is an array")
     s.close()
 })
 
@@ -123,26 +123,26 @@ testing.test("openStream exposes status / headers / cookies up front", lam{ in
 testing.test("Content-Length: read(n) returns up to n bytes", lam{ in
     let s = http.openStream({url: base + "/contentlength"})
     let first = s.read(20)
-    testing.assertEqual(first, "Hello streaming worl", nil)
+    testing.expectEqual(first, "Hello streaming worl", nil)
     let rest = s.readAll()
-    testing.assert(rest.startsWith("d. Hello"), nil)
-    testing.assert(s.eof(), "EOF after readAll")
+    testing.expect(rest.startsWith("d. Hello"), nil)
+    testing.expect(s.eof(), "EOF after readAll")
     s.close()
 })
 
 testing.test("Content-Length: readAll returns the full body", lam{ in
     let s = http.openStream({url: base + "/contentlength"})
     let all = s.readAll()
-    testing.assertEqual(len(all.bytes()), 1150, "23 * 50 = 1150 bytes")
-    testing.assertEqual(all.slice(0, 23), "Hello streaming world. ", nil)
+    testing.expectEqual(len(all.bytes()), 1150, "23 * 50 = 1150 bytes")
+    testing.expectEqual(all.slice(0, 23), "Hello streaming world. ", nil)
     s.close()
 })
 
 testing.test("Content-Length: zero-length body", lam{ in
     let s = http.openStream({url: base + "/empty"})
-    testing.assertEqual(s.status, 204, nil)
-    testing.assertEqual(s.readAll(), "", nil)
-    testing.assert(s.eof(), nil)
+    testing.expectEqual(s.status, 204, nil)
+    testing.expectEqual(s.readAll(), "", nil)
+    testing.expect(s.eof(), nil)
     s.close()
 })
 
@@ -154,7 +154,7 @@ testing.test("Content-Length: large body streams without slurping", lam{ in
         let chunk = s.read(1024)
         total = total + len(chunk.bytes())
     }
-    testing.assertEqual(total, 102400, "100 KiB body delivered in full")
+    testing.expectEqual(total, 102400, "100 KiB body delivered in full")
     s.close()
 })
 
@@ -162,14 +162,14 @@ testing.test("Content-Length: large body streams without slurping", lam{ in
 
 testing.test("Transfer-Encoding: chunked decodes correctly", lam{ in
     let s = http.openStream({url: base + "/chunked"})
-    testing.assertEqual(s.headers["transfer-encoding"], "chunked", nil)
-    testing.assertEqual(s.readAll(), "Hello streaming world", nil)
+    testing.expectEqual(s.headers["transfer-encoding"], "chunked", nil)
+    testing.expectEqual(s.readAll(), "Hello streaming world", nil)
     s.close()
 })
 
 testing.test("Chunked: chunk extensions after ';' are ignored", lam{ in
     let s = http.openStream({url: base + "/chunked-with-ext"})
-    testing.assertEqual(s.readAll(), "hello", nil)
+    testing.expectEqual(s.readAll(), "hello", nil)
     s.close()
 })
 
@@ -178,8 +178,8 @@ testing.test("Chunked: openStream survives a packet-boundary mid-chunk", lam{ in
     // which eagerly decoded chunked bodies — a partial first chunk
     // would throw "chunk data truncated" before openStream returned.
     let s = http.openStream({url: base + "/chunked-split"})
-    testing.assertEqual(s.status, 200, "headers parsed before any body bytes")
-    testing.assertEqual(s.readAll(), "hello",
+    testing.expectEqual(s.status, 200, "headers parsed before any body bytes")
+    testing.expectEqual(s.readAll(), "hello",
         "streaming decoder reassembles across the TCP split")
     s.close()
 })
@@ -188,7 +188,7 @@ testing.test("Chunked: openStream survives a packet-boundary mid-chunk", lam{ in
 
 testing.test("Close-delimited body reads until EOF", lam{ in
     let s = http.openStream({url: base + "/close-delimited"})
-    testing.assertEqual(s.readAll(), "body-by-close", nil)
+    testing.expectEqual(s.readAll(), "body-by-close", nil)
     s.close()
 })
 
@@ -196,11 +196,11 @@ testing.test("Close-delimited body reads until EOF", lam{ in
 
 testing.test("readLine returns one line at a time, nil at EOF", lam{ in
     let s = http.openStream({url: base + "/multiline"})
-    testing.assertEqual(s.readLine(), "alpha", nil)
-    testing.assertEqual(s.readLine(), "beta", nil)
-    testing.assertEqual(s.readLine(), "gamma",
+    testing.expectEqual(s.readLine(), "alpha", nil)
+    testing.expectEqual(s.readLine(), "beta", nil)
+    testing.expectEqual(s.readLine(), "gamma",
                         "final line without trailing \\n is still returned")
-    testing.assertEqual(s.readLine(), nil, "EOF returns nil")
+    testing.expectEqual(s.readLine(), nil, "EOF returns nil")
     s.close()
 })
 
@@ -216,7 +216,7 @@ testing.test("json.parser consumes the stream end-to-end", lam{ in
         let rec = p.nextValue()
         sum = sum + rec.n
     }
-    testing.assertEqual(sum, 6, "1 + 2 + 3")
+    testing.expectEqual(sum, 6, "1 + 2 + 3")
     s.close()
 })
 

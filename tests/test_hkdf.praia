@@ -12,7 +12,7 @@ testing.test("RFC 5869 Test Case 1 (SHA-256, basic)", lam{ in
     let salt = bytes.fromHex("000102030405060708090a0b0c")
     let info = bytes.fromHex("f0f1f2f3f4f5f6f7f8f9")
     let out = crypto.hkdf(ikm, salt, info, 42, "sha256")
-    testing.assertEqual(bytes.hex(out),
+    testing.expectEqual(bytes.hex(out),
         "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
         nil)
 })
@@ -31,7 +31,7 @@ testing.test("RFC 5869 Test Case 2 (SHA-256, longer inputs and output)", lam{ in
         "d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef" +
         "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
     let out = crypto.hkdf(ikm, salt, info, 82, "sha256")
-    testing.assertEqual(bytes.hex(out),
+    testing.expectEqual(bytes.hex(out),
         "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c" +
         "59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71" +
         "cc30c58179ec3e87c14c01d5c1f3434f1d87",
@@ -41,7 +41,7 @@ testing.test("RFC 5869 Test Case 2 (SHA-256, longer inputs and output)", lam{ in
 testing.test("RFC 5869 Test Case 3 (SHA-256, empty salt and empty info)", lam{ in
     let ikm = bytes.fromHex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
     let out = crypto.hkdf(ikm, "", "", 42, "sha256")
-    testing.assertEqual(bytes.hex(out),
+    testing.expectEqual(bytes.hex(out),
         "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d" +
         "9d201395faa4b61a96c8",
         nil)
@@ -52,7 +52,7 @@ testing.test("RFC 5869 Test Case 4 (SHA-1)", lam{ in
     let salt = bytes.fromHex("000102030405060708090a0b0c")
     let info = bytes.fromHex("f0f1f2f3f4f5f6f7f8f9")
     let out = crypto.hkdf(ikm, salt, info, 42, "sha1")
-    testing.assertEqual(bytes.hex(out),
+    testing.expectEqual(bytes.hex(out),
         "085a01ea1b10f36933068b56efa5ad81a4f14b822f5b091568a9cdd4f155fda2" +
         "c22e422478d305f3f896",
         nil)
@@ -64,7 +64,7 @@ testing.test("hash defaults to sha256 when omitted", lam{ in
     let ikm  = bytes.fromHex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
     let salt = bytes.fromHex("000102030405060708090a0b0c")
     let info = bytes.fromHex("f0f1f2f3f4f5f6f7f8f9")
-    testing.assertEqual(bytes.hex(crypto.hkdf(ikm, salt, info, 42)),
+    testing.expectEqual(bytes.hex(crypto.hkdf(ikm, salt, info, 42)),
                         bytes.hex(crypto.hkdf(ikm, salt, info, 42, "sha256")),
                         nil)
 })
@@ -72,31 +72,31 @@ testing.test("hash defaults to sha256 when omitted", lam{ in
 // ── Error cases ──────────────────────────────────────────────
 
 testing.test("length must be positive", lam{ in
-    testing.assertThrows(lam{ in crypto.hkdf("k", "s", "i", 0) },
+    testing.expectThrows(lam{ in crypto.hkdf("k", "s", "i", 0) },
                          "length must be positive")
-    testing.assertThrows(lam{ in crypto.hkdf("k", "s", "i", -8) },
+    testing.expectThrows(lam{ in crypto.hkdf("k", "s", "i", -8) },
                          "length must be positive")
 })
 
 testing.test("length is capped at 255 * hashlen", lam{ in
     // SHA-256 cap is 255 * 32 = 8160.
-    testing.assertThrows(lam{ in crypto.hkdf("k", "", "", 8161, "sha256") },
+    testing.expectThrows(lam{ in crypto.hkdf("k", "", "", 8161, "sha256") },
                          "exceeds RFC 5869 max")
 })
 
 testing.test("unknown hash throws", lam{ in
-    testing.assertThrows(lam{ in crypto.hkdf("k", "", "", 16, "blake3") },
+    testing.expectThrows(lam{ in crypto.hkdf("k", "", "", 16, "blake3") },
                          "must be 'sha256'")
 })
 
 testing.test("non-string key/salt/info throws", lam{ in
-    testing.assertThrows(lam{ in crypto.hkdf(123, "", "", 16) }, "key must be a string")
-    testing.assertThrows(lam{ in crypto.hkdf("k", 1, "", 16) }, "salt must be a string")
-    testing.assertThrows(lam{ in crypto.hkdf("k", "", 1, 16) }, "info must be a string")
+    testing.expectThrows(lam{ in crypto.hkdf(123, "", "", 16) }, "key must be a string")
+    testing.expectThrows(lam{ in crypto.hkdf("k", 1, "", 16) }, "salt must be a string")
+    testing.expectThrows(lam{ in crypto.hkdf("k", "", 1, 16) }, "info must be a string")
 })
 
 testing.test("missing required arguments throw", lam{ in
-    testing.assertThrows(lam{ in crypto.hkdf("k", "s", "i") },
+    testing.expectThrows(lam{ in crypto.hkdf("k", "s", "i") },
                          "requires 4-5 arguments")
 })
 
@@ -109,11 +109,11 @@ testing.test("different info strings produce independent keys", lam{ in
     let macKey = crypto.hkdf(master, salt, "mac-key-v1", 32)
     let cookieKey = crypto.hkdf(master, salt, "cookie-key-v1", 32)
     // No two derived keys collide.
-    testing.assert(encKey != macKey, nil)
-    testing.assert(encKey != cookieKey, nil)
-    testing.assert(macKey != cookieKey, nil)
+    testing.expect(encKey != macKey, nil)
+    testing.expect(encKey != cookieKey, nil)
+    testing.expect(macKey != cookieKey, nil)
     // Each is a full 32 bytes.
-    testing.assertEqual(len(encKey.bytes()), 32, nil)
+    testing.expectEqual(len(encKey.bytes()), 32, nil)
 })
 
 testing.done()

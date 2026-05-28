@@ -14,17 +14,17 @@ testing.test("Stack: LIFO ordering", lam{ in
     s.push(1)
     s.push(2)
     s.push(3)
-    testing.assertEqual(s.size(), 3, nil)
-    testing.assertEqual(s.peek(), 3, nil)
-    testing.assertEqual(s.pop(), 3, nil)
-    testing.assertEqual(s.pop(), 2, nil)
-    testing.assertEqual(s.pop(), 1, nil)
-    testing.assert(s.isEmpty(), nil)
+    testing.expectEqual(s.size(), 3, nil)
+    testing.expectEqual(s.peek(), 3, nil)
+    testing.expectEqual(s.pop(), 3, nil)
+    testing.expectEqual(s.pop(), 2, nil)
+    testing.expectEqual(s.pop(), 1, nil)
+    testing.expect(s.isEmpty(), nil)
 })
 
 testing.test("Stack: pop on empty throws", lam{ in
     let s = collections.Stack()
-    testing.assertThrows(lam{ in s.pop() }, "empty stack")
+    testing.expectThrows(lam{ in s.pop() }, "empty stack")
 })
 
 // ── Queue ─────────────────────────────────────────────────────
@@ -34,11 +34,11 @@ testing.test("Queue: FIFO ordering", lam{ in
     q.enqueue("a")
     q.enqueue("b")
     q.enqueue("c")
-    testing.assertEqual(q.peek(), "a", nil)
-    testing.assertEqual(q.dequeue(), "a", nil)
-    testing.assertEqual(q.dequeue(), "b", nil)
-    testing.assertEqual(q.dequeue(), "c", nil)
-    testing.assert(q.isEmpty(), nil)
+    testing.expectEqual(q.peek(), "a", nil)
+    testing.expectEqual(q.dequeue(), "a", nil)
+    testing.expectEqual(q.dequeue(), "b", nil)
+    testing.expectEqual(q.dequeue(), "c", nil)
+    testing.expect(q.isEmpty(), nil)
 })
 
 testing.test("Queue: dequeue is O(1) amortized (large-N regression)", lam{ in
@@ -50,12 +50,12 @@ testing.test("Queue: dequeue is O(1) amortized (large-N regression)", lam{ in
     for (i in 0..5000) { q.enqueue(i) }
     let total = 0
     while (!q.isEmpty()) { total = total + q.dequeue() }
-    testing.assertEqual(total, 5000 * 4999 / 2, "0+1+..+4999 = 12497500")
+    testing.expectEqual(total, 5000 * 4999 / 2, "0+1+..+4999 = 12497500")
 })
 
 testing.test("Queue: dequeue on empty throws", lam{ in
     let q = collections.Queue()
-    testing.assertThrows(lam{ in q.dequeue() }, "empty queue")
+    testing.expectThrows(lam{ in q.dequeue() }, "empty queue")
 })
 
 // ── Set ───────────────────────────────────────────────────────
@@ -65,13 +65,13 @@ testing.test("Set: add / has / remove", lam{ in
     s.add(1)
     s.add("hello")
     s.add(true)
-    testing.assertEqual(s.size(), 3, nil)
-    testing.assert(s.has(1), nil)
-    testing.assert(s.has("hello"), nil)
-    testing.assert(!s.has("missing"), nil)
+    testing.expectEqual(s.size(), 3, nil)
+    testing.expect(s.has(1), nil)
+    testing.expect(s.has("hello"), nil)
+    testing.expect(!s.has("missing"), nil)
     s.remove(1)
-    testing.assert(!s.has(1), nil)
-    testing.assertEqual(s.size(), 2, nil)
+    testing.expect(!s.has(1), nil)
+    testing.expectEqual(s.size(), 2, nil)
 })
 
 testing.test("Set: add is idempotent (no duplicates)", lam{ in
@@ -79,7 +79,7 @@ testing.test("Set: add is idempotent (no duplicates)", lam{ in
     s.add("x")
     s.add("x")
     s.add("x")
-    testing.assertEqual(s.size(), 1, "three adds of same value → size 1")
+    testing.expectEqual(s.size(), 1, "three adds of same value → size 1")
 })
 
 testing.test("Set: union / intersect / difference", lam{ in
@@ -89,13 +89,13 @@ testing.test("Set: union / intersect / difference", lam{ in
     for (v in [3, 4, 5, 6]) { b.add(v) }
 
     let u = sort(a.union(b).toArray())
-    testing.assertEqual(u, [1, 2, 3, 4, 5, 6], nil)
+    testing.expectEqual(u, [1, 2, 3, 4, 5, 6], nil)
 
     let i = sort(a.intersect(b).toArray())
-    testing.assertEqual(i, [3, 4], nil)
+    testing.expectEqual(i, [3, 4], nil)
 
     let d = sort(a.difference(b).toArray())
-    testing.assertEqual(d, [1, 2], "elements in a but not in b")
+    testing.expectEqual(d, [1, 2], "elements in a but not in b")
 })
 
 testing.test("Set: large-N regression (O(1) add/has)", lam{ in
@@ -104,9 +104,9 @@ testing.test("Set: large-N regression (O(1) add/has)", lam{ in
     // near-instantly.
     let s = collections.Set()
     for (i in 0..10000) { s.add(i) }
-    testing.assertEqual(s.size(), 10000, nil)
-    testing.assert(s.has(5000), nil)
-    testing.assert(!s.has(10001), nil)
+    testing.expectEqual(s.size(), 10000, nil)
+    testing.expect(s.has(5000), nil)
+    testing.expect(!s.has(10001), nil)
 })
 
 // ── Deque ─────────────────────────────────────────────────────
@@ -118,10 +118,10 @@ testing.test("Deque: pushFront / pushBack / popFront / popBack", lam{ in
     d.pushFront(1)
     d.pushFront(0)
     // Logical order: [0, 1, 2, 3]
-    testing.assertEqual(d.toArray(), [0, 1, 2, 3], nil)
-    testing.assertEqual(d.popFront(), 0, nil)
-    testing.assertEqual(d.popBack(),  3, nil)
-    testing.assertEqual(d.toArray(), [1, 2], nil)
+    testing.expectEqual(d.toArray(), [0, 1, 2, 3], nil)
+    testing.expectEqual(d.popFront(), 0, nil)
+    testing.expectEqual(d.popBack(),  3, nil)
+    testing.expectEqual(d.toArray(), [1, 2], nil)
 })
 
 testing.test("Deque: rebalancing handles all-on-one-side", lam{ in
@@ -130,10 +130,10 @@ testing.test("Deque: rebalancing handles all-on-one-side", lam{ in
     let d = collections.Deque()
     for (i in 0..5) { d.pushFront(i) }
     // Logical order: [4, 3, 2, 1, 0]
-    testing.assertEqual(d.popBack(), 0, nil)
-    testing.assertEqual(d.popBack(), 1, nil)
-    testing.assertEqual(d.popBack(), 2, nil)
-    testing.assertEqual(d.peekBack(), 3, nil)
+    testing.expectEqual(d.popBack(), 0, nil)
+    testing.expectEqual(d.popBack(), 1, nil)
+    testing.expectEqual(d.popBack(), 2, nil)
+    testing.expectEqual(d.peekBack(), 3, nil)
 })
 
 // ── OrderedMap ────────────────────────────────────────────────
@@ -143,8 +143,8 @@ testing.test("OrderedMap: preserves insertion order", lam{ in
     om.set("z", 1)
     om.set("a", 2)
     om.set("m", 3)
-    testing.assertEqual(om.getKeys(), ["z", "a", "m"], nil)
-    testing.assertEqual(om.getValues(), [1, 2, 3], nil)
+    testing.expectEqual(om.getKeys(), ["z", "a", "m"], nil)
+    testing.expectEqual(om.getValues(), [1, 2, 3], nil)
 })
 
 testing.test("OrderedMap: re-setting a key keeps its original position", lam{ in
@@ -153,8 +153,8 @@ testing.test("OrderedMap: re-setting a key keeps its original position", lam{ in
     om.set("b", 2)
     om.set("c", 3)
     om.set("b", 20)  // update — should NOT move "b" to the end
-    testing.assertEqual(om.getKeys(), ["a", "b", "c"], nil)
-    testing.assertEqual(om.get("b"), 20, nil)
+    testing.expectEqual(om.getKeys(), ["a", "b", "c"], nil)
+    testing.expectEqual(om.get("b"), 20, nil)
 })
 
 testing.test("OrderedMap: remove keeps order of the rest", lam{ in
@@ -163,20 +163,20 @@ testing.test("OrderedMap: remove keeps order of the rest", lam{ in
         om.set(p[0], p[1])
     }
     om.remove("b")
-    testing.assertEqual(om.getKeys(), ["a", "c", "d"], nil)
-    testing.assert(!om.has("b"), nil)
+    testing.expectEqual(om.getKeys(), ["a", "c", "d"], nil)
+    testing.expect(!om.has("b"), nil)
 })
 
 // ── Counter ───────────────────────────────────────────────────
 
 testing.test("Counter: count from an iterable", lam{ in
     let c = collections.Counter(["a", "b", "a", "c", "a", "b"])
-    testing.assertEqual(c.count("a"), 3, nil)
-    testing.assertEqual(c.count("b"), 2, nil)
-    testing.assertEqual(c.count("c"), 1, nil)
-    testing.assertEqual(c.count("missing"), 0, "missing key reads as 0, no throw")
-    testing.assertEqual(c.total(), 6, nil)
-    testing.assertEqual(c.size(), 3, "three distinct keys")
+    testing.expectEqual(c.count("a"), 3, nil)
+    testing.expectEqual(c.count("b"), 2, nil)
+    testing.expectEqual(c.count("c"), 1, nil)
+    testing.expectEqual(c.count("missing"), 0, "missing key reads as 0, no throw")
+    testing.expectEqual(c.total(), 6, nil)
+    testing.expectEqual(c.size(), 3, "three distinct keys")
 })
 
 testing.test("Counter: increment / decrement", lam{ in
@@ -184,26 +184,26 @@ testing.test("Counter: increment / decrement", lam{ in
     c.increment("x")
     c.increment("x", 5)
     c.decrement("x")
-    testing.assertEqual(c.count("x"), 5, "1 + 5 - 1")
+    testing.expectEqual(c.count("x"), 5, "1 + 5 - 1")
     c.decrement("y", 10)
-    testing.assertEqual(c.count("y"), -10, "negative counts allowed (matches Python's Counter)")
+    testing.expectEqual(c.count("y"), -10, "negative counts allowed (matches Python's Counter)")
 })
 
 testing.test("Counter: mostCommon returns descending {key, count}", lam{ in
     let c = collections.Counter(["a", "b", "a", "c", "a", "b", "d"])
     let top = c.mostCommon(2)
-    testing.assertEqual(len(top), 2, nil)
-    testing.assertEqual(top[0].key, "a", nil)
-    testing.assertEqual(top[0].count, 3, nil)
-    testing.assertEqual(top[1].key, "b", nil)
-    testing.assertEqual(top[1].count, 2, nil)
+    testing.expectEqual(len(top), 2, nil)
+    testing.expectEqual(top[0].key, "a", nil)
+    testing.expectEqual(top[0].count, 3, nil)
+    testing.expectEqual(top[1].key, "b", nil)
+    testing.expectEqual(top[1].count, 2, nil)
 })
 
 testing.test("Counter: mostCommon without n returns all entries", lam{ in
     let c = collections.Counter(["a", "b", "a"])
     let all = c.mostCommon()
-    testing.assertEqual(len(all), 2, nil)
-    testing.assertEqual(all[0].key, "a", nil)
+    testing.expectEqual(len(all), 2, nil)
+    testing.expectEqual(all[0].key, "a", nil)
 })
 
 testing.test("Counter: mostCommon return shape has no internal fields", lam{ in
@@ -212,9 +212,9 @@ testing.test("Counter: mostCommon return shape has no internal fields", lam{ in
     // the returned maps — callers see only {key, count}.
     let c = collections.Counter(["a", "b", "a"])
     let top = c.mostCommon()
-    testing.assertEqual(keys(top[0]).sort(), ["count", "key"],
+    testing.expectEqual(keys(top[0]).sort(), ["count", "key"],
         "returned entries must contain exactly 'key' and 'count'")
-    testing.assertEqual(top[0]._idx, nil,
+    testing.expectEqual(top[0]._idx, nil,
         "internal _idx must not be present on the returned pair")
 })
 
@@ -225,12 +225,12 @@ testing.test("Counter: mostCommon ties break by first-insertion order", lam{ in
     // first-encountered order — which is what we now guarantee.
     let c = collections.Counter(["b", "c", "a", "b", "c", "a"])
     let top = c.mostCommon()
-    testing.assertEqual(len(top), 3, nil)
+    testing.expectEqual(len(top), 3, nil)
     // All three keys tie at count=2. Expected order is the insertion
     // order: b, c, a.
-    testing.assertEqual(top[0].key, "b", "first-inserted key wins the tie")
-    testing.assertEqual(top[1].key, "c", "second-inserted next")
-    testing.assertEqual(top[2].key, "a", "third-inserted last")
+    testing.expectEqual(top[0].key, "b", "first-inserted key wins the tie")
+    testing.expectEqual(top[1].key, "c", "second-inserted next")
+    testing.expectEqual(top[2].key, "a", "third-inserted last")
 })
 
 testing.test("Counter: mostCommon tie order across two count tiers", lam{ in
@@ -244,38 +244,38 @@ testing.test("Counter: mostCommon tie order across two count tiers", lam{ in
     let top = c.mostCommon()
     // Expected: count=2 group first in insertion order (second, fourth),
     // then count=1 group in insertion order (first, third).
-    testing.assertEqual(top[0].key, "second", nil)
-    testing.assertEqual(top[1].key, "fourth", nil)
-    testing.assertEqual(top[2].key, "first",  nil)
-    testing.assertEqual(top[3].key, "third",  nil)
+    testing.expectEqual(top[0].key, "second", nil)
+    testing.expectEqual(top[1].key, "fourth", nil)
+    testing.expectEqual(top[2].key, "first",  nil)
+    testing.expectEqual(top[3].key, "third",  nil)
 })
 
 testing.test("Counter: update / subtract with another Counter", lam{ in
     let a = collections.Counter(["x", "x", "y"])
     let b = collections.Counter(["x", "z"])
     a.update(b)
-    testing.assertEqual(a.count("x"), 3, "2 + 1")
-    testing.assertEqual(a.count("y"), 1, nil)
-    testing.assertEqual(a.count("z"), 1, "new key from update")
+    testing.expectEqual(a.count("x"), 3, "2 + 1")
+    testing.expectEqual(a.count("y"), 1, nil)
+    testing.expectEqual(a.count("z"), 1, "new key from update")
 
     a.subtract(b)
-    testing.assertEqual(a.count("x"), 2, "back where we started")
-    testing.assertEqual(a.count("z"), 0, nil)
+    testing.expectEqual(a.count("x"), 2, "back where we started")
+    testing.expectEqual(a.count("z"), 0, nil)
 })
 
 testing.test("Counter: update from an array", lam{ in
     let c = collections.Counter()
     c.update(["a", "a", "b"])
-    testing.assertEqual(c.count("a"), 2, nil)
-    testing.assertEqual(c.count("b"), 1, nil)
+    testing.expectEqual(c.count("a"), 2, nil)
+    testing.expectEqual(c.count("b"), 1, nil)
 })
 
 testing.test("Counter: toMap roundtrip", lam{ in
     let c = collections.Counter(["a", "a", "b", "c", "c", "c"])
     let m = c.toMap()
-    testing.assertEqual(m.a, 2, nil)
-    testing.assertEqual(m.b, 1, nil)
-    testing.assertEqual(m.c, 3, nil)
+    testing.expectEqual(m.a, 2, nil)
+    testing.expectEqual(m.b, 1, nil)
+    testing.expectEqual(m.c, 3, nil)
 })
 
 // ── DefaultDict ───────────────────────────────────────────────
@@ -286,32 +286,32 @@ testing.test("DefaultDict: factory fires once per missing key", lam{ in
     dd.get("a").push(1)
     dd.get("a").push(2)
     dd.get("b").push(99)
-    testing.assertEqual(calls, 2, "factory invoked once for 'a' and once for 'b'")
-    testing.assertEqual(dd.get("a"), [1, 2], nil)
-    testing.assertEqual(dd.get("b"), [99], nil)
+    testing.expectEqual(calls, 2, "factory invoked once for 'a' and once for 'b'")
+    testing.expectEqual(dd.get("a"), [1, 2], nil)
+    testing.expectEqual(dd.get("b"), [99], nil)
 })
 
 testing.test("DefaultDict: group items by key", lam{ in
     let dd = collections.DefaultDict(lam{ in [] })
     let words = ["apple", "ant", "banana", "berry", "avocado"]
     for (w in words) { dd.get(w[0]).push(w) }
-    testing.assertEqual(dd.get("a"), ["apple", "ant", "avocado"], nil)
-    testing.assertEqual(dd.get("b"), ["banana", "berry"], nil)
+    testing.expectEqual(dd.get("a"), ["apple", "ant", "avocado"], nil)
+    testing.expectEqual(dd.get("b"), ["banana", "berry"], nil)
 })
 
 testing.test("DefaultDict: explicit set and delete", lam{ in
     let dd = collections.DefaultDict(lam{ in 0 })
     dd.set("k", 42)
-    testing.assertEqual(dd.get("k"), 42, nil)
-    testing.assert(dd.has("k"), nil)
+    testing.expectEqual(dd.get("k"), 42, nil)
+    testing.expect(dd.has("k"), nil)
     dd.delete("k")
-    testing.assert(!dd.has("k"), nil)
+    testing.expect(!dd.has("k"), nil)
     // After delete, next get() should fire the factory again.
-    testing.assertEqual(dd.get("k"), 0, "factory re-invoked after delete")
+    testing.expectEqual(dd.get("k"), 0, "factory re-invoked after delete")
 })
 
 testing.test("DefaultDict: factory must be callable", lam{ in
-    testing.assertThrows(lam{ in collections.DefaultDict(42) },
+    testing.expectThrows(lam{ in collections.DefaultDict(42) },
                          "zero-arg factory function")
 })
 

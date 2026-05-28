@@ -1,51 +1,51 @@
 use "testing"
 
 testing.test("path.join", lam{ in
-    testing.assertEqual(path.join("a", "b", "c"), "a/b/c", nil)
-    testing.assertEqual(path.join("/usr", "local", "bin"), "/usr/local/bin", nil)
+    testing.expectEqual(path.join("a", "b", "c"), "a/b/c", nil)
+    testing.expectEqual(path.join("/usr", "local", "bin"), "/usr/local/bin", nil)
 })
 
 testing.test("path.dirname", lam{ in
-    testing.assertEqual(path.dirname("/usr/local/bin/praia"), "/usr/local/bin", nil)
+    testing.expectEqual(path.dirname("/usr/local/bin/praia"), "/usr/local/bin", nil)
 })
 
 testing.test("path.basename", lam{ in
-    testing.assertEqual(path.basename("/usr/local/bin/praia"), "praia", nil)
-    testing.assertEqual(path.basename("file.txt"), "file.txt", nil)
+    testing.expectEqual(path.basename("/usr/local/bin/praia"), "praia", nil)
+    testing.expectEqual(path.basename("file.txt"), "file.txt", nil)
 })
 
 testing.test("path.ext", lam{ in
-    testing.assertEqual(path.ext("file.txt"), ".txt", nil)
-    testing.assertEqual(path.ext("archive.tar.gz"), ".gz", nil)
-    testing.assertEqual(path.ext("noext"), "", nil)
+    testing.expectEqual(path.ext("file.txt"), ".txt", nil)
+    testing.expectEqual(path.ext("archive.tar.gz"), ".gz", nil)
+    testing.expectEqual(path.ext("noext"), "", nil)
 })
 
 testing.test("path.resolve", lam{ in
     let resolved = path.resolve(".")
-    testing.assert(resolved.startsWith("/"), "should be absolute")
+    testing.expect(resolved.startsWith("/"), "should be absolute")
 })
 
 testing.test("path.isDir and isFile", lam{ in
-    testing.assert(path.isDir("."), nil)
-    testing.assert(!path.isFile("."), nil)
-    testing.assert(path.isFile("Makefile"), nil)
-    testing.assert(!path.isDir("Makefile"), nil)
+    testing.expect(path.isDir("."), nil)
+    testing.expect(!path.isFile("."), nil)
+    testing.expect(path.isFile("Makefile"), nil)
+    testing.expect(!path.isDir("Makefile"), nil)
 })
 
 testing.test("path.size", lam{ in
     let s = path.size("Makefile")
-    testing.assert(s > 0, "Makefile should have content")
+    testing.expect(s > 0, "Makefile should have content")
 })
 
 testing.test("path.walk", lam{ in
     let files = path.walk("tests")
-    testing.assert(len(files) > 10, "tests/ has many files")
-    testing.assert(files[0].endsWith(".praia"), "should find .praia files")
+    testing.expect(len(files) > 10, "tests/ has many files")
+    testing.expect(files[0].endsWith(".praia"), "should find .praia files")
 })
 
 testing.test("path.glob", lam{ in
     let files = path.glob("tests", ".praia")
-    testing.assert(len(files) > 10, nil)
+    testing.expect(len(files) > 10, nil)
 })
 
 testing.done()

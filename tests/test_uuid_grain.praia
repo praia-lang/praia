@@ -4,21 +4,21 @@ use "validate"
 
 testing.test("uuid v4 format", lam{ in
     let id = uuid.v4()
-    testing.assertEqual(len(id), 36, "uuid is 36 chars")
-    testing.assert(validate.uuid(id), "should be valid uuid format")
-    testing.assertEqual(id[14], "4", "version nibble is 4")
+    testing.expectEqual(len(id), 36, "uuid is 36 chars")
+    testing.expect(validate.uuid(id), "should be valid uuid format")
+    testing.expectEqual(id[14], "4", "version nibble is 4")
     // Variant 1: byte 8 has high bits 10xx, so the hex nibble at
     // position 19 must be 8, 9, a, or b. Regression: pre-CSPRNG impl
     // already got this right; covering it here so any future rewrite
     // can't accidentally regress.
-    testing.assert("89ab".contains(id[19]),
+    testing.expect("89ab".contains(id[19]),
                    "variant nibble must be 8/9/a/b (got " + id[19] + ")")
 })
 
 testing.test("uuid v4 uniqueness", lam{ in
     let a = uuid.v4()
     let b = uuid.v4()
-    testing.assert(a != b, "two uuids should differ")
+    testing.expect(a != b, "two uuids should differ")
 })
 
 testing.done()

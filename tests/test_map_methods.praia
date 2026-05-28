@@ -4,92 +4,92 @@ use "testing"
 
 testing.test("has returns true for existing key", lam{ in
     let m = {a: 1, b: 2}
-    testing.assert(m.has("a"), nil)
-    testing.assert(m.has("b"), nil)
+    testing.expect(m.has("a"), nil)
+    testing.expect(m.has("b"), nil)
 })
 
 testing.test("has returns false for missing key", lam{ in
     let m = {a: 1}
-    testing.assert(!m.has("z"), nil)
-    testing.assert(!m.has(""), nil)
+    testing.expect(!m.has("z"), nil)
+    testing.expect(!m.has(""), nil)
 })
 
 testing.test("has with non-string keys", lam{ in
     let m = {[1]: "one", [true]: "yes"}
-    testing.assert(m.has(1), nil)
-    testing.assert(m.has(true), nil)
-    testing.assert(!m.has(2), nil)
+    testing.expect(m.has(1), nil)
+    testing.expect(m.has(true), nil)
+    testing.expect(!m.has(2), nil)
 })
 
 testing.test("has on empty map", lam{ in
-    testing.assert(!({}).has("anything"), nil)
+    testing.expect(!({}).has("anything"), nil)
 })
 
 testing.test("has with nil value", lam{ in
     let m = {a: nil}
-    testing.assert(m.has("a"), "key exists even if value is nil")
+    testing.expect(m.has("a"), "key exists even if value is nil")
 })
 
 // ── .get() ──
 
 testing.test("get returns value for existing key", lam{ in
     let m = {a: 1, b: "hello"}
-    testing.assertEqual(m.get("a"), 1, nil)
-    testing.assertEqual(m.get("b"), "hello", nil)
+    testing.expectEqual(m.get("a"), 1, nil)
+    testing.expectEqual(m.get("b"), "hello", nil)
 })
 
 testing.test("get returns nil for missing key", lam{ in
-    testing.assertEqual({a: 1}.get("z"), nil, nil)
+    testing.expectEqual({a: 1}.get("z"), nil, nil)
 })
 
 testing.test("get returns default for missing key", lam{ in
-    testing.assertEqual({a: 1}.get("z", 99), 99, nil)
-    testing.assertEqual({a: 1}.get("z", "default"), "default", nil)
+    testing.expectEqual({a: 1}.get("z", 99), 99, nil)
+    testing.expectEqual({a: 1}.get("z", "default"), "default", nil)
 })
 
 testing.test("get returns value not default when key exists", lam{ in
-    testing.assertEqual({a: 1}.get("a", 99), 1, "should return value, not default")
+    testing.expectEqual({a: 1}.get("a", 99), 1, "should return value, not default")
 })
 
 testing.test("get with nil value returns nil not default", lam{ in
-    testing.assertEqual({a: nil}.get("a", 99), nil, "nil value is still a value")
+    testing.expectEqual({a: nil}.get("a", 99), nil, "nil value is still a value")
 })
 
 testing.test("get with non-string keys", lam{ in
     let m = {[42]: "answer"}
-    testing.assertEqual(m.get(42), "answer", nil)
-    testing.assertEqual(m.get(43, "nope"), "nope", nil)
+    testing.expectEqual(m.get(42), "answer", nil)
+    testing.expectEqual(m.get(43, "nope"), "nope", nil)
 })
 
 // ── shadowing ──
 
 testing.test("map key named 'has' shadows method", lam{ in
     let m = {has: 42}
-    testing.assertEqual(m.has, 42, nil)
+    testing.expectEqual(m.has, 42, nil)
 })
 
 testing.test("map key named 'get' shadows method", lam{ in
     let m = {get: "value"}
-    testing.assertEqual(m.get, "value", nil)
+    testing.expectEqual(m.get, "value", nil)
 })
 
 testing.test("trailing comma in map literal is accepted", lam{ in
     let m = {x: 1, y: 2,}
-    testing.assertEqual(m.x, 1, nil)
-    testing.assertEqual(m.y, 2, nil)
-    testing.assertEqual(len(m), 2, "trailing comma does not add a key")
+    testing.expectEqual(m.x, 1, nil)
+    testing.expectEqual(m.y, 2, nil)
+    testing.expectEqual(len(m), 2, "trailing comma does not add a key")
 
     let single = {only: "yes",}
-    testing.assertEqual(single.only, "yes", nil)
+    testing.expectEqual(single.only, "yes", nil)
 })
 
 testing.test("trailing comma in array literal is accepted", lam{ in
     let a = [1, 2, 3,]
-    testing.assertEqual(len(a), 3, "trailing comma does not add an element")
-    testing.assertEqual(a[2], 3, nil)
+    testing.expectEqual(len(a), 3, "trailing comma does not add an element")
+    testing.expectEqual(a[2], 3, nil)
 
     let single = [42,]
-    testing.assertEqual(len(single), 1, nil)
+    testing.expectEqual(len(single), 1, nil)
 })
 
 testing.done()

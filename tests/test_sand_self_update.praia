@@ -107,12 +107,12 @@ if (fs.exists(path.join(installedSandDir, ".git"))) {
 
 testing.test("sand list -g synthesizes a sand entry from grain.yaml", lam{ in
     // No lockfile written yet — synthSandEntry kicks in.
-    testing.assert(
+    testing.expect(
         !fs.exists(path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")),
         "precondition: no lockfile present")
     let r = runSand(["list", "-g"])
-    testing.assertEqual(r.exitCode, 0, "list -g exit 0: " + r.stderr)
-    testing.assert(r.stdout.contains("sand@"),
+    testing.expectEqual(r.exitCode, 0, "list -g exit 0: " + r.stderr)
+    testing.expect(r.stdout.contains("sand@"),
                     "lazy bootstrap surfaces sand in list output")
 })
 
@@ -124,36 +124,36 @@ testing.test("sand install -g atomic-swaps over existing sand", lam{ in
 
     let mirrorSand = path.join(mirrorRoot, "sand")
     let r = runSand(["install", "-g", "file://" + mirrorSand])
-    testing.assertEqual(r.exitCode, 0, "install exit 0: " + r.stderr + " | " + r.stdout)
+    testing.expectEqual(r.exitCode, 0, "install exit 0: " + r.stderr + " | " + r.stdout)
 
     // Atomic swap replaced the dir — sentinel from the OLD sand is gone.
-    testing.assert(!fs.exists(path.join(installedSandDir, "PRE_SWAP_MARKER")),
+    testing.expect(!fs.exists(path.join(installedSandDir, "PRE_SWAP_MARKER")),
                     "old marker gone after atomic swap")
 
     // No .bak.<pid> or .new.<pid> leftovers on a successful swap.
     let parent = path.join(sandHome, ".praia", "ext_grains")
     let entries = fs.readDir(parent)
     for (e in entries) {
-        testing.assert(!e.contains(".bak."), "no .bak leftover: " + e)
-        testing.assert(!e.contains(".new."), "no .new leftover: " + e)
+        testing.expect(!e.contains(".bak."), "no .bak leftover: " + e)
+        testing.expect(!e.contains(".new."), "no .new leftover: " + e)
     }
 
     // Wrapper at ~/.praia/bin/sand exists, is sand-managed, points at
     // the new sand main.
     let wrapper = path.join(sandHome, ".praia", "bin", "sand")
-    testing.assert(fs.exists(wrapper), "sand wrapper installed to ~/.praia/bin/sand")
+    testing.expect(fs.exists(wrapper), "sand wrapper installed to ~/.praia/bin/sand")
     let body = fs.read(wrapper)
-    testing.assert(body.contains("# sand-managed wrapper for sand"),
+    testing.expect(body.contains("# sand-managed wrapper for sand"),
                     "wrapper carries sand-managed sentinel")
-    testing.assert(
+    testing.expect(
         body.contains(path.join(installedSandDir, "main.praia")),
         "wrapper points at the swapped sand main.praia")
 
     // The reinstalled sand should report the same version it cloned
     // (whatever sand/grain.yaml currently says).
     let verR = sys.exec([wrapper, "--version"])
-    testing.assertEqual(verR.exitCode, 0, "wrapper runs: " + verR.stderr)
-    testing.assert(verR.stdout.contains("sand v"),
+    testing.expectEqual(verR.exitCode, 0, "wrapper runs: " + verR.stderr)
+    testing.expect(verR.stdout.contains("sand v"),
                     "wrapper prints sand version: " + verR.stdout)
 })
 
@@ -161,11 +161,11 @@ testing.test("post-swap: sand list -g shows the now-real lockfile entry", lam{ i
     // After the previous install, the lockfile has a real sand entry.
     // The synth path shouldn't trigger now (real entry takes precedence).
     let r = runSand(["list", "-g"])
-    testing.assertEqual(r.exitCode, 0, nil)
-    testing.assert(r.stdout.contains("sand@"), "sand listed")
+    testing.expectEqual(r.exitCode, 0, nil)
+    testing.expect(r.stdout.contains("sand@"), "sand listed")
     // Source should be the file:// mirror URL we used, not the synth's
     // github.com placeholder.
-    testing.assert(r.stdout.contains("file://"),
+    testing.expect(r.stdout.contains("file://"),
                     "real lockfile entry retained: " + r.stdout)
 })
 

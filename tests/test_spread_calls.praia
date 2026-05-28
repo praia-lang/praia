@@ -3,13 +3,13 @@ use "testing"
 testing.test("spread array as args", lam{ in
     func add(a, b, c) { return a + b + c }
     let args = [1, 2, 3]
-    testing.assertEqual(add(...args), 6, nil)
+    testing.expectEqual(add(...args), 6, nil)
 })
 
 testing.test("spread with fixed args", lam{ in
     func f(a, b, c, d) { return [a, b, c, d] }
     let rest = [3, 4]
-    testing.assertEqual(f(1, 2, ...rest), [1, 2, 3, 4], nil)
+    testing.expectEqual(f(1, 2, ...rest), [1, 2, 3, 4], nil)
 })
 
 testing.test("multiple spreads", lam{ in
@@ -20,13 +20,13 @@ testing.test("multiple spreads", lam{ in
     }
     let a = [1, 2]
     let b = [3, 4]
-    testing.assertEqual(sum(...a, ...b), 10, nil)
+    testing.expectEqual(sum(...a, ...b), 10, nil)
 })
 
 testing.test("spread empty array", lam{ in
     func f(...args) { return len(args) }
-    testing.assertEqual(f(...[]), 0, nil)
-    testing.assertEqual(f(1, ...[], 2), 2, nil)
+    testing.expectEqual(f(...[]), 0, nil)
+    testing.expectEqual(f(1, ...[], 2), 2, nil)
 })
 
 testing.test("generic wrapper with spread", lam{ in
@@ -35,7 +35,7 @@ testing.test("generic wrapper with spread", lam{ in
     }
     func add(a, b) { return a + b }
     let w = wrapper(add)
-    testing.assertEqual(w(3, 4), 7, nil)
+    testing.expectEqual(w(3, 4), 7, nil)
 })
 
 testing.test("decorator pattern with spread", lam{ in
@@ -48,16 +48,16 @@ testing.test("decorator pattern with spread", lam{ in
     }
     func multiply(a, b) { return a * b }
     let tracked = logged(multiply)
-    testing.assertEqual(tracked(3, 4), 12, nil)
-    testing.assertEqual(tracked(5, 6), 30, nil)
+    testing.expectEqual(tracked(3, 4), 12, nil)
+    testing.expectEqual(tracked(5, 6), 30, nil)
 })
 
 testing.test("spread with rest params", lam{ in
     func first(a, ...rest) { return [a, rest] }
     let args = [10, 20, 30]
     let result = first(...args)
-    testing.assertEqual(result[0], 10, nil)
-    testing.assertEqual(result[1], [20, 30], nil)
+    testing.expectEqual(result[0], 10, nil)
+    testing.expectEqual(result[1], [20, 30], nil)
 })
 
 testing.done()

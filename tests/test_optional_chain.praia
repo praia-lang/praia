@@ -4,27 +4,27 @@ use "testing"
 
 testing.test("?. on nil returns nil", lam{ in
     let x = nil
-    testing.assertEqual(x?.name, nil, nil)
+    testing.expectEqual(x?.name, nil, nil)
 })
 
 testing.test("?. on non-nil accesses field", lam{ in
     let x = {name: "Ada"}
-    testing.assertEqual(x?.name, "Ada", nil)
+    testing.expectEqual(x?.name, "Ada", nil)
 })
 
 testing.test("?. chained", lam{ in
     let user = {address: {city: "Lisbon"}}
-    testing.assertEqual(user?.address?.city, "Lisbon", nil)
+    testing.expectEqual(user?.address?.city, "Lisbon", nil)
 })
 
 testing.test("?. short-circuits on first nil", lam{ in
     let user = nil
-    testing.assertEqual(user?.address?.city, nil, nil)
+    testing.expectEqual(user?.address?.city, nil, nil)
 })
 
 testing.test("?. mid-chain nil", lam{ in
     let user = {address: nil}
-    testing.assertEqual(user?.address?.city, nil, nil)
+    testing.expectEqual(user?.address?.city, nil, nil)
 })
 
 testing.test("?. on instance", lam{ in
@@ -32,72 +32,72 @@ testing.test("?. on instance", lam{ in
         func init(name) { this.name = name }
     }
     let p = Person("Ada")
-    testing.assertEqual(p?.name, "Ada", nil)
+    testing.expectEqual(p?.name, "Ada", nil)
     let q = nil
-    testing.assertEqual(q?.name, nil, nil)
+    testing.expectEqual(q?.name, nil, nil)
 })
 
 // ── Optional index (?[]) ──
 
 testing.test("?[] on nil returns nil", lam{ in
     let arr = nil
-    testing.assertEqual(arr?[0], nil, nil)
+    testing.expectEqual(arr?[0], nil, nil)
 })
 
 testing.test("?[] on array accesses element", lam{ in
     let arr = [10, 20, 30]
-    testing.assertEqual(arr?[1], 20, nil)
+    testing.expectEqual(arr?[1], 20, nil)
 })
 
 testing.test("?[] on map accesses key", lam{ in
     let m = {a: 1}
-    testing.assertEqual(m?["a"], 1, nil)
+    testing.expectEqual(m?["a"], 1, nil)
 })
 
 // ── Nil coalescing (??) ──
 
 testing.test("?? returns left if non-nil", lam{ in
-    testing.assertEqual("hello" ?? "default", "hello", nil)
-    testing.assertEqual(0 ?? 42, 0, nil)
-    testing.assertEqual(false ?? true, false, nil)
+    testing.expectEqual("hello" ?? "default", "hello", nil)
+    testing.expectEqual(0 ?? 42, 0, nil)
+    testing.expectEqual(false ?? true, false, nil)
 })
 
 testing.test("?? returns right if left is nil", lam{ in
-    testing.assertEqual(nil ?? "default", "default", nil)
-    testing.assertEqual(nil ?? 0, 0, nil)
+    testing.expectEqual(nil ?? "default", "default", nil)
+    testing.expectEqual(nil ?? 0, 0, nil)
 })
 
 testing.test("?? short-circuits (right not evaluated)", lam{ in
     let called = false
     func sideEffect() { called = true; return 42 }
     let result = "exists" ?? sideEffect()
-    testing.assertEqual(result, "exists", nil)
-    testing.assert(!called, "right side should not be evaluated")
+    testing.expectEqual(result, "exists", nil)
+    testing.expect(!called, "right side should not be evaluated")
 })
 
 testing.test("?? chains", lam{ in
-    testing.assertEqual(nil ?? nil ?? "last", "last", nil)
-    testing.assertEqual(nil ?? "second" ?? "third", "second", nil)
+    testing.expectEqual(nil ?? nil ?? "last", "last", nil)
+    testing.expectEqual(nil ?? "second" ?? "third", "second", nil)
 })
 
 // ── Combined ──
 
 testing.test("?. with ??", lam{ in
     let user = nil
-    testing.assertEqual(user?.name ?? "anonymous", "anonymous", nil)
+    testing.expectEqual(user?.name ?? "anonymous", "anonymous", nil)
 })
 
 testing.test("?. chain with ??", lam{ in
     let config = {db: {host: "localhost"}}
-    testing.assertEqual(config?.db?.host ?? "127.0.0.1", "localhost", nil)
-    testing.assertEqual(config?.db?.port ?? 5432, 5432, nil)
+    testing.expectEqual(config?.db?.host ?? "127.0.0.1", "localhost", nil)
+    testing.expectEqual(config?.db?.port ?? 5432, 5432, nil)
 })
 
 testing.test("?[] with ??", lam{ in
     let arr = nil
-    testing.assertEqual(arr?[0] ?? "default", "default", nil)
+    testing.expectEqual(arr?[0] ?? "default", "default", nil)
     let arr2 = [1, 2]
-    testing.assertEqual(arr2?[0] ?? 99, 1, nil)
+    testing.expectEqual(arr2?[0] ?? 99, 1, nil)
 })
 
 testing.done()

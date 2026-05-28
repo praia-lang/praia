@@ -2,27 +2,27 @@ use "testing"
 
 testing.test("rest param collects all args", lam{ in
     func f(...args) { return args }
-    testing.assertEqual(f(1, 2, 3), [1, 2, 3], nil)
+    testing.expectEqual(f(1, 2, 3), [1, 2, 3], nil)
 })
 
 testing.test("rest param with no args", lam{ in
     func f(...args) { return args }
-    testing.assertEqual(f(), [], nil)
+    testing.expectEqual(f(), [], nil)
 })
 
 testing.test("rest param after regular params", lam{ in
     func f(a, b, ...rest) { return [a, b, rest] }
-    testing.assertEqual(f(1, 2, 3, 4), [1, 2, [3, 4]], nil)
+    testing.expectEqual(f(1, 2, 3, 4), [1, 2, [3, 4]], nil)
 })
 
 testing.test("rest param empty when all consumed by regular", lam{ in
     func f(a, b, ...rest) { return rest }
-    testing.assertEqual(f(1, 2), [], nil)
+    testing.expectEqual(f(1, 2), [], nil)
 })
 
 testing.test("rest param with single regular param", lam{ in
     func f(first, ...rest) { return [first, len(rest)] }
-    testing.assertEqual(f("a", "b", "c"), ["a", 2], nil)
+    testing.expectEqual(f("a", "b", "c"), ["a", 2], nil)
 })
 
 testing.test("rest param in lambda", lam{ in
@@ -31,12 +31,12 @@ testing.test("rest param in lambda", lam{ in
         for (n in nums) { total = total + n }
         return total
     }
-    testing.assertEqual(sum(1, 2, 3, 4), 10, nil)
+    testing.expectEqual(sum(1, 2, 3, 4), 10, nil)
 })
 
 testing.test("rest param lambda with regular params", lam{ in
     let f = lam{ first, ...rest in [first, rest] }
-    testing.assertEqual(f("x", 1, 2), ["x", [1, 2]], nil)
+    testing.expectEqual(f("x", 1, 2), ["x", [1, 2]], nil)
 })
 
 testing.test("rest param in class method", lam{ in
@@ -47,7 +47,7 @@ testing.test("rest param in class method", lam{ in
         }
     }
     let logger = Logger("[INFO]")
-    testing.assertEqual(logger.log("hello", "world"), "[INFO]: hello, world", nil)
+    testing.expectEqual(logger.log("hello", "world"), "[INFO]: hello, world", nil)
 })
 
 testing.test("rest param with spread in call", lam{ in
@@ -56,18 +56,18 @@ testing.test("rest param with spread in call", lam{ in
         for (n in nums) { total = total + n }
         return total
     }
-    testing.assertEqual(sum(1, 2, 3), 6, nil)
+    testing.expectEqual(sum(1, 2, 3), 6, nil)
 })
 
 testing.test("rest param preserves order", lam{ in
     func f(...args) { return args }
-    testing.assertEqual(f("a", "b", "c"), ["a", "b", "c"], nil)
+    testing.expectEqual(f("a", "b", "c"), ["a", "b", "c"], nil)
 })
 
 testing.test("rest param with defaults", lam{ in
     func f(a, b = 10, ...rest) { return [a, b, rest] }
-    testing.assertEqual(f(1, 2, 3, 4), [1, 2, [3, 4]], nil)
-    testing.assertEqual(f(1), [1, 10, []], nil)
+    testing.expectEqual(f(1, 2, 3, 4), [1, 2, [3, 4]], nil)
+    testing.expectEqual(f(1), [1, 10, []], nil)
 })
 
 testing.done()

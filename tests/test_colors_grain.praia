@@ -3,26 +3,26 @@ use "colors"
 
 testing.test("basic color wrapping", lam{ in
     let r = colors.red("hi")
-    testing.assert(r.contains("hi"), "should contain text")
-    testing.assert(r.contains("\x1b["), "should contain escape")
+    testing.expect(r.contains("hi"), "should contain text")
+    testing.expect(r.contains("\x1b["), "should contain escape")
 })
 
 testing.test("colors.strip", lam{ in
-    testing.assertEqual(colors.strip(colors.red("hello")), "hello", nil)
-    testing.assertEqual(colors.strip(colors.bold(colors.green("x"))), "x", nil)
-    testing.assertEqual(colors.strip("plain"), "plain", nil)
+    testing.expectEqual(colors.strip(colors.red("hello")), "hello", nil)
+    testing.expectEqual(colors.strip(colors.bold(colors.green("x"))), "x", nil)
+    testing.expectEqual(colors.strip("plain"), "plain", nil)
 })
 
 testing.test("styles compose", lam{ in
     let s = colors.bold(colors.red("err"))
-    testing.assertEqual(colors.strip(s), "err", nil)
+    testing.expectEqual(colors.strip(s), "err", nil)
 })
 
 testing.test("256-color and RGB", lam{ in
     let s = colors.fg256("hi", 208)
-    testing.assertEqual(colors.strip(s), "hi", nil)
+    testing.expectEqual(colors.strip(s), "hi", nil)
     let r = colors.rgb("x", 255, 0, 0)
-    testing.assertEqual(colors.strip(r), "x", nil)
+    testing.expectEqual(colors.strip(r), "x", nil)
 })
 
 testing.done()

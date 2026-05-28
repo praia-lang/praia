@@ -17,7 +17,7 @@ testing.test("basic method decorator", lam{ in
         func value() { return this.base }
     }
     let c = Calc(21)
-    testing.assertEqual(c.value(), 42, nil)
+    testing.expectEqual(c.value(), 42, nil)
 })
 
 testing.test("decorator with arguments", lam{ in
@@ -27,7 +27,7 @@ testing.test("decorator with arguments", lam{ in
         func greet() { return "hello " + this.name }
     }
     let g = Greeter("Ada")
-    testing.assertEqual(g.greet(), ">>> hello Ada", nil)
+    testing.expectEqual(g.greet(), ">>> hello Ada", nil)
 })
 
 testing.test("decorator on method with params", lam{ in
@@ -36,7 +36,7 @@ testing.test("decorator on method with params", lam{ in
         func add(a, b) { return a + b }
     }
     let m = Math()
-    testing.assertEqual(m.add(3, 4), 14, nil)
+    testing.expectEqual(m.add(3, 4), 14, nil)
 })
 
 testing.test("stacked decorators", lam{ in
@@ -53,7 +53,7 @@ testing.test("stacked decorators", lam{ in
     }
     let m = Msg()
     // upper applied first (innermost), then exclaim: "HELLO!"
-    testing.assertEqual(m.text(), "HELLO!", nil)
+    testing.expectEqual(m.text(), "HELLO!", nil)
 })
 
 testing.test("decorator on static method", lam{ in
@@ -61,7 +61,7 @@ testing.test("decorator on static method", lam{ in
         @doubleResult
         static func compute(x) { return x + 1 }
     }
-    testing.assertEqual(Utils.compute(5), 12, nil)
+    testing.expectEqual(Utils.compute(5), 12, nil)
 })
 
 testing.test("undecorated methods still work", lam{ in
@@ -72,8 +72,8 @@ testing.test("undecorated methods still work", lam{ in
         func plain() { return this.x }
     }
     let f = Foo(10)
-    testing.assertEqual(f.decorated(), 20, nil)
-    testing.assertEqual(f.plain(), 10, nil)
+    testing.expectEqual(f.decorated(), 20, nil)
+    testing.expectEqual(f.plain(), 10, nil)
 })
 
 testing.done()

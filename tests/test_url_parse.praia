@@ -7,101 +7,101 @@ use "testing"
 
 testing.test("url.parse — full http URL with all components", lam{ in
     let u = url.parse("https://user:pass@example.com:8443/api/v1?q=1&r=2#section")
-    testing.assertEqual(u.scheme, "https", nil)
-    testing.assertEqual(u.userinfo, "user:pass", nil)
-    testing.assertEqual(u.host, "example.com", nil)
-    testing.assertEqual(u.port, 8443, nil)
-    testing.assertEqual(u.path, "/api/v1", nil)
-    testing.assertEqual(u.query, "q=1&r=2", nil)
-    testing.assertEqual(u.fragment, "section", nil)
+    testing.expectEqual(u.scheme, "https", nil)
+    testing.expectEqual(u.userinfo, "user:pass", nil)
+    testing.expectEqual(u.host, "example.com", nil)
+    testing.expectEqual(u.port, 8443, nil)
+    testing.expectEqual(u.path, "/api/v1", nil)
+    testing.expectEqual(u.query, "q=1&r=2", nil)
+    testing.expectEqual(u.fragment, "section", nil)
 })
 
 testing.test("url.parse — scheme is lowercased", lam{ in
-    testing.assertEqual(url.parse("HTTPS://x/").scheme, "https", nil)
-    testing.assertEqual(url.parse("HtTp://x/").scheme, "http", nil)
+    testing.expectEqual(url.parse("HTTPS://x/").scheme, "https", nil)
+    testing.expectEqual(url.parse("HtTp://x/").scheme, "http", nil)
 })
 
 testing.test("url.parse — absent port is nil, not 0", lam{ in
     // Important: 0 is a valid port value; `nil` is how we signal
     // "the URL didn't specify a port" without that collision.
     let u = url.parse("http://example.com/")
-    testing.assertEqual(u.port, nil, "no port should produce nil")
+    testing.expectEqual(u.port, nil, "no port should produce nil")
 })
 
 testing.test("url.parse — IPv6 literal is unbracketed in .host", lam{ in
     let u = url.parse("http://[::1]:8080/path")
-    testing.assertEqual(u.host, "::1", "host strips the brackets")
-    testing.assertEqual(u.port, 8080, nil)
-    testing.assertEqual(u.path, "/path", nil)
+    testing.expectEqual(u.host, "::1", "host strips the brackets")
+    testing.expectEqual(u.port, 8080, nil)
+    testing.expectEqual(u.path, "/path", nil)
 })
 
 testing.test("url.parse — IPv6 literal without port", lam{ in
     let u = url.parse("http://[2001:db8::1]/")
-    testing.assertEqual(u.host, "2001:db8::1", nil)
-    testing.assertEqual(u.port, nil, nil)
-    testing.assertEqual(u.path, "/", nil)
+    testing.expectEqual(u.host, "2001:db8::1", nil)
+    testing.expectEqual(u.port, nil, nil)
+    testing.expectEqual(u.path, "/", nil)
 })
 
 testing.test("url.parse — userinfo split on the LAST @", lam{ in
     // user:pa@ss is a valid (if odd) userinfo; the parser must not
     // get confused by the inner '@'.
     let u = url.parse("http://user:pa@ss@host/p")
-    testing.assertEqual(u.userinfo, "user:pa@ss", nil)
-    testing.assertEqual(u.host, "host", nil)
-    testing.assertEqual(u.path, "/p", nil)
+    testing.expectEqual(u.userinfo, "user:pa@ss", nil)
+    testing.expectEqual(u.host, "host", nil)
+    testing.expectEqual(u.path, "/p", nil)
 })
 
 testing.test("url.parse — userinfo without password", lam{ in
     let u = url.parse("http://alice@host/")
-    testing.assertEqual(u.userinfo, "alice", nil)
-    testing.assertEqual(u.host, "host", nil)
+    testing.expectEqual(u.userinfo, "alice", nil)
+    testing.expectEqual(u.host, "host", nil)
 })
 
 testing.test("url.parse — fragment without query", lam{ in
     let u = url.parse("http://x/p#frag")
-    testing.assertEqual(u.path, "/p", nil)
-    testing.assertEqual(u.query, "", nil)
-    testing.assertEqual(u.fragment, "frag", nil)
+    testing.expectEqual(u.path, "/p", nil)
+    testing.expectEqual(u.query, "", nil)
+    testing.expectEqual(u.fragment, "frag", nil)
 })
 
 testing.test("url.parse — '?' inside fragment is part of fragment", lam{ in
     // Fragment is stripped FIRST per RFC 3986 §3.5, so a '?' after a
     // '#' is fragment text, not a query delimiter.
     let u = url.parse("http://x/#a?b")
-    testing.assertEqual(u.query, "", nil)
-    testing.assertEqual(u.fragment, "a?b", nil)
+    testing.expectEqual(u.query, "", nil)
+    testing.expectEqual(u.fragment, "a?b", nil)
 })
 
 testing.test("url.parse — protocol-relative URL", lam{ in
     let u = url.parse("//host.test/relative")
-    testing.assertEqual(u.scheme, "", nil)
-    testing.assertEqual(u.host, "host.test", nil)
-    testing.assertEqual(u.path, "/relative", nil)
+    testing.expectEqual(u.scheme, "", nil)
+    testing.expectEqual(u.host, "host.test", nil)
+    testing.expectEqual(u.path, "/relative", nil)
 })
 
 testing.test("url.parse — path-only URL", lam{ in
     let u = url.parse("/just/a/path?q=2")
-    testing.assertEqual(u.scheme, "", nil)
-    testing.assertEqual(u.host, "", nil)
-    testing.assertEqual(u.path, "/just/a/path", nil)
-    testing.assertEqual(u.query, "q=2", nil)
+    testing.expectEqual(u.scheme, "", nil)
+    testing.expectEqual(u.host, "", nil)
+    testing.expectEqual(u.path, "/just/a/path", nil)
+    testing.expectEqual(u.query, "q=2", nil)
 })
 
 testing.test("url.parse — opaque URI (mailto:)", lam{ in
     // No '//' after the scheme — everything after the colon is path,
     // not authority. Userinfo/host/port stay empty.
     let u = url.parse("mailto:viggo@baconx.com")
-    testing.assertEqual(u.scheme, "mailto", nil)
-    testing.assertEqual(u.host, "", nil)
-    testing.assertEqual(u.userinfo, "", nil)
-    testing.assertEqual(u.path, "viggo@baconx.com", nil)
+    testing.expectEqual(u.scheme, "mailto", nil)
+    testing.expectEqual(u.host, "", nil)
+    testing.expectEqual(u.userinfo, "", nil)
+    testing.expectEqual(u.path, "viggo@baconx.com", nil)
 })
 
 testing.test("url.parse — empty path when authority has none", lam{ in
     // http://example.com is legal; the path component is empty.
     let u = url.parse("http://example.com")
-    testing.assertEqual(u.host, "example.com", nil)
-    testing.assertEqual(u.path, "", "no path should be empty string")
+    testing.expectEqual(u.host, "example.com", nil)
+    testing.expectEqual(u.path, "", "no path should be empty string")
 })
 
 // ── Error cases ─────────────────────────────────────────────────
@@ -110,33 +110,33 @@ testing.test("url.parse — rejects bare IPv6 (forgotten brackets)", lam{ in
     // Two ':' in an unbracketed host is the unambiguous signal that
     // someone wrote an IPv6 address without brackets. Pre-fix this
     // silently corrupted the parse; now it throws.
-    testing.assertThrows(lam{ in url.parse("http://1.2.3.4:5:6/") },
+    testing.expectThrows(lam{ in url.parse("http://1.2.3.4:5:6/") },
                          "ambiguous host")
 })
 
 testing.test("url.parse — rejects unterminated IPv6 literal", lam{ in
-    testing.assertThrows(lam{ in url.parse("http://[::1/x") },
+    testing.expectThrows(lam{ in url.parse("http://[::1/x") },
                          "unterminated IPv6 literal")
 })
 
 testing.test("url.parse — rejects empty port", lam{ in
-    testing.assertThrows(lam{ in url.parse("http://host:/") }, "empty port")
+    testing.expectThrows(lam{ in url.parse("http://host:/") }, "empty port")
 })
 
 testing.test("url.parse — rejects non-numeric port", lam{ in
-    testing.assertThrows(lam{ in url.parse("http://host:abc/") },
+    testing.expectThrows(lam{ in url.parse("http://host:abc/") },
                          "non-numeric port")
 })
 
 testing.test("url.parse — rejects out-of-range port", lam{ in
-    testing.assertThrows(lam{ in url.parse("http://host:99999/") },
+    testing.expectThrows(lam{ in url.parse("http://host:99999/") },
                          "port out of range")
 })
 
 testing.test("url.parse — rejects CR/LF/NUL (header injection guard)", lam{ in
-    testing.assertThrows(lam{ in url.parse("http://x/\r\nInjected: 1") },
+    testing.expectThrows(lam{ in url.parse("http://x/\r\nInjected: 1") },
                          "control character")
-    testing.assertThrows(lam{ in url.parse("http://x/\nfoo") },
+    testing.expectThrows(lam{ in url.parse("http://x/\nfoo") },
                          "control character")
 })
 

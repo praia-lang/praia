@@ -9,25 +9,25 @@ use "cookie"
 
 testing.test("parse: simple cookie header", lam{ in
     let c = cookie.parse("name=value; other=2")
-    testing.assertEqual(c.name, "value", nil)
-    testing.assertEqual(c.other, "2", nil)
+    testing.expectEqual(c.name, "value", nil)
+    testing.expectEqual(c.other, "2", nil)
 })
 
 testing.test("parse: empty / nil header → empty map", lam{ in
-    testing.assertEqual(len(keys(cookie.parse(""))), 0, nil)
-    testing.assertEqual(len(keys(cookie.parse(nil))), 0, nil)
+    testing.expectEqual(len(keys(cookie.parse(""))), 0, nil)
+    testing.expectEqual(len(keys(cookie.parse(nil))), 0, nil)
 })
 
 testing.test("parse: URL-decodes values", lam{ in
     let c = cookie.parse("greeting=hello%20world")
-    testing.assertEqual(c.greeting, "hello world", nil)
+    testing.expectEqual(c.greeting, "hello world", nil)
 })
 
 testing.test("build: defaults apply Path=/; HttpOnly; SameSite=Lax", lam{ in
     let h = cookie.build("session", "abc", nil)
-    testing.assert(h.contains("Path=/"), nil)
-    testing.assert(h.contains("HttpOnly"), nil)
-    testing.assert(h.contains("SameSite=Lax"), nil)
+    testing.expect(h.contains("Path=/"), nil)
+    testing.expect(h.contains("HttpOnly"), nil)
+    testing.expect(h.contains("SameSite=Lax"), nil)
 })
 
 // ── attribute-injection rejection (regression) ───────────────
@@ -35,13 +35,13 @@ testing.test("build: defaults apply Path=/; HttpOnly; SameSite=Lax", lam{ in
 testing.test("build: rejects '; Secure' injection via path", lam{ in
     // Probe value from the audit. The semicolon would let an attacker
     // smuggle additional cookie attributes if path were concatenated raw.
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in cookie.build("session", "abc", {path: "/; Secure"}) },
         "invalid character in path")
 })
 
 testing.test("build: rejects CRLF in domain", lam{ in
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in cookie.build("session", "abc", {domain: "evil.com\r\n"}) },
         "invalid byte in domain")
 })
@@ -49,153 +49,153 @@ testing.test("build: rejects CRLF in domain", lam{ in
 testing.test("build: rejects every CTL + DEL in path/domain", lam{ in
     // Spot-check a few CTLs that the previous deny-list missed:
     // \x01, \x08 (BS), \x0B (VT), \x1F (US), \x7F (DEL).
-    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x01b"}) }, "invalid byte in path")
-    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x08b"}) }, "invalid byte in path")
-    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x0bb"}) }, "invalid byte in path")
-    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x1fb"}) }, "invalid byte in path")
-    testing.assertThrows(lam{ in cookie.build("s", "v", {path: "/a\x7fb"}) }, "invalid byte in path")
-    testing.assertThrows(lam{ in cookie.build("s", "v", {domain: "x\x7fy"}) }, "invalid byte in domain")
+    testing.expectThrows(lam{ in cookie.build("s", "v", {path: "/a\x01b"}) }, "invalid byte in path")
+    testing.expectThrows(lam{ in cookie.build("s", "v", {path: "/a\x08b"}) }, "invalid byte in path")
+    testing.expectThrows(lam{ in cookie.build("s", "v", {path: "/a\x0bb"}) }, "invalid byte in path")
+    testing.expectThrows(lam{ in cookie.build("s", "v", {path: "/a\x1fb"}) }, "invalid byte in path")
+    testing.expectThrows(lam{ in cookie.build("s", "v", {path: "/a\x7fb"}) }, "invalid byte in path")
+    testing.expectThrows(lam{ in cookie.build("s", "v", {domain: "x\x7fy"}) }, "invalid byte in domain")
 })
 
 testing.test("build: rejects '=' / ';' / whitespace in name", lam{ in
-    testing.assertThrows(lam{ in cookie.build("ses;sion", "x", nil) }, "invalid character in name")
-    testing.assertThrows(lam{ in cookie.build("ses=sion", "x", nil) }, "invalid character in name")
-    testing.assertThrows(lam{ in cookie.build("ses sion", "x", nil) }, "invalid character in name")
+    testing.expectThrows(lam{ in cookie.build("ses;sion", "x", nil) }, "invalid character in name")
+    testing.expectThrows(lam{ in cookie.build("ses=sion", "x", nil) }, "invalid character in name")
+    testing.expectThrows(lam{ in cookie.build("ses sion", "x", nil) }, "invalid character in name")
 })
 
 testing.test("build: rejects control bytes and non-ASCII in name", lam{ in
     // CTLs (< 0x20 and == 0x7F) and any non-ASCII grapheme are outside
     // the RFC 7230 tchar allow-list and must be rejected.
-    testing.assertThrows(lam{ in cookie.build("ses\x01ion", "x", nil) }, "invalid character in name")
-    testing.assertThrows(lam{ in cookie.build("ses\x7fion", "x", nil) }, "invalid character in name")
-    testing.assertThrows(lam{ in cookie.build("ses\x1fion", "x", nil) }, "invalid character in name")
-    testing.assertThrows(lam{ in cookie.build("café",       "x", nil) }, "invalid character in name")
-    testing.assertThrows(lam{ in cookie.build("名前",       "x", nil) }, "invalid character in name")
+    testing.expectThrows(lam{ in cookie.build("ses\x01ion", "x", nil) }, "invalid character in name")
+    testing.expectThrows(lam{ in cookie.build("ses\x7fion", "x", nil) }, "invalid character in name")
+    testing.expectThrows(lam{ in cookie.build("ses\x1fion", "x", nil) }, "invalid character in name")
+    testing.expectThrows(lam{ in cookie.build("café",       "x", nil) }, "invalid character in name")
+    testing.expectThrows(lam{ in cookie.build("名前",       "x", nil) }, "invalid character in name")
 })
 
 testing.test("build: accepts the full tchar punctuation set in names", lam{ in
     // Valid tchar punctuation per RFC 7230 — used by some real cookie
     // schemes (e.g. csrf-token, _ga, .session_id).
     let h = cookie.build("!#$%&'*+-.^_`|~", "x", nil)
-    testing.assert(h.startsWith("!#$%&'*+-.^_`|~="),
+    testing.expect(h.startsWith("!#$%&'*+-.^_`|~="),
         "tchar punctuation must round-trip into the name unchanged")
 })
 
 testing.test("build: rejects unknown sameSite values", lam{ in
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in cookie.build("session", "abc", {sameSite: "Bogus"}) },
         "sameSite must be 'Strict', 'Lax', or 'None'")
 })
 
 testing.test("build: accepts the three legal sameSite values", lam{ in
-    testing.assert(cookie.build("a", "b", {sameSite: "Strict"}).contains("SameSite=Strict"), nil)
-    testing.assert(cookie.build("a", "b", {sameSite: "Lax"}).contains("SameSite=Lax"), nil)
-    testing.assert(cookie.build("a", "b", {sameSite: "None"}).contains("SameSite=None"), nil)
+    testing.expect(cookie.build("a", "b", {sameSite: "Strict"}).contains("SameSite=Strict"), nil)
+    testing.expect(cookie.build("a", "b", {sameSite: "Lax"}).contains("SameSite=Lax"), nil)
+    testing.expect(cookie.build("a", "b", {sameSite: "None"}).contains("SameSite=None"), nil)
 })
 
 testing.test("build: rejects non-numeric / NaN / infinite maxAge", lam{ in
     // Previously these values went through `toString()` and produced
     // malformed `Max-Age=...` attributes that browsers silently ignore.
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in cookie.build("a", "b", {maxAge: "soon"}) },
         "maxAge must be a finite number")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in cookie.build("a", "b", {maxAge: nil}) },
         "maxAge must be a finite number")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in cookie.build("a", "b", {maxAge: math.sqrt(-1.0)}) },
         "maxAge must be a finite number")
     // Positive and negative infinity must also be rejected — they
     // exercise the math.isInf(m) branch the NaN test misses. `1.0/0.0`
     // throws in Praia, so we produce inf via the canonical
     // double-overflow trick.
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in cookie.build("a", "b", {maxAge: 1e308 * 10}) },
         "maxAge must be a finite number")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in cookie.build("a", "b", {maxAge: -1e308 * 10}) },
         "maxAge must be a finite number")
 })
 
 testing.test("build: accepts integer + zero + negative maxAge", lam{ in
-    testing.assert(cookie.build("a", "b", {maxAge: 3600}).contains("Max-Age=3600"), nil)
-    testing.assert(cookie.build("a", "b", {maxAge: 0}).contains("Max-Age=0"),
+    testing.expect(cookie.build("a", "b", {maxAge: 3600}).contains("Max-Age=3600"), nil)
+    testing.expect(cookie.build("a", "b", {maxAge: 0}).contains("Max-Age=0"),
         "Max-Age=0 means delete — must still emit")
-    testing.assert(cookie.build("a", "b", {maxAge: -1}).contains("Max-Age=-1"),
+    testing.expect(cookie.build("a", "b", {maxAge: -1}).contains("Max-Age=-1"),
         "negative is non-RFC but common-in-the-wild for cookie deletion")
 })
 
 testing.test("clear: emits a maxAge=0 expiry", lam{ in
     let h = cookie.clear("session", nil)
-    testing.assert(h.contains("Max-Age=0"), nil)
-    testing.assert(h.startsWith("session="), nil)
+    testing.expect(h.contains("Max-Age=0"), nil)
+    testing.expect(h.startsWith("session="), nil)
 })
 
 // ── parseSet ─────────────────────────────────────────────────
 
 testing.test("parseSet: simple Set-Cookie value", lam{ in
     let c = cookie.parseSet("session=abc123")
-    testing.assertEqual(c.name, "session", nil)
-    testing.assertEqual(c.value, "abc123", nil)
-    testing.assertEqual(c.path, nil, "no path attr → nil at parse time")
-    testing.assertEqual(c.secure, false, nil)
-    testing.assertEqual(c.httpOnly, false, nil)
+    testing.expectEqual(c.name, "session", nil)
+    testing.expectEqual(c.value, "abc123", nil)
+    testing.expectEqual(c.path, nil, "no path attr → nil at parse time")
+    testing.expectEqual(c.secure, false, nil)
+    testing.expectEqual(c.httpOnly, false, nil)
 })
 
 testing.test("parseSet: full attribute set", lam{ in
     let c = cookie.parseSet("token=xyz; Path=/api; Domain=example.com; Max-Age=3600; HttpOnly; Secure; SameSite=Strict")
-    testing.assertEqual(c.name, "token", nil)
-    testing.assertEqual(c.value, "xyz", nil)
-    testing.assertEqual(c.path, "/api", nil)
-    testing.assertEqual(c.domain, "example.com", "domain lower-cased")
-    testing.assertEqual(c.maxAge, 3600, nil)
-    testing.assertEqual(c.httpOnly, true, nil)
-    testing.assertEqual(c.secure, true, nil)
-    testing.assertEqual(c.sameSite, "Strict", nil)
+    testing.expectEqual(c.name, "token", nil)
+    testing.expectEqual(c.value, "xyz", nil)
+    testing.expectEqual(c.path, "/api", nil)
+    testing.expectEqual(c.domain, "example.com", "domain lower-cased")
+    testing.expectEqual(c.maxAge, 3600, nil)
+    testing.expectEqual(c.httpOnly, true, nil)
+    testing.expectEqual(c.secure, true, nil)
+    testing.expectEqual(c.sameSite, "Strict", nil)
 })
 
 testing.test("parseSet: attribute names are case-insensitive", lam{ in
     let c = cookie.parseSet("k=v; PATH=/x; httponly; Max-Age=10")
-    testing.assertEqual(c.path, "/x", nil)
-    testing.assertEqual(c.httpOnly, true, nil)
-    testing.assertEqual(c.maxAge, 10, nil)
+    testing.expectEqual(c.path, "/x", nil)
+    testing.expectEqual(c.httpOnly, true, nil)
+    testing.expectEqual(c.maxAge, 10, nil)
 })
 
 testing.test("parseSet: malformed input returns nil", lam{ in
-    testing.assertEqual(cookie.parseSet(""), nil, nil)
-    testing.assertEqual(cookie.parseSet("no-equals"), nil, nil)
+    testing.expectEqual(cookie.parseSet(""), nil, nil)
+    testing.expectEqual(cookie.parseSet("no-equals"), nil, nil)
 })
 
 // ── sign / verify ────────────────────────────────────────────
 
 testing.test("sign / verify roundtrip", lam{ in
     let signed = cookie.sign("uid=42", "secret")
-    testing.assert(signed.startsWith("uid=42."), "value preserved as plaintext")
-    testing.assertEqual(cookie.verify(signed, "secret"), "uid=42", nil)
+    testing.expect(signed.startsWith("uid=42."), "value preserved as plaintext")
+    testing.expectEqual(cookie.verify(signed, "secret"), "uid=42", nil)
 })
 
 testing.test("verify rejects tampered value", lam{ in
     let signed = cookie.sign("uid=42", "secret")
     // Swap "42" → "43"; the MAC suffix no longer covers the new value.
     let tampered = "uid=43" + signed.slice(signed.indexOf("."), len(signed))
-    testing.assertEqual(cookie.verify(tampered, "secret"), nil, nil)
+    testing.expectEqual(cookie.verify(tampered, "secret"), nil, nil)
 })
 
 testing.test("verify rejects wrong key", lam{ in
     let signed = cookie.sign("uid=42", "secret")
-    testing.assertEqual(cookie.verify(signed, "different-secret"), nil, nil)
+    testing.expectEqual(cookie.verify(signed, "different-secret"), nil, nil)
 })
 
 testing.test("verify on malformed input returns nil", lam{ in
-    testing.assertEqual(cookie.verify("no-dot-in-here", "key"), nil, nil)
-    testing.assertEqual(cookie.verify(nil, "key"), nil, nil)
-    testing.assertEqual(cookie.verify("", "key"), nil, nil)
+    testing.expectEqual(cookie.verify("no-dot-in-here", "key"), nil, nil)
+    testing.expectEqual(cookie.verify(nil, "key"), nil, nil)
+    testing.expectEqual(cookie.verify("", "key"), nil, nil)
 })
 
 testing.test("sign: deterministic for same input + key", lam{ in
     // HMAC is deterministic. Two signs of the same value+key produce
     // the same string — required for cookie equality checks.
-    testing.assertEqual(cookie.sign("k=v", "secret"),
+    testing.expectEqual(cookie.sign("k=v", "secret"),
                         cookie.sign("k=v", "secret"), nil)
 })
 
@@ -204,7 +204,7 @@ testing.test("sign: deterministic for same input + key", lam{ in
 testing.test("encrypt / decrypt roundtrip", lam{ in
     let key = secrets.token(32)
     let sealed = cookie.encrypt("uid=42; role=admin", key)
-    testing.assertEqual(cookie.decrypt(sealed, key), "uid=42; role=admin", nil)
+    testing.expectEqual(cookie.decrypt(sealed, key), "uid=42; role=admin", nil)
 })
 
 testing.test("encrypt output is URL-safe base64 (no padding, no +/)", lam{ in
@@ -212,7 +212,7 @@ testing.test("encrypt output is URL-safe base64 (no padding, no +/)", lam{ in
     let sealed = cookie.encrypt("payload", key)
     for (i in 0..len(sealed)) {
         let c = sealed[i]
-        testing.assert(
+        testing.expect(
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".contains(c),
             "non-urlsafe char at " + i + ": " + c)
     }
@@ -225,12 +225,12 @@ testing.test("encrypt: two seals of same plaintext produce different output", la
     let key = secrets.token(32)
     let a = cookie.encrypt("same", key)
     let b = cookie.encrypt("same", key)
-    testing.assert(a != b, nil)
+    testing.expect(a != b, nil)
 })
 
 testing.test("decrypt rejects wrong key", lam{ in
     let sealed = cookie.encrypt("payload", secrets.token(32))
-    testing.assertEqual(cookie.decrypt(sealed, secrets.token(32)), nil, nil)
+    testing.expectEqual(cookie.decrypt(sealed, secrets.token(32)), nil, nil)
 })
 
 testing.test("decrypt rejects tampered blob", lam{ in
@@ -242,22 +242,22 @@ testing.test("decrypt rejects tampered blob", lam{ in
     // ~25% of random nonces would let a "tampered" blob round-trip
     // unchanged at the byte level — flaky across runs.
     let tampered = (sealed[0] == "A" ? "B" : "A") + sealed.slice(1, len(sealed))
-    testing.assertEqual(cookie.decrypt(tampered, key), nil, nil)
+    testing.expectEqual(cookie.decrypt(tampered, key), nil, nil)
 })
 
 testing.test("decrypt on garbage / nil returns nil (no throw)", lam{ in
     let key = secrets.token(32)
-    testing.assertEqual(cookie.decrypt("not_base64_at_all~~", key), nil, nil)
-    testing.assertEqual(cookie.decrypt("", key), nil, nil)
-    testing.assertEqual(cookie.decrypt(nil, key), nil, nil)
+    testing.expectEqual(cookie.decrypt("not_base64_at_all~~", key), nil, nil)
+    testing.expectEqual(cookie.decrypt("", key), nil, nil)
+    testing.expectEqual(cookie.decrypt(nil, key), nil, nil)
 })
 
 // ── Jar — single-request and roundtrip ───────────────────────
 
 testing.test("Jar: empty jar emits empty Cookie header", lam{ in
     let jar = cookie.Jar()
-    testing.assertEqual(jar.headerFor("https://example.com/"), "", nil)
-    testing.assertEqual(jar.size(), 0, nil)
+    testing.expectEqual(jar.headerFor("https://example.com/"), "", nil)
+    testing.expectEqual(jar.size(), 0, nil)
 })
 
 testing.test("Jar: accepts a Set-Cookie response and emits it back", lam{ in
@@ -265,7 +265,7 @@ testing.test("Jar: accepts a Set-Cookie response and emits it back", lam{ in
     jar.acceptResponse("https://example.com/", {
         cookies: ["session=abc123; Path=/"]
     })
-    testing.assertEqual(jar.headerFor("https://example.com/"), "session=abc123", nil)
+    testing.expectEqual(jar.headerFor("https://example.com/"), "session=abc123", nil)
 })
 
 testing.test("Jar: longer paths sort before shorter paths in the header", lam{ in
@@ -280,7 +280,7 @@ testing.test("Jar: longer paths sort before shorter paths in the header", lam{ i
         ]
     })
     let h = jar.headerFor("https://example.com/api/v1/items")
-    testing.assert(h.startsWith("specific=deep"),
+    testing.expect(h.startsWith("specific=deep"),
                    "longest path first; got: " + h)
 })
 
@@ -290,9 +290,9 @@ testing.test("Jar: host-only cookies don't leak to other hosts", lam{ in
     jar.acceptResponse("https://api.example.com/", {
         cookies: ["session=abc; Path=/"]
     })
-    testing.assertEqual(jar.headerFor("https://api.example.com/"),
+    testing.expectEqual(jar.headerFor("https://api.example.com/"),
                         "session=abc", "same host gets it")
-    testing.assertEqual(jar.headerFor("https://www.example.com/"), "",
+    testing.expectEqual(jar.headerFor("https://www.example.com/"), "",
                         "sibling subdomain does NOT get a host-only cookie")
 })
 
@@ -301,11 +301,11 @@ testing.test("Jar: Domain attribute scopes to subdomains", lam{ in
     jar.acceptResponse("https://api.example.com/", {
         cookies: ["shared=yes; Domain=example.com; Path=/"]
     })
-    testing.assertEqual(jar.headerFor("https://www.example.com/"),
+    testing.expectEqual(jar.headerFor("https://www.example.com/"),
                         "shared=yes", "subdomain receives it")
-    testing.assertEqual(jar.headerFor("https://example.com/"),
+    testing.expectEqual(jar.headerFor("https://example.com/"),
                         "shared=yes", "apex receives it")
-    testing.assertEqual(jar.headerFor("https://unrelated.test/"), "",
+    testing.expectEqual(jar.headerFor("https://unrelated.test/"), "",
                         "unrelated host does NOT")
 })
 
@@ -316,9 +316,9 @@ testing.test("Jar: rejects Domain attribute for an unrelated origin", lam{ in
     jar.acceptResponse("https://evil.com/", {
         cookies: ["fake-session=hijack; Domain=bank.example.com; Path=/"]
     })
-    testing.assertEqual(jar.headerFor("https://bank.example.com/"), "",
+    testing.expectEqual(jar.headerFor("https://bank.example.com/"), "",
                         "cross-origin Domain attribute rejected")
-    testing.assertEqual(jar.size(), 0, "cookie was dropped, not stored")
+    testing.expectEqual(jar.size(), 0, "cookie was dropped, not stored")
 })
 
 testing.test("Jar: Secure cookies only emit over https", lam{ in
@@ -326,8 +326,8 @@ testing.test("Jar: Secure cookies only emit over https", lam{ in
     jar.acceptResponse("https://example.com/", {
         cookies: ["secret=v; Path=/; Secure"]
     })
-    testing.assertEqual(jar.headerFor("https://example.com/"), "secret=v", nil)
-    testing.assertEqual(jar.headerFor("http://example.com/"),  "",
+    testing.expectEqual(jar.headerFor("https://example.com/"), "secret=v", nil)
+    testing.expectEqual(jar.headerFor("http://example.com/"),  "",
                         "Secure cookie withheld from plaintext")
 })
 
@@ -336,13 +336,13 @@ testing.test("Jar: path-match enforcement", lam{ in
     jar.acceptResponse("https://example.com/api/v1/x", {
         cookies: ["scoped=yes; Path=/api"]
     })
-    testing.assertEqual(jar.headerFor("https://example.com/api/v1/"),
+    testing.expectEqual(jar.headerFor("https://example.com/api/v1/"),
                         "scoped=yes", "sub-path match")
-    testing.assertEqual(jar.headerFor("https://example.com/api"),
+    testing.expectEqual(jar.headerFor("https://example.com/api"),
                         "scoped=yes", "exact match")
-    testing.assertEqual(jar.headerFor("https://example.com/other"), "",
+    testing.expectEqual(jar.headerFor("https://example.com/other"), "",
                         "outside the path scope")
-    testing.assertEqual(jar.headerFor("https://example.com/apix"), "",
+    testing.expectEqual(jar.headerFor("https://example.com/apix"), "",
                         "false-prefix collision (no slash boundary)")
 })
 
@@ -354,8 +354,8 @@ testing.test("Jar: re-setting (name, domain, path) replaces", lam{ in
     jar.acceptResponse("https://example.com/", {
         cookies: ["s=v2; Path=/"]
     })
-    testing.assertEqual(jar.size(), 1, "same key → replaced not appended")
-    testing.assertEqual(jar.headerFor("https://example.com/"), "s=v2", nil)
+    testing.expectEqual(jar.size(), 1, "same key → replaced not appended")
+    testing.expectEqual(jar.headerFor("https://example.com/"), "s=v2", nil)
 })
 
 testing.test("Jar: Max-Age=0 deletes the matching cookie", lam{ in
@@ -363,12 +363,12 @@ testing.test("Jar: Max-Age=0 deletes the matching cookie", lam{ in
     jar.acceptResponse("https://example.com/", {
         cookies: ["s=v; Path=/"]
     })
-    testing.assertEqual(jar.size(), 1, nil)
+    testing.expectEqual(jar.size(), 1, nil)
     jar.acceptResponse("https://example.com/", {
         cookies: ["s=ignored; Path=/; Max-Age=0"]
     })
-    testing.assertEqual(jar.size(), 0, "Max-Age=0 → delete")
-    testing.assertEqual(jar.headerFor("https://example.com/"), "", nil)
+    testing.expectEqual(jar.size(), 0, "Max-Age=0 → delete")
+    testing.expectEqual(jar.headerFor("https://example.com/"), "", nil)
 })
 
 testing.test("Jar: clear() empties the jar", lam{ in
@@ -376,17 +376,17 @@ testing.test("Jar: clear() empties the jar", lam{ in
     jar.acceptResponse("https://example.com/", {
         cookies: ["a=1; Path=/", "b=2; Path=/"]
     })
-    testing.assertEqual(jar.size(), 2, nil)
+    testing.expectEqual(jar.size(), 2, nil)
     jar.clear()
-    testing.assertEqual(jar.size(), 0, nil)
-    testing.assertEqual(jar.headerFor("https://example.com/"), "", nil)
+    testing.expectEqual(jar.size(), 0, nil)
+    testing.expectEqual(jar.headerFor("https://example.com/"), "", nil)
 })
 
 testing.test("Jar: no cookies on response is a no-op", lam{ in
     let jar = cookie.Jar()
     jar.acceptResponse("https://example.com/", {cookies: []})
     jar.acceptResponse("https://example.com/", {body: "x"})  // no cookies field
-    testing.assertEqual(jar.size(), 0, nil)
+    testing.expectEqual(jar.size(), 0, nil)
 })
 
 // ── Integration: full request → response → next request ──────
@@ -405,16 +405,16 @@ testing.test("Integration: login + scoped subsequent request", lam{ in
 
     // /api/profile is in the /api scope and over https
     let h1 = jar.headerFor("https://api.example.com/api/profile")
-    testing.assert(h1.contains("session=sess-token"), nil)
-    testing.assert(h1.contains("csrf=csrf-tok"), nil)
+    testing.expect(h1.contains("session=sess-token"), nil)
+    testing.expect(h1.contains("csrf=csrf-tok"), nil)
 
     // /static is NOT in /api, so only session leaks
     let h2 = jar.headerFor("https://api.example.com/static/app.js")
-    testing.assertEqual(h2, "session=sess-token", nil)
+    testing.expectEqual(h2, "session=sess-token", nil)
 
     // Plain http: Secure cookie withheld; csrf still depends on path
     let h3 = jar.headerFor("http://api.example.com/api/x")
-    testing.assertEqual(h3, "csrf=csrf-tok",
+    testing.expectEqual(h3, "csrf=csrf-tok",
                         "Secure session withheld; non-secure csrf still emitted")
 })
 

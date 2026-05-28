@@ -64,8 +64,8 @@ let base = "http://localhost:" + str(TEST_PORT)
 testing.test("parses headers with no space after colon", lam{ in
     // followRedirects:false to observe the 302 with its raw Location header.
     let r = http.request({url: base + "/no-space", followRedirects: false})
-    testing.assertEqual(r.status, 302, nil)
-    testing.assertEqual(r.headers["location"], "/final",
+    testing.expectEqual(r.status, 302, nil)
+    testing.expectEqual(r.headers["location"], "/final",
         "Location:/final must parse — the colon-space requirement was a bug")
 })
 
@@ -74,38 +74,38 @@ testing.test("redirect-following works with colon-only Location", lam{ in
     // follow. Earlier the header was silently dropped and the redirect
     // path failed.
     let r = http.get(base + "/no-space")
-    testing.assertEqual(r.status, 200, nil)
-    testing.assertEqual(r.body, "hello", "ended up at /final")
+    testing.expectEqual(r.status, 200, nil)
+    testing.expectEqual(r.body, "hello", "ended up at /final")
 })
 
 testing.test("accepts a tab after the colon", lam{ in
     let r = http.get(base + "/tab-after-colon")
-    testing.assertEqual(r.headers["x-custom"], "value",
+    testing.expectEqual(r.headers["x-custom"], "value",
         "OWS includes HTAB per RFC 7230")
 })
 
 testing.test("strips multiple leading spaces", lam{ in
     let r = http.get(base + "/multi-space")
-    testing.assertEqual(r.headers["x-custom"], "indented value", nil)
+    testing.expectEqual(r.headers["x-custom"], "indented value", nil)
 })
 
 testing.test("strips trailing whitespace", lam{ in
     let r = http.get(base + "/trailing-ws")
-    testing.assertEqual(r.headers["x-custom"], "value",
+    testing.expectEqual(r.headers["x-custom"], "value",
         "trailing OWS must be trimmed")
 })
 
 testing.test("rejects whitespace before the colon (RFC 7230 §3.2.4)", lam{ in
     let r = http.get(base + "/space-before-colon")
-    testing.assertEqual(r.headers["x-bad"], nil,
+    testing.expectEqual(r.headers["x-bad"], nil,
         "header with whitespace before colon must be dropped")
-    testing.assertEqual(r.headers["x-ok"], "kept",
+    testing.expectEqual(r.headers["x-ok"], "kept",
         "the well-formed sibling header still parses")
 })
 
 testing.test("empty values are accepted", lam{ in
     let r = http.get(base + "/empty-value")
-    testing.assertEqual(r.headers["x-empty"], "",
+    testing.expectEqual(r.headers["x-empty"], "",
         "X-Empty: with no value must parse as empty string")
 })
 

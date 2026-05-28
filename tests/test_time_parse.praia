@@ -2,45 +2,45 @@ use "testing"
 
 testing.test("parse date string", lam{ in
     let ts = time.parse("2024-06-15")
-    testing.assert(ts > 0, "should return positive timestamp")
+    testing.expect(ts > 0, "should return positive timestamp")
 })
 
 testing.test("parse datetime string", lam{ in
     let ts = time.parse("2024-06-15 14:30:00")
-    testing.assert(ts > 0, nil)
+    testing.expect(ts > 0, nil)
 })
 
 testing.test("parse roundtrip with format", lam{ in
     let ts = time.parse("2024-06-15")
-    testing.assertEqual(time.format("%Y-%m-%d", ts), "2024-06-15", nil)
+    testing.expectEqual(time.format("%Y-%m-%d", ts), "2024-06-15", nil)
 })
 
 testing.test("parse datetime roundtrip", lam{ in
     let ts = time.parse("2024-01-01 00:00:00")
-    testing.assertEqual(time.format("%Y-%m-%d %H:%M:%S", ts), "2024-01-01 00:00:00", nil)
+    testing.expectEqual(time.format("%Y-%m-%d %H:%M:%S", ts), "2024-01-01 00:00:00", nil)
 })
 
 testing.test("parse with custom format", lam{ in
     let ts = time.parse("15/06/2024", "%d/%m/%Y")
-    testing.assertEqual(time.format("%Y-%m-%d", ts), "2024-06-15", nil)
+    testing.expectEqual(time.format("%Y-%m-%d", ts), "2024-06-15", nil)
 })
 
 testing.test("parse returns milliseconds", lam{ in
     let ts = time.parse("2024-06-15")
     // Milliseconds should be much larger than seconds
-    testing.assert(ts > 1000000000000, "should be in milliseconds not seconds")
+    testing.expect(ts > 1000000000000, "should be in milliseconds not seconds")
 })
 
 testing.test("parse invalid string throws", lam{ in
-    testing.assertThrows(lam{ in time.parse("not-a-date") }, nil)
+    testing.expectThrows(lam{ in time.parse("not-a-date") }, nil)
 })
 
 testing.test("parse with wrong format throws", lam{ in
-    testing.assertThrows(lam{ in time.parse("2024-06-15", "%d/%m/%Y") }, nil)
+    testing.expectThrows(lam{ in time.parse("2024-06-15", "%d/%m/%Y") }, nil)
 })
 
 testing.test("parse requires string argument", lam{ in
-    testing.assertThrows(lam{ in time.parse(12345) }, nil)
+    testing.expectThrows(lam{ in time.parse(12345) }, nil)
 })
 
 testing.done()

@@ -6,10 +6,10 @@ use "../sand/grains/manifest"
 
 testing.test("platformKey returns <platform>-<arch>", lam{ in
     let k = prebuilt.platformKey()
-    testing.assert(k.contains("-"), "key must contain hyphen, got: %{k}")
+    testing.expect(k.contains("-"), "key must contain hyphen, got: %{k}")
     let firstHy = k.indexOf("-")
     let plat = k.slice(0, firstHy)
-    testing.assert(plat == "darwin" || plat == "linux", "platform prefix must be darwin or linux, got: %{plat}")
+    testing.expect(plat == "darwin" || plat == "linux", "platform prefix must be darwin or linux, got: %{plat}")
 })
 
 // ── resolveEntry() ─────────────────────────────────────────────
@@ -20,18 +20,18 @@ testing.test("resolveEntry picks the exact platform key", lam{ in
     m.prebuilt[key] = {url: "https://example.com/a.dylib",
                       integrity: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
     let entry = prebuilt.resolveEntry(m)
-    testing.assert(entry != nil, "expected to resolve our own platform key")
-    testing.assertEqual(entry.url, "https://example.com/a.dylib", nil)
+    testing.expect(entry != nil, "expected to resolve our own platform key")
+    testing.expectEqual(entry.url, "https://example.com/a.dylib", nil)
 })
 
 testing.test("resolveEntry returns nil when no key matches", lam{ in
     let m = {prebuilt: {"freebsd-riscv64": {url: "https://x/y", integrity: "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
-    testing.assertEqual(prebuilt.resolveEntry(m), nil, "no match → nil")
+    testing.expectEqual(prebuilt.resolveEntry(m), nil, "no match → nil")
 })
 
 testing.test("resolveEntry returns nil when prebuilt block is absent", lam{ in
     let m = {name: "no-natives"}
-    testing.assertEqual(prebuilt.resolveEntry(m), nil, "missing block → nil")
+    testing.expectEqual(prebuilt.resolveEntry(m), nil, "missing block → nil")
 })
 
 testing.test("resolveEntry falls back to darwin-universal on macOS", lam{ in
@@ -39,8 +39,8 @@ testing.test("resolveEntry falls back to darwin-universal on macOS", lam{ in
     let m = {prebuilt: {"darwin-universal": {url: "https://example.com/uni.dylib",
                                             integrity: "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
     let entry = prebuilt.resolveEntry(m)
-    testing.assert(entry != nil, "darwin-universal should match on darwin")
-    testing.assertEqual(entry.url, "https://example.com/uni.dylib", nil)
+    testing.expect(entry != nil, "darwin-universal should match on darwin")
+    testing.expectEqual(entry.url, "https://example.com/uni.dylib", nil)
 })
 
 // ── manifest.read accept/reject ────────────────────────────────
@@ -56,7 +56,7 @@ testing.test("manifest.read accepts a well-formed prebuilt block", lam{ in
     }
     manifest.write(dir, m)
     let r = manifest.read(dir)
-    testing.assertEqual(r.prebuilt["darwin-arm64"].url, "https://example.com/widget.dylib", nil)
+    testing.expectEqual(r.prebuilt["darwin-arm64"].url, "https://example.com/widget.dylib", nil)
 })
 
 testing.test("manifest.read rejects http (non-https) URL", lam{ in
@@ -65,7 +65,7 @@ testing.test("manifest.read rejects http (non-https) URL", lam{ in
         "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  darwin-arm64:\n    url: http://oops\n    integrity: sha256-1111111111111111111111111111111111111111111111111111111111111111\ndependencies:\n")
     let threw = false
     try { manifest.read(dir) } catch (e) { threw = true }
-    testing.assert(threw, "http:// URL must be rejected")
+    testing.expect(threw, "http:// URL must be rejected")
 })
 
 testing.test("manifest.read rejects malformed integrity", lam{ in
@@ -74,7 +74,7 @@ testing.test("manifest.read rejects malformed integrity", lam{ in
         "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  linux-x86_64:\n    url: https://example.com/x.so\n    integrity: sha256-short\ndependencies:\n")
     let threw = false
     try { manifest.read(dir) } catch (e) { threw = true }
-    testing.assert(threw, "short sha256 hex must be rejected")
+    testing.expect(threw, "short sha256 hex must be rejected")
 })
 
 testing.test("manifest.read rejects unknown platform name", lam{ in
@@ -85,7 +85,7 @@ testing.test("manifest.read rejects unknown platform name", lam{ in
         "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  plan9-x86_64:\n    url: https://example.com/x.so\n    integrity: sha256-1111111111111111111111111111111111111111111111111111111111111111\ndependencies:\n")
     let threw = false
     try { manifest.read(dir) } catch (e) { threw = true }
-    testing.assert(threw, "unknown platform name must be rejected")
+    testing.expect(threw, "unknown platform name must be rejected")
 })
 
 testing.test("manifest.read rejects https URL with empty host", lam{ in
@@ -94,7 +94,7 @@ testing.test("manifest.read rejects https URL with empty host", lam{ in
         "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  linux-x86_64:\n    url: \"https://\"\n    integrity: sha256-1111111111111111111111111111111111111111111111111111111111111111\ndependencies:\n")
     let threw = false
     try { manifest.read(dir) } catch (e) { threw = true }
-    testing.assert(threw, "https:// (empty host) must be rejected")
+    testing.expect(threw, "https:// (empty host) must be rejected")
 })
 
 testing.test("manifest.read rejects https URL with dot-only host", lam{ in
@@ -103,7 +103,7 @@ testing.test("manifest.read rejects https URL with dot-only host", lam{ in
         "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  linux-x86_64:\n    url: \"https://...\"\n    integrity: sha256-1111111111111111111111111111111111111111111111111111111111111111\ndependencies:\n")
     let threw = false
     try { manifest.read(dir) } catch (e) { threw = true }
-    testing.assert(threw, "host of only dots must be rejected")
+    testing.expect(threw, "host of only dots must be rejected")
 })
 
 testing.test("manifest.write emits prebuilt keys sorted", lam{ in
@@ -119,8 +119,8 @@ testing.test("manifest.write emits prebuilt keys sorted", lam{ in
     let text = fs.read(path.join(dir, "grain.yaml"))
     let darwinIdx = text.indexOf("darwin-arm64")
     let linuxIdx = text.indexOf("linux-x86_64")
-    testing.assert(darwinIdx >= 0 && linuxIdx >= 0, "both keys present")
-    testing.assert(darwinIdx < linuxIdx, "darwin-arm64 must sort before linux-x86_64")
+    testing.expect(darwinIdx >= 0 && linuxIdx >= 0, "both keys present")
+    testing.expect(darwinIdx < linuxIdx, "darwin-arm64 must sort before linux-x86_64")
 })
 
 testing.test("manifest.read rejects upper-case platform key", lam{ in
@@ -129,7 +129,7 @@ testing.test("manifest.read rejects upper-case platform key", lam{ in
         "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  Darwin-arm64:\n    url: https://example.com/x.dylib\n    integrity: sha256-1111111111111111111111111111111111111111111111111111111111111111\ndependencies:\n")
     let threw = false
     try { manifest.read(dir) } catch (e) { threw = true }
-    testing.assert(threw, "non-lowercase platform key must be rejected")
+    testing.expect(threw, "non-lowercase platform key must be rejected")
 })
 
 testing.test("manifest.read rejects non-map entry", lam{ in
@@ -138,7 +138,7 @@ testing.test("manifest.read rejects non-map entry", lam{ in
         "name: bad\nversion: 0.1.0\nmain: main.praia\nprebuilt:\n  darwin-arm64: \"just a string\"\ndependencies:\n")
     let threw = false
     try { manifest.read(dir) } catch (e) { threw = true }
-    testing.assert(threw, "scalar entry must be rejected")
+    testing.expect(threw, "scalar entry must be rejected")
 })
 
 testing.test("manifest round-trips a prebuilt block", lam{ in
@@ -152,8 +152,8 @@ testing.test("manifest round-trips a prebuilt block", lam{ in
     }
     manifest.write(dir, m)
     let r = manifest.read(dir)
-    testing.assertEqual(r.prebuilt["darwin-arm64"].url, "https://example.com/w.dylib", nil)
-    testing.assertEqual(r.prebuilt["linux-x86_64"].integrity,
+    testing.expectEqual(r.prebuilt["darwin-arm64"].url, "https://example.com/w.dylib", nil)
+    testing.expectEqual(r.prebuilt["linux-x86_64"].integrity,
                        "sha256-2222222222222222222222222222222222222222222222222222222222222222", nil)
 })
 
@@ -221,10 +221,10 @@ testing.test("installEntry downloads, hashes, writes plugins/<basename>", lam{ i
     let stage = testing.tempDir(nil)
     let entry = {url: "%{_baseUrl}/widget.dylib", integrity: _binSha}
     let ok = prebuilt.installEntry(entry, stage, false)
-    testing.assert(ok, "installEntry must return true on success")
+    testing.expect(ok, "installEntry must return true on success")
     let dest = path.join(stage, "plugins", "widget.dylib")
-    testing.assert(fs.exists(dest), "binary should land at plugins/widget.dylib")
-    testing.assertEqual(fs.read(dest), _binBytes, "bytes round-trip intact")
+    testing.expect(fs.exists(dest), "binary should land at plugins/widget.dylib")
+    testing.expectEqual(fs.read(dest), _binBytes, "bytes round-trip intact")
 })
 
 testing.test("installEntry throws on hash mismatch", lam{ in
@@ -234,8 +234,8 @@ testing.test("installEntry throws on hash mismatch", lam{ in
     let entry = {url: "%{_baseUrl}/widget.dylib", integrity: wrong}
     let threw = false
     try { prebuilt.installEntry(entry, stage, false) } catch (e) { threw = true }
-    testing.assert(threw, "mismatched hash must throw")
-    testing.assert(!fs.exists(path.join(stage, "plugins", "widget.dylib")),
+    testing.expect(threw, "mismatched hash must throw")
+    testing.expect(!fs.exists(path.join(stage, "plugins", "widget.dylib")),
                    "no binary should be written on mismatch")
 })
 
@@ -244,7 +244,7 @@ testing.test("installEntry throws on HTTP 404", lam{ in
     let entry = {url: "%{_baseUrl}/missing.dylib", integrity: _binSha}
     let threw = false
     try { prebuilt.installEntry(entry, stage, false) } catch (e) { threw = true }
-    testing.assert(threw, "404 must throw, not silently install garbage")
+    testing.expect(threw, "404 must throw, not silently install garbage")
 })
 
 // ── fetchAndStage: end-to-end resolver + install ───────────────
@@ -252,7 +252,7 @@ testing.test("installEntry throws on HTTP 404", lam{ in
 testing.test("fetchAndStage returns false when no entry matches", lam{ in
     let stage = testing.tempDir(nil)
     let m = {prebuilt: {"freebsd-riscv64": {url: "%{_baseUrl}/widget.dylib", integrity: _binSha}}}
-    testing.assertEqual(prebuilt.fetchAndStage(m, stage, false), false,
+    testing.expectEqual(prebuilt.fetchAndStage(m, stage, false), false,
                        "no-match must return false (caller falls back to source)")
 })
 
@@ -261,8 +261,8 @@ testing.test("fetchAndStage installs the matching entry", lam{ in
     let key = prebuilt.platformKey()
     let m = {prebuilt: {}}
     m.prebuilt[key] = {url: "%{_baseUrl}/widget.dylib", integrity: _binSha}
-    testing.assertEqual(prebuilt.fetchAndStage(m, stage, false), true, "match → true")
-    testing.assert(fs.exists(path.join(stage, "plugins", "widget.dylib")), "binary written")
+    testing.expectEqual(prebuilt.fetchAndStage(m, stage, false), true, "match → true")
+    testing.expect(fs.exists(path.join(stage, "plugins", "widget.dylib")), "binary written")
 })
 
 testing.test("installEntry strips query string from filename", lam{ in
@@ -273,10 +273,10 @@ testing.test("installEntry strips query string from filename", lam{ in
     let stage = testing.tempDir(nil)
     let entry = {url: "%{_baseUrl}/widget.dylib?token=abc&exp=1", integrity: _binSha}
     let ok = prebuilt.installEntry(entry, stage, false)
-    testing.assert(ok, "install should succeed")
-    testing.assert(fs.exists(path.join(stage, "plugins", "widget.dylib")),
+    testing.expect(ok, "install should succeed")
+    testing.expect(fs.exists(path.join(stage, "plugins", "widget.dylib")),
                    "binary lands at the clean basename")
-    testing.assert(!fs.exists(path.join(stage, "plugins", "widget.dylib?token=abc&exp=1")),
+    testing.expect(!fs.exists(path.join(stage, "plugins", "widget.dylib?token=abc&exp=1")),
                    "no garbage-named file")
 })
 

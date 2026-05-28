@@ -2,33 +2,33 @@ use "testing"
 
 testing.test("pipe into function", lam{ in
     func double(x) { return x * 2 }
-    testing.assertEqual(5 |> double, 10, nil)
+    testing.expectEqual(5 |> double, 10, nil)
 })
 
 testing.test("pipe chain", lam{ in
     func add1(x) { return x + 1 }
     func double(x) { return x * 2 }
-    testing.assertEqual(3 |> add1 |> double, 8, nil)
+    testing.expectEqual(3 |> add1 |> double, 8, nil)
 })
 
 testing.test("pipe into call with extra args", lam{ in
     func add(a, b) { return a + b }
-    testing.assertEqual(5 |> add(3), 8, "pipe provides first arg")
+    testing.expectEqual(5 |> add(3), 8, "pipe provides first arg")
 })
 
 testing.test("pipe with filter", lam{ in
     let result = [1, 2, 3, 4, 5] |> filter(lam{ x in x > 3 })
-    testing.assertEqual(result, [4, 5], nil)
+    testing.expectEqual(result, [4, 5], nil)
 })
 
 testing.test("pipe with map", lam{ in
     let result = [1, 2, 3] |> map(lam{ x in x * 10 })
-    testing.assertEqual(result, [10, 20, 30], nil)
+    testing.expectEqual(result, [10, 20, 30], nil)
 })
 
 testing.test("pipe with sort", lam{ in
     let result = [3, 1, 2] |> sort
-    testing.assertEqual(result, [1, 2, 3], nil)
+    testing.expectEqual(result, [1, 2, 3], nil)
 })
 
 testing.test("pipe chain data processing", lam{ in
@@ -36,13 +36,13 @@ testing.test("pipe chain data processing", lam{ in
         |> filter(lam{ x in x % 2 == 0 })
         |> map(lam{ x in x * x })
         |> sort
-    testing.assertEqual(result, [4, 16, 36], nil)
+    testing.expectEqual(result, [4, 16, 36], nil)
 })
 
 testing.test("pipe with keys and values", lam{ in
     let m = {a: 1, b: 2, c: 3}
     let k = m |> keys |> sort
-    testing.assertEqual(k, ["a", "b", "c"], nil)
+    testing.expectEqual(k, ["a", "b", "c"], nil)
 })
 
 testing.done()

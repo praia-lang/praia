@@ -8,7 +8,7 @@ testing.test("defer LIFO order", lam{ in
         defer push(order, "a")
     }
     f()
-    testing.assertEqual(order, ["a", "b", "c"], nil)
+    testing.expectEqual(order, ["a", "b", "c"], nil)
 })
 
 testing.test("defer runs on return", lam{ in
@@ -19,8 +19,8 @@ testing.test("defer runs on return", lam{ in
         return 42
     }
     let r = f()
-    testing.assertEqual(r, 42, "return value preserved")
-    testing.assertEqual(len(ran), 1, "defer ran")
+    testing.expectEqual(r, 42, "return value preserved")
+    testing.expectEqual(len(ran), 1, "defer ran")
 })
 
 testing.test("defer runs on exception", lam{ in
@@ -31,15 +31,15 @@ testing.test("defer runs on exception", lam{ in
         throw "boom"
     }
     try { f() } catch (e) {}
-    testing.assertEqual(len(ran), 1, "defer ran after throw")
+    testing.expectEqual(len(ran), 1, "defer ran after throw")
 })
 
 testing.test("defer in lambda", lam{ in
     let ran = []
     func mark() { push(ran, true) }
     let f = lam{ in defer mark(); return "ok" }
-    testing.assertEqual(f(), "ok", nil)
-    testing.assertEqual(len(ran), 1, nil)
+    testing.expectEqual(f(), "ok", nil)
+    testing.expectEqual(len(ran), 1, nil)
 })
 
 testing.test("failing defer does not block others", lam{ in
@@ -51,12 +51,12 @@ testing.test("failing defer does not block others", lam{ in
         defer push(order, "before")
     }
     try { f() } catch (e) {}
-    testing.assertEqual(order, ["before", "after"], nil)
+    testing.expectEqual(order, ["before", "after"], nil)
 })
 
 testing.test("defer with no defers is no-op", lam{ in
     func f() { return 1 + 2 }
-    testing.assertEqual(f(), 3, nil)
+    testing.expectEqual(f(), 3, nil)
 })
 
 testing.done()

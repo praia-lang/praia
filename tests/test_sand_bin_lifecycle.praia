@@ -76,45 +76,45 @@ testing.test("sand init generates grain.yaml with a discoverable bin: section", 
     // glob-expanded by the trampoline.
     let r = sys.exec(["sh", "-c", "cd \"$1\" && shift && exec \"$@\"",
                        "sh", projectDir, praiaBin, sandMain, "init"])
-    testing.assertEqual(r.exitCode, 0, "init exit 0: " + r.stderr)
+    testing.expectEqual(r.exitCode, 0, "init exit 0: " + r.stderr)
 
     let yaml = fs.read(path.join(projectDir, "grain.yaml"))
-    testing.assert(yaml.contains("\nbin:\n"),
+    testing.expect(yaml.contains("\nbin:\n"),
                     "grain.yaml has a live bin: section: " + yaml)
-    testing.assert(yaml.contains("# bin: declares CLI entry points"),
+    testing.expect(yaml.contains("# bin: declares CLI entry points"),
                     "grain.yaml has the bin: discovery comment")
     // Test plugin variant too — same hint should appear.
     let pluginDir = path.join(fixtureRoot, "init-plugin-fixture")
     fs.mkdir(pluginDir)
     let r2 = sys.exec(["sh", "-c", "cd \"$1\" && shift && exec \"$@\"",
                         "sh", pluginDir, praiaBin, sandMain, "init", "--plugin"])
-    testing.assertEqual(r2.exitCode, 0, "init --plugin exit 0: " + r2.stderr)
+    testing.expectEqual(r2.exitCode, 0, "init --plugin exit 0: " + r2.stderr)
     let pyaml = fs.read(path.join(pluginDir, "grain.yaml"))
-    testing.assert(pyaml.contains("\nbin:\n"),
+    testing.expect(pyaml.contains("\nbin:\n"),
                     "plugin grain.yaml also has bin: section")
 })
 
 testing.test("install -g plants a wrapper on PATH, removes it cleanly", lam{ in
     let grain = makeFixture("prscan", {prscan: "bin/prscan.praia"})
     let r = runSand(["install", "-g", "file://" + grain])
-    testing.assertEqual(r.exitCode, 0, "install exit 0: " + r.stderr)
+    testing.expectEqual(r.exitCode, 0, "install exit 0: " + r.stderr)
 
     let wrapper = path.join(sandHome, ".praia", "bin", "prscan")
-    testing.assert(fs.exists(wrapper), "wrapper exists at ~/.praia/bin/prscan")
+    testing.expect(fs.exists(wrapper), "wrapper exists at ~/.praia/bin/prscan")
     let body = fs.read(wrapper)
-    testing.assert(body.contains("# sand-managed wrapper for prscan"),
+    testing.expect(body.contains("# sand-managed wrapper for prscan"),
                     "sentinel comment present")
-    testing.assert(body.contains("/ext_grains/prscan/bin/prscan.praia"),
+    testing.expect(body.contains("/ext_grains/prscan/bin/prscan.praia"),
                     "absolute path baked in")
 
     // The wrapper should be executable and point at praia.
     let runR = sys.exec([wrapper, "alpha", "beta"])
-    testing.assertEqual(runR.exitCode, 0, "wrapper runs: " + runR.stderr)
-    testing.assert(runR.stdout.contains("alpha"), "args passed through")
+    testing.expectEqual(runR.exitCode, 0, "wrapper runs: " + runR.stderr)
+    testing.expect(runR.stdout.contains("alpha"), "args passed through")
 
     let rmR = runSand(["remove", "-g", "prscan"])
-    testing.assertEqual(rmR.exitCode, 0, "remove exit 0: " + rmR.stderr)
-    testing.assert(!fs.exists(wrapper), "wrapper unlinked after remove")
+    testing.expectEqual(rmR.exitCode, 0, "remove exit 0: " + rmR.stderr)
+    testing.expect(!fs.exists(wrapper), "wrapper unlinked after remove")
 })
 
 testing.test("install rolls back wrappers when the grain fails to register", lam{ in
@@ -140,13 +140,13 @@ testing.test("install rolls back wrappers when the grain fails to register", lam
               "commit", "-q", "-m", "init"])
 
     let r = runSand(["install", "-g", "file://" + grain])
-    testing.assertNotEqual(r.exitCode, 0, "install should fail")
+    testing.expectNotEqual(r.exitCode, 0, "install should fail")
 
     let binA = path.join(sandHome, ".praia", "bin", "a")
     let binB = path.join(sandHome, ".praia", "bin", "b")
-    testing.assert(!fs.exists(binA), "first wrapper rolled back")
-    testing.assert(!fs.exists(binB), "second wrapper never written")
-    testing.assert(
+    testing.expect(!fs.exists(binA), "first wrapper rolled back")
+    testing.expect(!fs.exists(binB), "second wrapper never written")
+    testing.expect(
         !fs.exists(path.join(sandHome, ".praia", "ext_grains", "broken")),
         "grain dir rolled back")
 })
@@ -180,20 +180,20 @@ testing.test("sand remove warns and cascade-removes dependents with -y", lam{ in
 
     // Install depA — pulls depB transitively.
     let r = runSand(["install", "-g", "file://" + depA])
-    testing.assertEqual(r.exitCode, 0, "install: " + r.stderr)
+    testing.expectEqual(r.exitCode, 0, "install: " + r.stderr)
 
     // -y bypasses the prompt and cascades the removal.
     let rm = runSand(["remove", "-g", "-y", "depB"])
-    testing.assertEqual(rm.exitCode, 0, "remove -y: " + rm.stderr)
-    testing.assert(rm.stdout.contains("will also remove these dependents: depA"),
+    testing.expectEqual(rm.exitCode, 0, "remove -y: " + rm.stderr)
+    testing.expect(rm.stdout.contains("will also remove these dependents: depA"),
                     "warned about dependent: " + rm.stdout)
-    testing.assert(rm.stdout.contains("Removed depA") &&
+    testing.expect(rm.stdout.contains("Removed depA") &&
                     rm.stdout.contains("Removed depB"),
                     "both grains removed: " + rm.stdout)
-    testing.assert(
+    testing.expect(
         !fs.exists(path.join(sandHome, ".praia", "ext_grains", "depA")),
         "depA dir gone")
-    testing.assert(
+    testing.expect(
         !fs.exists(path.join(sandHome, ".praia", "ext_grains", "depB")),
         "depB dir gone")
 })
@@ -220,20 +220,20 @@ testing.test("sand remove aborts on `n` and leaves everything in place", lam{ in
               "sh", depA])
 
     let r = runSand(["install", "-g", "file://" + depA])
-    testing.assertEqual(r.exitCode, 0, "install: " + r.stderr)
+    testing.expectEqual(r.exitCode, 0, "install: " + r.stderr)
 
     // Pipe "n\n" through stdin to answer the prompt with No.
     let rm = sys.exec(["sh", "-c",
         "echo n | env HOME=\"$1\" \"$2\" \"$3\" remove -g depB2",
         "sh", sandHome, praiaBin, sandMain])
-    testing.assertEqual(rm.exitCode, 0, "no-confirm exits cleanly")
-    testing.assert(rm.stdout.contains("Aborted"),
+    testing.expectEqual(rm.exitCode, 0, "no-confirm exits cleanly")
+    testing.expect(rm.stdout.contains("Aborted"),
                     "abort message: " + rm.stdout)
     // Both still installed.
-    testing.assert(
+    testing.expect(
         fs.exists(path.join(sandHome, ".praia", "ext_grains", "depA2")),
         "depA2 survived")
-    testing.assert(
+    testing.expect(
         fs.exists(path.join(sandHome, ".praia", "ext_grains", "depB2")),
         "depB2 survived")
 
@@ -241,7 +241,7 @@ testing.test("sand remove aborts on `n` and leaves everything in place", lam{ in
     // cleanup failure can't leave depA2/depB2 around to corrupt later
     // assertions that share `sandHome`.
     let cleanup = runSand(["remove", "-g", "-y", "depB2"])
-    testing.assertEqual(cleanup.exitCode, 0,
+    testing.expectEqual(cleanup.exitCode, 0,
                          "cleanup remove succeeded: " + cleanup.stderr)
 })
 
@@ -249,8 +249,8 @@ testing.test("update -g rewrites wrappers and cleans up renamed bins", lam{ in
     // v1: bin: { foo: bin/foo.praia }
     let grain = makeFixture("renamer", {foo: "bin/foo.praia"})
     let r1 = runSand(["install", "-g", "file://" + grain])
-    testing.assertEqual(r1.exitCode, 0, "initial install: " + r1.stderr)
-    testing.assert(fs.exists(path.join(sandHome, ".praia", "bin", "foo")),
+    testing.expectEqual(r1.exitCode, 0, "initial install: " + r1.stderr)
+    testing.expect(fs.exists(path.join(sandHome, ".praia", "bin", "foo")),
                     "foo wrapper present after install")
 
     // v2: rename the bin from foo to bar (commit so update picks it up)
@@ -265,14 +265,14 @@ testing.test("update -g rewrites wrappers and cleans up renamed bins", lam{ in
               "commit", "-q", "-m", "rename foo to bar"])
 
     let r2 = runSand(["update", "-g", "renamer"])
-    testing.assertEqual(r2.exitCode, 0, "update: " + r2.stderr)
-    testing.assert(!fs.exists(path.join(sandHome, ".praia", "bin", "foo")),
+    testing.expectEqual(r2.exitCode, 0, "update: " + r2.stderr)
+    testing.expect(!fs.exists(path.join(sandHome, ".praia", "bin", "foo")),
                     "old foo wrapper cleaned up on rename")
-    testing.assert(fs.exists(path.join(sandHome, ".praia", "bin", "bar")),
+    testing.expect(fs.exists(path.join(sandHome, ".praia", "bin", "bar")),
                     "new bar wrapper present after rename")
 
     let rmR = runSand(["remove", "-g", "renamer"])
-    testing.assertEqual(rmR.exitCode, 0, "cleanup: " + rmR.stderr)
+    testing.expectEqual(rmR.exitCode, 0, "cleanup: " + rmR.stderr)
 })
 
 // Final cleanup — tempDirs live outside any test body so testing's
