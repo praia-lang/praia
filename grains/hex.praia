@@ -10,15 +10,24 @@ func decode(hexStr) {
     return bytes.fromHex(hexStr)
 }
 
-// Encode an integer to hex string (no 0x prefix)
+// Encode an integer to hex string (no 0x prefix). Negative inputs
+// throw: Praia ints are signed 64-bit and there is no portable
+// `>>>` logical-shift to recover an unsigned representation, so the
+// old `val + (1 << 64)` path was a no-op (shift-by-width wraps to
+// `1` in Praia, leaving `val + 1`) and silently produced wrong
+// output. Callers that need an unsigned encoding should mask first,
+// e.g. `hex.fromInt(n & 0xFFFFFFFF, 8)` for a 32-bit two's-complement
+// view.
 func fromInt(n, width = 0) {
     if (type(n) != "int" && type(n) != "float") {
         throw "hex.fromInt() requires a number"
     }
+    if (n < 0) {
+        throw "hex.fromInt() requires a non-negative number; mask the value first for an unsigned view"
+    }
     let result = ""
     let digits = "0123456789abcdef"
     let val = n
-    if (val < 0) { val = val + (1 << 64) }
     if (val == 0) { result = "0" }
     while (val > 0) {
         result = digits[val & 0xF] + result

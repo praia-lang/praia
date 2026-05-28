@@ -60,8 +60,12 @@ let LEVEL_NAMES = ["debug", "info", "warn", "error", "none"]
 //   color: true  — wrap the LEVEL token in ANSI color
 //   timeFormat: strftime-style override (default "%Y-%m-%d %H:%M:%S")
 func textFormatter(opts) {
-    let o = opts || {}
-    let timeFmt = o.timeFormat || "%Y-%m-%d %H:%M:%S"
+    // `??` not `||`: in Praia `""` is truthy, so a caller passing
+    // an explicit empty timeFormat would have erased the default
+    // under `||` and produced empty timestamps. `??` keeps the
+    // default only when the field is actually missing (nil).
+    let o = opts ?? {}
+    let timeFmt = o.timeFormat ?? "%Y-%m-%d %H:%M:%S"
     let useColor = o.color == true
     return {
         format: lam{ rec in
@@ -114,7 +118,7 @@ func _defaultFormatter() {
 }
 
 func stdoutSink(formatter) {
-    let fmt = formatter || _defaultFormatter()
+    let fmt = formatter ?? _defaultFormatter()
     return {
         write: lam{ rec in print(fmt.format(rec)) },
         close: lam{ in nil }
@@ -126,7 +130,7 @@ func stdoutSink(formatter) {
 // abstract this further because Praia doesn't currently expose a stderr
 // builtin.
 func stderrSink(formatter) {
-    let fmt = formatter || _defaultFormatter()
+    let fmt = formatter ?? _defaultFormatter()
     let fh = fs.open("/dev/stderr", "a")
     return {
         write: lam{ rec in fh.write(fmt.format(rec) + "\n") },
@@ -138,7 +142,7 @@ func stderrSink(formatter) {
 // loses at most one in-flight write. Call `.close()` to release the fd
 // during clean shutdown (otherwise the fd leaks until process exit).
 func fileSink(path, formatter) {
-    let fmt = formatter || _defaultFormatter()
+    let fmt = formatter ?? _defaultFormatter()
     let fh = fs.open(path, "a")
     return {
         write: lam{ rec in
@@ -241,8 +245,8 @@ func _makeLogger(name, levelRef, sink, fields) {
 //   formatter — convenience when you just want to override the default
 //               stdout formatter (e.g. JSON). Ignored if `sink` is set.
 func create(name, options) {
-    let o = options || {}
-    let levelName = o.level || "info"
+    let o = options ?? {}
+    let levelName = o.level ?? "info"
     ensure (LEVELS[levelName] != nil) else {
         throw "logger.create: invalid level '%{levelName}'"
     }

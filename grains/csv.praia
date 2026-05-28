@@ -126,8 +126,14 @@ func stringify(data, headers) {
             if (type(row) == "map" && row[h] != nil) {
                 val = row[h].toString()
             }
-            // Quote if contains comma or quote
-            if (val.contains(",") || val.contains("\"")) {
+            // Quote if the value contains any character that the row /
+            // field splitter treats specially. `parseRaw` (since the
+            // RFC 4180 multi-line correctness fix) preserves quoted
+            // newlines, so we must quote on `\n`/`\r` too — without
+            // these the writer emits a row that the parser then
+            // splits in half.
+            if (val.contains(",") || val.contains("\"") ||
+                val.contains("\n") || val.contains("\r")) {
                 val = "\"" + val.replace("\"", "\"\"") + "\""
             }
             fields.push(val)

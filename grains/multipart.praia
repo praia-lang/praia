@@ -98,7 +98,10 @@ func parse(req, options) {
     }
     if (!ct.contains("multipart/form-data")) { return nil }
     let boundary = _extractBoundary(ct)
-    if (!boundary) { return nil }
+    // `""` is truthy in Praia, so `if (!boundary)` would let an
+    // empty `boundary=` through and ship us into the parse loop
+    // with a zero-length delimiter.
+    if (boundary == nil || len(boundary) == 0) { return nil }
 
     let delim = "--" + boundary
     let body = req.body

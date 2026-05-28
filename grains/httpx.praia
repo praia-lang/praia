@@ -56,7 +56,9 @@ class Session {
         if (!opts) { throw "httpx.Session.request() requires an options map" }
         let method = opts.method ?? "GET"
         let url    = opts.url
-        if (!url) { throw "httpx.Session.request() requires opts.url" }
+        // `""` is truthy in Praia; reject it explicitly so an empty
+        // url string doesn't reach the http layer as a no-op fetch.
+        if (url == nil || len(url) == 0) { throw "httpx.Session.request() requires opts.url" }
         let body   = opts.body
         return this._dispatch(method, url, body, opts)
     }

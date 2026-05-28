@@ -130,13 +130,17 @@ func _parseValue(val) {
         return _parseInlineTable(val)
     }
 
-    // Integer
-    if (val.test("^-?[0-9_]+$")) {
+    // Integer. Per TOML spec, underscores must sit BETWEEN two
+    // digits (`1_000` ok, `1_`, `_1`, `1__2` not), so we anchor a
+    // single leading digit and allow `_?` only between digit runs.
+    if (val.test("^-?[0-9](_?[0-9])*$")) {
         return num(val.replace("_", ""))
     }
 
-    // Float
-    if (val.test("^-?[0-9_]*\\.[0-9_]+$") || val.test("^-?[0-9_]+[eE][+-]?[0-9]+$")) {
+    // Float. Same digit-underscore-digit rule on each digit run
+    // (integer part, fractional part, exponent).
+    if (val.test("^-?[0-9](_?[0-9])*\\.[0-9](_?[0-9])*$") ||
+        val.test("^-?[0-9](_?[0-9])*[eE][+-]?[0-9]+$")) {
         return num(val.replace("_", ""))
     }
 
