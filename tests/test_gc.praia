@@ -159,11 +159,17 @@ testing.test("static method upvalue survives GC", lam{ in
 
 // Regression: markClass used to skip methodDecorators. A decorator callable
 // reachable only through the class could be swept, breaking decorated calls.
+// _tagWith is a module-level factory because the tree walker re-evaluates the
+// decorator expression at each method lookup in the *current* scope, so a
+// local decorator name would not be resolvable. The factory's return value
+// still captures `prefix` via the returned closure — that is the upvalue
+// methodDecorators must keep marked.
+func _tagWith(prefix) {
+    return lam{ fn in lam{ ...args in prefix + fn(...args) } }
+}
 func _makeDecoratedClass() {
-    let prefix = "[tagged] "
-    let tag = lam{ fn in lam{ ...args in prefix + fn(...args) } }
     class Foo {
-        @tag
+        @_tagWith("[tagged] ")
         func greet() { return "hello" }
     }
     return Foo
