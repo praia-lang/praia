@@ -1486,36 +1486,50 @@ static std::unique_ptr<SocketConn> sessionTakeIdle(HttpSession& s,
 // reuses the existing list slot (and moves it to the front so it's
 // marked most-recently-used); a new key gets pushed to the front and
 // triggers LRU eviction off the back if we're now over capacity.
+//
+// SSL_shutdown does a close_notify exchange — a blocking write
+// (sometimes a read) we don't want serialized behind every concurrent
+// sessionTakeIdle / sessionReturnIdle. So all the data-structure work
+// happens under s.mu, displaced connections are moved into a local
+// `toClose` list, and the actual shutdown_close() calls run AFTER the
+// lock is released.
 static void sessionReturnIdle(HttpSession& s, const std::string& key,
                               std::unique_ptr<SocketConn> conn) {
-    std::lock_guard<std::mutex> lock(s.mu);
-    // Close-race guard: an in-flight request that started before
-    // httpSessionClose ran may try to return its conn after closed=true.
-    // Drop the conn rather than re-pooling — otherwise sockets survive
-    // past the documented close point.
-    if (s.closed) {
-        conn->shutdown_close();
-        return;
+    std::vector<std::unique_ptr<SocketConn>> toClose;
+    {
+        std::lock_guard<std::mutex> lock(s.mu);
+        // Close-race guard: an in-flight request that started before
+        // httpSessionClose ran may try to return its conn after
+        // closed=true. Drop the conn rather than re-pooling.
+        if (s.closed) {
+            toClose.push_back(std::move(conn));
+        } else {
+            auto now = std::chrono::steady_clock::now();
+            auto it = s.idleIndex.find(key);
+            if (it != s.idleIndex.end()) {
+                // Same-key replace: stash the old conn for post-unlock
+                // teardown, swap in the new one, splice to the front
+                // to mark it MRU.
+                toClose.push_back(std::move(it->second->conn));
+                it->second->conn = std::move(conn);
+                it->second->insertedAt = now;
+                s.idleList.splice(s.idleList.begin(), s.idleList, it->second);
+            } else {
+                s.idleList.push_front({key, std::move(conn), now});
+                s.idleIndex[key] = s.idleList.begin();
+                while (static_cast<int>(s.idleList.size()) > s.poolMaxSize) {
+                    auto& victim = s.idleList.back();
+                    toClose.push_back(std::move(victim.conn));
+                    s.idleIndex.erase(victim.key);
+                    s.idleList.pop_back();
+                }
+            }
+        }
     }
-    auto now = std::chrono::steady_clock::now();
-    auto it = s.idleIndex.find(key);
-    if (it != s.idleIndex.end()) {
-        // Same-key replace: tear down the old conn, swap in the new
-        // one, splice the slot to the front to mark it MRU.
-        it->second->conn->shutdown_close();
-        it->second->conn = std::move(conn);
-        it->second->insertedAt = now;
-        s.idleList.splice(s.idleList.begin(), s.idleList, it->second);
-        return;
-    }
-    s.idleList.push_front({key, std::move(conn), now});
-    s.idleIndex[key] = s.idleList.begin();
-
-    while (static_cast<int>(s.idleList.size()) > s.poolMaxSize) {
-        auto& victim = s.idleList.back();
-        victim.conn->shutdown_close();
-        s.idleIndex.erase(victim.key);
-        s.idleList.pop_back();
+    // Lock released — perform the blocking SSL/TCP teardown now that
+    // we're not blocking other pool users.
+    for (auto& c : toClose) {
+        if (c) c->shutdown_close();
     }
 }
 
