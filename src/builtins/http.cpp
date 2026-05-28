@@ -659,7 +659,11 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
                 throw RuntimeError("chunk size overflow", 0);
             chunkSize = (chunkSize << 4) | static_cast<size_t>(d);
         }
-        if (body.size() + chunkSize > MAX_CHUNKED_BODY)
+        // Subtractive check — body.size() + chunkSize as a forward sum
+        // could wrap size_t when chunkSize is near SIZE_MAX. After this
+        // passes, chunkSize <= MAX_CHUNKED_BODY, so all later additions
+        // involving chunkSize (`pos + chunkSize + 2` below) are bounded.
+        if (chunkSize > MAX_CHUNKED_BODY - body.size())
             throw RuntimeError(
                 "chunked body exceeds server limit (" +
                 std::to_string(MAX_CHUNKED_BODY) + " bytes)", 0);
@@ -786,6 +790,13 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
         }
     } else if (hasCL) {
         if (clen > 0) {
+            // parseContentLengthStrict caps overflow during parsing but
+            // clen can still be near SIZE_MAX. Guard `bodyStart + clen`
+            // before adding so we don't wrap and silently misread.
+            if (clen > std::numeric_limits<size_t>::max() - bodyStart) {
+                sendBadRequest(client, "Content-Length too large");
+                return nullptr;
+            }
             size_t needed = bodyStart + clen;
             if (!recvAtLeast(client, data, needed)) return nullptr;
             reqBody.assign(data, bodyStart, clen);
@@ -1478,6 +1489,14 @@ static std::unique_ptr<SocketConn> sessionTakeIdle(HttpSession& s,
 static void sessionReturnIdle(HttpSession& s, const std::string& key,
                               std::unique_ptr<SocketConn> conn) {
     std::lock_guard<std::mutex> lock(s.mu);
+    // Close-race guard: an in-flight request that started before
+    // httpSessionClose ran may try to return its conn after closed=true.
+    // Drop the conn rather than re-pooling — otherwise sockets survive
+    // past the documented close point.
+    if (s.closed) {
+        conn->shutdown_close();
+        return;
+    }
     auto now = std::chrono::steady_clock::now();
     auto it = s.idleIndex.find(key);
     if (it != s.idleIndex.end()) {

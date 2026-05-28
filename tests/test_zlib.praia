@@ -125,6 +125,15 @@ testing.test("gunzip rejects negative or zero maxOutput", lam{ in
     testing.expectThrows(lam{ in zlib.gunzip(gz, -1) }, "positive")
 })
 
+testing.test("gunzip rejects NaN / Inf maxOutput", lam{ in
+    let gz = zlib.gzip("hi")
+    // NaN slips past `d <= 0` and `d >= SIZE_MAX` because every NaN
+    // comparison is false; static_cast<size_t>(NaN) is UB. Make sure
+    // the gate rejects both NaN and Inf explicitly.
+    testing.expectThrows(lam{ in zlib.gunzip(gz, 0.0 / 0.0) }, "finite")
+    testing.expectThrows(lam{ in zlib.gunzip(gz, 1.0 / 0.0) }, "finite")
+})
+
 testing.test("gunzip with maxOutput=nil uses the default cap", lam{ in
     let gz = zlib.gzip("hi")
     testing.expectEqual(zlib.gunzip(gz, nil), "hi", nil)

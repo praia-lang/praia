@@ -44,6 +44,7 @@ testing.test("link-local 169.254/16 (cloud metadata) is blocked", lam{ in
 // 200 OK with body "ok". Used to confirm we got past the SSRF gate
 // rather than stalled before connect.
 let _serveOnce = lam{ listener in
+    defer net.close(listener)
     let conn = net.accept(listener)
     net.recv(conn, 4096)
     net.send(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
@@ -64,6 +65,7 @@ testing.test("session with blockPrivateHosts:false inherits opt-out", lam{ in
     let port = net.localAddr(listener).port
     async _serveOnce(listener)
     let s = http.session({blockPrivateHosts: false})
+    defer http.close(s)
     let r = http.get(s, "http://127.0.0.1:" + str(port) + "/")
     testing.expectEqual(r.body, "ok", nil)
 })

@@ -1,5 +1,6 @@
 #include "../builtins.h"
 #include "../gc_heap.h"
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -119,6 +120,12 @@ size_t extractMaxOutput(const std::vector<Value>& args, size_t idx) {
     if (!args[idx].isNumber())
         throw RuntimeError("zlib: maxOutput must be a number of bytes (or nil for default)", 0);
     double d = args[idx].asNumber();
+    // NaN-first: all NaN comparisons are false, so a NaN would slip
+    // past `d <= 0` and `d >= SIZE_MAX`, reaching the static_cast<size_t>
+    // below, which is undefined behavior in C++.
+    if (!std::isfinite(d))
+        throw RuntimeError(
+            "zlib: maxOutput must be a finite positive number (or nil for default)", 0);
     if (d <= 0)
         throw RuntimeError("zlib: maxOutput must be positive (got " +
                            std::to_string(static_cast<long long>(d)) + ")", 0);
