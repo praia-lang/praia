@@ -22,7 +22,13 @@ func parse(text) {
 
         // Table header [section] or [section.subsection]
         if (trimmed[0] == "[" && !trimmed.startsWith("[[")) {
-            let header = trimmed.slice(1, len(trimmed) - 1).strip()
+            let closeIdx = trimmed.indexOf("]")
+            ensure (closeIdx > 0) else { throw "malformed section header: %{trimmed}" }
+            let header = trimmed.slice(1, closeIdx).strip()
+            let tail = trimmed.slice(closeIdx + 1, len(trimmed)).strip()
+            ensure (len(tail) == 0 || tail[0] == "#") else {
+                throw "unexpected text after section header: %{tail}"
+            }
             let parts = header.split(".")
             currentTable = result
             currentPath = parts
@@ -90,12 +96,25 @@ func _parseValue(val) {
     // String (basic: "..." or literal: '...')
     if (val.startsWith("\"") && val.endsWith("\"") && len(val) >= 2) {
         let inner = val.slice(1, len(val) - 1)
-        // Handle escape sequences
-        inner = inner.replace("\\n", "\n")
-        inner = inner.replace("\\t", "\t")
-        inner = inner.replace("\\\\", "\\")
-        inner = inner.replace("\\\"", "\"")
-        return inner
+        // Single-pass escape handling: order-independent.
+        let out = ""
+        let i = 0
+        while (i < len(inner)) {
+            if (inner[i] == "\\" && i + 1 < len(inner)) {
+                let c = inner[i + 1]
+                if (c == "n") { out = out + "\n" }
+                elif (c == "t") { out = out + "\t" }
+                elif (c == "r") { out = out + "\r" }
+                elif (c == "\\") { out = out + "\\" }
+                elif (c == "\"") { out = out + "\"" }
+                else { out = out + inner[i] + c }
+                i = i + 2
+            } else {
+                out = out + inner[i]
+                i = i + 1
+            }
+        }
+        return out
     }
     if (val.startsWith("'") && val.endsWith("'") && len(val) >= 2) {
         return val.slice(1, len(val) - 1)

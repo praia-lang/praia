@@ -33,4 +33,10 @@ testing.test("csv stringify", lam{ in
     testing.assert(result.contains("Ada,36"), nil)
 })
 
+testing.test("csv quoted fields span newlines", lam{ in
+    let data = csv.parse("name,bio\nAda,\"line1\nline2\"")
+    testing.assertEqual(len(data), 1, "quoted newline doesn't split rows")
+    testing.assertEqual(data[0].bio, "line1\nline2", "multi-line quoted value preserved")
+})
+
 testing.done()
