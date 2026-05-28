@@ -124,8 +124,21 @@ func _defaultFormatter() {
     return textFormatter(nil)
 }
 
+// Resolve the formatter arg shared by every sink: nil → default,
+// otherwise verify it shapes like a formatter (map with a callable
+// `.format`). Fail-fast at sink-construction time so a misuse is
+// caught at the call site rather than crashing inside `.format(rec)`
+// the first time the sink is written to.
+func _resolveFormatter(formatter) {
+    if (formatter == nil) { return _defaultFormatter() }
+    if (type(formatter) != "map" || type(formatter.format) != "function") {
+        throw "logger sink: formatter must be a map with a .format(rec) function"
+    }
+    return formatter
+}
+
 func stdoutSink(formatter) {
-    let fmt = formatter ?? _defaultFormatter()
+    let fmt = _resolveFormatter(formatter)
     return {
         write: lam{ rec in print(fmt.format(rec)) },
         close: lam{ in nil }
@@ -137,7 +150,7 @@ func stdoutSink(formatter) {
 // abstract this further because Praia doesn't currently expose a stderr
 // builtin.
 func stderrSink(formatter) {
-    let fmt = formatter ?? _defaultFormatter()
+    let fmt = _resolveFormatter(formatter)
     let fh = fs.open("/dev/stderr", "a")
     return {
         write: lam{ rec in fh.write(fmt.format(rec) + "\n") },
@@ -149,7 +162,7 @@ func stderrSink(formatter) {
 // loses at most one in-flight write. Call `.close()` to release the fd
 // during clean shutdown (otherwise the fd leaks until process exit).
 func fileSink(path, formatter) {
-    let fmt = formatter ?? _defaultFormatter()
+    let fmt = _resolveFormatter(formatter)
     let fh = fs.open(path, "a")
     return {
         write: lam{ rec in

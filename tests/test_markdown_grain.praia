@@ -86,7 +86,12 @@ testing.test("dangerous schemes are blocked case-insensitively", lam{ in
         "[a](  javascript:alert(1))",
         "[a](java\tscript:alert(1))",
         "[a](VBScript:msgbox(1))",
-        "[a](data:text/html,<script>alert(1)</script>)"
+        "[a](data:text/html,<script>alert(1)</script>)",
+        // SVG is the one image data: scheme that can run code,
+        // because <svg> accepts <script> and on* event handlers.
+        // Pin both the raw and the parameterized form.
+        "[a](data:image/svg+xml,<svg onload=alert(1)/>)",
+        "[a](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSkvPg==)"
     ]
     for (c in cases) {
         let out = markdown.render(c)

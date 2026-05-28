@@ -62,9 +62,10 @@ class Session {
         // "no len() for int" error from inside the wrapper. `type`
         // short-circuits the `len` call to produce our own clear
         // diagnostic. (`type(nil) == "nil"` so this also catches
-        // nil.) `""` is truthy in Praia, so we still need the
-        // explicit `len == 0` step to reject an empty url string.
-        if (type(url) != "string" || len(url) == 0) {
+        // nil.) We strip before measuring length so a whitespace-
+        // only URL (`"   "`) is rejected on the same code path
+        // rather than reaching the http layer to fail less clearly.
+        if (type(url) != "string" || len(url.strip()) == 0) {
             throw "httpx.Session.request() requires opts.url (non-empty string)"
         }
         let body   = opts.body
