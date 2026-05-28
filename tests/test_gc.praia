@@ -154,7 +154,7 @@ testing.test("static method upvalue survives GC", lam{ in
         let temp = []
         push(temp, temp)
     }
-    testing.assertEqual(cls.get(), [10, 20, 30], "captured static-method upvalue intact")
+    testing.expectEqual(cls.get(), [10, 20, 30], "captured static-method upvalue intact")
 })
 
 // Regression: markClass used to skip methodDecorators. A decorator callable
@@ -181,7 +181,7 @@ testing.test("method decorator closure survives GC", lam{ in
         let temp = []
         push(temp, temp)
     }
-    testing.assertEqual(f.greet(), "[tagged] hello", "decorator closure reachable through class")
+    testing.expectEqual(f.greet(), "[tagged] hello", "decorator closure reachable through class")
 })
 
 testing.done()
