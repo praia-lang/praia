@@ -10,7 +10,28 @@
 
 use "html" as htmlUtil
 
-func render(text) {
+// render(text, opts) — Markdown → HTML.
+//
+// By default (`opts.allowHTML` not set or not literally `true`) raw
+// HTML in the input is HTML-escaped: a stray `<script>` ends up as
+// the literal characters `&lt;script&gt;` in the output rather than
+// executing. Use this when rendering markdown from untrusted sources
+// (user comments, AI output, scraped content).
+//
+// Set `opts.allowHTML: true` for trusted-author rendering where you
+// want raw HTML (`<details>`, `<video>`, custom classes) to survive
+// into the output verbatim — same behaviour every spec-compliant
+// CommonMark renderer ships by default. The opt-in is intentionally
+// loud at call sites: `markdown.render(text, {allowHTML: true})`
+// signals at code-review time that the caller accepts the XSS risk
+// for the input source.
+//
+// Either way, link/image attribute escaping and the `_safeUrl`
+// scheme guard run unconditionally — `javascript:` URLs collapse to
+// `#` and `href`/`src` attribute breakouts are escaped in both
+// modes.
+func render(text, opts) {
+    let allowHTML = (opts != nil && opts.allowHTML == true)
     let lines = text.split("\n")
     let result = ""
     let i = 0
@@ -64,7 +85,7 @@ func render(text) {
                 level = level + 1
             }
             if (level <= 6 && level < len(trimmed) && trimmed[level] == " ") {
-                let content = _inline(trimmed.slice(level + 1, len(trimmed)).strip())
+                let content = _inline(trimmed.slice(level + 1, len(trimmed)).strip(), allowHTML)
                 result = result + "<h" + str(level) + ">" + content + "</h" + str(level) + ">\n"
                 i = i + 1
                 continue
@@ -85,7 +106,9 @@ func render(text) {
                 }
                 i = i + 1
             }
-            let inner = render(quoteLines.join("\n"))
+            // Recurse with the same opts so allowHTML propagates
+            // into the nested block context.
+            let inner = render(quoteLines.join("\n"), opts)
             result = result + "<blockquote>\n" + inner + "</blockquote>\n"
             continue
         }
@@ -96,13 +119,13 @@ func render(text) {
             while (i < len(lines)) {
                 let ll = lines[i].strip()
                 if (ll.startsWith("- ") || ll.startsWith("* ")) {
-                    items.push(_inline(ll.slice(2, len(ll))))
+                    items.push(_inline(ll.slice(2, len(ll)), allowHTML))
                 } elif (len(ll) == 0) {
                     break
                 } else {
                     // Continuation of previous item
                     if (len(items) > 0) {
-                        items[len(items) - 1] = items[len(items) - 1] + " " + _inline(ll)
+                        items[len(items) - 1] = items[len(items) - 1] + " " + _inline(ll, allowHTML)
                     }
                 }
                 i = i + 1
@@ -122,12 +145,12 @@ func render(text) {
                 let ll = lines[i].strip()
                 if (ll.test("^[0-9]+\\. ")) {
                     let dotIdx = ll.indexOf(". ")
-                    items.push(_inline(ll.slice(dotIdx + 2, len(ll))))
+                    items.push(_inline(ll.slice(dotIdx + 2, len(ll)), allowHTML))
                 } elif (len(ll) == 0) {
                     break
                 } else {
                     if (len(items) > 0) {
-                        items[len(items) - 1] = items[len(items) - 1] + " " + _inline(ll)
+                        items[len(items) - 1] = items[len(items) - 1] + " " + _inline(ll, allowHTML)
                     }
                 }
                 i = i + 1
@@ -154,7 +177,7 @@ func render(text) {
             i = i + 1
         }
         if (len(paraLines) > 0) {
-            result = result + "<p>" + _inline(paraLines.join(" ")) + "</p>\n"
+            result = result + "<p>" + _inline(paraLines.join(" "), allowHTML) + "</p>\n"
         }
     }
 
@@ -210,31 +233,54 @@ func _replaceMatches(s, pattern, builder) {
     return out
 }
 
-// Process inline formatting
-func _inline(text) {
-    let s = text
+// Process inline formatting.
+//
+// When `allowHTML` is false (the safe default) we html-escape the
+// input here, at the point where we're about to splice it into
+// HTML body positions. The escape is deliberately scoped to the
+// inline pass — block detection upstream still sees raw `>`, `#`,
+// `-`, etc. (none of those are touched by html.escape so block
+// structure detection is unaffected, *except* `>` for blockquotes,
+// which is exactly why we don't escape at the top of render).
+//
+// The markdown delimiters used by the regex passes below
+// (`*`, `_`, `[`, `]`, `(`, `)`, `` ` ``, `!`) are likewise not
+// touched by html.escape, so the regexes still match after the
+// pre-escape.
+func _inline(text, allowHTML) {
+    let s = allowHTML ? text : htmlUtil.escape(text)
+
+    // In safe mode the link/image captures come from already-escaped
+    // text. `html.a` / `html.img` re-escape attribute values via
+    // `_renderContent` — so we must unescape the captures before
+    // passing them in, otherwise an URL like `?a=1&b=2` would round-
+    // trip as `&amp;amp;`. In allowHTML mode the captures are raw,
+    // so `prep` is the identity.
+    let prep = allowHTML ? lam{ x in x } : htmlUtil.unescape
 
     // Images ![alt](url) and links [text](url). We use html.img /
     // html.a (rather than building the tag inline) so attribute
     // values are escaped — without that, a URL like
     // `x"><script>...` breaks out of the href attribute. `_safeUrl`
     // additionally neutralizes `javascript:` and similar
-    // code-executing schemes that surviving the attribute escape
+    // code-executing schemes that survive the attribute escape
     // alone (escaped quotes don't help when the browser still
     // dispatches the scheme on click).
     //
     // Images must run before links because `\[...\]\(...\)` is a
-    // substring of `!\[...\]\(...\)`, so a link pass before image
-    // pass would consume the bracket part of an image and leave a
-    // stray `!`.
+    // substring of `!\[...\]\(...\)`, so a link pass before the
+    // image pass would consume the bracket part of an image and
+    // leave a stray `!`.
     s = _replaceMatches(s, "!\\[([^\\]]*)\\]\\(([^)]+)\\)", lam{ g in
-        htmlUtil.img(_safeUrl(g[1]), g[0], nil)
+        htmlUtil.img(_safeUrl(prep(g[1])), prep(g[0]), nil)
     })
     s = _replaceMatches(s, "\\[([^\\]]*)\\]\\(([^)]+)\\)", lam{ g in
-        htmlUtil.a(_safeUrl(g[1]), g[0], nil)
+        htmlUtil.a(_safeUrl(prep(g[1])), prep(g[0]), nil)
     })
 
-    // Inline code `code`
+    // Inline code `code`. With allowHTML=false the captured `$1` is
+    // already escape-safe (e.g. `<b>` → `&lt;b&gt;`), so emitting it
+    // verbatim into `<code>...</code>` keeps it as visible text.
     s = s.replacePattern("`([^`]+)`", "<code>$1</code>")
 
     // Bold **text** or __text__
@@ -251,9 +297,11 @@ func _inline(text) {
     return s
 }
 
-// Render a markdown file to HTML
-func renderFile(path) {
-    return render(fs.read(path))
+// Render a markdown file to HTML. `opts` is forwarded to `render`
+// — pass `{allowHTML: true}` for trusted-author files that need
+// raw HTML to survive.
+func renderFile(path, opts) {
+    return render(fs.read(path), opts)
 }
 
 // ── Praia syntax highlighting ──
