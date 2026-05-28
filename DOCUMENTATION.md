@@ -3332,6 +3332,7 @@ Header names are lowercased for consistent access.
 | `maxRedirects` | 10 | Throw if a chain exceeds this |
 | `insecure` | `false` | **Skip TLS certificate verification.** Testing/dev only; equivalent to `curl -k` |
 | `caBundle` | system trust store | Path to a custom CA PEM bundle for trust-store override |
+| `blockPrivateHosts` | `true` | **SSRF protection.** Refuse to connect to loopback, RFC1918, link-local (incl. cloud metadata `169.254.169.254`), IPv4-mapped, multicast, and reserved address ranges. Re-applied per redirect hop. Set to `false` only when deliberately targeting internal hosts. |
 
 ```
 // Strict timeouts on a flaky upstream.
@@ -3351,7 +3352,12 @@ let r = http.request({url: "https://localhost:8443/", insecure: true})
 
 // Internal CA for mTLS / private PKI.
 let r = http.request({url: "https://internal.corp/", caBundle: "/etc/ssl/corp-root.pem"})
+
+// Deliberately hit localhost during development.
+let r = http.get("http://127.0.0.1:8080/health", {blockPrivateHosts: false})
 ```
+
+`http.get` and `http.post` also accept an optional trailing options map — `http.get(url, opts)`, `http.get(session, url, opts)`, and the equivalent shapes for `http.post`. The map fields are the same as `http.request`'s.
 
 #### Redirects
 
@@ -3418,7 +3424,7 @@ http.request(s, {
 })
 ```
 
-The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle` — minus `method`/`url`/`body`, which only make sense per-call.
+The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts` — minus `method`/`url`/`body`, which only make sense per-call.
 
 ##### Connection reuse and stale-conn recovery
 
@@ -3522,6 +3528,8 @@ The stream decodes three response-body framings transparently:
 - **`Transfer-Encoding: chunked`** — parses `HEXSIZE\r\n<data>\r\n` repeatedly until the `0\r\n` terminator. Chunk extensions (`;name=val` after the size) are ignored. Trailers are dropped (no API surface for them).
 - **Neither header** — read until the server closes the connection (HTTP/1.0 style; HTTP/1.1 with `Connection: close`).
 
+Responses that declare **both** `Content-Length` and `Transfer-Encoding`, or **multiple conflicting `Content-Length`** lines, throw a `RuntimeError` instead of being silently coerced — they're a response-smuggling vector when chained behind a permissive proxy.
+
 ##### Composing with json.parser
 
 The handle exposes `.read(n)` in the same shape `json.parser` expects, so streaming NDJSON over HTTP is one line of glue:
@@ -3616,14 +3624,26 @@ server.listen(3000)
 
 If the handler throws an error, the server returns a 500 response and continues running.
 
-#### Request body size
+#### Request body size and framing
 
-The server has no built-in cap on request body size — it reads up to `Content-Length` bytes into `req.body`. This matches the philosophy of `net/http`, Flask, and Express: the stdlib stays out of policy. If you need a limit, opt in:
+The server decodes both RFC 7230 body framings transparently before invoking the handler:
+
+- **`Content-Length: N`** — reads exactly N bytes into `req.body`. No built-in cap; this matches the philosophy of `net/http`, Flask, and Express.
+- **`Transfer-Encoding: chunked`** — decodes chunks (chunk extensions and trailers are accepted but discarded), capped at 64 MiB of decoded body to prevent unbounded chunked-stream DoS.
+
+Headers are capped at 64 KB regardless.
+
+Malformed or conflicting framing is rejected with a `400 Bad Request` response before the handler runs:
+
+- Both `Content-Length` and `Transfer-Encoding` present (request-smuggling vector).
+- Multiple `Content-Length` headers with different values, or multiple `Transfer-Encoding` headers.
+- `Content-Length` that isn't a non-negative decimal integer (no signs, no garbage suffix, no overflow).
+- `Transfer-Encoding` where `chunked` isn't the final coding.
+
+If you need an explicit `Content-Length` cap on top of those checks, opt in:
 
 - **Application-level** — use `middleware.bodyLimit(n)` from the middleware grain to reject requests with `Content-Length` over `n` bytes (returns 413).
 - **DoS-grade** — put a reverse proxy (nginx, caddy) in front. A determined attacker can lie about `Content-Length` or stream forever; only the proxy can short-circuit before the body is buffered.
-
-Headers are capped at 64 KB regardless.
 
 #### Graceful shutdown
 
@@ -3787,7 +3807,7 @@ s.close()
 | `s.jar()` | The underlying `cookie.Jar` (mutable; call `.clear()` to drop all cookies) |
 | `s.close()` | Closes the underlying `http.session`. Idempotent. |
 
-The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `headers`) plus one extra key:
+The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `headers`) plus one extra key:
 
 - **`jar`** — if provided, the session uses this `cookie.Jar` instance instead of creating an empty one. Useful for resuming cookie state across runs (save with `jar.cookies()`, restore by constructing a jar with the saved entries) or for sharing one jar across multiple sessions.
 
@@ -6182,10 +6202,12 @@ sudo dnf install utf8proc-devel
 
 | Function | Format | Use when |
 |----------|--------|----------|
-| `zlib.gzip(bytes, level?)` / `zlib.gunzip(bytes)` | RFC 1952 (10-byte header + crc32 + isize) | `.gz` files, HTTP `Content-Encoding: gzip`, log rotation — any payload that needs to be self-framing |
-| `zlib.deflate(bytes, level?)` / `zlib.inflate(bytes)` | RFC 1951 raw deflate (no header, no checksum) | Inner layer of a protocol that already frames the compressed body |
+| `zlib.gzip(bytes, level?)` / `zlib.gunzip(bytes, maxOutput?)` | RFC 1952 (10-byte header + crc32 + isize) | `.gz` files, HTTP `Content-Encoding: gzip`, log rotation — any payload that needs to be self-framing |
+| `zlib.deflate(bytes, level?)` / `zlib.inflate(bytes, maxOutput?)` | RFC 1951 raw deflate (no header, no checksum) | Inner layer of a protocol that already frames the compressed body |
 
 `level` is an integer 0..9: 0 = stored (no compression), 1 = fastest, 9 = best. Omit it for zlib's default (currently 6) — a good ratio/CPU balance for typical text.
+
+`maxOutput` (on `gunzip` / `inflate`) caps the decompressed size in bytes. A few hundred bytes of gzip can decompress to gigabytes — a "zip bomb" — so the inverse direction has a default ceiling of **64 MiB**. Pass an explicit value to raise/lower the cap; pass `nil` for the default. Exceeding the cap throws.
 
 ```
 let body = fs.read("server.log")
