@@ -1,24 +1,31 @@
 // Simple HTML template engine
 // Supports {{ variable }} and {{# each items }} ... {{/ each }} blocks
 //
+// {{ key }}   — HTML-escaped (safe default)
+// {{{ key }}} — raw, unescaped (use only for trusted content)
+//
 // Usage:
 //   use "template"
 //   let html = template.render("<h1>{{ title }}</h1>", {title: "Hello"})
 
+use "html"
+
 func render(tmpl, data) {
     let result = tmpl
 
-    // Replace {{ key }} with values from data
+    // Replace {{ key }} (escaped) and {{{ key }}} (raw) with values from data.
+    // Raw passes run first so the escaped pass doesn't see "{{{...}}}" remnants.
     let ks = keys(data)
     for (k in ks) {
         let val = data[k]
         // Skip arrays/maps — those are for block helpers
         if (type(val) != "array" && type(val) != "map") {
-            let placeholder = "{{ " + k + " }}"
-            result = result.replace(placeholder, val.toString())
-            // Also without spaces
-            let placeholderNoSpace = "{{" + k + "}}"
-            result = result.replace(placeholderNoSpace, val.toString())
+            let raw = val.toString()
+            let escaped = html.escape(raw)
+            result = result.replace("{{{ " + k + " }}}", raw)
+            result = result.replace("{{{" + k + "}}}", raw)
+            result = result.replace("{{ " + k + " }}", escaped)
+            result = result.replace("{{" + k + "}}", escaped)
         }
     }
 
@@ -67,12 +74,20 @@ func render(tmpl, data) {
                         if (type(item) == "map") {
                             let itemKeys = keys(item)
                             for (ik in itemKeys) {
-                                itemStr = itemStr.replace("{{ " + ik + " }}", item[ik].toString())
-                                itemStr = itemStr.replace("{{" + ik + "}}", item[ik].toString())
+                                let rawItem = item[ik].toString()
+                                let escItem = html.escape(rawItem)
+                                itemStr = itemStr.replace("{{{ " + ik + " }}}", rawItem)
+                                itemStr = itemStr.replace("{{{" + ik + "}}}", rawItem)
+                                itemStr = itemStr.replace("{{ " + ik + " }}", escItem)
+                                itemStr = itemStr.replace("{{" + ik + "}}", escItem)
                             }
                         } else {
-                            itemStr = itemStr.replace("{{ this }}", item.toString())
-                            itemStr = itemStr.replace("{{this}}", item.toString())
+                            let rawThis = item.toString()
+                            let escThis = html.escape(rawThis)
+                            itemStr = itemStr.replace("{{{ this }}}", rawThis)
+                            itemStr = itemStr.replace("{{{this}}}", rawThis)
+                            itemStr = itemStr.replace("{{ this }}", escThis)
+                            itemStr = itemStr.replace("{{this}}", escThis)
                         }
                         expanded = expanded + itemStr + "\n"
                     }

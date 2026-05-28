@@ -30,4 +30,20 @@ testing.test("stringify", lam{ in
     testing.expect(result.contains("age = 36"), nil)
 })
 
+testing.test("section header tolerates inline comment", lam{ in
+    let data = toml.parse("[section] # comment\nkey = 1")
+    testing.assertEqual(keys(data)[0], "section", nil)
+    testing.assertEqual(data.section.key, 1, nil)
+})
+
+testing.test("string escape sequences are order-independent", lam{ in
+    // Input bytes:  k = "a\\nb"   → value should be a\nb (literal backslash + n + b)
+    let d1 = toml.parse("k = \"a\\\\nb\"")
+    testing.assertEqual(d1.k, "a\\nb", "double-backslash + n stays literal")
+
+    // Input bytes:  k = "a\nb"    → value should contain a real newline
+    let d2 = toml.parse("k = \"a\\nb\"")
+    testing.assertEqual(d2.k, "a\nb", "single-backslash + n becomes newline")
+})
+
 testing.done()

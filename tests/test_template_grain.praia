@@ -1,0 +1,38 @@
+use "testing"
+use "template"
+
+testing.test("escapes interpolated values by default", lam{ in
+    let out = template.render("Hello {{ name }}", {name: "<script>"})
+    testing.assertEqual(out, "Hello &lt;script&gt;", nil)
+})
+
+testing.test("escape covers all HTML-special characters", lam{ in
+    let out = template.render("{{ s }}", {s: "& < > \" '"})
+    testing.assertEqual(out, "&amp; &lt; &gt; &quot; &#39;", nil)
+})
+
+testing.test("triple-brace emits raw HTML", lam{ in
+    let out = template.render("Hello {{{ name }}}", {name: "<b>Ada</b>"})
+    testing.assertEqual(out, "Hello <b>Ada</b>", nil)
+})
+
+testing.test("triple-brace works without spaces", lam{ in
+    let out = template.render("Hello {{{name}}}", {name: "<b>Ada</b>"})
+    testing.assertEqual(out, "Hello <b>Ada</b>", nil)
+})
+
+testing.test("each-block items are escaped by default", lam{ in
+    let tmpl = "{{# each items }}\n- {{ name }}\n{{/ each }}"
+    let out = template.render(tmpl, {items: [{name: "<a>"}, {name: "<b>"}]})
+    testing.assert(out.contains("- &lt;a&gt;"), "first item escaped")
+    testing.assert(out.contains("- &lt;b&gt;"), "second item escaped")
+    testing.assert(!out.contains("- <a>"), "raw item not present")
+})
+
+testing.test("each-block raw with triple brace", lam{ in
+    let tmpl = "{{# each items }}\n- {{{ name }}}\n{{/ each }}"
+    let out = template.render(tmpl, {items: [{name: "<a>"}]})
+    testing.assert(out.contains("- <a>"), "raw item present")
+})
+
+testing.done()

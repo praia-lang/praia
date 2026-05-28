@@ -139,4 +139,49 @@ testing.test("tagged cycles are collected without crashing", lam{ in
     testing.expect(true, "1000 tagged cycles broken without crash")
 })
 
+// Regression: markClass used to skip vmStaticMethods. A class with only its
+// static method's closure reaching a value could see that value swept.
+func _makeStaticHolder() {
+    let captured = [10, 20, 30]
+    class Util {
+        static func get() { return captured }
+    }
+    return Util
+}
+testing.test("static method upvalue survives GC", lam{ in
+    let cls = _makeStaticHolder()
+    for (i in 0..2000) {
+        let temp = []
+        push(temp, temp)
+    }
+    testing.assertEqual(cls.get(), [10, 20, 30], "captured static-method upvalue intact")
+})
+
+// Regression: markClass used to skip methodDecorators. A decorator callable
+// reachable only through the class could be swept, breaking decorated calls.
+// _tagWith is a module-level factory because the tree walker re-evaluates the
+// decorator expression at each method lookup in the *current* scope, so a
+// local decorator name would not be resolvable. The factory's return value
+// still captures `prefix` via the returned closure — that is the upvalue
+// methodDecorators must keep marked.
+func _tagWith(prefix) {
+    return lam{ fn in lam{ ...args in prefix + fn(...args) } }
+}
+func _makeDecoratedClass() {
+    class Foo {
+        @_tagWith("[tagged] ")
+        func greet() { return "hello" }
+    }
+    return Foo
+}
+testing.test("method decorator closure survives GC", lam{ in
+    let Cls = _makeDecoratedClass()
+    let f = Cls()
+    for (i in 0..2000) {
+        let temp = []
+        push(temp, temp)
+    }
+    testing.assertEqual(f.greet(), "[tagged] hello", "decorator closure reachable through class")
+})
+
 testing.done()

@@ -36,22 +36,42 @@ func parse(text) {
         let key = trimmed.slice(0, eqIdx).strip()
         let val = trimmed.slice(eqIdx + 1, len(trimmed)).strip()
 
-        // Strip quotes
-        if (len(val) >= 2) {
-            if ((val[0] == "\"" && val[len(val) - 1] == "\"") ||
-                (val[0] == "'" && val[len(val) - 1] == "'")) {
-                val = val.slice(1, len(val) - 1)
+        // If the value starts with a quote, find the matching closing quote and
+        // treat anything after it as comment/whitespace. This correctly handles
+        // `key = "hello # world"` (no comment) and `key = "hello # world" # note`
+        // (with trailing comment) — the # inside the quoted span must not split.
+        let isQuoted = false
+        if (len(val) >= 2 && (val[0] == "\"" || val[0] == "'")) {
+            let q = val[0]
+            let close = -1
+            let j = 1
+            while (j < len(val)) {
+                if (val[j] == q) {
+                    close = j
+                    j = len(val)
+                } else {
+                    j = j + 1
+                }
+            }
+            if (close > 0) {
+                let tail = val.slice(close + 1, len(val)).strip()
+                if (len(tail) == 0 || tail[0] == "#" || tail[0] == ";") {
+                    val = val.slice(1, close)
+                    isQuoted = true
+                }
             }
         }
 
-        // Strip inline comments (unquoted)
-        let commentIdx = val.indexOf(" ;")
-        if (commentIdx >= 0) {
-            val = val.slice(0, commentIdx).strip()
-        }
-        let hashIdx = val.indexOf(" #")
-        if (hashIdx >= 0) {
-            val = val.slice(0, hashIdx).strip()
+        if (!isQuoted) {
+            // Strip inline comments (unquoted only)
+            let commentIdx = val.indexOf(" ;")
+            if (commentIdx >= 0) {
+                val = val.slice(0, commentIdx).strip()
+            }
+            let hashIdx = val.indexOf(" #")
+            if (hashIdx >= 0) {
+                val = val.slice(0, hashIdx).strip()
+            }
         }
 
         // Auto-convert types

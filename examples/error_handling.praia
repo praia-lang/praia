@@ -70,7 +70,7 @@ greet("Bob")
 
 // ── ensure: validate input ──
 func processAge(age) {
-    ensure (type(age) == "number") else {
+    ensure (type(age) == "int" || type(age) == "float") else {
         throw "age must be a number"
     }
     ensure (age >= 0 && age <= 150) else {

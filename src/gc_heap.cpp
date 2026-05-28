@@ -204,6 +204,10 @@ void GcHeap::markClass(PraiaClass* cls) {
     if (!marked_.insert(static_cast<void*>(cls)).second) return;
     if (cls->superclass) markClass(cls->superclass.get());
     for (auto& [k, v] : cls->vmMethods) markValue(v);
+    for (auto& [k, v] : cls->vmStaticMethods) markValue(v);
+    for (auto& [k, vs] : cls->methodDecorators) {
+        for (auto& v : vs) markValue(v);
+    }
     if (cls->closure) markEnvironment(cls->closure.get());
 }
 
@@ -313,6 +317,8 @@ void GcHeap::sweep() {
             case GcType::Class: {
                 auto* cls = static_cast<PraiaClass*>(item.rawPtr);
                 cls->vmMethods.clear();
+                cls->vmStaticMethods.clear();
+                cls->methodDecorators.clear();
                 cls->superclass.reset();
                 cls->closure.reset();
                 break;
