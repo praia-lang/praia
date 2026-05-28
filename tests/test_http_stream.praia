@@ -1,7 +1,5 @@
 use "testing"
 
-let _LH = {blockPrivateHosts: false}
-
 // http.openStream — response-body streaming. Decodes Content-Length,
 // Transfer-Encoding: chunked, and the close-delimited fallback. Uses
 // a hand-rolled net.* mock server so we can emit exact wire bytes

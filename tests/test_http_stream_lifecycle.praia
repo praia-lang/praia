@@ -1,7 +1,5 @@
 use "testing"
 
-let _LH = {blockPrivateHosts: false}
-
 // Redirect, lifecycle, argument-validation, and RAII tests for
 // http.openStream. Carved out of test_http_stream.praia: that file
 // hit a tree-walker-only issue (cumulative async-server state after

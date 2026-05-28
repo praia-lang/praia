@@ -51,10 +51,19 @@ func rawRequest(port, payload) {
 }
 
 func statusOf(resp) {
-    // "HTTP/1.1 NNN ..." — pull NNN.
-    let line = resp.slice(0, resp.indexOf("\r\n"))
+    // "HTTP/1.1 NNN ..." — pull NNN. Defensive: any test failure is
+    // already noisy enough; report what the wire actually said when
+    // the response shape is wrong rather than a generic index error.
+    let eol = resp.indexOf("\r\n")
+    ensure (eol > 0) else { throw "statusOf: no status line in response: %{resp}" }
+    let line = resp.slice(0, eol)
     let parts = line.split(" ")
-    return num(parts[1])
+    ensure (len(parts) >= 2) else { throw "statusOf: malformed status line: %{line}" }
+    let n = nil
+    try { n = num(parts[1]) } catch (e) {
+        throw "statusOf: non-numeric status code in %{line}"
+    }
+    return n
 }
 
 // ── Server: framing-conflict rejection ───────────────────────────
@@ -178,6 +187,7 @@ func mockServeOnce(listener, response) {
 
 testing.test("client rejects response with both Content-Length and Transfer-Encoding", lam{ in
     let listener = net.listen(0)
+    defer net.close(listener)
     let port = net.localAddr(listener).port
     mockServeOnce(listener,
         "HTTP/1.1 200 OK\r\n" +
@@ -193,6 +203,7 @@ testing.test("client rejects response with both Content-Length and Transfer-Enco
 
 testing.test("client rejects response with conflicting duplicate Content-Length", lam{ in
     let listener = net.listen(0)
+    defer net.close(listener)
     let port = net.localAddr(listener).port
     mockServeOnce(listener,
         "HTTP/1.1 200 OK\r\n" +

@@ -1,7 +1,5 @@
 use "testing"
 
-let _LH = {blockPrivateHosts: false}
-
 // Pool bounds + idle TTL + openStream-session. Separated from
 // test_http_session.praia because `praia test` subprocess-isolates
 // between files — gives this file fresh OS-level networking state
