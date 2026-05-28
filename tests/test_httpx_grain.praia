@@ -2,7 +2,7 @@ use "testing"
 use "httpx"
 use "cookie"
 
-// httpx grain — wraps http.session() + cookie.Jar() so Set-Cookie
+// httpx grain — wraps http.session({blockPrivateHosts: false}) + cookie.Jar() so Set-Cookie
 // from one request gets auto-attached as a Cookie on the next.
 // Mock server records the inbound Cookie header (echoed in body) and
 // optionally sets cookies via Set-Cookie response headers. The
@@ -76,7 +76,7 @@ let base = "http://localhost:" + str(TEST_PORT)
 // ── Basic plumbing ───────────────────────────────────────────
 
 testing.test("session() returns a usable wrapper", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     let r = s.get(base + "/")
     testing.expectEqual(r.status, 200, nil)
     testing.expectEqual(r.body, "", "no cookies on a bare path → empty Cookie header echo")
@@ -84,7 +84,7 @@ testing.test("session() returns a usable wrapper", lam{ in
 })
 
 testing.test("jar() exposes the underlying cookie.Jar instance", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     testing.expectEqual(s.jar().size(), 0, "fresh jar starts empty")
     s.close()
 })
@@ -92,7 +92,7 @@ testing.test("jar() exposes the underlying cookie.Jar instance", lam{ in
 // ── Cookie threading ─────────────────────────────────────────
 
 testing.test("Set-Cookie from response 1 attaches to request 2", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     let r1 = s.get(base + "/login")
     testing.expectEqual(r1.status, 200, nil)
     // Server echoes the Cookie header it received: empty on first call
@@ -110,7 +110,7 @@ testing.test("Set-Cookie from response 1 attaches to request 2", lam{ in
 // would duplicate cookie-grain coverage without adding wrapper-specific signal.
 
 testing.test("multiple Set-Cookie headers all land in the jar", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     s.get(base + "/multi")
     let r = s.get(base + "/x")
     // Both cookies should be in the Cookie header. Order can vary by
@@ -127,7 +127,7 @@ testing.test("Secure cookie is suppressed on plain-HTTP requests", lam{ in
     // host is http://, the jar must filter this cookie out on outbound
     // requests. (Defense-in-depth check that cookie.Jar's matching is
     // wired through correctly via our wrapper.)
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     s.get(base + "/login-secure")
     let r = s.get(base + "/x")
     testing.expectEqual(r.body, "",
@@ -136,7 +136,7 @@ testing.test("Secure cookie is suppressed on plain-HTTP requests", lam{ in
 })
 
 testing.test("path-scoped cookie only attaches to matching paths", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     s.get(base + "/login-scoped")          // sets scoped=yes; Path=/area
     let r1 = s.get(base + "/")
     testing.expectEqual(r1.body, "",
@@ -162,13 +162,13 @@ testing.test("path-scoped cookie only attaches to matching paths", lam{ in
 // ── Close lifecycle ──────────────────────────────────────────
 
 testing.test("idempotent close: double-close is a no-op", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     s.close()
     s.close()
 })
 
 testing.test("use-after-close throws", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     s.close()
     let err = nil
     try { s.get(base + "/") } catch (e) { err = str(e) }
@@ -177,7 +177,7 @@ testing.test("use-after-close throws", lam{ in
 })
 
 testing.test("request() without url throws", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     let err = nil
     try { s.request({method: "GET"}) } catch (e) { err = str(e) }
     testing.expect(err != nil, nil)

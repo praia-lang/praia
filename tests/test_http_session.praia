@@ -1,5 +1,7 @@
 use "testing"
 
+let _LH = {blockPrivateHosts: false}
+
 // http.session — keepalive connection pool + default opts/headers.
 // Spins a hand-rolled net.* mock server so each test sees its own
 // per-process accept counter (echoed back via response headers).
@@ -106,7 +108,7 @@ let base = "http://localhost:" + str(TEST_PORT)
 // ── Handle shape ──────────────────────────────────────────────
 
 testing.test("handle prints as <external:http.session>", lam{ in
-    let s = http.session()
+    let s = http.session({blockPrivateHosts: false})
     testing.expectEqual(str(s), "<external:http.session>", nil)
     http.close(s)
 })
@@ -117,7 +119,7 @@ testing.test("basic GET via session returns 200", lam{ in
     // X-Accepts is a per-server (cumulative) counter; the keepalive
     // test below asserts deltas, not absolutes, since tests share one
     // server task.
-    let s = http.session()
+    let s = http.session({blockPrivateHosts: false})
     let r = http.get(s, base + "/ping")
     testing.expectEqual(r.status, 200, nil)
     testing.expectEqual(r.body, "pong", nil)
@@ -130,26 +132,26 @@ testing.test("basic GET via session returns 200", lam{ in
 // state any of those tests might leave behind.
 
 testing.test("stateless http.get unchanged (URL-only)", lam{ in
-    let r = http.get(base + "/ping")
+    let r = http.get(base + "/ping", _LH)
     testing.expectEqual(r.body, "pong", nil)
 })
 
 testing.test("stateless http.request unchanged (opts-map)", lam{ in
-    let r = http.request({url: base + "/ping"})
+    let r = http.request({blockPrivateHosts: false, url: base + "/ping"})
     testing.expectEqual(r.body, "pong", nil)
 })
 
 // ── Default headers apply ─────────────────────────────────────
 
 testing.test("session default headers reach the server", lam{ in
-    let s = http.session({headers: {"User-Agent": "praia-session-test/1.0"}})
+    let s = http.session({blockPrivateHosts: false, headers: {"User-Agent": "praia-session-test/1.0"}})
     let r = http.get(s, base + "/ua-echo")
     testing.expectEqual(r.body, "praia-session-test/1.0", nil)
     http.close(s)
 })
 
 testing.test("per-call headers override session defaults", lam{ in
-    let s = http.session({headers: {"X-Test": "from-session"}})
+    let s = http.session({blockPrivateHosts: false, headers: {"X-Test": "from-session"}})
     let r = http.request(s, {url: base + "/x-test-echo",
                               headers: {"X-Test": "from-call"}})
     testing.expectEqual(r.body, "from-call",
@@ -160,7 +162,7 @@ testing.test("per-call headers override session defaults", lam{ in
 testing.test("per-call headers compose with session defaults", lam{ in
     // The session sets X-Test; the per-call adds User-Agent. Both
     // should reach the server because they don't collide.
-    let s = http.session({headers: {"X-Test": "session-only"}})
+    let s = http.session({blockPrivateHosts: false, headers: {"X-Test": "session-only"}})
     let r1 = http.request(s, {url: base + "/x-test-echo",
                                headers: {"User-Agent": "perCall"}})
     testing.expectEqual(r1.body, "session-only", "session default still applied")
@@ -175,7 +177,7 @@ testing.test("per-call headers compose with session defaults", lam{ in
 testing.test("session default opts apply when call omits them", lam{ in
     // timeout: 30 → connectTimeoutMs=30000, readTimeoutMs=30000,
     // totalTimeoutMs=30000. Just verify the request succeeds.
-    let s = http.session({timeout: 30})
+    let s = http.session({blockPrivateHosts: false, timeout: 30})
     let r = http.get(s, base + "/ping")
     testing.expectEqual(r.status, 200, nil)
     http.close(s)
@@ -193,7 +195,7 @@ testing.test("session default opts apply when call omits them", lam{ in
 // ── Keepalive ─────────────────────────────────────────────────
 
 testing.test("keepalive: multiple requests use a single accept", lam{ in
-    let s = http.session()
+    let s = http.session({blockPrivateHosts: false})
     let firstAccepts = nil
     for (i in 0..5) {
         let r = http.get(s, base + "/ping")
@@ -211,7 +213,7 @@ testing.test("keepalive: multiple requests use a single accept", lam{ in
 // ── Stale-conn recovery ───────────────────────────────────────
 
 testing.test("stale conn: server-side close triggers one-shot retry", lam{ in
-    let s = http.session()
+    let s = http.session({blockPrivateHosts: false})
     // First request: server closes the socket after responding.
     let r1 = http.get(s, base + "/close-after")
     testing.expectEqual(r1.body, "ok", nil)
@@ -232,7 +234,7 @@ testing.test("stale conn: server-side close triggers one-shot retry", lam{ in
 // ── Connection: close from server ─────────────────────────────
 
 testing.test("server Connection: close opts out of the pool", lam{ in
-    let s = http.session()
+    let s = http.session({blockPrivateHosts: false})
     let r1 = http.get(s, base + "/conn-close")
     testing.expectEqual(r1.body, "ok", nil)
     testing.expectEqual(r1.headers["connection"], "close", nil)
@@ -253,7 +255,7 @@ testing.test("client-managed headers (Host/Connection/...) are rejected (per-cal
     // The client sets these itself; a caller-supplied duplicate would
     // either be ignored, conflict, or enable header-smuggling-class
     // behavior on lenient servers. Case-insensitive match.
-    let s = http.session()
+    let s = http.session({blockPrivateHosts: false})
     let names = ["Host", "Connection", "Content-Length", "Transfer-Encoding", "Upgrade"]
     for (name in names) {
         let err = nil
@@ -279,12 +281,12 @@ testing.test("client-managed headers (Host/Connection/...) are rejected (per-cal
 testing.test("reserved headers in SESSION defaults are also rejected", lam{ in
     // The defaults-merge path layers session headers under per-call
     // headers, so a reserved name placed in session defaults must
-    // surface the same "reserved" error on first use. http.session()
+    // surface the same "reserved" error on first use. http.session({blockPrivateHosts: false})
     // itself accepts the map (no early validation by design); the
     // error fires when a request goes through the session.
     let names = ["Host", "Connection", "Content-Length", "Transfer-Encoding", "Upgrade"]
     for (name in names) {
-        let s = http.session({headers: {[name]: "x"}})
+        let s = http.session({blockPrivateHosts: false, headers: {[name]: "x"}})
         let err = nil
         try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
         testing.expect(err != nil, name + " (session default) must be rejected")
@@ -293,7 +295,7 @@ testing.test("reserved headers in SESSION defaults are also rejected", lam{ in
         http.close(s)
     }
     // Case-insensitive variant too.
-    let s = http.session({headers: {"host": "evil.example"}})
+    let s = http.session({blockPrivateHosts: false, headers: {"host": "evil.example"}})
     let err = nil
     try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
     testing.expect(err != nil, "lowercase host (session default) rejected")
@@ -322,13 +324,13 @@ testing.test("http.close on non-session throws with the canonical type tag", lam
 // ── Close lifecycle ───────────────────────────────────────────
 
 testing.test("idempotent close: double-close is a no-op", lam{ in
-    let s = http.session()
+    let s = http.session({blockPrivateHosts: false})
     http.close(s)
     http.close(s)
 })
 
 testing.test("use-after-close throws", lam{ in
-    let s = http.session()
+    let s = http.session({blockPrivateHosts: false})
     http.close(s)
     let err = nil
     try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
@@ -348,7 +350,7 @@ testing.test("GC-driven close: many discarded sessions don't leak", lam{ in
     // socket allocation.
     let s = nil
     for (i in 0..200) {
-        s = http.session()
+        s = http.session({blockPrivateHosts: false})
     }
     s = nil
     testing.expect(true, nil)

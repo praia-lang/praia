@@ -55,13 +55,13 @@ let base = "http://localhost:" + str(TEST_PORT)
 testing.test("opts.jar lets callers supply a pre-existing jar", lam{ in
     // Build a jar by routing through one session, then hand it to a
     // fresh session — the cookies should carry over.
-    let s1 = httpx.session()
+    let s1 = httpx.session({blockPrivateHosts: false})
     s1.get(base + "/login")                // sid=abc123 lands in s1.jar
     let savedJar = s1.jar()
     testing.expectEqual(savedJar.size(), 1, "one cookie in saved jar")
     s1.close()
 
-    let s2 = httpx.session({jar: savedJar})
+    let s2 = httpx.session({blockPrivateHosts: false, jar: savedJar})
     let r = s2.get(base + "/x")
     testing.expect(r.status == 200,
         "second session reached the server")
@@ -75,14 +75,14 @@ testing.test("session-default headers don't break the request pipeline", lam{ in
     // Direct verification of session-default-header forwarding lives
     // in test_http_session.praia; here we just check the wrapper
     // accepts an opts.headers map without crashing.
-    let s = httpx.session({headers: {"X-Trace": "abc"}})
+    let s = httpx.session({blockPrivateHosts: false, headers: {"X-Trace": "abc"}})
     let r = s.get(base + "/")
     testing.expectEqual(r.status, 200, nil)
     s.close()
 })
 
 testing.test("request({method, url, body, headers}) round-trips", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     let r = s.request({method: "GET", url: base + "/",
                         headers: {"X-Test": "abc"}})
     testing.expectEqual(r.status, 200, nil)
@@ -90,7 +90,7 @@ testing.test("request({method, url, body, headers}) round-trips", lam{ in
 })
 
 testing.test("explicit per-call Cookie header overrides the jar", lam{ in
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     s.get(base + "/login")                 // sid=abc123 now in jar
     // A per-call Cookie header is the user explicitly stating "use
     // this exact value." The wrapper must not silently overwrite it
@@ -104,7 +104,7 @@ testing.test("explicit per-call Cookie header overrides the jar", lam{ in
 
 testing.test("Session.stream(url) threads cookies into the streamed request", lam{ in
     // /login puts sid=abc123 in the jar.
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     s.get(base + "/login")
     // A streamed request through the same session must attach the
     // jar's Cookie header — the stream handle's body echoes back
@@ -120,7 +120,7 @@ testing.test("Session.stream(url) threads cookies into the streamed request", la
 
 testing.test("Session.stream() also ingests Set-Cookie from the response", lam{ in
     // /login on the streamed path should still update the jar.
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     let stream = s.stream(base + "/login")
     stream.close()
     testing.expectEqual(s.jar().size(), 1,
@@ -137,7 +137,7 @@ testing.test("lowercase 'cookie' per-call header is honored (case-insensitive)",
     // (any case) still counts as "I'm setting the cookie header myself" —
     // the wrapper must not shadow it with the jar's value just because
     // the casing isn't exactly "Cookie".
-    let s = httpx.session()
+    let s = httpx.session({blockPrivateHosts: false})
     s.get(base + "/login")        // sid=abc123 in jar
     let r = s.request({url: base + "/x",
                         headers: {"cookie": "lc=wins"}})

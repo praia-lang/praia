@@ -1,5 +1,7 @@
 use "testing"
 
+let _LH = {blockPrivateHosts: false}
+
 // Regression: stdlib exceptions escaping a native used to abort the
 // whole process (e.g. std::invalid_argument from std::stoi on a
 // malformed port string in http.get). The native-call boundary in both
@@ -8,17 +10,17 @@ use "testing"
 // Praia code.
 
 testing.test("http.get malformed port — empty", lam{ in
-    testing.expectThrows(lam{ in http.get("http://example.com:") },
+    testing.expectThrows(lam{ in http.get("http://example.com:", _LH) },
                          "port")
 })
 
 testing.test("http.get malformed port — non-numeric", lam{ in
-    testing.expectThrows(lam{ in http.get("http://example.com:abc/") },
+    testing.expectThrows(lam{ in http.get("http://example.com:abc/", _LH) },
                          "port")
 })
 
 testing.test("http.get malformed port — out of range", lam{ in
-    testing.expectThrows(lam{ in http.get("http://example.com:99999/") },
+    testing.expectThrows(lam{ in http.get("http://example.com:99999/", _LH) },
                          "port")
 })
 

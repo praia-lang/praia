@@ -1,6 +1,8 @@
 #include "../builtins.h"
 #include "../gc_heap.h"
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 
 #ifdef HAVE_ZLIB
@@ -39,6 +41,12 @@ namespace {
 // level — let callers be explicit.
 constexpr int CHUNK = 16384;
 
+// Default output cap for inflate/gunzip — 64 MiB. A few hundred bytes
+// of gzip can expand to gigabytes (zip-bomb), so the inverse direction
+// is the dangerous one. Callers can pass a higher (or lower) maxOutput
+// argument to override; passing 0 / nil keeps the default.
+constexpr size_t INFLATE_DEFAULT_MAX = 64ull * 1024 * 1024;
+
 int validateLevel(int level) {
     if (level < 0 || level > 9)
         throw RuntimeError("zlib: compression level must be 0..9 (got " +
@@ -73,7 +81,7 @@ std::string doDeflate(const std::string& input, int windowBits, int level) {
     return out;
 }
 
-std::string doInflate(const std::string& input, int windowBits) {
+std::string doInflate(const std::string& input, int windowBits, size_t maxOutput) {
     z_stream zs{};
     if (inflateInit2(&zs, windowBits) != Z_OK)
         throw RuntimeError("zlib: inflateInit2 failed", 0);
@@ -92,10 +100,40 @@ std::string doInflate(const std::string& input, int windowBits) {
             inflateEnd(&zs);
             throw RuntimeError("zlib: inflate failed: " + msg, 0);
         }
-        out.append(buf, CHUNK - zs.avail_out);
+        size_t produced = CHUNK - zs.avail_out;
+        if (out.size() + produced > maxOutput) {
+            inflateEnd(&zs);
+            throw RuntimeError("zlib: inflate output exceeded maxOutput (" +
+                               std::to_string(maxOutput) + " bytes) — possible "
+                               "zip bomb; pass a higher maxOutput if intentional",
+                               0);
+        }
+        out.append(buf, produced);
     } while (ret != Z_STREAM_END);
     inflateEnd(&zs);
     return out;
+}
+
+size_t extractMaxOutput(const std::vector<Value>& args, size_t idx) {
+    if (args.size() <= idx) return INFLATE_DEFAULT_MAX;
+    if (args[idx].isNil())  return INFLATE_DEFAULT_MAX;
+    if (!args[idx].isNumber())
+        throw RuntimeError("zlib: maxOutput must be a number of bytes (or nil for default)", 0);
+    double d = args[idx].asNumber();
+    // NaN-first: all NaN comparisons are false, so a NaN would slip
+    // past `d <= 0` and `d >= SIZE_MAX`, reaching the static_cast<size_t>
+    // below, which is undefined behavior in C++.
+    if (!std::isfinite(d))
+        throw RuntimeError(
+            "zlib: maxOutput must be a finite positive number (or nil for default)", 0);
+    if (d <= 0)
+        throw RuntimeError("zlib: maxOutput must be positive (got " +
+                           std::to_string(static_cast<long long>(d)) + ")", 0);
+    // Clamp obviously-out-of-range values to size_t max — anything past
+    // that would have to be truncated anyway.
+    if (d >= static_cast<double>(std::numeric_limits<size_t>::max()))
+        return std::numeric_limits<size_t>::max();
+    return static_cast<size_t>(d);
 }
 
 int extractLevel(const std::vector<Value>& args, size_t idx) {
@@ -123,11 +161,16 @@ void registerZlibBuiltins(std::shared_ptr<PraiaMap> zlibMap) {
             return Value(doDeflate(args[0].asString(), 15 + 16, level));
         }));
 
-    zlibMap->entries[Value("gunzip")] = Value(makeNative("zlib.gunzip", 1,
+    // zlib.gunzip(bytes, maxOutput?) — inverse of gzip. maxOutput caps the
+    // decompressed size (defaults to 64 MiB) to stop zip-bombs. Pass a
+    // higher value when handling known-large archives; pass nil to use
+    // the default explicitly.
+    zlibMap->entries[Value("gunzip")] = Value(makeNative("zlib.gunzip", -1,
         [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("zlib.gunzip(bytes) requires bytes (a string)", 0);
-            return Value(doInflate(args[0].asString(), 15 + 16));
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("zlib.gunzip(bytes, maxOutput?) requires bytes (a string)", 0);
+            size_t maxOut = extractMaxOutput(args, 1);
+            return Value(doInflate(args[0].asString(), 15 + 16, maxOut));
         }));
 
     // zlib.deflate(bytes, level?) — RAW deflate (RFC 1951). No header,
@@ -141,11 +184,14 @@ void registerZlibBuiltins(std::shared_ptr<PraiaMap> zlibMap) {
             return Value(doDeflate(args[0].asString(), -15, level));
         }));
 
-    zlibMap->entries[Value("inflate")] = Value(makeNative("zlib.inflate", 1,
+    // zlib.inflate(bytes, maxOutput?) — inverse of deflate. See gunzip
+    // for maxOutput semantics; the cap is the same default 64 MiB.
+    zlibMap->entries[Value("inflate")] = Value(makeNative("zlib.inflate", -1,
         [](const std::vector<Value>& args) -> Value {
-            if (!args[0].isString())
-                throw RuntimeError("zlib.inflate(bytes) requires bytes (a string)", 0);
-            return Value(doInflate(args[0].asString(), -15));
+            if (args.empty() || !args[0].isString())
+                throw RuntimeError("zlib.inflate(bytes, maxOutput?) requires bytes (a string)", 0);
+            size_t maxOut = extractMaxOutput(args, 1);
+            return Value(doInflate(args[0].asString(), -15, maxOut));
         }));
 #else
     // No zlib at link time → every entry throws so callers see a clear
