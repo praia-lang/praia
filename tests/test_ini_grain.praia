@@ -35,4 +35,14 @@ testing.test("stringify with sections", lam{ in
     testing.assert(result.contains("localhost"), nil)
 })
 
+testing.test("quoted values keep embedded comment characters", lam{ in
+    let data = ini.parse("[s]\nkey = \"hello # world\"")
+    testing.assertEqual(data.s.key, "hello # world", nil)
+})
+
+testing.test("unquoted values strip inline comments", lam{ in
+    let data = ini.parse("[s]\nkey = bare # comment")
+    testing.assertEqual(data.s.key, "bare", nil)
+})
+
 testing.done()

@@ -36,22 +36,24 @@ func parse(text) {
         let key = trimmed.slice(0, eqIdx).strip()
         let val = trimmed.slice(eqIdx + 1, len(trimmed)).strip()
 
-        // Strip quotes
-        if (len(val) >= 2) {
-            if ((val[0] == "\"" && val[len(val) - 1] == "\"") ||
-                (val[0] == "'" && val[len(val) - 1] == "'")) {
-                val = val.slice(1, len(val) - 1)
-            }
-        }
+        // Detect quoted values *before* stripping comments, so that `# ` and ` ;`
+        // inside a quoted value aren't treated as inline comments.
+        let isQuoted = (len(val) >= 2 &&
+                        ((val[0] == "\"" && val[len(val) - 1] == "\"") ||
+                         (val[0] == "'"  && val[len(val) - 1] == "'")))
 
-        // Strip inline comments (unquoted)
-        let commentIdx = val.indexOf(" ;")
-        if (commentIdx >= 0) {
-            val = val.slice(0, commentIdx).strip()
-        }
-        let hashIdx = val.indexOf(" #")
-        if (hashIdx >= 0) {
-            val = val.slice(0, hashIdx).strip()
+        if (!isQuoted) {
+            // Strip inline comments (unquoted only)
+            let commentIdx = val.indexOf(" ;")
+            if (commentIdx >= 0) {
+                val = val.slice(0, commentIdx).strip()
+            }
+            let hashIdx = val.indexOf(" #")
+            if (hashIdx >= 0) {
+                val = val.slice(0, hashIdx).strip()
+            }
+        } else {
+            val = val.slice(1, len(val) - 1)
         }
 
         // Auto-convert types

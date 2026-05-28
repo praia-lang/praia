@@ -23,7 +23,7 @@ server.listen(8080)
 A data pipeline:
 
 ```praia
-let adults = sys.read("users.json")
+let adults = fs.read("users.json")
     |> json.parse
     |> filter(lam{ u in u.age >= 18 })
     |> map(lam{ u in u.name })
@@ -131,7 +131,7 @@ classes, control flow, error handling, pipes/closures, and JSON.
 * Networking: TCP, UDP, raw sockets, DNS queries (A/AAAA/MX/TXT/NS/CNAME/SOA/PTR/SRV), connect timeouts
 * HTTP client and server
 * JSON and YAML parse/stringify
-* async/await with true parallelism, channels, futures.all/race
+* async/await with true parallelism, queues, futures.all/race
 * Module system ("grains") with import/export
 * Package manager ([sand](https://github.com/praia-lang/sand))
 * File I/O, directories, copy/move (`sys` namespace)
@@ -162,7 +162,7 @@ Praia/
 │   │   ├── net.cpp              # TCP, UDP, raw sockets, DNS queries, interfaces
 │   │   ├── bytes.cpp            # struct pack/unpack, hex, binary data
 │   │   ├── crypto.cpp           # MD5, SHA-256
-│   │   ├── concurrency.cpp      # Lock, Channel, futures.all/race
+│   │   ├── concurrency.cpp      # Lock, Queue, futures.all/race
 │   │   ├── http.cpp             # HTTP client + server
 │   │   ├── json.cpp             # JSON parser + stringifier
 │   │   ├── yaml.cpp             # YAML parser + stringifier

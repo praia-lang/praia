@@ -42,12 +42,31 @@ func parseRow(line) {
 }
 
 func parseRaw(text) {
-    let lines = text.strip().split("\n")
+    // Quote-aware row splitter: only treat \n as a row separator outside quotes,
+    // so a quoted field can span newlines per RFC 4180.
     let rows = []
-    for (line in lines) {
-        if (len(line.strip()) > 0) {
-            rows.push(parseRow(line))
+    let current = ""
+    let inQuotes = false
+    let i = 0
+    while (i < len(text)) {
+        let ch = text[i]
+        if (ch == "\"") {
+            inQuotes = !inQuotes
+            current = current + ch
+        } elif (ch == "\n" && !inQuotes) {
+            if (len(current.strip()) > 0) {
+                rows.push(parseRow(current))
+            }
+            current = ""
+        } elif (ch == "\r" && !inQuotes) {
+            // skip CR; CRLF handled by the LF branch
+        } else {
+            current = current + ch
         }
+        i = i + 1
+    }
+    if (len(current.strip()) > 0) {
+        rows.push(parseRow(current))
     }
     return rows
 }
