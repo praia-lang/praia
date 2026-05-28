@@ -70,7 +70,7 @@ testing.test("failed update preserves the prior install and lock entry", lam{ in
         "bin:\n  survivor: bin/survivor.praia\n",
         {"bin/survivor.praia": "print(\"survivor v1:\", sys.args)\n"})
     let r1 = runSand(["install", "-g", "file://" + g])
-    testing.assertEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
+    testing.expectEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
 
     let grainDir = path.join(sandHome, ".praia", "ext_grains", "survivor")
     let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
@@ -92,19 +92,19 @@ testing.test("failed update preserves the prior install and lock entry", lam{ in
     commitInGrain(g, "broken v2")
 
     let r2 = runSand(["update", "-g", "survivor"])
-    testing.assert(r2.exitCode != 0,
+    testing.expect(r2.exitCode != 0,
         "update with missing bin script must fail (exit=" + str(r2.exitCode) + ")")
 
     // Everything must look like the failure never happened.
-    testing.assertEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
+    testing.expectEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
         "grain dir restored to v1 content after failed update")
-    testing.assertEqual(fs.read(lockPath), lockBefore,
+    testing.expectEqual(fs.read(lockPath), lockBefore,
         "lockfile restored to v1 entry after failed update")
-    testing.assertEqual(fs.read(binPath), binBefore,
+    testing.expectEqual(fs.read(binPath), binBefore,
         "bin wrapper preserved after failed update")
 
     let cleanup = runSand(["remove", "-g", "-y", "survivor"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 testing.test("failed restore preserves the lockfile entry for retry", lam{ in
@@ -116,7 +116,7 @@ testing.test("failed restore preserves the lockfile entry for retry", lam{ in
     let g = makeGrain("retryable",
         "let v = 1\nexport { v }\n", "", {})
     let r1 = runSand(["install", "-g", "file://" + g])
-    testing.assertEqual(r1.exitCode, 0, r1.stderr)
+    testing.expectEqual(r1.exitCode, 0, r1.stderr)
 
     let grainDir = path.join(sandHome, ".praia", "ext_grains", "retryable")
     let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
@@ -131,25 +131,25 @@ testing.test("failed restore preserves the lockfile entry for retry", lam{ in
     fs.write(lockPath, mangled)
 
     let r2 = runSand(["install", "-g"])
-    testing.assert(r2.exitCode != 0, "restore should fail on integrity mismatch")
+    testing.expect(r2.exitCode != 0, "restore should fail on integrity mismatch")
 
     // Lockfile entry survives: the user can roll back the corrupted
     // integrity field, re-`sand install`, and recover.
     let lockAfter = fs.read(lockPath)
-    testing.assert(lockAfter.contains("retryable:"),
+    testing.expect(lockAfter.contains("retryable:"),
         "lockfile still has the entry after failed restore: " + lockAfter)
-    testing.assert(lockAfter.contains("source:"),
+    testing.expect(lockAfter.contains("source:"),
         "lockfile entry still names the source for retry: " + lockAfter)
 
     // Put the good integrity back and verify retry works.
     fs.write(lockPath, lockBefore)
     let r3 = runSand(["install", "-g"])
-    testing.assertEqual(r3.exitCode, 0,
+    testing.expectEqual(r3.exitCode, 0,
         "retry succeeds after fixing integrity: " + r3.stderr)
-    testing.assert(fs.exists(grainDir), "grain reinstalled on retry")
+    testing.expect(fs.exists(grainDir), "grain reinstalled on retry")
 
     let cleanup = runSand(["remove", "-g", "-y", "retryable"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 testing.test("update keeps bin wrappers working through failure", lam{ in
@@ -162,17 +162,17 @@ testing.test("update keeps bin wrappers working through failure", lam{ in
         "bin:\n  keepbin: bin/keepbin.praia\n",
         {"bin/keepbin.praia": "print(\"keepbin v1:\", sys.args)\n"})
     let r1 = runSand(["install", "-g", "file://" + g])
-    testing.assertEqual(r1.exitCode, 0, r1.stderr)
+    testing.expectEqual(r1.exitCode, 0, r1.stderr)
 
     let binPath = path.join(sandHome, ".praia", "bin", "keepbin")
-    testing.assert(fs.exists(binPath), "v1 wrapper planted")
+    testing.expect(fs.exists(binPath), "v1 wrapper planted")
 
     // Verify the wrapper actually runs the v1 main *now*, before we
     // attempt the failed update. This is the property the rollback
     // is responsible for preserving.
     let probe1 = sys.exec([binPath, "hello"])
-    testing.assertEqual(probe1.exitCode, 0, "v1 wrapper runs: " + probe1.stderr)
-    testing.assert(probe1.stdout.contains("keepbin v1:"),
+    testing.expectEqual(probe1.exitCode, 0, "v1 wrapper runs: " + probe1.stderr)
+    testing.expect(probe1.stdout.contains("keepbin v1:"),
         "v1 wrapper prints v1 marker: " + probe1.stdout)
 
     // Push a manifest referencing a missing bin script. installGrain
@@ -184,19 +184,19 @@ testing.test("update keeps bin wrappers working through failure", lam{ in
     commitInGrain(g, "broken v2")
 
     let r2 = runSand(["update", "-g", "keepbin"])
-    testing.assert(r2.exitCode != 0, "update fails")
+    testing.expect(r2.exitCode != 0, "update fails")
 
     // Wrapper file still exists and still runs v1.
-    testing.assert(fs.exists(binPath),
+    testing.expect(fs.exists(binPath),
         "wrapper still on PATH after failed update")
     let probe2 = sys.exec([binPath, "world"])
-    testing.assertEqual(probe2.exitCode, 0,
+    testing.expectEqual(probe2.exitCode, 0,
         "wrapper still runnable after failed update: " + probe2.stderr)
-    testing.assert(probe2.stdout.contains("keepbin v1:"),
+    testing.expect(probe2.stdout.contains("keepbin v1:"),
         "wrapper still runs v1 content after failed update: " + probe2.stdout)
 
     let cleanup = runSand(["remove", "-g", "-y", "keepbin"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 testing.test("failed transitive dep install preserves the prior grain dir AND wrapper", lam{ in
@@ -214,7 +214,7 @@ testing.test("failed transitive dep install preserves the prior grain dir AND wr
         "bin:\n  depfail: bin/depfail.praia\n",
         {"bin/depfail.praia": "print(\"depfail v1\")\n"})
     let r1 = runSand(["install", "-g", "file://" + g])
-    testing.assertEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
+    testing.expectEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
 
     let grainDir = path.join(sandHome, ".praia", "ext_grains", "depfail")
     let binPath  = path.join(sandHome, ".praia", "bin", "depfail")
@@ -235,31 +235,31 @@ testing.test("failed transitive dep install preserves the prior grain dir AND wr
     commitInGrain(g, "v2 with bad dep")
 
     let r2 = runSand(["update", "-g", "depfail"])
-    testing.assert(r2.exitCode != 0,
+    testing.expect(r2.exitCode != 0,
         "update must fail when dep clone fails (exit=" + str(r2.exitCode) + ")")
 
     // The whole point: rollback must have restored everything from
     // before the swap, *not* just deleted the new dir.
-    testing.assert(fs.exists(grainDir),
+    testing.expect(fs.exists(grainDir),
         "grain dir survives failed update (wasn't deleted by buggy rollback)")
-    testing.assertEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
+    testing.expectEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
         "grain dir restored to v1 content")
-    testing.assert(fs.exists(binPath),
+    testing.expect(fs.exists(binPath),
         "bin wrapper survives failed update")
-    testing.assertEqual(fs.read(binPath), binBefore,
+    testing.expectEqual(fs.read(binPath), binBefore,
         "bin wrapper restored to v1 bytes")
-    testing.assertEqual(fs.read(lockPath), lockBefore,
+    testing.expectEqual(fs.read(lockPath), lockBefore,
         "lockfile restored to v1 entry")
 
     // And the wrapper still runs.
     let probe = sys.exec([binPath])
-    testing.assertEqual(probe.exitCode, 0,
+    testing.expectEqual(probe.exitCode, 0,
         "wrapper still executable after rollback: " + probe.stderr)
-    testing.assert(probe.stdout.contains("depfail v1"),
+    testing.expect(probe.stdout.contains("depfail v1"),
         "wrapper runs v1 content: " + probe.stdout)
 
     let cleanup = runSand(["remove", "-g", "-y", "depfail"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 sys.exec(["rm", "-rf", sandHome, fixtureRoot])

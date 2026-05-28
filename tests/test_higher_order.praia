@@ -2,41 +2,41 @@ use "testing"
 
 testing.test("lambdas", lam{ in
     let double = lam{ x in x * 2 }
-    testing.assertEqual(double(21), 42, nil)
+    testing.expectEqual(double(21), 42, nil)
     let add = lam{ a, b in a + b }
-    testing.assertEqual(add(3, 4), 7, nil)
+    testing.expectEqual(add(3, 4), 7, nil)
 })
 
 testing.test("map", lam{ in
     let doubled = map([1, 2, 3], lam{ x in x * 2 })
-    testing.assertEqual(doubled[0], 2, nil)
-    testing.assertEqual(doubled[2], 6, nil)
+    testing.expectEqual(doubled[0], 2, nil)
+    testing.expectEqual(doubled[2], 6, nil)
 })
 
 testing.test("filter", lam{ in
     let evens = filter([1, 2, 3, 4, 5, 6], lam{ x in x % 2 == 0 })
-    testing.assertEqual(len(evens), 3, nil)
-    testing.assertEqual(evens[0], 2, nil)
+    testing.expectEqual(len(evens), 3, nil)
+    testing.expectEqual(evens[0], 2, nil)
 })
 
 testing.test("sort", lam{ in
     let sorted = sort([3, 1, 4, 1, 5, 9, 2, 6])
-    testing.assertEqual(sorted[0], 1, nil)
-    testing.assertEqual(sorted[7], 9, nil)
+    testing.expectEqual(sorted[0], 1, nil)
+    testing.expectEqual(sorted[7], 9, nil)
 })
 
 testing.test("pipe operator with bare function", lam{ in
     let n = [1, 2, 3, 4] |> len
-    testing.assertEqual(n, 4, nil)
+    testing.expectEqual(n, 4, nil)
 })
 
 testing.test("pipe operator with call", lam{ in
     let result = [1, 2, 3, 4, 5]
         |> filter(lam{ x in x > 2 })
         |> map(lam{ x in x * 10 })
-    testing.assertEqual(len(result), 3, nil)
-    testing.assertEqual(result[0], 30, nil)
-    testing.assertEqual(result[2], 50, nil)
+    testing.expectEqual(len(result), 3, nil)
+    testing.expectEqual(result[0], 30, nil)
+    testing.expectEqual(result[2], 50, nil)
 })
 
 testing.test("closures capture variables", lam{ in
@@ -48,9 +48,9 @@ testing.test("closures capture variables", lam{ in
         }
     }
     let c = makeCounter()
-    testing.assertEqual(c(), 1, nil)
-    testing.assertEqual(c(), 2, nil)
-    testing.assertEqual(c(), 3, nil)
+    testing.expectEqual(c(), 1, nil)
+    testing.expectEqual(c(), 2, nil)
+    testing.expectEqual(c(), 3, nil)
 })
 
 testing.done()

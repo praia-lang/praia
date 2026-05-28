@@ -14,7 +14,7 @@ testing.test("fs.open 'w' creates and truncates", lam{ in
     let h = fs.open(p, "w")
     h.write("new")
     h.close()
-    testing.assertEqual(fs.read(p), "new", "old content was truncated")
+    testing.expectEqual(fs.read(p), "new", "old content was truncated")
     fs.remove(d)
 })
 
@@ -25,12 +25,12 @@ testing.test("fs.open 'a' appends", lam{ in
     let h = fs.open(p, "a")
     h.write("second")
     h.close()
-    testing.assertEqual(fs.read(p), "first second", nil)
+    testing.expectEqual(fs.read(p), "first second", nil)
     fs.remove(d)
 })
 
 testing.test("fs.open 'r' on missing file throws", lam{ in
-    testing.assertThrows(lam{ in fs.open("/var/no/such/p3-r/file", "r") },
+    testing.expectThrows(lam{ in fs.open("/var/no/such/p3-r/file", "r") },
                          "fs.open()")
 })
 
@@ -38,7 +38,7 @@ testing.test("fs.open with invalid mode throws", lam{ in
     let d = fs.tempDir("p3-bad-mode")
     let p = d + "/x"
     fs.write(p, "")
-    testing.assertThrows(lam{ in fs.open(p, "rw") }, "invalid mode")
+    testing.expectThrows(lam{ in fs.open(p, "rw") }, "invalid mode")
     fs.remove(d)
 })
 
@@ -47,8 +47,8 @@ testing.test("handle exposes path and mode", lam{ in
     let p = d + "/x"
     fs.write(p, "")
     let h = fs.open(p, "r")
-    testing.assertEqual(h.path, p, nil)
-    testing.assertEqual(h.mode, "r", nil)
+    testing.expectEqual(h.path, p, nil)
+    testing.expectEqual(h.mode, "r", nil)
     h.close()
     fs.remove(d)
 })
@@ -60,10 +60,10 @@ testing.test("handle.read returns up to n bytes", lam{ in
     let p = d + "/x"
     fs.write(p, "abcdefghij")
     let h = fs.open(p, "r")
-    testing.assertEqual(h.read(3), "abc", nil)
-    testing.assertEqual(h.read(4), "defg", nil)
-    testing.assertEqual(h.read(100), "hij", "EOF caps the result")
-    testing.assertEqual(h.read(100), "", "further reads return ''")
+    testing.expectEqual(h.read(3), "abc", nil)
+    testing.expectEqual(h.read(4), "defg", nil)
+    testing.expectEqual(h.read(100), "hij", "EOF caps the result")
+    testing.expectEqual(h.read(100), "", "further reads return ''")
     h.close()
     fs.remove(d)
 })
@@ -73,10 +73,10 @@ testing.test("handle.readLine yields lines without trailing \\n", lam{ in
     let p = d + "/log"
     fs.write(p, "alpha\nbeta\ngamma\n")
     let h = fs.open(p, "r")
-    testing.assertEqual(h.readLine(), "alpha", nil)
-    testing.assertEqual(h.readLine(), "beta", nil)
-    testing.assertEqual(h.readLine(), "gamma", nil)
-    testing.assertEqual(h.readLine(), nil, "EOF returns nil")
+    testing.expectEqual(h.readLine(), "alpha", nil)
+    testing.expectEqual(h.readLine(), "beta", nil)
+    testing.expectEqual(h.readLine(), "gamma", nil)
+    testing.expectEqual(h.readLine(), nil, "EOF returns nil")
     h.close()
     fs.remove(d)
 })
@@ -86,10 +86,10 @@ testing.test("handle.readLine returns trailing partial line at EOF", lam{ in
     let p = d + "/x"
     fs.write(p, "first\nno-newline-end")
     let h = fs.open(p, "r")
-    testing.assertEqual(h.readLine(), "first", nil)
-    testing.assertEqual(h.readLine(), "no-newline-end",
+    testing.expectEqual(h.readLine(), "first", nil)
+    testing.expectEqual(h.readLine(), "no-newline-end",
                         "trailing partial line is returned")
-    testing.assertEqual(h.readLine(), nil, nil)
+    testing.expectEqual(h.readLine(), nil, nil)
     h.close()
     fs.remove(d)
 })
@@ -99,9 +99,9 @@ testing.test("read and readLine can be mixed on the same handle", lam{ in
     let p = d + "/x"
     fs.write(p, "header\nbody-bytes\n")
     let h = fs.open(p, "r")
-    testing.assertEqual(h.readLine(), "header", "consume header line")
-    testing.assertEqual(h.read(4), "body", "byte-precise read picks up where readLine left off")
-    testing.assertEqual(h.readLine(), "-bytes", "readLine resumes from same place")
+    testing.expectEqual(h.readLine(), "header", "consume header line")
+    testing.expectEqual(h.read(4), "body", "byte-precise read picks up where readLine left off")
+    testing.expectEqual(h.readLine(), "-bytes", "readLine resumes from same place")
     h.close()
     fs.remove(d)
 })
@@ -114,13 +114,13 @@ testing.test("handle.seek + tell with string whence", lam{ in
     fs.write(p, "0123456789")
     let h = fs.open(p, "r")
     h.seek(4)
-    testing.assertEqual(h.tell(), 4, "default whence is 'start'")
-    testing.assertEqual(h.read(2), "45", nil)
+    testing.expectEqual(h.tell(), 4, "default whence is 'start'")
+    testing.expectEqual(h.read(2), "45", nil)
     h.seek(-3, "end")
-    testing.assertEqual(h.tell(), 7, nil)
-    testing.assertEqual(h.read(3), "789", nil)
+    testing.expectEqual(h.tell(), 7, nil)
+    testing.expectEqual(h.read(3), "789", nil)
     h.seek(0, "current")
-    testing.assertEqual(h.tell(), 10, "current+0 stays put")
+    testing.expectEqual(h.tell(), 10, "current+0 stays put")
     h.close()
     fs.remove(d)
 })
@@ -135,7 +135,7 @@ testing.test("tell accounts for unread buffered bytes", lam{ in
     fs.write(p, "0123456789ABCDEFGHIJ")
     let h = fs.open(p, "r")
     h.read(5)
-    testing.assertEqual(h.tell(), 5, "logical position is 5")
+    testing.expectEqual(h.tell(), 5, "logical position is 5")
     h.close()
     fs.remove(d)
 })
@@ -147,7 +147,7 @@ testing.test("seek invalidates the read buffer", lam{ in
     let h = fs.open(p, "r")
     h.read(3)         // pulls all 8 bytes into buffer, advances pos to 3
     h.seek(6)
-    testing.assertEqual(h.read(2), "gh", "post-seek read pulls from new offset, not stale buffer")
+    testing.expectEqual(h.read(2), "gh", "post-seek read pulls from new offset, not stale buffer")
     h.close()
     fs.remove(d)
 })
@@ -159,10 +159,10 @@ testing.test("write on 'r+' updates in place; read/write mix syncs position", la
     let p = d + "/x"
     fs.write(p, "AAAABBBBCCCCDDDD")
     let h = fs.open(p, "r+")
-    testing.assertEqual(h.read(4), "AAAA", nil)
+    testing.expectEqual(h.read(4), "AAAA", nil)
     h.write("xxxx")
     h.close()
-    testing.assertEqual(fs.read(p), "AAAAxxxxCCCCDDDD",
+    testing.expectEqual(fs.read(p), "AAAAxxxxCCCCDDDD",
                         "write landed at logical position 4, not kernel-buffered position")
     fs.remove(d)
 })
@@ -170,8 +170,8 @@ testing.test("write on 'r+' updates in place; read/write mix syncs position", la
 testing.test("write returns bytes written", lam{ in
     let d = fs.tempDir("p3-write-ret")
     let h = fs.open(d + "/x", "w")
-    testing.assertEqual(h.write("hello"), 5, nil)
-    testing.assertEqual(h.write(""), 0, nil)
+    testing.expectEqual(h.write("hello"), 5, nil)
+    testing.expectEqual(h.write(""), 0, nil)
     h.close()
     fs.remove(d)
 })
@@ -183,7 +183,7 @@ testing.test("close is idempotent", lam{ in
     let h = fs.open(d + "/x", "w")
     h.close()
     h.close()
-    testing.assert(true, "second close did not throw")
+    testing.expect(true, "second close did not throw")
     fs.remove(d)
 })
 
@@ -191,12 +191,12 @@ testing.test("use after close throws", lam{ in
     let d = fs.tempDir("p3-use-after-close")
     let h = fs.open(d + "/x", "w")
     h.close()
-    testing.assertThrows(lam{ in h.write("x") }, "FileHandle is closed")
-    testing.assertThrows(lam{ in h.read(1)   }, "FileHandle is closed")
-    testing.assertThrows(lam{ in h.readLine() }, "FileHandle is closed")
-    testing.assertThrows(lam{ in h.seek(0)   }, "FileHandle is closed")
-    testing.assertThrows(lam{ in h.tell()    }, "FileHandle is closed")
-    testing.assertThrows(lam{ in h.flush()   }, "FileHandle is closed")
+    testing.expectThrows(lam{ in h.write("x") }, "FileHandle is closed")
+    testing.expectThrows(lam{ in h.read(1)   }, "FileHandle is closed")
+    testing.expectThrows(lam{ in h.readLine() }, "FileHandle is closed")
+    testing.expectThrows(lam{ in h.seek(0)   }, "FileHandle is closed")
+    testing.expectThrows(lam{ in h.tell()    }, "FileHandle is closed")
+    testing.expectThrows(lam{ in h.flush()   }, "FileHandle is closed")
     fs.remove(d)
 })
 
@@ -211,7 +211,7 @@ testing.test("flush doesn't throw on a freshly written handle", lam{ in
     h.write("durable")
     h.flush()
     h.close()
-    testing.assertEqual(fs.read(d + "/x"), "durable", nil)
+    testing.expectEqual(fs.read(d + "/x"), "durable", nil)
     fs.remove(d)
 })
 

@@ -3,7 +3,7 @@
 //   use "testing"
 //
 //   testing.test("addition", lam{ in
-//       testing.assertEqual(1 + 1, 2, nil)
+//       testing.expectEqual(1 + 1, 2, nil)
 //   })
 //   testing.done()
 //
@@ -19,7 +19,7 @@
 //
 // Run with `praia test`. `testing.done()` exits with status 0/1 by counts.
 //
-// Diffs for multi-line `assertEqual` and `matchSnapshot` are produced by
+// Diffs for multi-line `expectEqual` and `matchSnapshot` are produced by
 // the inline `_diff` helper below rather than `use "diff"`. The diff
 // grain exports a `format(changes)` function, and the VM grain loader
 // copies grain globals into the parent VM's global table by name — so
@@ -56,12 +56,12 @@ let _focusMode = false
 
 // ── Assertions ───────────────────────────────────────────────
 
-func assert(condition, message) {
+func expect(condition, message) {
     if (condition) {
         passed = passed + 1
     } else {
         failed = failed + 1
-        let msg = message || "Assertion failed"
+        let msg = message || "Expectation failed"
         errors.push(msg)
         print("  FAIL:", msg)
     }
@@ -109,7 +109,7 @@ func _diffMessage(actual, expected) {
     return "Expected %{expected}, got %{actual}"
 }
 
-func assertEqual(actual, expected, message) {
+func expectEqual(actual, expected, message) {
     if (actual == expected) {
         passed = passed + 1
     } else {
@@ -120,7 +120,7 @@ func assertEqual(actual, expected, message) {
     }
 }
 
-func assertNotEqual(actual, expected, message) {
+func expectNotEqual(actual, expected, message) {
     if (actual != expected) {
         passed = passed + 1
     } else {
@@ -131,10 +131,10 @@ func assertNotEqual(actual, expected, message) {
     }
 }
 
-// assertContains works on strings (substring check), arrays (element
+// expectContains works on strings (substring check), arrays (element
 // membership), and maps (key presence). Common ergonomic gap in the
 // original assertion set.
-func assertContains(haystack, needle, message) {
+func expectContains(haystack, needle, message) {
     let found = false
     if (type(haystack) == "string") {
         found = haystack.contains(needle)
@@ -147,7 +147,7 @@ func assertContains(haystack, needle, message) {
         for (k in keys(haystack)) { if (k == needle) { found = true } }
     } else {
         failed = failed + 1
-        let msg = message || "assertContains: unsupported haystack type %{type(haystack)}"
+        let msg = message || "expectContains: unsupported haystack type %{type(haystack)}"
         errors.push(msg)
         print("  FAIL:", msg)
         return
@@ -162,7 +162,7 @@ func assertContains(haystack, needle, message) {
     }
 }
 
-func assertThrows(fn, message) {
+func expectThrows(fn, message) {
     let threw = false
     try {
         fn()
@@ -182,7 +182,7 @@ func assertThrows(fn, message) {
 // ── Fixtures ─────────────────────────────────────────────────
 
 // Register a cleanup to run after the current test finishes (whether by
-// return, assert failure, or throw). Cleanups run in reverse registration
+// return, expect failure, or throw). Cleanups run in reverse registration
 // order — same as Go's t.Cleanup. Throws caught and logged so one bad
 // cleanup doesn't prevent the rest from running.
 func cleanup(fn) {
@@ -330,20 +330,20 @@ func _runCleanups(testCtx) {
 }
 
 // Build a test-context object. The methods on it (`cleanup`,
-// `assertEqual`, etc.) delegate to module-level functions — those
+// `expectEqual`, etc.) delegate to module-level functions — those
 // resolve against `_currentTest`, which is always set to this context
 // while the body is running, so behaviour is identical between
-// `t.assertEqual(...)` and `testing.assertEqual(...)`. Two styles, one
+// `t.expectEqual(...)` and `testing.expectEqual(...)`. Two styles, one
 // underlying machinery.
 func _makeContext(name) {
     return {
         name: name,
         cleanups: [],
-        assert: lam{ cond, msg in assert(cond, msg) },
-        assertEqual: lam{ a, e, msg in assertEqual(a, e, msg) },
-        assertNotEqual: lam{ a, e, msg in assertNotEqual(a, e, msg) },
-        assertThrows: lam{ f, msg in assertThrows(f, msg) },
-        assertContains: lam{ h, n, msg in assertContains(h, n, msg) },
+        expect: lam{ cond, msg in expect(cond, msg) },
+        expectEqual: lam{ a, e, msg in expectEqual(a, e, msg) },
+        expectNotEqual: lam{ a, e, msg in expectNotEqual(a, e, msg) },
+        expectThrows: lam{ f, msg in expectThrows(f, msg) },
+        expectContains: lam{ h, n, msg in expectContains(h, n, msg) },
         matchSnapshot: lam{ label, actual in matchSnapshot(label, actual) },
         cleanup: lam{ f in cleanup(f) },
         tempDir: lam{ p in tempDir(p) },
@@ -534,7 +534,7 @@ func done() {
 }
 
 export {
-    assert, assertEqual, assertNotEqual, assertThrows, assertContains,
+    expect, expectEqual, expectNotEqual, expectThrows, expectContains,
     matchSnapshot,
     test, subtest, testEach, skip, only,
     cleanup, tempDir, tempFile,

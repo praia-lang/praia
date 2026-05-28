@@ -9,26 +9,26 @@ use "testing"
 
 testing.test("utf-8 roundtrip on ASCII", lam{ in
     let s = "hello"
-    testing.assertEqual(bytes.decode(s.encode("utf-8"), "utf-8"), s, nil)
-    testing.assertEqual(len(s.encode("utf-8").bytes()), 5, nil)
+    testing.expectEqual(bytes.decode(s.encode("utf-8"), "utf-8"), s, nil)
+    testing.expectEqual(len(s.encode("utf-8").bytes()), 5, nil)
 })
 
 testing.test("utf-8 roundtrip on mixed text", lam{ in
     let s = "h\u{E9}llo \u{1F600}"
     let bs = s.encode("utf-8")
-    testing.assertEqual(len(bs.bytes()), 11, "1+2+1+1+1+1+1+4 = 11")
-    testing.assertEqual(bytes.decode(bs, "utf-8"), s, nil)
+    testing.expectEqual(len(bs.bytes()), 11, "1+2+1+1+1+1+1+4 = 11")
+    testing.expectEqual(bytes.decode(bs, "utf-8"), s, nil)
 })
 
 testing.test("utf-8 decode rejects invalid lead byte", lam{ in
     // 0xC0 followed by ASCII is an invalid (overlong) UTF-8 sequence;
     // 0xFE / 0xFF are reserved.
-    testing.assertThrows(lam{ in bytes.decode(bytes.from([0xFE]), "utf-8") },
+    testing.expectThrows(lam{ in bytes.decode(bytes.from([0xFE]), "utf-8") },
                          "invalid UTF-8")
 })
 
 testing.test("utf-8 decode rejects truncated sequence", lam{ in
-    testing.assertThrows(lam{ in bytes.decode(bytes.from([0xC2]), "utf-8") },
+    testing.expectThrows(lam{ in bytes.decode(bytes.from([0xC2]), "utf-8") },
                          "truncated")
 })
 
@@ -36,26 +36,26 @@ testing.test("utf-8 decode rejects truncated sequence", lam{ in
 
 testing.test("latin-1 roundtrip on ASCII", lam{ in
     let s = "hello"
-    testing.assertEqual(bytes.decode(s.encode("latin-1"), "latin-1"), s, nil)
+    testing.expectEqual(bytes.decode(s.encode("latin-1"), "latin-1"), s, nil)
 })
 
 testing.test("latin-1 keeps each codepoint as a single byte", lam{ in
     // "café" = c (0x63), a (0x61), f (0x66), é (U+00E9 → byte 0xE9).
     let b = "caf\u{E9}".encode("latin-1")
-    testing.assertEqual(len(b.bytes()), 4, nil)
-    testing.assertEqual(bytes.hex(b), "636166e9", nil)
-    testing.assertEqual(bytes.decode(b, "latin-1"), "caf\u{E9}", nil)
+    testing.expectEqual(len(b.bytes()), 4, nil)
+    testing.expectEqual(bytes.hex(b), "636166e9", nil)
+    testing.expectEqual(bytes.decode(b, "latin-1"), "caf\u{E9}", nil)
 })
 
 testing.test("latin-1 rejects codepoints > 0xFF", lam{ in
-    testing.assertThrows(lam{ in "\u{0100}".encode("latin-1") },
+    testing.expectThrows(lam{ in "\u{0100}".encode("latin-1") },
                          "not encodable in latin-1")
-    testing.assertThrows(lam{ in "\u{1F600}".encode("latin-1") },
+    testing.expectThrows(lam{ in "\u{1F600}".encode("latin-1") },
                          "not encodable in latin-1")
 })
 
 testing.test("iso-8859-1 is an alias for latin-1", lam{ in
-    testing.assertEqual(bytes.hex("caf\u{E9}".encode("iso-8859-1")),
+    testing.expectEqual(bytes.hex("caf\u{E9}".encode("iso-8859-1")),
                         bytes.hex("caf\u{E9}".encode("latin-1")), nil)
 })
 
@@ -63,16 +63,16 @@ testing.test("iso-8859-1 is an alias for latin-1", lam{ in
 
 testing.test("ascii roundtrip", lam{ in
     let s = "hello, world!"
-    testing.assertEqual(bytes.decode(s.encode("ascii"), "ascii"), s, nil)
+    testing.expectEqual(bytes.decode(s.encode("ascii"), "ascii"), s, nil)
 })
 
 testing.test("ascii rejects codepoints >= 0x80", lam{ in
-    testing.assertThrows(lam{ in "caf\u{E9}".encode("ascii") },
+    testing.expectThrows(lam{ in "caf\u{E9}".encode("ascii") },
                          "not encodable in ASCII")
 })
 
 testing.test("ascii decode rejects high bytes", lam{ in
-    testing.assertThrows(lam{ in bytes.decode(bytes.from([0x80]), "ascii") },
+    testing.expectThrows(lam{ in bytes.decode(bytes.from([0x80]), "ascii") },
                          "not valid ASCII")
 })
 
@@ -82,43 +82,43 @@ testing.test("utf-16le roundtrip BMP", lam{ in
     let s = "hi"
     let b = s.encode("utf-16le")
     // Each ASCII codepoint → 2 bytes little-endian: "hi" → 68 00 69 00.
-    testing.assertEqual(bytes.hex(b), "68006900", nil)
-    testing.assertEqual(bytes.decode(b, "utf-16le"), s, nil)
+    testing.expectEqual(bytes.hex(b), "68006900", nil)
+    testing.expectEqual(bytes.decode(b, "utf-16le"), s, nil)
 })
 
 testing.test("utf-16be roundtrip BMP", lam{ in
     let b = "hi".encode("utf-16be")
-    testing.assertEqual(bytes.hex(b), "00680069", nil)
-    testing.assertEqual(bytes.decode(b, "utf-16be"), "hi", nil)
+    testing.expectEqual(bytes.hex(b), "00680069", nil)
+    testing.expectEqual(bytes.decode(b, "utf-16be"), "hi", nil)
 })
 
 testing.test("utf-16 surrogate pair for supplementary plane", lam{ in
     // U+1F600 (😀) → surrogate pair D83D DE00.
     let leHex = bytes.hex("\u{1F600}".encode("utf-16le"))
     let beHex = bytes.hex("\u{1F600}".encode("utf-16be"))
-    testing.assertEqual(leHex, "3dd800de", "LE: D8 3D, DE 00 (bytes swapped within each unit)")
-    testing.assertEqual(beHex, "d83dde00", "BE: D8 3D DE 00")
+    testing.expectEqual(leHex, "3dd800de", "LE: D8 3D, DE 00 (bytes swapped within each unit)")
+    testing.expectEqual(beHex, "d83dde00", "BE: D8 3D DE 00")
     // Roundtrip through both.
-    testing.assertEqual(bytes.decode("\u{1F600}".encode("utf-16le"), "utf-16le"),
+    testing.expectEqual(bytes.decode("\u{1F600}".encode("utf-16le"), "utf-16le"),
                         "\u{1F600}", nil)
-    testing.assertEqual(bytes.decode("\u{1F600}".encode("utf-16be"), "utf-16be"),
+    testing.expectEqual(bytes.decode("\u{1F600}".encode("utf-16be"), "utf-16be"),
                         "\u{1F600}", nil)
 })
 
 testing.test("utf-16le rejects odd byte length", lam{ in
-    testing.assertThrows(lam{ in bytes.decode(bytes.from([0x68, 0x00, 0x69]), "utf-16le") },
+    testing.expectThrows(lam{ in bytes.decode(bytes.from([0x68, 0x00, 0x69]), "utf-16le") },
                          "byte length must be even")
 })
 
 testing.test("utf-16le rejects truncated surrogate pair", lam{ in
     // High surrogate alone (D8 3D in LE) with nothing after.
-    testing.assertThrows(lam{ in bytes.decode(bytes.from([0x3D, 0xD8]), "utf-16le") },
+    testing.expectThrows(lam{ in bytes.decode(bytes.from([0x3D, 0xD8]), "utf-16le") },
                          "truncated utf-16 surrogate pair")
 })
 
 testing.test("utf-16le rejects lone low surrogate", lam{ in
     // Low surrogate without a preceding high surrogate.
-    testing.assertThrows(lam{ in bytes.decode(bytes.from([0x00, 0xDC]), "utf-16le") },
+    testing.expectThrows(lam{ in bytes.decode(bytes.from([0x00, 0xDC]), "utf-16le") },
                          "unexpected low surrogate")
 })
 
@@ -126,15 +126,15 @@ testing.test("utf-16le rejects lone low surrogate", lam{ in
 
 testing.test("encoding names ignore case, hyphens, and underscores", lam{ in
     let canonical = "hi".encode("utf-8")
-    testing.assertEqual(bytes.hex("hi".encode("UTF-8")), bytes.hex(canonical), nil)
-    testing.assertEqual(bytes.hex("hi".encode("utf8")),  bytes.hex(canonical), nil)
-    testing.assertEqual(bytes.hex("hi".encode("Utf_8")), bytes.hex(canonical), nil)
+    testing.expectEqual(bytes.hex("hi".encode("UTF-8")), bytes.hex(canonical), nil)
+    testing.expectEqual(bytes.hex("hi".encode("utf8")),  bytes.hex(canonical), nil)
+    testing.expectEqual(bytes.hex("hi".encode("Utf_8")), bytes.hex(canonical), nil)
 })
 
 testing.test("unknown encoding throws with helpful message", lam{ in
-    testing.assertThrows(lam{ in "x".encode("klingon") },
+    testing.expectThrows(lam{ in "x".encode("klingon") },
                          "unknown encoding")
-    testing.assertThrows(lam{ in bytes.decode(bytes.from([0]), "shift-jis") },
+    testing.expectThrows(lam{ in bytes.decode(bytes.from([0]), "shift-jis") },
                          "unknown encoding")
 })
 

@@ -23,7 +23,7 @@ testing.test("body must be skipped when beforeEach throws", lam{ in
 testing.reset()
 
 testing.test("verify the body did not run", lam{ in
-    testing.assertEqual(_bodyRan, false,
+    testing.expectEqual(_bodyRan, false,
         "test body must not execute when its beforeEach threw")
 })
 
@@ -46,7 +46,7 @@ testing.test("body throws but its cleanup still runs", lam{ in
 testing.reset()
 
 testing.test("verify cleanup ran after the body threw", lam{ in
-    testing.assertEqual(_cleanupRanAfterThrow, true,
+    testing.expectEqual(_cleanupRanAfterThrow, true,
         "registered cleanup must run when the test body throws")
 })
 

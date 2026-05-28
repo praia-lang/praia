@@ -5,8 +5,8 @@ testing.test("spawn basic write/read", lam{ in
     proc.write("hello\n")
     proc.closeStdin()
     let out = proc.read()
-    testing.assertEqual(out, "hello\n", nil)
-    testing.assertEqual(proc.wait(), 0, nil)
+    testing.expectEqual(out, "hello\n", nil)
+    testing.expectEqual(proc.wait(), 0, nil)
 })
 
 testing.test("spawn readLine", lam{ in
@@ -17,42 +17,42 @@ testing.test("spawn readLine", lam{ in
     let line1 = proc.readLine()
     let line2 = proc.readLine()
     let line3 = proc.readLine()
-    testing.assert(line1.contains("a"), "first line")
-    testing.assert(line2.contains("b"), "second line")
-    testing.assertEqual(line3, nil, "EOF returns nil")
+    testing.expect(line1.contains("a"), "first line")
+    testing.expect(line2.contains("b"), "second line")
+    testing.expectEqual(line3, nil, "EOF returns nil")
     proc.wait()
 })
 
 testing.test("spawn stderr", lam{ in
     let proc = sys.spawn("sh -c 'echo err >&2'")
     let err = proc.readErr()
-    testing.assertEqual(err, "err\n", nil)
+    testing.expectEqual(err, "err\n", nil)
     proc.wait()
 })
 
 testing.test("spawn exit code", lam{ in
     let proc = sys.spawn("sh -c 'exit 42'")
-    testing.assertEqual(proc.wait(), 42, nil)
+    testing.expectEqual(proc.wait(), 42, nil)
 })
 
 testing.test("spawn kill", lam{ in
     let proc = sys.spawn("sleep 60")
     proc.kill()
     let code = proc.wait()
-    testing.assertNotEqual(code, 0, "killed process should not exit 0")
+    testing.expectNotEqual(code, 0, "killed process should not exit 0")
 })
 
 testing.test("spawn write after close throws", lam{ in
     let proc = sys.spawn("cat")
     proc.closeStdin()
     proc.wait()
-    testing.assertThrows(lam{ in proc.write("x") }, "write after close")
+    testing.expectThrows(lam{ in proc.write("x") }, "write after close")
 })
 
 testing.test("spawn pid", lam{ in
     let proc = sys.spawn("echo hi")
-    testing.assertEqual(type(proc.pid), "int", nil)
-    testing.assert(proc.pid > 0, "pid should be positive")
+    testing.expectEqual(type(proc.pid), "int", nil)
+    testing.expect(proc.pid > 0, "pid should be positive")
     proc.read()
     proc.wait()
 })
@@ -69,7 +69,7 @@ testing.test("dropped spawn handles release fds + reap child (RAII cleanup)", la
         let proc = sys.spawn(["true"])
         // intentionally NO proc.wait() — relies on RAII
     }
-    testing.assert(true, "completed 300 implicit-cleanup spawns without exhausting fds/procs")
+    testing.expect(true, "completed 300 implicit-cleanup spawns without exhausting fds/procs")
 })
 
 testing.done()

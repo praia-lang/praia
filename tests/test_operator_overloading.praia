@@ -19,60 +19,60 @@ class Vec {
 
 testing.test("__add", lam{ in
     let r = Vec(1, 2) + Vec(3, 4)
-    testing.assertEqual(r.x, 4, nil)
-    testing.assertEqual(r.y, 6, nil)
+    testing.expectEqual(r.x, 4, nil)
+    testing.expectEqual(r.y, 6, nil)
 })
 
 testing.test("__sub", lam{ in
     let r = Vec(5, 7) - Vec(2, 3)
-    testing.assertEqual(r.x, 3, nil)
-    testing.assertEqual(r.y, 4, nil)
+    testing.expectEqual(r.x, 3, nil)
+    testing.expectEqual(r.y, 4, nil)
 })
 
 testing.test("__mul", lam{ in
     let r = Vec(2, 3) * 4
-    testing.assertEqual(r.x, 8, nil)
-    testing.assertEqual(r.y, 12, nil)
+    testing.expectEqual(r.x, 8, nil)
+    testing.expectEqual(r.y, 12, nil)
 })
 
 testing.test("__eq and __neq", lam{ in
-    testing.assert(Vec(1, 2) == Vec(1, 2), "eq")
-    testing.assert(Vec(1, 2) != Vec(3, 4), "neq")
+    testing.expect(Vec(1, 2) == Vec(1, 2), "eq")
+    testing.expect(Vec(1, 2) != Vec(3, 4), "neq")
 })
 
 testing.test("__lt __gt __lte __gte", lam{ in
-    testing.assert(Vec(1, 1) < Vec(3, 3), "lt")
-    testing.assert(Vec(3, 3) > Vec(1, 1), "gt")
-    testing.assert(!(Vec(3, 3) <= Vec(1, 1)), "not lte")
-    testing.assert(!(Vec(1, 1) >= Vec(3, 3)), "not gte")
+    testing.expect(Vec(1, 1) < Vec(3, 3), "lt")
+    testing.expect(Vec(3, 3) > Vec(1, 1), "gt")
+    testing.expect(!(Vec(3, 3) <= Vec(1, 1)), "not lte")
+    testing.expect(!(Vec(1, 1) >= Vec(3, 3)), "not gte")
 })
 
 testing.test("__neg", lam{ in
     let r = -Vec(1, 2)
-    testing.assertEqual(r.x, -1, nil)
-    testing.assertEqual(r.y, -2, nil)
+    testing.expectEqual(r.x, -1, nil)
+    testing.expectEqual(r.y, -2, nil)
 })
 
 testing.test("__str with str() and print", lam{ in
-    testing.assertEqual(str(Vec(3, 4)), "(3, 4)", nil)
+    testing.expectEqual(str(Vec(3, 4)), "(3, 4)", nil)
 })
 
 testing.test("__len", lam{ in
-    testing.assertEqual(len(Vec(0, 0)), 2, nil)
+    testing.expectEqual(len(Vec(0, 0)), 2, nil)
 })
 
 testing.test("__index", lam{ in
     let v = Vec(10, 20)
-    testing.assertEqual(v[0], 10, nil)
-    testing.assertEqual(v[1], 20, nil)
+    testing.expectEqual(v[0], 10, nil)
+    testing.expectEqual(v[1], 20, nil)
 })
 
 testing.test("__indexSet", lam{ in
     let v = Vec(0, 0)
     v[0] = 42
     v[1] = 99
-    testing.assertEqual(v.x, 42, nil)
-    testing.assertEqual(v.y, 99, nil)
+    testing.expectEqual(v.x, 42, nil)
+    testing.expectEqual(v.y, 99, nil)
 })
 
 testing.test("__str backwards compat with toString", lam{ in
@@ -80,7 +80,7 @@ testing.test("__str backwards compat with toString", lam{ in
         func init(v) { this.v = v }
         func toString() { return "old:" + str(this.v) }
     }
-    testing.assertEqual(str(Old(1)), "old:1", nil)
+    testing.expectEqual(str(Old(1)), "old:1", nil)
 })
 
 testing.test("operators on non-overloaded classes fall through", lam{ in
@@ -88,8 +88,8 @@ testing.test("operators on non-overloaded classes fall through", lam{ in
     let a = Plain()
     let b = Plain()
     // == falls back to reference equality
-    testing.assert(a != b, "different instances")
-    testing.assert(a == a, "same reference")
+    testing.expect(a != b, "different instances")
+    testing.expect(a == a, "same reference")
 })
 
 testing.done()

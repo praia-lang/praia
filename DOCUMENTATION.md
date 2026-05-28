@@ -1845,6 +1845,7 @@ print(Dog.type())    // "dog"
 | Function | Description |
 |----------|-------------|
 | `print(args...)` | Print values separated by spaces, followed by a newline |
+| `assert(cond, msg?)` | Throw `RuntimeError("assertion failed[: msg]")` when `cond` is falsy. Always on — no compile-time strip flag. |
 | `len(value)` | Length of an array, string, map, or set |
 | `push(array, value)` | Append a value to an array |
 | `pop(array)` | Remove and return the last element of an array |
@@ -1857,6 +1858,21 @@ print(Dog.type())    // "dog"
 | `sort(arr)` | Return sorted copy (ascending) |
 | `keys(map)` | Return array of map keys |
 | `values(map)` | Return array of map values |
+
+<a id="assert"></a>
+### `assert(cond, msg?)`
+
+Production assertion. Throws a `RuntimeError` when `cond` is falsy. The optional `msg` is coerced via `toString` and appended to the default text:
+
+```praia
+assert(user.age >= 0)                              // "assertion failed"
+assert(input != nil, "input is required")          // "assertion failed: input is required"
+assert(arr.len() > 0, {code: "EMPTY", at: ctx})    // message accepts non-string values
+```
+
+Praia's `assert` is **always on** — there's no strip-in-release flag (Rust's `assert!`, not `debug_assert!`). Use it for invariants whose violation should never reach production. For unit-test assertions that count pass/fail instead of throwing, see [`testing.expect`](#testing-grain).
+
+Praia's truthiness rules: only `nil` and `false` are falsy. `0`, `""`, and `[]` are truthy and pass `assert` cleanly.
 
 ```praia
 print(len([1, 2, 3]))      // 3
@@ -4062,17 +4078,22 @@ snapshot testing for `praia test`.
 use "testing"
 
 testing.test("addition", lam{ in
-    testing.assertEqual(1 + 1, 2, nil)
+    testing.expectEqual(1 + 1, 2, nil)
 })
 
 testing.done()    // exits 0 on success, 1 on any failure
 ```
 
-Assertions: `assert`, `assertEqual`, `assertNotEqual`, `assertThrows`,
-`assertContains`. The last works on strings (substring), arrays
+Assertions: `expect`, `expectEqual`, `expectNotEqual`, `expectThrows`,
+`expectContains`. The last works on strings (substring), arrays
 (element membership), and maps (**key presence** — `{a: nil}` counts
 as containing `"a"`). Multi-line string mismatches show a unified diff
 instead of a flat "expected/got" string.
+
+The testing-grain `expect*` family is distinct from the global
+[`assert(cond, msg?)`](#assert) builtin: `expect*` counts pass/fail
+for the runner, while `assert` throws a `RuntimeError`. Use `assert`
+for production invariants and `testing.expect*` inside test bodies.
 
 ### Fixtures
 
@@ -4109,10 +4130,10 @@ throws, and an `afterEach` that throws doesn't stop the rest of the
 ```
 testing.test("ip parser", lam{ in
     testing.subtest("valid v4", lam{ t in
-        t.assertEqual(parse("1.2.3.4").family, 4, nil)
+        t.expectEqual(parse("1.2.3.4").family, 4, nil)
     })
     testing.subtest("rejects garbage", lam{ t in
-        t.assertThrows(lam{ in parse("nope") }, nil)
+        t.expectThrows(lam{ in parse("nope") }, nil)
     })
 })
 
@@ -4120,7 +4141,7 @@ testing.testEach("addition cases", [
     {name: "0+0", a: 0, b: 0, want: 0},
     {name: "neg", a: -1, b: 1, want: 0}
 ], lam{ t, c in
-    t.assertEqual(c.a + c.b, c.want, nil)
+    t.expectEqual(c.a + c.b, c.want, nil)
 })
 ```
 

@@ -3,35 +3,35 @@ use "testing"
 testing.test("async/await basic", lam{ in
     func add(a, b) { return a + b }
     let f = async add(3, 4)
-    testing.assertEqual(await f, 7, nil)
+    testing.expectEqual(await f, 7, nil)
 })
 
 testing.test("async/await multiple", lam{ in
     func double(x) { return x * 2 }
     let f1 = async double(5)
     let f2 = async double(10)
-    testing.assertEqual(await f1, 10, nil)
-    testing.assertEqual(await f2, 20, nil)
+    testing.expectEqual(await f1, 10, nil)
+    testing.expectEqual(await f2, 20, nil)
 })
 
 testing.test("await precedence", lam{ in
     func id(x) { return x }
     let f1 = async id(3)
     let f2 = async id(4)
-    testing.assertEqual(await f1 + await f2, 7, nil)
+    testing.expectEqual(await f1 + await f2, 7, nil)
 })
 
 testing.test("async with closure", lam{ in
     let base = 100
     func addBase(x) { return x + base }
     let f = async addBase(42)
-    testing.assertEqual(await f, 142, nil)
+    testing.expectEqual(await f, 142, nil)
 })
 
 testing.test("future prints as <future>", lam{ in
     func noop() { return nil }
     let f = async noop()
-    testing.assertEqual(str(f), "<future>", nil)
+    testing.expectEqual(str(f), "<future>", nil)
     await f
 })
 
@@ -41,8 +41,8 @@ testing.test("async class construction runs init", lam{ in
     }
     let fut = async Point(10, 20)
     let p = await fut
-    testing.assertEqual(p.x, 10, nil)
-    testing.assertEqual(p.y, 20, nil)
+    testing.expectEqual(p.x, 10, nil)
+    testing.expectEqual(p.y, 20, nil)
 })
 
 testing.test("async class construction with named args", lam{ in
@@ -51,34 +51,34 @@ testing.test("async class construction with named args", lam{ in
     }
     let fut = async Pair(b: 99, a: 42)
     let p = await fut
-    testing.assertEqual(p.a, 42, nil)
-    testing.assertEqual(p.b, 99, nil)
+    testing.expectEqual(p.a, 42, nil)
+    testing.expectEqual(p.b, 99, nil)
 })
 
 testing.test("async class no-init with no args", lam{ in
     class Empty {}
     let fut = async Empty()
     let e = await fut
-    testing.assertEqual(type(e), "instance", nil)
+    testing.expectEqual(type(e), "instance", nil)
 })
 
 testing.test("async class no-init rejects args", lam{ in
     class Empty {}
-    testing.assertThrows(lam{ in
+    testing.expectThrows(lam{ in
         let fut = async Empty(1)
         await fut
     }, nil)
 })
 
 testing.test("async native too few args throws", lam{ in
-    testing.assertThrows(lam{ in
+    testing.expectThrows(lam{ in
         let fut = async len()
         await fut
     }, nil)
 })
 
 testing.test("async native too many args throws", lam{ in
-    testing.assertThrows(lam{ in
+    testing.expectThrows(lam{ in
         let fut = async len([1, 2], 99)
         await fut
     }, nil)
@@ -95,7 +95,7 @@ testing.test("bare async returns immediately (no binding)", lam{ in
     // The bug was a full 1000 ms block (the entire sleep). Anything under
     // half a second proves the future destructor isn't waiting; the slack
     // makes this robust on slow/contended CI runners.
-    testing.assert(elapsed < 500,
+    testing.expect(elapsed < 500,
         "bare async blocked for " + elapsed.toString() + "ms (expected <500ms)")
 })
 
@@ -105,26 +105,26 @@ testing.test("bare async returns immediately (no binding)", lam{ in
 testing.test("SharedMap basic ops", lam{ in
     let m = SharedMap()
     m.set("a", 1)
-    testing.assertEqual(m.get("a"), 1, nil)
-    testing.assertEqual(m.get("missing"), nil, nil)
-    testing.assertEqual(m.get("missing", 99), 99, nil)
-    testing.assert(m.has("a"), "has a")
-    testing.assert(!m.has("missing"), "no missing")
-    testing.assertEqual(m.size(), 1, nil)
-    testing.assert(m.delete("a"), "delete found")
-    testing.assert(!m.delete("a"), "delete second time false")
+    testing.expectEqual(m.get("a"), 1, nil)
+    testing.expectEqual(m.get("missing"), nil, nil)
+    testing.expectEqual(m.get("missing", 99), 99, nil)
+    testing.expect(m.has("a"), "has a")
+    testing.expect(!m.has("missing"), "no missing")
+    testing.expectEqual(m.size(), 1, nil)
+    testing.expect(m.delete("a"), "delete found")
+    testing.expect(!m.delete("a"), "delete second time false")
 })
 
 testing.test("SharedMap.update is atomic read-modify-write", lam{ in
     let m = SharedMap()
     m.set("c", 0)
     let result = m.update("c", lam{ v in v + 5 })
-    testing.assertEqual(result, 5, "update returns new value")
-    testing.assertEqual(m.get("c"), 5, "stored")
+    testing.expectEqual(result, 5, "update returns new value")
+    testing.expectEqual(m.get("c"), 5, "stored")
     // update on missing key receives nil
     let r2 = m.update("new", lam{ v in v == nil ? 1 : v + 1 })
-    testing.assertEqual(r2, 1, nil)
-    testing.assertEqual(m.get("new"), 1, nil)
+    testing.expectEqual(r2, 1, nil)
+    testing.expectEqual(m.get("new"), 1, nil)
 })
 
 testing.test("SharedMap survives async deep-copy", lam{ in
@@ -132,7 +132,7 @@ testing.test("SharedMap survives async deep-copy", lam{ in
     m.set("k", 0)
     let f = async lam{ in m.update("k", lam{ v in v + 100 }) }()
     await f
-    testing.assertEqual(m.get("k"), 100,
+    testing.expectEqual(m.get("k"), 100,
         "mutation in async task visible to caller")
 })
 
@@ -140,16 +140,16 @@ testing.test("SharedMap survives async deep-copy", lam{ in
 // deep-copy (same trick as Channel/SharedMap).
 testing.test("CancellationToken basic", lam{ in
     let t = CancellationToken()
-    testing.assertEqual(t.cancelled(), false, nil)
+    testing.expectEqual(t.cancelled(), false, nil)
     t.cancel()
-    testing.assertEqual(t.cancelled(), true, nil)
+    testing.expectEqual(t.cancelled(), true, nil)
 })
 
 testing.test("CancellationToken throwIfCancelled", lam{ in
     let t = CancellationToken()
     t.throwIfCancelled()  // shouldn't throw
     t.cancel()
-    testing.assertThrows(lam{ in t.throwIfCancelled() }, "cancelled")
+    testing.expectThrows(lam{ in t.throwIfCancelled() }, "cancelled")
 })
 
 testing.test("CancellationToken signals across async VMs", lam{ in
@@ -172,7 +172,7 @@ testing.test("CancellationToken signals across async VMs", lam{ in
     time.sleep(200)
     token.cancel()
     let iters = await f
-    testing.assert(iters < cap,
+    testing.expect(iters < cap,
         "cancel should bail the loop before natural end (iters=" + iters.toString() + ")")
 })
 
@@ -193,7 +193,7 @@ testing.test("async deep-copy survives parent GC pressure", lam{ in
         let f = async inc(m)
         await f
     }
-    testing.assertEqual(m.get("n"), 1, "task ran each iteration without corruption")
+    testing.expectEqual(m.get("n"), 1, "task ran each iteration without corruption")
 })
 
 // Lazy-globals regression: with the per-task globals map rebuilt via
@@ -206,7 +206,7 @@ testing.test("async reads parent-defined global", lam{ in
     let counter_value = 4711
     func read_counter() { return counter_value }
     let f = async read_counter()
-    testing.assertEqual(await f, 4711, nil)
+    testing.expectEqual(await f, 4711, nil)
 })
 
 testing.test("async reads selected global among many", lam{ in
@@ -216,7 +216,7 @@ testing.test("async reads selected global among many", lam{ in
     let g8 = "g8"; let g9 = "g9"
     func read_target() { return target }
     let f = async read_target()
-    testing.assertEqual(await f, "found_it", nil)
+    testing.expectEqual(await f, "found_it", nil)
 })
 
 testing.test("nested async sees parent globals through chain", lam{ in
@@ -228,7 +228,7 @@ testing.test("nested async sees parent globals through chain", lam{ in
         return await f
     }
     let g = async outer()
-    testing.assertEqual(await g, 7, nil)
+    testing.expectEqual(await g, 7, nil)
 })
 
 testing.done()

@@ -107,7 +107,7 @@ let base = "http://localhost:" + str(TEST_PORT)
 
 testing.test("handle prints as <external:http.session>", lam{ in
     let s = http.session()
-    testing.assertEqual(str(s), "<external:http.session>", nil)
+    testing.expectEqual(str(s), "<external:http.session>", nil)
     http.close(s)
 })
 
@@ -119,8 +119,8 @@ testing.test("basic GET via session returns 200", lam{ in
     // server task.
     let s = http.session()
     let r = http.get(s, base + "/ping")
-    testing.assertEqual(r.status, 200, nil)
-    testing.assertEqual(r.body, "pong", nil)
+    testing.expectEqual(r.status, 200, nil)
+    testing.expectEqual(r.body, "pong", nil)
     http.close(s)
 })
 
@@ -131,12 +131,12 @@ testing.test("basic GET via session returns 200", lam{ in
 
 testing.test("stateless http.get unchanged (URL-only)", lam{ in
     let r = http.get(base + "/ping")
-    testing.assertEqual(r.body, "pong", nil)
+    testing.expectEqual(r.body, "pong", nil)
 })
 
 testing.test("stateless http.request unchanged (opts-map)", lam{ in
     let r = http.request({url: base + "/ping"})
-    testing.assertEqual(r.body, "pong", nil)
+    testing.expectEqual(r.body, "pong", nil)
 })
 
 // ── Default headers apply ─────────────────────────────────────
@@ -144,7 +144,7 @@ testing.test("stateless http.request unchanged (opts-map)", lam{ in
 testing.test("session default headers reach the server", lam{ in
     let s = http.session({headers: {"User-Agent": "praia-session-test/1.0"}})
     let r = http.get(s, base + "/ua-echo")
-    testing.assertEqual(r.body, "praia-session-test/1.0", nil)
+    testing.expectEqual(r.body, "praia-session-test/1.0", nil)
     http.close(s)
 })
 
@@ -152,7 +152,7 @@ testing.test("per-call headers override session defaults", lam{ in
     let s = http.session({headers: {"X-Test": "from-session"}})
     let r = http.request(s, {url: base + "/x-test-echo",
                               headers: {"X-Test": "from-call"}})
-    testing.assertEqual(r.body, "from-call",
+    testing.expectEqual(r.body, "from-call",
         "per-call header value wins on key conflict")
     http.close(s)
 })
@@ -163,10 +163,10 @@ testing.test("per-call headers compose with session defaults", lam{ in
     let s = http.session({headers: {"X-Test": "session-only"}})
     let r1 = http.request(s, {url: base + "/x-test-echo",
                                headers: {"User-Agent": "perCall"}})
-    testing.assertEqual(r1.body, "session-only", "session default still applied")
+    testing.expectEqual(r1.body, "session-only", "session default still applied")
     let r2 = http.request(s, {url: base + "/ua-echo",
                                headers: {"User-Agent": "perCall"}})
-    testing.assertEqual(r2.body, "perCall", "per-call header also applied")
+    testing.expectEqual(r2.body, "perCall", "per-call header also applied")
     http.close(s)
 })
 
@@ -177,7 +177,7 @@ testing.test("session default opts apply when call omits them", lam{ in
     // totalTimeoutMs=30000. Just verify the request succeeds.
     let s = http.session({timeout: 30})
     let r = http.get(s, base + "/ping")
-    testing.assertEqual(r.status, 200, nil)
+    testing.expectEqual(r.status, 200, nil)
     http.close(s)
 })
 
@@ -197,11 +197,11 @@ testing.test("keepalive: multiple requests use a single accept", lam{ in
     let firstAccepts = nil
     for (i in 0..5) {
         let r = http.get(s, base + "/ping")
-        testing.assertEqual(r.status, 200, nil)
+        testing.expectEqual(r.status, 200, nil)
         if (firstAccepts == nil) {
             firstAccepts = r.headers["x-accepts"]
         } else {
-            testing.assertEqual(r.headers["x-accepts"], firstAccepts,
+            testing.expectEqual(r.headers["x-accepts"], firstAccepts,
                 "request " + str(i) + " stayed on the original accept")
         }
     }
@@ -214,16 +214,16 @@ testing.test("stale conn: server-side close triggers one-shot retry", lam{ in
     let s = http.session()
     // First request: server closes the socket after responding.
     let r1 = http.get(s, base + "/close-after")
-    testing.assertEqual(r1.body, "ok", nil)
+    testing.expectEqual(r1.body, "ok", nil)
     let n1 = num(r1.headers["x-accepts"])
     // Second request: the pool has the now-closed socket. The probe
     // (or the send) catches the closure; the wrapper opens fresh.
     // The accept count must advance by at least one.
     let r2 = http.get(s, base + "/ping")
-    testing.assertEqual(r2.status, 200, nil)
-    testing.assertEqual(r2.body, "pong", nil)
+    testing.expectEqual(r2.status, 200, nil)
+    testing.expectEqual(r2.body, "pong", nil)
     let n2 = num(r2.headers["x-accepts"])
-    testing.assert(n2 > n1,
+    testing.expect(n2 > n1,
         "second request landed on a fresh accept (was " + str(n1) +
         ", now " + str(n2) + ")")
     http.close(s)
@@ -234,14 +234,14 @@ testing.test("stale conn: server-side close triggers one-shot retry", lam{ in
 testing.test("server Connection: close opts out of the pool", lam{ in
     let s = http.session()
     let r1 = http.get(s, base + "/conn-close")
-    testing.assertEqual(r1.body, "ok", nil)
-    testing.assertEqual(r1.headers["connection"], "close", nil)
+    testing.expectEqual(r1.body, "ok", nil)
+    testing.expectEqual(r1.headers["connection"], "close", nil)
     let n1 = num(r1.headers["x-accepts"])
     // Even though the framing was Content-Length (reusable), the
     // Connection: close response header forces the pool to discard.
     let r2 = http.get(s, base + "/ping")
     let n2 = num(r2.headers["x-accepts"])
-    testing.assert(n2 > n1,
+    testing.expect(n2 > n1,
         "second request opened a fresh connection (was " + str(n1) +
         ", now " + str(n2) + ")")
     http.close(s)
@@ -262,8 +262,8 @@ testing.test("client-managed headers (Host/Connection/...) are rejected (per-cal
             http.request(s, {url: base + "/ping",
                               headers: {[name]: "anything"}})
         } catch (e) { err = str(e) }
-        testing.assert(err != nil, name + " must be rejected")
-        testing.assert(err.contains("reserved"),
+        testing.expect(err != nil, name + " must be rejected")
+        testing.expect(err.contains("reserved"),
             "error mentions reserved: " + str(err))
     }
     // Case-insensitive check.
@@ -272,7 +272,7 @@ testing.test("client-managed headers (Host/Connection/...) are rejected (per-cal
         http.request(s, {url: base + "/ping",
                           headers: {"host": "evil.example"}})
     } catch (e) { err = str(e) }
-    testing.assert(err != nil, "lowercase host also rejected")
+    testing.expect(err != nil, "lowercase host also rejected")
     http.close(s)
 })
 
@@ -287,8 +287,8 @@ testing.test("reserved headers in SESSION defaults are also rejected", lam{ in
         let s = http.session({headers: {[name]: "x"}})
         let err = nil
         try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
-        testing.assert(err != nil, name + " (session default) must be rejected")
-        testing.assert(err.contains("reserved"),
+        testing.expect(err != nil, name + " (session default) must be rejected")
+        testing.expect(err.contains("reserved"),
             "error mentions reserved: " + str(err))
         http.close(s)
     }
@@ -296,8 +296,8 @@ testing.test("reserved headers in SESSION defaults are also rejected", lam{ in
     let s = http.session({headers: {"host": "evil.example"}})
     let err = nil
     try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "lowercase host (session default) rejected")
-    testing.assert(err.contains("reserved"),
+    testing.expect(err != nil, "lowercase host (session default) rejected")
+    testing.expect(err.contains("reserved"),
         "lowercase host hit the reserved-headers validator: " + str(err))
     http.close(s)
 })
@@ -307,15 +307,15 @@ testing.test("reserved headers in SESSION defaults are also rejected", lam{ in
 testing.test("non-session first arg to http.get throws", lam{ in
     let err = nil
     try { http.get(42, "http://localhost/") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw")
-    testing.assert(err.contains("requires"), str(err))
+    testing.expect(err != nil, "must throw")
+    testing.expect(err.contains("requires"), str(err))
 })
 
 testing.test("http.close on non-session throws with the canonical type tag", lam{ in
     let err = nil
     try { http.close("not a session") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw")
-    testing.assert(err.contains("external handle") && err.contains("http.session"),
+    testing.expect(err != nil, "must throw")
+    testing.expect(err.contains("external handle") && err.contains("http.session"),
         "error names the expected type: " + str(err))
 })
 
@@ -332,8 +332,8 @@ testing.test("use-after-close throws", lam{ in
     http.close(s)
     let err = nil
     try { http.get(s, base + "/ping") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw")
-    testing.assert(err.contains("closed"), str(err))
+    testing.expect(err != nil, "must throw")
+    testing.expect(err.contains("closed"), str(err))
 })
 
 // ── GC-driven close ───────────────────────────────────────────
@@ -351,7 +351,7 @@ testing.test("GC-driven close: many discarded sessions don't leak", lam{ in
         s = http.session()
     }
     s = nil
-    testing.assert(true, nil)
+    testing.expect(true, nil)
 })
 
 testing.done()

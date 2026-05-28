@@ -9,41 +9,41 @@ use "../sand/grains/git" as gitmod
 
 testing.test("SCP-style SSH without a version pin", lam{ in
     let r = gitmod.parseSpec("git@github.com:user/repo")
-    testing.assertEqual(r.url, "git@github.com:user/repo.git",
+    testing.expectEqual(r.url, "git@github.com:user/repo.git",
         "URL preserved verbatim with .git appended")
-    testing.assertEqual(r.name, "repo", nil)
-    testing.assertEqual(r.version, nil, "no spurious version pin")
+    testing.expectEqual(r.name, "repo", nil)
+    testing.expectEqual(r.version, nil, "no spurious version pin")
 })
 
 testing.test("SCP-style SSH already ending in .git", lam{ in
     let r = gitmod.parseSpec("git@github.com:user/repo.git")
-    testing.assertEqual(r.url, "git@github.com:user/repo.git",
+    testing.expectEqual(r.url, "git@github.com:user/repo.git",
         ".git not double-appended")
-    testing.assertEqual(r.name, "repo", nil)
-    testing.assertEqual(r.version, nil, nil)
+    testing.expectEqual(r.name, "repo", nil)
+    testing.expectEqual(r.version, nil, nil)
 })
 
 testing.test("SCP-style SSH with a version pin", lam{ in
     let r = gitmod.parseSpec("git@github.com:user/repo@v1.2.3")
-    testing.assertEqual(r.url, "git@github.com:user/repo.git",
+    testing.expectEqual(r.url, "git@github.com:user/repo.git",
         "version stripped from URL")
-    testing.assertEqual(r.version, "v1.2.3",
+    testing.expectEqual(r.version, "v1.2.3",
         "tag-like suffix recognized as the pin")
-    testing.assertEqual(r.name, "repo", nil)
+    testing.expectEqual(r.name, "repo", nil)
 })
 
 testing.test("ssh:// URL with user", lam{ in
     let r = gitmod.parseSpec("ssh://git@github.com/user/repo")
-    testing.assertEqual(r.url, "ssh://git@github.com/user/repo.git", nil)
-    testing.assertEqual(r.name, "repo", nil)
-    testing.assertEqual(r.version, nil,
+    testing.expectEqual(r.url, "ssh://git@github.com/user/repo.git", nil)
+    testing.expectEqual(r.name, "repo", nil)
+    testing.expectEqual(r.version, nil,
         "ssh:// user@host @ isn't mistaken for a version separator")
 })
 
 testing.test("ssh:// URL with user and version pin", lam{ in
     let r = gitmod.parseSpec("ssh://git@github.com/user/repo@v2")
-    testing.assertEqual(r.url, "ssh://git@github.com/user/repo.git", nil)
-    testing.assertEqual(r.version, "v2", nil)
+    testing.expectEqual(r.url, "ssh://git@github.com/user/repo.git", nil)
+    testing.expectEqual(r.version, "v2", nil)
 })
 
 testing.test("regression hold: previously-working https forms still parse", lam{ in
@@ -58,9 +58,9 @@ testing.test("regression hold: previously-working https forms still parse", lam{
     ]
     for (c in cases) {
         let r = gitmod.parseSpec(c[0])
-        testing.assertEqual(r.url,     c[1], "url for " + c[0])
-        testing.assertEqual(r.version, c[2], "version for " + c[0])
-        testing.assertEqual(r.name,    c[3], "name for " + c[0])
+        testing.expectEqual(r.url,     c[1], "url for " + c[0])
+        testing.expectEqual(r.version, c[2], "version for " + c[0])
+        testing.expectEqual(r.name,    c[3], "name for " + c[0])
     }
 })
 
@@ -75,13 +75,13 @@ testing.test("multi-segment branch name in pin is rejected (use SHA or tag)", la
     // No version split — everything past the @ stays in the URL,
     // which won't be a valid clone target but isn't the security
     // surprise the old code produced.
-    testing.assertEqual(r.version, nil,
+    testing.expectEqual(r.version, nil,
         "branch-with-/ does not silently parse as version")
     // And the @feature/x suffix is preserved in the URL — the spec
     // falls through whole instead of getting carved up. That's what
     // makes the later "Invalid grain URL" error clearer than the old
     // "Invalid grain version" misdiagnosis.
-    testing.assert(r.url.contains("@feature/x"),
+    testing.expect(r.url.contains("@feature/x"),
         "URL still carries the @feature/x suffix verbatim: " + r.url)
 })
 

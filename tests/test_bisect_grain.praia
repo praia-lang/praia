@@ -7,40 +7,40 @@ use "bisect"
 
 testing.test("left on a basic ascending array", lam{ in
     let s = [1, 3, 5, 7, 9]
-    testing.assertEqual(bisect.left(s, 0), 0, "smaller than all → 0")
-    testing.assertEqual(bisect.left(s, 5), 2, "equal to existing → leftmost")
-    testing.assertEqual(bisect.left(s, 6), 3, "between elements")
-    testing.assertEqual(bisect.left(s, 9), 4, nil)
-    testing.assertEqual(bisect.left(s, 100), 5, "larger than all → end")
+    testing.expectEqual(bisect.left(s, 0), 0, "smaller than all → 0")
+    testing.expectEqual(bisect.left(s, 5), 2, "equal to existing → leftmost")
+    testing.expectEqual(bisect.left(s, 6), 3, "between elements")
+    testing.expectEqual(bisect.left(s, 9), 4, nil)
+    testing.expectEqual(bisect.left(s, 100), 5, "larger than all → end")
 })
 
 testing.test("right on a basic ascending array", lam{ in
     let s = [1, 3, 5, 7, 9]
-    testing.assertEqual(bisect.right(s, 0), 0, nil)
-    testing.assertEqual(bisect.right(s, 5), 3, "equal to existing → rightmost")
-    testing.assertEqual(bisect.right(s, 6), 3, nil)
-    testing.assertEqual(bisect.right(s, 9), 5, nil)
-    testing.assertEqual(bisect.right(s, 100), 5, nil)
+    testing.expectEqual(bisect.right(s, 0), 0, nil)
+    testing.expectEqual(bisect.right(s, 5), 3, "equal to existing → rightmost")
+    testing.expectEqual(bisect.right(s, 6), 3, nil)
+    testing.expectEqual(bisect.right(s, 9), 5, nil)
+    testing.expectEqual(bisect.right(s, 100), 5, nil)
 })
 
 testing.test("left vs right differ only on equal elements", lam{ in
     let s = [1, 3, 3, 3, 5]
-    testing.assertEqual(bisect.left(s, 3),  1, "first occurrence of 3")
-    testing.assertEqual(bisect.right(s, 3), 4, "one past the last occurrence")
-    testing.assertEqual(bisect.right(s, 3) - bisect.left(s, 3), 3,
+    testing.expectEqual(bisect.left(s, 3),  1, "first occurrence of 3")
+    testing.expectEqual(bisect.right(s, 3), 4, "one past the last occurrence")
+    testing.expectEqual(bisect.right(s, 3) - bisect.left(s, 3), 3,
                         "the run of 3s has length 3 — left/right brackets it")
 })
 
 testing.test("left / right on empty array", lam{ in
-    testing.assertEqual(bisect.left([], 5),  0, nil)
-    testing.assertEqual(bisect.right([], 5), 0, nil)
+    testing.expectEqual(bisect.left([], 5),  0, nil)
+    testing.expectEqual(bisect.right([], 5), 0, nil)
 })
 
 testing.test("left / right on single-element array", lam{ in
-    testing.assertEqual(bisect.left([5], 5),  0, nil)
-    testing.assertEqual(bisect.right([5], 5), 1, nil)
-    testing.assertEqual(bisect.left([5], 3),  0, nil)
-    testing.assertEqual(bisect.left([5], 7),  1, nil)
+    testing.expectEqual(bisect.left([5], 5),  0, nil)
+    testing.expectEqual(bisect.right([5], 5), 1, nil)
+    testing.expectEqual(bisect.left([5], 3),  0, nil)
+    testing.expectEqual(bisect.left([5], 7),  1, nil)
 })
 
 // ── keyFn ─────────────────────────────────────────────────────
@@ -54,9 +54,9 @@ testing.test("keyFn searches by derived value", lam{ in
         {t: 400, msg: "d"}
     ]
     let keyFn = lam{ e in e.t }
-    testing.assertEqual(bisect.left(events, 250, keyFn),  2, nil)
-    testing.assertEqual(bisect.right(events, 200, keyFn), 2, nil)
-    testing.assertEqual(bisect.left(events, 200, keyFn),  1, nil)
+    testing.expectEqual(bisect.left(events, 250, keyFn),  2, nil)
+    testing.expectEqual(bisect.right(events, 200, keyFn), 2, nil)
+    testing.expectEqual(bisect.left(events, 200, keyFn),  1, nil)
 })
 
 // ── insort ────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ testing.test("insort builds a sorted array from arbitrary inputs", lam{ in
     for (v in [5, 1, 8, 3, 2, 9, 4, 7, 6]) {
         bisect.insort(xs, v)
     }
-    testing.assertEqual(xs, [1, 2, 3, 4, 5, 6, 7, 8, 9], nil)
+    testing.expectEqual(xs, [1, 2, 3, 4, 5, 6, 7, 8, 9], nil)
 })
 
 testing.test("insort keeps duplicates and places new at left", lam{ in
@@ -75,7 +75,7 @@ testing.test("insort keeps duplicates and places new at left", lam{ in
     bisect.insort(xs, 3)
     // After two inserts of 3, we should have three 3s starting at
     // index 1 (their leftmost insertion point).
-    testing.assertEqual(xs, [1, 3, 3, 3, 5, 7], nil)
+    testing.expectEqual(xs, [1, 3, 3, 3, 5, 7], nil)
 })
 
 testing.test("insort with keyFn maintains sort by derived key", lam{ in
@@ -87,35 +87,35 @@ testing.test("insort with keyFn maintains sort by derived key", lam{ in
     // Build a string from sorted msgs to assert order without comparing maps.
     let ms = ""
     for (e in events) { ms = ms + e.m }
-    testing.assertEqual(ms, "abcde", nil)
+    testing.expectEqual(ms, "abcde", nil)
 })
 
 testing.test("insort on empty creates a single-element array", lam{ in
     let xs = []
     bisect.insort(xs, 42)
-    testing.assertEqual(xs, [42], nil)
+    testing.expectEqual(xs, [42], nil)
 })
 
 // ── contains ─────────────────────────────────────────────────
 
 testing.test("contains hits and misses", lam{ in
     let s = [1, 3, 5, 7, 9]
-    testing.assertEqual(bisect.contains(s, 5),  true, nil)
-    testing.assertEqual(bisect.contains(s, 4),  false, "between elements")
-    testing.assertEqual(bisect.contains(s, 0),  false, "smaller than all")
-    testing.assertEqual(bisect.contains(s, 99), false, "larger than all")
+    testing.expectEqual(bisect.contains(s, 5),  true, nil)
+    testing.expectEqual(bisect.contains(s, 4),  false, "between elements")
+    testing.expectEqual(bisect.contains(s, 0),  false, "smaller than all")
+    testing.expectEqual(bisect.contains(s, 99), false, "larger than all")
 })
 
 testing.test("contains on duplicates", lam{ in
     let s = [1, 3, 3, 3, 5]
-    testing.assertEqual(bisect.contains(s, 3), true, nil)
+    testing.expectEqual(bisect.contains(s, 3), true, nil)
 })
 
 testing.test("contains with keyFn", lam{ in
     let events = [{t: 100}, {t: 200}, {t: 300}]
     let keyFn = lam{ e in e.t }
-    testing.assertEqual(bisect.contains(events, 200, keyFn), true,  nil)
-    testing.assertEqual(bisect.contains(events, 250, keyFn), false, nil)
+    testing.expectEqual(bisect.contains(events, 200, keyFn), true,  nil)
+    testing.expectEqual(bisect.contains(events, 250, keyFn), false, nil)
 })
 
 // ── Big-N correctness ────────────────────────────────────────
@@ -123,11 +123,11 @@ testing.test("contains with keyFn", lam{ in
 testing.test("left/right scale to 10k elements", lam{ in
     let s = []
     for (i in 0..10000) { s.push(i * 2) }   // 0, 2, 4, ..., 19998
-    testing.assertEqual(bisect.left(s, 4998),  2499, nil)
-    testing.assertEqual(bisect.right(s, 4998), 2500, nil)
-    testing.assertEqual(bisect.left(s, 4999),  2500, "between 4998 and 5000")
-    testing.assertEqual(bisect.contains(s, 4998), true, nil)
-    testing.assertEqual(bisect.contains(s, 4999), false, nil)
+    testing.expectEqual(bisect.left(s, 4998),  2499, nil)
+    testing.expectEqual(bisect.right(s, 4998), 2500, nil)
+    testing.expectEqual(bisect.left(s, 4999),  2500, "between 4998 and 5000")
+    testing.expectEqual(bisect.contains(s, 4998), true, nil)
+    testing.expectEqual(bisect.contains(s, 4999), false, nil)
 })
 
 testing.done()

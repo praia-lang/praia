@@ -2,31 +2,31 @@ use "testing"
 
 testing.test("basic function", lam{ in
     func add(a, b) { return a + b }
-    testing.assertEqual(add(3, 4), 7, nil)
+    testing.expectEqual(add(3, 4), 7, nil)
 })
 
 testing.test("default parameters", lam{ in
     func greet(name = "world") { return "hello " + name }
-    testing.assertEqual(greet(), "hello world", nil)
-    testing.assertEqual(greet("Ada"), "hello Ada", nil)
+    testing.expectEqual(greet(), "hello world", nil)
+    testing.expectEqual(greet("Ada"), "hello Ada", nil)
 })
 
 testing.test("default param references earlier param", lam{ in
     func f(a = 1, b = a + 1) { return b }
-    testing.assertEqual(f(), 2, nil)
-    testing.assertEqual(f(10), 11, nil)
+    testing.expectEqual(f(), 2, nil)
+    testing.expectEqual(f(10), 11, nil)
 })
 
 testing.test("defaults resolve in definition scope", lam{ in
     let y = 10
     func f(x = y) { return x }
     // Even if called from a scope with a different y, the default uses the definition scope
-    testing.assertEqual(f(), 10, nil)
+    testing.expectEqual(f(), 10, nil)
 })
 
 testing.test("implicit nil return", lam{ in
     func nothing() {}
-    testing.assertEqual(nothing(), nil, nil)
+    testing.expectEqual(nothing(), nil, nil)
 })
 
 testing.test("recursion", lam{ in
@@ -34,7 +34,7 @@ testing.test("recursion", lam{ in
         if (n <= 1) { return n }
         return fib(n - 1) + fib(n - 2)
     }
-    testing.assertEqual(fib(10), 55, nil)
+    testing.expectEqual(fib(10), 55, nil)
 })
 
 testing.test("closure captures variable", lam{ in
@@ -46,29 +46,29 @@ testing.test("closure captures variable", lam{ in
         }
     }
     let c = makeCounter()
-    testing.assertEqual(c(), 1, nil)
-    testing.assertEqual(c(), 2, nil)
-    testing.assertEqual(c(), 3, nil)
+    testing.expectEqual(c(), 1, nil)
+    testing.expectEqual(c(), 2, nil)
+    testing.expectEqual(c(), 3, nil)
 })
 
 testing.test("lambda with defaults", lam{ in
     let f = lam{ x = 5 in x * 2 }
-    testing.assertEqual(f(), 10, nil)
-    testing.assertEqual(f(3), 6, nil)
+    testing.expectEqual(f(), 10, nil)
+    testing.expectEqual(f(3), 6, nil)
 })
 
 testing.test("pipe operator", lam{ in
     func double(x) { return x * 2 }
     func addOne(x) { return x + 1 }
-    testing.assertEqual(5 |> double, 10, nil)
-    testing.assertEqual(5 |> double |> addOne, 11, nil)
+    testing.expectEqual(5 |> double, 10, nil)
+    testing.expectEqual(5 |> double |> addOne, 11, nil)
 })
 
 testing.test("higher-order: passing functions", lam{ in
     func apply(fn, x) { return fn(x) }
     func square(x) { return x * x }
-    testing.assertEqual(apply(square, 5), 25, nil)
-    testing.assertEqual(apply(lam{ x in x + 1 }, 10), 11, nil)
+    testing.expectEqual(apply(square, 5), 25, nil)
+    testing.expectEqual(apply(lam{ x in x + 1 }, 10), 11, nil)
 })
 
 testing.done()

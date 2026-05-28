@@ -2,41 +2,41 @@ use "testing"
 
 testing.test("array destructuring", lam{ in
     let [a, b, c] = [1, 2, 3]
-    testing.assertEqual(a, 1, nil)
-    testing.assertEqual(b, 2, nil)
-    testing.assertEqual(c, 3, nil)
+    testing.expectEqual(a, 1, nil)
+    testing.expectEqual(b, 2, nil)
+    testing.expectEqual(c, 3, nil)
 })
 
 testing.test("array rest pattern", lam{ in
     let [first, ...rest] = [1, 2, 3, 4, 5]
-    testing.assertEqual(first, 1, nil)
-    testing.assertEqual(rest, [2, 3, 4, 5], nil)
+    testing.expectEqual(first, 1, nil)
+    testing.expectEqual(rest, [2, 3, 4, 5], nil)
 })
 
 testing.test("map destructuring", lam{ in
     let {name: n, age: a} = {name: "Ada", age: 36}
-    testing.assertEqual(n, "Ada", nil)
-    testing.assertEqual(a, 36, nil)
+    testing.expectEqual(n, "Ada", nil)
+    testing.expectEqual(a, 36, nil)
 })
 
 testing.test("array spread in literal", lam{ in
     let base = [1, 2]
     let extended = [...base, 3, 4]
-    testing.assertEqual(extended, [1, 2, 3, 4], nil)
+    testing.expectEqual(extended, [1, 2, 3, 4], nil)
 })
 
 testing.test("map spread in literal", lam{ in
     let base = {a: 1, b: 2}
     let extended = {...base, c: 3}
-    testing.assertEqual(extended.a, 1, nil)
-    testing.assertEqual(extended.c, 3, nil)
+    testing.expectEqual(extended.a, 1, nil)
+    testing.expectEqual(extended.c, 3, nil)
 })
 
 testing.test("map spread override", lam{ in
     let defaults = {color: "red", size: 10}
     let custom = {...defaults, color: "blue"}
-    testing.assertEqual(custom.color, "blue", nil)
-    testing.assertEqual(custom.size, 10, nil)
+    testing.expectEqual(custom.color, "blue", nil)
+    testing.expectEqual(custom.size, 10, nil)
 })
 
 testing.done()

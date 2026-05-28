@@ -6,7 +6,7 @@ testing.test("basic decorator", lam{ in
     @double
     func add5(x) { return x + 5 }
 
-    testing.assertEqual(add5(10), 30, nil)
+    testing.expectEqual(add5(10), 30, nil)
 })
 
 testing.test("stacked decorators", lam{ in
@@ -17,7 +17,7 @@ testing.test("stacked decorators", lam{ in
     @italic
     func greeting() { return "hi" }
 
-    testing.assertEqual(greeting(), "<b><i>hi</i></b>", nil)
+    testing.expectEqual(greeting(), "<b><i>hi</i></b>", nil)
 })
 
 testing.test("decorator with arguments (factory)", lam{ in
@@ -34,7 +34,7 @@ testing.test("decorator with arguments (factory)", lam{ in
     @repeat(3)
     func id(x) { return x }
 
-    testing.assertEqual(id("a"), "aaa", nil)
+    testing.expectEqual(id("a"), "aaa", nil)
 })
 
 testing.test("decorator preserves function behavior", lam{ in
@@ -43,7 +43,7 @@ testing.test("decorator preserves function behavior", lam{ in
     @noop
     func add(a, b) { return a + b }
 
-    testing.assertEqual(add(1, 2), 3, nil)
+    testing.expectEqual(add(1, 2), 3, nil)
 })
 
 testing.done()

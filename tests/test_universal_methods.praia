@@ -1,59 +1,59 @@
 use "testing"
 
 testing.test(".toString() on int", lam{ in
-    testing.assertEqual(42.toString(), "42", nil)
-    testing.assertEqual(0.toString(), "0", nil)
+    testing.expectEqual(42.toString(), "42", nil)
+    testing.expectEqual(0.toString(), "0", nil)
 })
 
 testing.test(".toString() on float", lam{ in
     let s = 3.14.toString()
-    testing.assert(s.startsWith("3.14"), "should start with 3.14")
+    testing.expect(s.startsWith("3.14"), "should start with 3.14")
 })
 
 testing.test(".toString() on bool", lam{ in
-    testing.assertEqual(true.toString(), "true", nil)
-    testing.assertEqual(false.toString(), "false", nil)
+    testing.expectEqual(true.toString(), "true", nil)
+    testing.expectEqual(false.toString(), "false", nil)
 })
 
 testing.test(".toString() on nil", lam{ in
-    testing.assertEqual(nil.toString(), "nil", nil)
+    testing.expectEqual(nil.toString(), "nil", nil)
 })
 
 testing.test(".toString() on array", lam{ in
-    testing.assertEqual([1, 2].toString(), "[1, 2]", nil)
+    testing.expectEqual([1, 2].toString(), "[1, 2]", nil)
 })
 
 testing.test(".toNum() on string", lam{ in
-    testing.assertEqual("42".toNum(), 42, nil)
-    testing.assertEqual("3.14".toNum(), 3.14, nil)
+    testing.expectEqual("42".toNum(), 42, nil)
+    testing.expectEqual("3.14".toNum(), 3.14, nil)
 })
 
 testing.test(".toNum() on bool", lam{ in
-    testing.assertEqual(true.toNum(), 1, nil)
-    testing.assertEqual(false.toNum(), 0, nil)
+    testing.expectEqual(true.toNum(), 1, nil)
+    testing.expectEqual(false.toNum(), 0, nil)
 })
 
 testing.test(".toNum() on bool strings", lam{ in
-    testing.assertEqual("true".toNum(), 1, nil)
-    testing.assertEqual("FALSE".toNum(), 0, nil)
+    testing.expectEqual("true".toNum(), 1, nil)
+    testing.expectEqual("FALSE".toNum(), 0, nil)
 })
 
 testing.test(".toNum() on number is identity", lam{ in
-    testing.assertEqual(42.toNum(), 42, nil)
-    testing.assertEqual(3.14.toNum(), 3.14, nil)
+    testing.expectEqual(42.toNum(), 42, nil)
+    testing.expectEqual(3.14.toNum(), 3.14, nil)
 })
 
 testing.test(".toNum() throws on invalid string", lam{ in
-    testing.assertThrows(lam{ in "abc".toNum() }, nil)
+    testing.expectThrows(lam{ in "abc".toNum() }, nil)
 })
 
 testing.test("instance .toString() calls user method", lam{ in
     class A {
         func toString() { return "custom" }
     }
-    testing.assertEqual(A().toString(), "custom", nil)
+    testing.expectEqual(A().toString(), "custom", nil)
     // str() should also use it (via __str/toString fallback)
-    testing.assertEqual(str(A()), "custom", nil)
+    testing.expectEqual(str(A()), "custom", nil)
 })
 
 testing.test("instance .toNum() calls user method", lam{ in
@@ -61,23 +61,23 @@ testing.test("instance .toNum() calls user method", lam{ in
         func init(v) { this.v = v }
         func toNum() { return this.v }
     }
-    testing.assertEqual(B(42).toNum(), 42, nil)
+    testing.expectEqual(B(42).toNum(), 42, nil)
 })
 
 testing.test("instance without override gets universal .toString()", lam{ in
     class Plain {}
-    testing.assertEqual(Plain().toString(), "<instance>", nil)
+    testing.expectEqual(Plain().toString(), "<instance>", nil)
 })
 
 testing.test("map key 'toString' is not shadowed by universal", lam{ in
     let m = {toString: "field", toNum: 42}
-    testing.assertEqual(m.toString, "field", nil)
-    testing.assertEqual(m.toNum, 42, nil)
+    testing.expectEqual(m.toString, "field", nil)
+    testing.expectEqual(m.toNum, 42, nil)
 })
 
 testing.test("map without 'toString' key gets universal", lam{ in
     let m = {a: 1}
-    testing.assertEqual(m.toString(), "{a: 1}", nil)
+    testing.expectEqual(m.toString(), "{a: 1}", nil)
 })
 
 testing.done()

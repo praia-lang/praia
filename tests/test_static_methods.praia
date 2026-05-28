@@ -4,14 +4,14 @@ testing.test("basic static method", lam{ in
     class Utils {
         static func double(n) { return n * 2 }
     }
-    testing.assertEqual(Utils.double(21), 42, nil)
+    testing.expectEqual(Utils.double(21), 42, nil)
 })
 
 testing.test("static method works without this", lam{ in
     class Foo {
         static func greet(name) { return "hi " + name }
     }
-    testing.assertEqual(Foo.greet("Ada"), "hi Ada", nil)
+    testing.expectEqual(Foo.greet("Ada"), "hi Ada", nil)
 })
 
 testing.test("static and instance methods coexist", lam{ in
@@ -21,7 +21,7 @@ testing.test("static and instance methods coexist", lam{ in
         static func zero() { return Counter(0) }
     }
     let c = Counter.zero()
-    testing.assertEqual(c.value(), 0, nil)
+    testing.expectEqual(c.value(), 0, nil)
 })
 
 testing.test("static method with multiple params", lam{ in
@@ -32,9 +32,9 @@ testing.test("static method with multiple params", lam{ in
             return x
         }
     }
-    testing.assertEqual(Math.clamp(5, 0, 10), 5, nil)
-    testing.assertEqual(Math.clamp(-1, 0, 10), 0, nil)
-    testing.assertEqual(Math.clamp(99, 0, 10), 10, nil)
+    testing.expectEqual(Math.clamp(5, 0, 10), 5, nil)
+    testing.expectEqual(Math.clamp(-1, 0, 10), 0, nil)
+    testing.expectEqual(Math.clamp(99, 0, 10), 10, nil)
 })
 
 testing.test("static method inheritance", lam{ in
@@ -42,7 +42,7 @@ testing.test("static method inheritance", lam{ in
         static func type() { return "animal" }
     }
     class Dog extends Animal {}
-    testing.assertEqual(Dog.type(), "animal", nil)
+    testing.expectEqual(Dog.type(), "animal", nil)
 })
 
 testing.test("child overrides static", lam{ in
@@ -52,8 +52,8 @@ testing.test("child overrides static", lam{ in
     class Child extends Base {
         static func name() { return "Child" }
     }
-    testing.assertEqual(Base.name(), "Base", nil)
-    testing.assertEqual(Child.name(), "Child", nil)
+    testing.expectEqual(Base.name(), "Base", nil)
+    testing.expectEqual(Child.name(), "Child", nil)
 })
 
 testing.test("static with default params", lam{ in
@@ -63,10 +63,10 @@ testing.test("static with default params", lam{ in
         }
     }
     let c = Config.create()
-    testing.assertEqual(c.host, "localhost", nil)
-    testing.assertEqual(c.port, 8080, nil)
+    testing.expectEqual(c.host, "localhost", nil)
+    testing.expectEqual(c.port, 8080, nil)
     let c2 = Config.create("0.0.0.0", 3000)
-    testing.assertEqual(c2.port, 3000, nil)
+    testing.expectEqual(c2.port, 3000, nil)
 })
 
 testing.test("static with rest params", lam{ in
@@ -75,7 +75,7 @@ testing.test("static with rest params", lam{ in
             return parts.join(" ")
         }
     }
-    testing.assertEqual(Logger.format("a", "b", "c"), "a b c", nil)
+    testing.expectEqual(Logger.format("a", "b", "c"), "a b c", nil)
 })
 
 testing.test("static as factory method", lam{ in
@@ -88,10 +88,10 @@ testing.test("static as factory method", lam{ in
         static func fromArray(arr) { return Point(arr[0], arr[1]) }
     }
     let p = Point.origin()
-    testing.assertEqual(p.x, 0, nil)
+    testing.expectEqual(p.x, 0, nil)
     let p2 = Point.fromArray([3, 4])
-    testing.assertEqual(p2.x, 3, nil)
-    testing.assertEqual(p2.y, 4, nil)
+    testing.expectEqual(p2.x, 3, nil)
+    testing.expectEqual(p2.y, 4, nil)
 })
 
 testing.test("instance cannot access static method", lam{ in
@@ -105,7 +105,7 @@ testing.test("instance cannot access static method", lam{ in
     } catch (e) {
         ok = true
     }
-    testing.assert(ok, "static method not accessible on instance")
+    testing.expect(ok, "static method not accessible on instance")
 })
 
 testing.done()

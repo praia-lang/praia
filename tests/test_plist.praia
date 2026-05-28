@@ -24,51 +24,51 @@ let sample = "<?xml version=\"1.0\"?><plist version=\"1.0\">" +
 
 testing.test("parse: <string>", lam{ in
     let v = plist.parse(sample)
-    testing.assertEqual(v.name, "Ada", nil)
+    testing.expectEqual(v.name, "Ada", nil)
 })
 
 testing.test("parse: <integer> yields an int", lam{ in
     let v = plist.parse(sample)
-    testing.assertEqual(type(v.age), "int", nil)
-    testing.assertEqual(v.age, 36, nil)
+    testing.expectEqual(type(v.age), "int", nil)
+    testing.expectEqual(v.age, 36, nil)
 })
 
 testing.test("parse: <real> yields a float", lam{ in
     let v = plist.parse(sample)
-    testing.assertEqual(type(v.score), "float", nil)
-    testing.assert(v.score > 3.139 && v.score < 3.141, nil)
+    testing.expectEqual(type(v.score), "float", nil)
+    testing.expect(v.score > 3.139 && v.score < 3.141, nil)
 })
 
 testing.test("parse: <true/> and <false/>", lam{ in
     let v = plist.parse(sample)
-    testing.assertEqual(v.active, true, nil)
-    testing.assertEqual(v.locked, false, nil)
+    testing.expectEqual(v.active, true, nil)
+    testing.expectEqual(v.locked, false, nil)
 })
 
 testing.test("parse: <array>", lam{ in
     let v = plist.parse(sample)
-    testing.assertEqual(v.tags, ["admin", "founder"], nil)
+    testing.expectEqual(v.tags, ["admin", "founder"], nil)
 })
 
 testing.test("parse: <data> decodes base64", lam{ in
     let p = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>" +
         "<key>blob</key><data>aGVsbG8=</data></dict></plist>"
     let v = plist.parse(p)
-    testing.assertEqual(v.blob, "hello", "base64(\"hello\")")
+    testing.expectEqual(v.blob, "hello", "base64(\"hello\")")
 })
 
 testing.test("parse: <data> tolerates whitespace and line wraps", lam{ in
     let p = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>" +
         "<key>blob</key><data>\n   aGVsbG8g\n   d29ybGQ=\n   </data></dict></plist>"
     let v = plist.parse(p)
-    testing.assertEqual(v.blob, "hello world", nil)
+    testing.expectEqual(v.blob, "hello world", nil)
 })
 
 testing.test("parse: <date> returns ISO 8601 string", lam{ in
     let p = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>" +
         "<key>when</key><date>2024-01-15T12:00:00Z</date></dict></plist>"
     let v = plist.parse(p)
-    testing.assertEqual(v.when, "2024-01-15T12:00:00Z",
+    testing.expectEqual(v.when, "2024-01-15T12:00:00Z",
                         "dates round-trip as strings, not parsed times")
 })
 
@@ -84,90 +84,90 @@ testing.test("parse: nested dicts and arrays", lam{ in
             "</array>" +
         "</dict></plist>"
     let v = plist.parse(p)
-    testing.assertEqual(v.servers[0].host, "a", nil)
-    testing.assertEqual(v.servers[1].port, 2, nil)
+    testing.expectEqual(v.servers[0].host, "a", nil)
+    testing.expectEqual(v.servers[1].port, 2, nil)
 })
 
 testing.test("parse: top-level <array>", lam{ in
     let p = "<?xml version=\"1.0\"?><plist version=\"1.0\">" +
         "<array><integer>1</integer><integer>2</integer></array></plist>"
-    testing.assertEqual(plist.parse(p), [1, 2], nil)
+    testing.expectEqual(plist.parse(p), [1, 2], nil)
 })
 
 testing.test("parse: top-level <string>", lam{ in
     let p = "<?xml version=\"1.0\"?><plist version=\"1.0\"><string>hi</string></plist>"
-    testing.assertEqual(plist.parse(p), "hi", nil)
+    testing.expectEqual(plist.parse(p), "hi", nil)
 })
 
 // ── Error cases ───────────────────────────────────────────────
 
 testing.test("binary plist throws with conversion hint", lam{ in
-    testing.assertThrows(lam{ in plist.parse("bplist00\u{00}") },
+    testing.expectThrows(lam{ in plist.parse("bplist00\u{00}") },
                          "plutil")
 })
 
 testing.test("wrong root element throws", lam{ in
-    testing.assertThrows(lam{ in plist.parse("<not-a-plist/>") },
+    testing.expectThrows(lam{ in plist.parse("<not-a-plist/>") },
                          "must be <plist>")
 })
 
 testing.test("unknown element throws", lam{ in
     let p = "<?xml version=\"1.0\"?><plist version=\"1.0\"><weird/></plist>"
-    testing.assertThrows(lam{ in plist.parse(p) }, "unknown plist element")
+    testing.expectThrows(lam{ in plist.parse(p) }, "unknown plist element")
 })
 
 testing.test("invalid integer body throws", lam{ in
     let p = "<?xml version=\"1.0\"?><plist version=\"1.0\">" +
         "<integer>not-a-number</integer></plist>"
-    testing.assertThrows(lam{ in plist.parse(p) }, "invalid <integer>")
+    testing.expectThrows(lam{ in plist.parse(p) }, "invalid <integer>")
 })
 
 testing.test("dict with stray text between key/value throws", lam{ in
     let p = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>" +
         "<key>x</key>unexpected<string>v</string></dict></plist>"
-    testing.assertThrows(lam{ in plist.parse(p) }, "stray text")
+    testing.expectThrows(lam{ in plist.parse(p) }, "stray text")
 })
 
 // ── stringify ─────────────────────────────────────────────────
 
 testing.test("stringify scalar types", lam{ in
     let s = plist.stringify({s: "hi", i: 42, f: 3.5, t: true, f2: false})
-    testing.assert(s.contains("<string>hi</string>"), nil)
-    testing.assert(s.contains("<integer>42</integer>"), nil)
-    testing.assert(s.contains("<real>"), nil)
-    testing.assert(s.contains("<true/>"), nil)
-    testing.assert(s.contains("<false/>"), nil)
+    testing.expect(s.contains("<string>hi</string>"), nil)
+    testing.expect(s.contains("<integer>42</integer>"), nil)
+    testing.expect(s.contains("<real>"), nil)
+    testing.expect(s.contains("<true/>"), nil)
+    testing.expect(s.contains("<false/>"), nil)
 })
 
 testing.test("stringify wraps in plist root and DOCTYPE", lam{ in
     let s = plist.stringify({k: 1})
-    testing.assert(s.contains("<?xml version=\"1.0\""), "xml decl present")
-    testing.assert(s.contains("<!DOCTYPE plist"), "doctype present")
-    testing.assert(s.contains("<plist version=\"1.0\">"), "plist root present")
+    testing.expect(s.contains("<?xml version=\"1.0\""), "xml decl present")
+    testing.expect(s.contains("<!DOCTYPE plist"), "doctype present")
+    testing.expect(s.contains("<plist version=\"1.0\">"), "plist root present")
 })
 
 testing.test("stringify roundtrips through parse", lam{ in
     let original = {name: "Ada", age: 36, tags: ["admin", "ops"], active: true}
     let v = plist.parse(plist.stringify(original))
-    testing.assertEqual(v.name, "Ada", nil)
-    testing.assertEqual(v.age, 36, nil)
-    testing.assertEqual(v.tags, ["admin", "ops"], nil)
-    testing.assertEqual(v.active, true, nil)
+    testing.expectEqual(v.name, "Ada", nil)
+    testing.expectEqual(v.age, 36, nil)
+    testing.expectEqual(v.tags, ["admin", "ops"], nil)
+    testing.expectEqual(v.active, true, nil)
 })
 
 testing.test("stringify rejects NaN / Inf as <real>", lam{ in
     let nan = math.INF - math.INF
-    testing.assertThrows(lam{ in plist.stringify(nan) }, "NaN or Infinity")
-    testing.assertThrows(lam{ in plist.stringify(math.INF) }, "NaN or Infinity")
+    testing.expectThrows(lam{ in plist.stringify(nan) }, "NaN or Infinity")
+    testing.expectThrows(lam{ in plist.stringify(math.INF) }, "NaN or Infinity")
 })
 
 testing.test("stringify rejects nil (no plist null)", lam{ in
-    testing.assertThrows(lam{ in plist.stringify(nil) }, "nil has no representation")
+    testing.expectThrows(lam{ in plist.stringify(nil) }, "nil has no representation")
 })
 
 testing.test("stringify with indent is multi-line", lam{ in
     let s = plist.stringify({k: 1}, 2)
-    testing.assert(s.contains("\n  <key>k</key>"), "key indented")
+    testing.expect(s.contains("\n  <key>k</key>"), "key indented")
 })
 
 testing.done()

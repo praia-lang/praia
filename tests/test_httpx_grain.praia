@@ -78,14 +78,14 @@ let base = "http://localhost:" + str(TEST_PORT)
 testing.test("session() returns a usable wrapper", lam{ in
     let s = httpx.session()
     let r = s.get(base + "/")
-    testing.assertEqual(r.status, 200, nil)
-    testing.assertEqual(r.body, "", "no cookies on a bare path → empty Cookie header echo")
+    testing.expectEqual(r.status, 200, nil)
+    testing.expectEqual(r.body, "", "no cookies on a bare path → empty Cookie header echo")
     s.close()
 })
 
 testing.test("jar() exposes the underlying cookie.Jar instance", lam{ in
     let s = httpx.session()
-    testing.assertEqual(s.jar().size(), 0, "fresh jar starts empty")
+    testing.expectEqual(s.jar().size(), 0, "fresh jar starts empty")
     s.close()
 })
 
@@ -94,12 +94,12 @@ testing.test("jar() exposes the underlying cookie.Jar instance", lam{ in
 testing.test("Set-Cookie from response 1 attaches to request 2", lam{ in
     let s = httpx.session()
     let r1 = s.get(base + "/login")
-    testing.assertEqual(r1.status, 200, nil)
+    testing.expectEqual(r1.status, 200, nil)
     // Server echoes the Cookie header it received: empty on first call
     // (no cookies in jar yet), then sid=abc123 on the second.
-    testing.assertEqual(r1.body, "", "first request had no cookies in jar")
+    testing.expectEqual(r1.body, "", "first request had no cookies in jar")
     let r2 = s.get(base + "/anything")
-    testing.assertEqual(r2.body, "sid=abc123",
+    testing.expectEqual(r2.body, "sid=abc123",
         "second request carried the jar's cookie")
     s.close()
 })
@@ -117,8 +117,8 @@ testing.test("multiple Set-Cookie headers all land in the jar", lam{ in
     // path-length tiebreak in cookie.Jar; both with Path=/ tie so
     // insertion order applies — but assert both keys are present
     // rather than the exact ordering.
-    testing.assert(r.body.contains("a=1"), "a=1 attached: " + str(r.body))
-    testing.assert(r.body.contains("b=2"), "b=2 attached: " + str(r.body))
+    testing.expect(r.body.contains("a=1"), "a=1 attached: " + str(r.body))
+    testing.expect(r.body.contains("b=2"), "b=2 attached: " + str(r.body))
     s.close()
 })
 
@@ -130,7 +130,7 @@ testing.test("Secure cookie is suppressed on plain-HTTP requests", lam{ in
     let s = httpx.session()
     s.get(base + "/login-secure")
     let r = s.get(base + "/x")
-    testing.assertEqual(r.body, "",
+    testing.expectEqual(r.body, "",
         "Secure cookie must not attach over plain HTTP")
     s.close()
 })
@@ -139,10 +139,10 @@ testing.test("path-scoped cookie only attaches to matching paths", lam{ in
     let s = httpx.session()
     s.get(base + "/login-scoped")          // sets scoped=yes; Path=/area
     let r1 = s.get(base + "/")
-    testing.assertEqual(r1.body, "",
+    testing.expectEqual(r1.body, "",
         "path-scoped cookie not sent to /")
     let r2 = s.get(base + "/area/page")
-    testing.assertEqual(r2.body, "scoped=yes",
+    testing.expectEqual(r2.body, "scoped=yes",
         "path-scoped cookie sent to /area/...")
     s.close()
 })
@@ -172,16 +172,16 @@ testing.test("use-after-close throws", lam{ in
     s.close()
     let err = nil
     try { s.get(base + "/") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw")
-    testing.assert(err.contains("closed"), str(err))
+    testing.expect(err != nil, "must throw")
+    testing.expect(err.contains("closed"), str(err))
 })
 
 testing.test("request() without url throws", lam{ in
     let s = httpx.session()
     let err = nil
     try { s.request({method: "GET"}) } catch (e) { err = str(e) }
-    testing.assert(err != nil, nil)
-    testing.assert(err.contains("url"), str(err))
+    testing.expect(err != nil, nil)
+    testing.expect(err.contains("url"), str(err))
     s.close()
 })
 

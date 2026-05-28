@@ -3,34 +3,34 @@ use "csv"
 
 testing.test("csv parse", lam{ in
     let data = csv.parse("name,age\nAda,36\nBob,25")
-    testing.assertEqual(len(data), 2, nil)
-    testing.assertEqual(data[0].name, "Ada", nil)
-    testing.assert(data[0].age == 36 || data[0].age == "36", "age is 36")
-    testing.assertEqual(data[1].name, "Bob", nil)
+    testing.expectEqual(len(data), 2, nil)
+    testing.expectEqual(data[0].name, "Ada", nil)
+    testing.expect(data[0].age == 36 || data[0].age == "36", "age is 36")
+    testing.expectEqual(data[1].name, "Bob", nil)
 })
 
 testing.test("csv parse quoted", lam{ in
     let data = csv.parse("name,bio\nAda,\"likes, commas\"")
-    testing.assertEqual(data[0].bio, "likes, commas", nil)
+    testing.expectEqual(data[0].bio, "likes, commas", nil)
 })
 
 testing.test("csv parseRaw", lam{ in
     let rows = csv.parseRaw("a,b,c\n1,2,3\n4,5,6")
-    testing.assertEqual(len(rows), 3, nil)
-    testing.assertEqual(rows[0], ["a", "b", "c"], nil)
-    testing.assertEqual(rows[1], ["1", "2", "3"], nil)
+    testing.expectEqual(len(rows), 3, nil)
+    testing.expectEqual(rows[0], ["a", "b", "c"], nil)
+    testing.expectEqual(rows[1], ["1", "2", "3"], nil)
 })
 
 testing.test("csv parseRow", lam{ in
-    testing.assertEqual(csv.parseRow("a,b,c"), ["a", "b", "c"], nil)
-    testing.assertEqual(csv.parseRow("\"hello, world\",b"), ["hello, world", "b"], nil)
+    testing.expectEqual(csv.parseRow("a,b,c"), ["a", "b", "c"], nil)
+    testing.expectEqual(csv.parseRow("\"hello, world\",b"), ["hello, world", "b"], nil)
 })
 
 testing.test("csv stringify", lam{ in
     let data = [{name: "Ada", age: "36"}, {name: "Bob", age: "25"}]
     let result = csv.stringify(data, ["name", "age"])
-    testing.assert(result.contains("name,age"), nil)
-    testing.assert(result.contains("Ada,36"), nil)
+    testing.expect(result.contains("name,age"), nil)
+    testing.expect(result.contains("Ada,36"), nil)
 })
 
 testing.done()

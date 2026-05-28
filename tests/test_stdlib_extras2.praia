@@ -4,48 +4,48 @@ use "testing"
 
 testing.test("delete existing key returns true", lam{ in
     let m = {a: 1, b: 2}
-    testing.assert(m.delete("a"), nil)
-    testing.assert(!m.has("a"), "key should be gone")
-    testing.assertEqual(m.b, 2, "other keys unchanged")
+    testing.expect(m.delete("a"), nil)
+    testing.expect(!m.has("a"), "key should be gone")
+    testing.expectEqual(m.b, 2, "other keys unchanged")
 })
 
 testing.test("delete missing key returns false", lam{ in
     let m = {a: 1}
-    testing.assert(!m.delete("z"), nil)
+    testing.expect(!m.delete("z"), nil)
 })
 
 testing.test("delete with non-string key", lam{ in
     let m = {[1]: "one", [2]: "two"}
     m.delete(1)
-    testing.assert(!m.has(1), nil)
-    testing.assert(m.has(2), nil)
+    testing.expect(!m.has(1), nil)
+    testing.expect(m.has(2), nil)
 })
 
 // ── map .merge() ──
 
 testing.test("merge combines maps", lam{ in
     let result = {a: 1}.merge({b: 2})
-    testing.assertEqual(result.a, 1, nil)
-    testing.assertEqual(result.b, 2, nil)
+    testing.expectEqual(result.a, 1, nil)
+    testing.expectEqual(result.b, 2, nil)
 })
 
 testing.test("merge overwrites duplicates", lam{ in
     let result = {a: 1, b: 2}.merge({b: 99, c: 3})
-    testing.assertEqual(result.b, 99, "second map wins")
-    testing.assertEqual(result.c, 3, nil)
+    testing.expectEqual(result.b, 99, "second map wins")
+    testing.expectEqual(result.c, 3, nil)
 })
 
 testing.test("merge returns new map", lam{ in
     let orig = {a: 1}
     let merged = orig.merge({b: 2})
-    testing.assert(!orig.has("b"), "original unchanged")
+    testing.expect(!orig.has("b"), "original unchanged")
 })
 
 testing.test("merge empty maps", lam{ in
     let r1 = {a: 1}.merge({})
-    testing.assertEqual(r1.a, 1, nil)
+    testing.expectEqual(r1.a, 1, nil)
     let r2 = {}.merge({b: 2})
-    testing.assertEqual(r2.b, 2, nil)
+    testing.expectEqual(r2.b, 2, nil)
 })
 
 // ── groupBy ──
@@ -53,29 +53,29 @@ testing.test("merge empty maps", lam{ in
 testing.test("groupBy groups elements", lam{ in
     let items = [{t: "a", v: 1}, {t: "b", v: 2}, {t: "a", v: 3}]
     let groups = items |> groupBy(lam{ x in x.t })
-    testing.assertEqual(len(groups.a), 2, nil)
-    testing.assertEqual(len(groups.b), 1, nil)
-    testing.assertEqual(groups.a[0].v, 1, nil)
-    testing.assertEqual(groups.a[1].v, 3, nil)
+    testing.expectEqual(len(groups.a), 2, nil)
+    testing.expectEqual(len(groups.b), 1, nil)
+    testing.expectEqual(groups.a[0].v, 1, nil)
+    testing.expectEqual(groups.a[1].v, 3, nil)
 })
 
 testing.test("groupBy with numbers", lam{ in
     let groups = [1, 2, 3, 4, 5, 6] |> groupBy(lam{ x in x % 2 == 0 ? "even" : "odd" })
-    testing.assertEqual(len(groups.even), 3, nil)
-    testing.assertEqual(len(groups.odd), 3, nil)
+    testing.expectEqual(len(groups.even), 3, nil)
+    testing.expectEqual(len(groups.odd), 3, nil)
 })
 
 testing.test("groupBy empty array", lam{ in
     let groups = [] |> groupBy(lam{ x in x })
-    testing.assertEqual(len(keys(groups)), 0, nil)
+    testing.expectEqual(len(keys(groups)), 0, nil)
 })
 
 // ── sys.envAll ──
 
 testing.test("envAll returns map with PATH", lam{ in
     let env = sys.envAll()
-    testing.assert(env.has("PATH"), "PATH should exist")
-    testing.assert(len(env.get("PATH", "")) > 0, "PATH should be non-empty")
+    testing.expect(env.has("PATH"), "PATH should exist")
+    testing.expect(len(env.get("PATH", "")) > 0, "PATH should be non-empty")
 })
 
 // ── sys.chdir ──
@@ -85,12 +85,12 @@ testing.test("chdir changes directory", lam{ in
     sys.chdir("/tmp")
     let after = sys.cwd()
     sys.chdir(orig)
-    testing.assert(after.contains("tmp"), nil)
-    testing.assertEqual(sys.cwd(), orig, "restored")
+    testing.expect(after.contains("tmp"), nil)
+    testing.expectEqual(sys.cwd(), orig, "restored")
 })
 
 testing.test("chdir invalid path throws", lam{ in
-    testing.assertThrows(lam{ in sys.chdir("/nonexistent_dir_12345") }, nil)
+    testing.expectThrows(lam{ in sys.chdir("/nonexistent_dir_12345") }, nil)
 })
 
 // ── fs.readLines ──
@@ -99,10 +99,10 @@ testing.test("readLines returns array of lines", lam{ in
     let tmpFile = "/tmp/praia_test_readlines.txt"
     fs.write(tmpFile, "alpha\nbeta\ngamma\n")
     let lines = fs.readLines(tmpFile)
-    testing.assertEqual(len(lines), 3, nil)
-    testing.assertEqual(lines[0], "alpha", nil)
-    testing.assertEqual(lines[1], "beta", nil)
-    testing.assertEqual(lines[2], "gamma", nil)
+    testing.expectEqual(len(lines), 3, nil)
+    testing.expectEqual(lines[0], "alpha", nil)
+    testing.expectEqual(lines[1], "beta", nil)
+    testing.expectEqual(lines[2], "gamma", nil)
     fs.remove(tmpFile)
 })
 
@@ -110,12 +110,12 @@ testing.test("readLines empty file", lam{ in
     let tmpFile = "/tmp/praia_test_empty.txt"
     fs.write(tmpFile, "")
     let lines = fs.readLines(tmpFile)
-    testing.assertEqual(len(lines), 0, nil)
+    testing.expectEqual(len(lines), 0, nil)
     fs.remove(tmpFile)
 })
 
 testing.test("readLines nonexistent file throws", lam{ in
-    testing.assertThrows(lam{ in fs.readLines("/nonexistent_file.txt") }, nil)
+    testing.expectThrows(lam{ in fs.readLines("/nonexistent_file.txt") }, nil)
 })
 
 testing.done()

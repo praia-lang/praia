@@ -24,31 +24,31 @@ class Dog extends Animal {
 
 testing.test("instance fields and methods", lam{ in
     let a = Animal("Leo")
-    testing.assertEqual(a.name, "Leo", nil)
-    testing.assertEqual(a.speak(), "Leo makes a noise", nil)
+    testing.expectEqual(a.name, "Leo", nil)
+    testing.expectEqual(a.speak(), "Leo makes a noise", nil)
 })
 
 testing.test("inheritance and override", lam{ in
     let d = Dog("Rex", "husky")
-    testing.assertEqual(d.name, "Rex", nil)
-    testing.assertEqual(d.breed, "husky", nil)
-    testing.assertEqual(d.speak(), "Rex barks", nil)
+    testing.expectEqual(d.name, "Rex", nil)
+    testing.expectEqual(d.breed, "husky", nil)
+    testing.expectEqual(d.speak(), "Rex barks", nil)
 })
 
 testing.test("super", lam{ in
     let d = Dog("Rex", "husky")
-    testing.assertEqual(d.describe(), "Rex makes a noise (it's a husky)", nil)
+    testing.expectEqual(d.describe(), "Rex makes a noise (it's a husky)", nil)
 })
 
 testing.test("field assignment", lam{ in
     let a = Animal("Cat")
     a.name = "Whiskers"
-    testing.assertEqual(a.name, "Whiskers", nil)
+    testing.expectEqual(a.name, "Whiskers", nil)
 })
 
 testing.test("isInstance-like type check", lam{ in
     let a = Animal("X")
-    testing.assertEqual(type(a), "instance", nil)
+    testing.expectEqual(type(a), "instance", nil)
 })
 
 testing.done()

@@ -53,15 +53,15 @@ let base = "http://localhost:" + str(_state.get("port", 0))
 
 testing.test("openStream follows 302 to the final body by default", lam{ in
     let s = http.openStream({url: base + "/redirect"})
-    testing.assertEqual(s.status, 200, "ended at /contentlength")
-    testing.assert(s.readAll().contains("Hello streaming world"), nil)
+    testing.expectEqual(s.status, 200, "ended at /contentlength")
+    testing.expect(s.readAll().contains("Hello streaming world"), nil)
     s.close()
 })
 
 testing.test("followRedirects: false returns the 3xx stream", lam{ in
     let s = http.openStream({url: base + "/redirect", followRedirects: false})
-    testing.assertEqual(s.status, 302, nil)
-    testing.assertEqual(s.headers["location"], "/contentlength", nil)
+    testing.expectEqual(s.status, 302, nil)
+    testing.expectEqual(s.headers["location"], "/contentlength", nil)
     s.close()
 })
 
@@ -70,25 +70,25 @@ testing.test("followRedirects: false returns the 3xx stream", lam{ in
 testing.test("read / readLine / readAll / eof after close throw", lam{ in
     let s = http.openStream({url: base + "/contentlength"})
     s.close()
-    testing.assertThrows(lam{ in s.read(1) },    "is closed")
-    testing.assertThrows(lam{ in s.readLine() }, "is closed")
-    testing.assertThrows(lam{ in s.readAll() },  "is closed")
-    testing.assertEqual(s.eof(), true, "eof() is true after close (not a throw)")
+    testing.expectThrows(lam{ in s.read(1) },    "is closed")
+    testing.expectThrows(lam{ in s.readLine() }, "is closed")
+    testing.expectThrows(lam{ in s.readAll() },  "is closed")
+    testing.expectEqual(s.eof(), true, "eof() is true after close (not a throw)")
 })
 
 testing.test("close is idempotent", lam{ in
     let s = http.openStream({url: base + "/contentlength"})
     s.close()
     s.close()
-    testing.assert(true, "second close did not throw")
+    testing.expect(true, "second close did not throw")
 })
 
 testing.test("openStream requires a url", lam{ in
-    testing.assertThrows(lam{ in http.openStream({}) }, "'url'")
+    testing.expectThrows(lam{ in http.openStream({}) }, "'url'")
 })
 
 testing.test("openStream requires a map", lam{ in
-    testing.assertThrows(lam{ in http.openStream("http://x") }, "options map")
+    testing.expectThrows(lam{ in http.openStream("http://x") }, "options map")
 })
 
 testing.test("dropped stream handles release their fd (RAII cleanup)", lam{ in
@@ -105,7 +105,7 @@ testing.test("dropped stream handles release their fd (RAII cleanup)", lam{ in
         let _ = s.readAll()
         // intentionally NO s.close() — relies on RAII
     }
-    testing.assert(true, "completed 300 implicit-close streams without exhausting fds")
+    testing.expect(true, "completed 300 implicit-close streams without exhausting fds")
 })
 
 testing.done()

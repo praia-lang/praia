@@ -1,74 +1,74 @@
 use "testing"
 
 testing.test("hex literal basic", lam{ in
-    testing.assertEqual(0xFF, 255, nil)
-    testing.assertEqual(0x0, 0, nil)
-    testing.assertEqual(0x10, 16, nil)
-    testing.assertEqual(0xCAFE, 51966, nil)
+    testing.expectEqual(0xFF, 255, nil)
+    testing.expectEqual(0x0, 0, nil)
+    testing.expectEqual(0x10, 16, nil)
+    testing.expectEqual(0xCAFE, 51966, nil)
 })
 
 testing.test("hex literal type is int", lam{ in
-    testing.assertEqual(type(0xFF), "int", nil)
+    testing.expectEqual(type(0xFF), "int", nil)
 })
 
 testing.test("hex in arithmetic", lam{ in
-    testing.assertEqual(0xFF + 1, 256, nil)
-    testing.assertEqual(0x10 * 2, 32, nil)
+    testing.expectEqual(0xFF + 1, 256, nil)
+    testing.expectEqual(0x10 * 2, 32, nil)
 })
 
 testing.test("hex in bitwise", lam{ in
-    testing.assertEqual(0xFF & 0x0F, 15, nil)
-    testing.assertEqual(0xF0 | 0x0F, 255, nil)
-    testing.assertEqual(0xFF ^ 0xFF, 0, nil)
+    testing.expectEqual(0xFF & 0x0F, 15, nil)
+    testing.expectEqual(0xF0 | 0x0F, 255, nil)
+    testing.expectEqual(0xFF ^ 0xFF, 0, nil)
 })
 
 testing.test("hex in arrays", lam{ in
     let arr = [0x01, 0x02, 0xFF]
-    testing.assertEqual(arr, [1, 2, 255], nil)
+    testing.expectEqual(arr, [1, 2, 255], nil)
 })
 
 testing.test("hex in comparisons", lam{ in
-    testing.assert(0xFF > 0xFE, "FF > FE")
-    testing.assertEqual(0x100, 256, nil)
+    testing.expect(0xFF > 0xFE, "FF > FE")
+    testing.expectEqual(0x100, 256, nil)
 })
 
 // ── Binary literals ──
 
 testing.test("binary literals", lam{ in
-    testing.assertEqual(0b0, 0, nil)
-    testing.assertEqual(0b1010, 10, nil)
-    testing.assertEqual(0b11111111, 255, nil)
-    testing.assertEqual(type(0b1010), "int", nil)
+    testing.expectEqual(0b0, 0, nil)
+    testing.expectEqual(0b1010, 10, nil)
+    testing.expectEqual(0b11111111, 255, nil)
+    testing.expectEqual(type(0b1010), "int", nil)
 })
 
 // ── Octal literals ──
 
 testing.test("octal literals", lam{ in
-    testing.assertEqual(0o0, 0, nil)
-    testing.assertEqual(0o17, 15, nil)
-    testing.assertEqual(0o755, 493, nil)
-    testing.assertEqual(type(0o17), "int", nil)
+    testing.expectEqual(0o0, 0, nil)
+    testing.expectEqual(0o17, 15, nil)
+    testing.expectEqual(0o755, 493, nil)
+    testing.expectEqual(type(0o17), "int", nil)
 })
 
 // ── Scientific notation ──
 
 testing.test("scientific notation", lam{ in
-    testing.assertEqual(1e3, 1000, nil)
-    testing.assertEqual(type(1e3), "float", nil)
-    testing.assertEqual(2.5e2, 250, nil)
-    testing.assertEqual(1e0, 1, nil)
-    testing.assert(math.approx(2.5e-4, 0.00025), nil)
+    testing.expectEqual(1e3, 1000, nil)
+    testing.expectEqual(type(1e3), "float", nil)
+    testing.expectEqual(2.5e2, 250, nil)
+    testing.expectEqual(1e0, 1, nil)
+    testing.expect(math.approx(2.5e-4, 0.00025), nil)
 })
 
 // ── Number separators ──
 
 testing.test("number separators", lam{ in
-    testing.assertEqual(1_000_000, 1000000, nil)
-    testing.assertEqual(0xFF_FF, 65535, nil)
-    testing.assertEqual(0b1010_0101, 165, nil)
-    testing.assertEqual(0o7_5_5, 493, nil)
-    testing.assertEqual(1_000.5, 1000.5, nil)
-    testing.assertEqual(type(1_000), "int", nil)
+    testing.expectEqual(1_000_000, 1000000, nil)
+    testing.expectEqual(0xFF_FF, 65535, nil)
+    testing.expectEqual(0b1010_0101, 165, nil)
+    testing.expectEqual(0o7_5_5, 493, nil)
+    testing.expectEqual(1_000.5, 1000.5, nil)
+    testing.expectEqual(type(1_000), "int", nil)
 })
 
 testing.done()

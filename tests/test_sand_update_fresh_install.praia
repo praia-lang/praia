@@ -57,9 +57,9 @@ testing.test("update sand from a user-global install with an empty lockfile", la
         ["env", "HOME=" + sandHome, praiaBin, sandMain, "update", "sand"],
         5000)
     let out = r.stdout + r.stderr
-    testing.assert(!out.contains("No grains installed"),
+    testing.expect(!out.contains("No grains installed"),
         "update sand must not short-circuit on empty lockfile: " + out)
-    testing.assert(out.contains("Updating sand"),
+    testing.expect(out.contains("Updating sand"),
         "update sand must reach updateOne: " + out)
 })
 
@@ -86,11 +86,11 @@ testing.test("synth sees a system-installed sand (PRAIA_LIBDIR) even as non-root
         ["env", "HOME=" + sandHome, praiaBin, sandMain, "update", "sand"],
         5000)
     let out = r.stdout + r.stderr
-    testing.assert(!out.contains("No grains installed"),
+    testing.expect(!out.contains("No grains installed"),
         "system-installed sand must be reachable via synth: " + out)
-    testing.assert(!out.contains("not installed"),
+    testing.expect(!out.contains("not installed"),
         "synth must return a valid entry for system-installed sand: " + out)
-    testing.assert(out.contains("Updating sand"),
+    testing.expect(out.contains("Updating sand"),
         "update sand must reach updateOne: " + out)
 })
 

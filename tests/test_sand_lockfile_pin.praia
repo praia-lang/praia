@@ -63,33 +63,33 @@ testing.test("install records commit SHA and integrity in the lockfile", lam{ in
     let [grain, sha] = makeGrain("pinme", "let v = 1\nexport { v }\n")
 
     let r = runSand(["install", "-g", "file://" + grain])
-    testing.assertEqual(r.exitCode, 0, "install: " + r.stderr)
+    testing.expectEqual(r.exitCode, 0, "install: " + r.stderr)
 
     let lock = fs.read(path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml"))
-    testing.assert(lock.contains("commit: %{sha}"),
+    testing.expect(lock.contains("commit: %{sha}"),
         "lockfile records the full HEAD SHA: " + lock)
-    testing.assert(lock.contains("integrity: sha256-"),
+    testing.expect(lock.contains("integrity: sha256-"),
         "lockfile records an sha256 integrity hash: " + lock)
 
     let cleanup = runSand(["remove", "-g", "-y", "pinme"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 testing.test("restore from lockfile re-installs the pinned commit, not the branch tip", lam{ in
     // Install at v1, capture lock contents.
     let [grain, sha1] = makeGrain("driftless", "let v = 1\nexport { v }\n")
     let r1 = runSand(["install", "-g", "file://" + grain])
-    testing.assertEqual(r1.exitCode, 0, "install: " + r1.stderr)
+    testing.expectEqual(r1.exitCode, 0, "install: " + r1.stderr)
 
     let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
     let lockBefore = fs.read(lockPath)
-    testing.assert(lockBefore.contains("commit: %{sha1}"),
+    testing.expect(lockBefore.contains("commit: %{sha1}"),
         "lockfile pins v1's SHA")
 
     // Source repo moves forward. Without a SHA pin, a restore would
     // silently install the new revision.
     let sha2 = bumpGrain(grain, "let v = 2\nexport { v }\n")
-    testing.assert(sha1 != sha2, "bump produced a new commit")
+    testing.expect(sha1 != sha2, "bump produced a new commit")
 
     // Tear down the local install — but keep the lockfile, which is
     // what `sand install` (no args) restores from.
@@ -97,11 +97,11 @@ testing.test("restore from lockfile re-installs the pinned commit, not the branc
     fs.remove(grainDir)
 
     let r2 = runSand(["install", "-g"])
-    testing.assertEqual(r2.exitCode, 0, "restore: " + r2.stderr)
+    testing.expectEqual(r2.exitCode, 0, "restore: " + r2.stderr)
 
     // Content must be v1 (pinned), not v2 (current branch tip).
     let restoredMain = fs.read(path.join(grainDir, "main.praia"))
-    testing.assertEqual(restoredMain, "let v = 1\nexport { v }\n",
+    testing.expectEqual(restoredMain, "let v = 1\nexport { v }\n",
         "restore brought back the pinned content")
 
     // And the lockfile entry — including commit and integrity — must
@@ -109,17 +109,17 @@ testing.test("restore from lockfile re-installs the pinned commit, not the branc
     // restore deterministic; a successful restore that mutated the
     // lock would defeat the whole point.
     let lockAfter = fs.read(lockPath)
-    testing.assertEqual(lockAfter, lockBefore,
+    testing.expectEqual(lockAfter, lockBefore,
         "lockfile is byte-identical after a clean restore")
 
     let cleanup = runSand(["remove", "-g", "-y", "driftless"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 testing.test("restore aborts when integrity does not match", lam{ in
     let [grain, sha] = makeGrain("verifyme", "let v = 1\nexport { v }\n")
     let r = runSand(["install", "-g", "file://" + grain])
-    testing.assertEqual(r.exitCode, 0, "install: " + r.stderr)
+    testing.expectEqual(r.exitCode, 0, "install: " + r.stderr)
 
     // Corrupt the recorded integrity hash. The pinned SHA still
     // points to valid content, so the only thing protecting us from
@@ -129,16 +129,16 @@ testing.test("restore aborts when integrity does not match", lam{ in
     let lock = fs.read(lockPath)
     let mangled = lock.replace("integrity: sha256-",
                                 "integrity: sha256-deadbeef")
-    testing.assert(mangled != lock, "managed to corrupt integrity line")
+    testing.expect(mangled != lock, "managed to corrupt integrity line")
     fs.write(lockPath, mangled)
 
     let grainDir = path.join(sandHome, ".praia", "ext_grains", "verifyme")
     fs.remove(grainDir)
 
     let r2 = runSand(["install", "-g"])
-    testing.assert(r2.exitCode != 0,
+    testing.expect(r2.exitCode != 0,
         "restore must fail when integrity check fails (exit=" + str(r2.exitCode) + ")")
-    testing.assert((r2.stdout + r2.stderr).contains("integrity"),
+    testing.expect((r2.stdout + r2.stderr).contains("integrity"),
         "error mentions integrity: " + r2.stdout + r2.stderr)
 
     // Roll the lockfile back so subsequent tests have a clean state.
@@ -162,13 +162,13 @@ testing.test("install with @version stores bare source (no double-pin on restore
     sys.exec(["git", "-C", grain, "tag", "v1"])
 
     let r1 = runSand(["install", "-g", "file://" + grain + "@v1"])
-    testing.assertEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
+    testing.expectEqual(r1.exitCode, 0, "v1 install: " + r1.stderr)
 
     let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
     let lock = fs.read(lockPath)
-    testing.assert(lock.contains("source: " + "file://" + grain + "\n"),
+    testing.expect(lock.contains("source: " + "file://" + grain + "\n"),
         "source stored without @version suffix: " + lock)
-    testing.assert(lock.contains("version: v1"),
+    testing.expect(lock.contains("version: v1"),
         "version recorded separately: " + lock)
 
     // Tear down the local install and restore from the lockfile.
@@ -176,13 +176,13 @@ testing.test("install with @version stores bare source (no double-pin on restore
     fs.remove(grainDir)
 
     let r2 = runSand(["install", "-g"])
-    testing.assertEqual(r2.exitCode, 0,
+    testing.expectEqual(r2.exitCode, 0,
         "restore (no double-pin) succeeds: " + r2.stderr)
-    testing.assert(fs.exists(grainDir),
+    testing.expect(fs.exists(grainDir),
         "grain reinstalled at the pinned version")
 
     let cleanup = runSand(["remove", "-g", "-y", "pinned"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 testing.test("restore tolerates an old-format lockfile with @version embedded in source", lam{ in
@@ -207,14 +207,14 @@ testing.test("restore tolerates an old-format lockfile with @version embedded in
         "    installed: 2026-05-20\n")
 
     let r = runSand(["install", "-g"])
-    testing.assertEqual(r.exitCode, 0,
+    testing.expectEqual(r.exitCode, 0,
         "restore from old-format lockfile succeeds: " + r.stderr)
     let grainDir = path.join(extGrains, "migrate")
-    testing.assert(fs.exists(grainDir),
+    testing.expect(fs.exists(grainDir),
         "old-format lockfile restored without double-pin")
 
     let cleanup = runSand(["remove", "-g", "-y", "migrate"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 testing.test("update short-circuits when the remote SHA matches the lockfile", lam{ in
@@ -225,7 +225,7 @@ testing.test("update short-circuits when the remote SHA matches the lockfile", l
     let g = makeGrain("nochange", "let v = 1\nexport { v }\n")
     let grain = g[0]
     let r1 = runSand(["install", "-g", "file://" + grain])
-    testing.assertEqual(r1.exitCode, 0, "install: " + r1.stderr)
+    testing.expectEqual(r1.exitCode, 0, "install: " + r1.stderr)
 
     let grainDir = path.join(sandHome, ".praia", "ext_grains", "nochange")
     let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
@@ -234,17 +234,17 @@ testing.test("update short-circuits when the remote SHA matches the lockfile", l
 
     // No remote change between install and update.
     let r2 = runSand(["update", "-g", "nochange"])
-    testing.assertEqual(r2.exitCode, 0, "update no-op: " + r2.stderr)
-    testing.assert(r2.stdout.contains("up to date"),
+    testing.expectEqual(r2.exitCode, 0, "update no-op: " + r2.stderr)
+    testing.expect(r2.stdout.contains("up to date"),
         "update reports no-op: " + r2.stdout)
     // Nothing on disk should change.
-    testing.assertEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
+    testing.expectEqual(fs.read(path.join(grainDir, "main.praia")), mainBefore,
         "grain content untouched on no-op update")
-    testing.assertEqual(fs.read(lockPath), lockBefore,
+    testing.expectEqual(fs.read(lockPath), lockBefore,
         "lockfile untouched on no-op update")
 
     let cleanup = runSand(["remove", "-g", "-y", "nochange"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 testing.test("update still re-installs when the remote has moved", lam{ in
@@ -253,24 +253,24 @@ testing.test("update still re-installs when the remote has moved", lam{ in
     let g = makeGrain("moved", "let v = 1\nexport { v }\n")
     let grain = g[0]
     let r1 = runSand(["install", "-g", "file://" + grain])
-    testing.assertEqual(r1.exitCode, 0, "install: " + r1.stderr)
+    testing.expectEqual(r1.exitCode, 0, "install: " + r1.stderr)
 
     let lockPath = path.join(sandHome, ".praia", "ext_grains", ".sand-lock.yaml")
     let lockBefore = fs.read(lockPath)
     let newSha = bumpGrain(grain, "let v = 2\nexport { v }\n")
 
     let r2 = runSand(["update", "-g", "moved"])
-    testing.assertEqual(r2.exitCode, 0, "update: " + r2.stderr)
-    testing.assert(!r2.stdout.contains("up to date"),
+    testing.expectEqual(r2.exitCode, 0, "update: " + r2.stderr)
+    testing.expect(!r2.stdout.contains("up to date"),
         "remote-moved update is not skipped: " + r2.stdout)
     let lockAfter = fs.read(lockPath)
-    testing.assert(lockAfter != lockBefore,
+    testing.expect(lockAfter != lockBefore,
         "lockfile updated when remote moves")
-    testing.assert(lockAfter.contains("commit: " + newSha),
+    testing.expect(lockAfter.contains("commit: " + newSha),
         "new commit SHA recorded: " + lockAfter)
 
     let cleanup = runSand(["remove", "-g", "-y", "moved"])
-    testing.assertEqual(cleanup.exitCode, 0, cleanup.stderr)
+    testing.expectEqual(cleanup.exitCode, 0, cleanup.stderr)
 })
 
 sys.exec(["rm", "-rf", sandHome, fixtureRoot])

@@ -14,9 +14,9 @@ testing.test("class with init and methods", lam{ in
         }
     }
     let p = Point(3, 4)
-    testing.assertEqual(p.x, 3, nil)
-    testing.assertEqual(p.magnitude(), 5, nil)
-    testing.assertEqual(p.format(), "(3, 4)", nil)
+    testing.expectEqual(p.x, 3, nil)
+    testing.expectEqual(p.magnitude(), 5, nil)
+    testing.expectEqual(p.format(), "(3, 4)", nil)
 })
 
 testing.test("multi-level inheritance with super", lam{ in
@@ -29,9 +29,9 @@ testing.test("multi-level inheritance with super", lam{ in
     class C extends B {
         func greet() { return "C+" + super.greet() }
     }
-    testing.assertEqual(A().greet(), "A", nil)
-    testing.assertEqual(B().greet(), "B+A", nil)
-    testing.assertEqual(C().greet(), "C+B+A", nil)
+    testing.expectEqual(A().greet(), "A", nil)
+    testing.expectEqual(B().greet(), "B+A", nil)
+    testing.expectEqual(C().greet(), "C+B+A", nil)
 })
 
 testing.test("inherited method with super does not recurse", lam{ in
@@ -42,7 +42,7 @@ testing.test("inherited method with super does not recurse", lam{ in
         func m() { return "mid+" + super.m() }
     }
     class Leaf extends Mid {}
-    testing.assertEqual(Leaf().m(), "mid+base", nil)
+    testing.expectEqual(Leaf().m(), "mid+base", nil)
 })
 
 testing.test("inherited init", lam{ in
@@ -52,8 +52,8 @@ testing.test("inherited init", lam{ in
     }
     class Dog extends Animal {}
     let d = Dog("Rex")
-    testing.assertEqual(d.name, "Rex", nil)
-    testing.assertEqual(d.speak(), "Rex", nil)
+    testing.expectEqual(d.name, "Rex", nil)
+    testing.expectEqual(d.speak(), "Rex", nil)
 })
 
 testing.test("method default params", lam{ in
@@ -61,8 +61,8 @@ testing.test("method default params", lam{ in
         func add(a, b = 10) { return a + b }
     }
     let c = Calc()
-    testing.assertEqual(c.add(5), 15, nil)
-    testing.assertEqual(c.add(5, 3), 8, nil)
+    testing.expectEqual(c.add(5), 15, nil)
+    testing.expectEqual(c.add(5, 3), 8, nil)
 })
 
 testing.test("str() calls toString()", lam{ in
@@ -71,7 +71,7 @@ testing.test("str() calls toString()", lam{ in
         func toString() { return this.name }
     }
     let p = Person("Ada")
-    testing.assertEqual(str(p), "Ada", nil)
+    testing.expectEqual(str(p), "Ada", nil)
 })
 
 testing.done()

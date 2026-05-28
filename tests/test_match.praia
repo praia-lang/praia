@@ -6,7 +6,7 @@ testing.test("match literal strings", lam{ in
         "world" { result = "world" }
         "hello" { result = "hello" }
     }
-    testing.assertEqual(result, "hello", nil)
+    testing.expectEqual(result, "hello", nil)
 })
 
 testing.test("match integers", lam{ in
@@ -16,7 +16,7 @@ testing.test("match integers", lam{ in
         2 { result = 20 }
         3 { result = 30 }
     }
-    testing.assertEqual(result, 20, nil)
+    testing.expectEqual(result, 20, nil)
 })
 
 testing.test("match with default", lam{ in
@@ -26,7 +26,7 @@ testing.test("match with default", lam{ in
         "b" { result = "b" }
         _ { result = "default" }
     }
-    testing.assertEqual(result, "default", nil)
+    testing.expectEqual(result, "default", nil)
 })
 
 testing.test("match no case hit and no default", lam{ in
@@ -35,7 +35,7 @@ testing.test("match no case hit and no default", lam{ in
         "a" { result = "a" }
         "b" { result = "b" }
     }
-    testing.assertEqual(result, "untouched", nil)
+    testing.expectEqual(result, "untouched", nil)
 })
 
 testing.test("match first case wins", lam{ in
@@ -44,7 +44,7 @@ testing.test("match first case wins", lam{ in
         "x" { result = "first" }
         "x" { result = "second" }
     }
-    testing.assertEqual(result, "first", nil)
+    testing.expectEqual(result, "first", nil)
 })
 
 testing.test("match expression subject", lam{ in
@@ -54,7 +54,7 @@ testing.test("match expression subject", lam{ in
         2 { result = 2 }
         3 { result = 3 }
     }
-    testing.assertEqual(result, 2, nil)
+    testing.expectEqual(result, 2, nil)
 })
 
 testing.test("match expression patterns", lam{ in
@@ -65,7 +65,7 @@ testing.test("match expression patterns", lam{ in
         x * 2 { result = "ten" }
         x { result = "five" }
     }
-    testing.assertEqual(result, "ten", nil)
+    testing.expectEqual(result, "ten", nil)
 })
 
 testing.test("match with variables", lam{ in
@@ -77,7 +77,7 @@ testing.test("match with variables", lam{ in
         "restart" { result = "restarting" }
         _ { result = "unknown" }
     }
-    testing.assertEqual(result, "restarting", nil)
+    testing.expectEqual(result, "restarting", nil)
 })
 
 testing.test("match booleans", lam{ in
@@ -86,7 +86,7 @@ testing.test("match booleans", lam{ in
         false { result = "no" }
         true { result = "yes" }
     }
-    testing.assertEqual(result, "yes", nil)
+    testing.expectEqual(result, "yes", nil)
 })
 
 testing.test("match nil", lam{ in
@@ -96,7 +96,7 @@ testing.test("match nil", lam{ in
         false { result = "false" }
         nil { result = "nil" }
     }
-    testing.assertEqual(result, "nil", nil)
+    testing.expectEqual(result, "nil", nil)
 })
 
 testing.test("match with function calls in body", lam{ in
@@ -106,7 +106,7 @@ testing.test("match with function calls in body", lam{ in
         "go" { result = double(21) }
         _ { result = -1 }
     }
-    testing.assertEqual(result, 42, nil)
+    testing.expectEqual(result, 42, nil)
 })
 
 testing.test("match default only", lam{ in
@@ -114,7 +114,7 @@ testing.test("match default only", lam{ in
     match ("anything") {
         _ { result = "caught" }
     }
-    testing.assertEqual(result, "caught", nil)
+    testing.expectEqual(result, "caught", nil)
 })
 
 testing.test("match with operator overloading", lam{ in
@@ -134,7 +134,7 @@ testing.test("match with operator overloading", lam{ in
         Point(1, 2) { result = "one-two" }
         _ { result = "other" }
     }
-    testing.assertEqual(result, "one-two", nil)
+    testing.expectEqual(result, "one-two", nil)
 })
 
 // ── Type patterns ──
@@ -146,7 +146,7 @@ testing.test("match is type string", lam{ in
         is "int"    { result = "int" }
         _           { result = "other" }
     }
-    testing.assertEqual(result, "int", nil)
+    testing.expectEqual(result, "int", nil)
 })
 
 testing.test("match is type checks all types", lam{ in
@@ -163,7 +163,7 @@ testing.test("match is type checks all types", lam{ in
             is "map"    { push(types, "map") }
         }
     }
-    testing.assertEqual(types, ["string", "int", "float", "bool", "nil", "array", "map"], nil)
+    testing.expectEqual(types, ["string", "int", "float", "bool", "nil", "array", "map"], nil)
 })
 
 testing.test("match is class with inheritance", lam{ in
@@ -178,7 +178,7 @@ testing.test("match is class with inheritance", lam{ in
         is Dog    { result = "dog" }
         is Animal { result = "animal" }
     }
-    testing.assertEqual(result, "dog", nil)
+    testing.expectEqual(result, "dog", nil)
 })
 
 // ── Guard clauses ──
@@ -192,7 +192,7 @@ testing.test("match when guard", lam{ in
         when score >= 70 { result = "C" }
         _                { result = "F" }
     }
-    testing.assertEqual(result, "B", nil)
+    testing.expectEqual(result, "B", nil)
 })
 
 testing.test("match when with default fallthrough", lam{ in
@@ -203,7 +203,7 @@ testing.test("match when with default fallthrough", lam{ in
         when x > 75  { result = "medium" }
         _            { result = "small" }
     }
-    testing.assertEqual(result, "small", nil)
+    testing.expectEqual(result, "small", nil)
 })
 
 // ── Combined patterns ──
@@ -216,7 +216,7 @@ testing.test("match mixed equality and guards", lam{ in
         when x > 0  { result = "positive" }
         when x < 0  { result = "negative" }
     }
-    testing.assertEqual(result, "negative", nil)
+    testing.expectEqual(result, "negative", nil)
 })
 
 testing.test("match mixed is and equality", lam{ in
@@ -226,7 +226,7 @@ testing.test("match mixed is and equality", lam{ in
         "hello"   { result = "greeting" }
         _         { result = "other" }
     }
-    testing.assertEqual(result, "greeting", nil)
+    testing.expectEqual(result, "greeting", nil)
 })
 
 testing.test("match no case hit with guards", lam{ in
@@ -236,7 +236,7 @@ testing.test("match no case hit with guards", lam{ in
         when x > 10 { result = "big" }
         when x < 0  { result = "negative" }
     }
-    testing.assertEqual(result, "untouched", nil)
+    testing.expectEqual(result, "untouched", nil)
 })
 
 testing.done()

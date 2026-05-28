@@ -32,27 +32,27 @@ if (!fs.exists(pluginPath)) {
 let cmod = loadNative(pluginPath)
 
 testing.test("C facade: _meta is populated from PRAIA_C_PLUGIN_METADATA", lam{ in
-    testing.assertEqual(cmod._meta.name, "cmod", nil)
-    testing.assertEqual(cmod._meta.version, "0.1.0", nil)
-    testing.assert(cmod._meta.description.contains("Pure-C"),
+    testing.expectEqual(cmod._meta.name, "cmod", nil)
+    testing.expectEqual(cmod._meta.version, "0.1.0", nil)
+    testing.expect(cmod._meta.description.contains("Pure-C"),
                    "description survives the macro round-trip")
 })
 
 testing.test("C facade: string round-trip via praia_value_string/as_string", lam{ in
-    testing.assertEqual(cmod.greet("world"), "hello, world", nil)
-    testing.assertEqual(cmod.greet("Viggo"), "hello, Viggo", nil)
+    testing.expectEqual(cmod.greet("world"), "hello, world", nil)
+    testing.expectEqual(cmod.greet("Viggo"), "hello, Viggo", nil)
 })
 
 testing.test("C facade: integer ops + arg-count validation", lam{ in
-    testing.assertEqual(cmod.add(2, 3), 5, nil)
-    testing.assertEqual(cmod.add(-100, 50), -50, nil)
+    testing.expectEqual(cmod.add(2, 3), 5, nil)
+    testing.expectEqual(cmod.add(-100, 50), -50, nil)
 })
 
 testing.test("C facade: praia_throw surfaces as a RuntimeError on the engine side", lam{ in
     let caught = nil
     try { cmod.boom() } catch (e) { caught = str(e) }
-    testing.assert(caught != nil, "boom should throw")
-    testing.assert(caught.contains("deliberate"),
+    testing.expect(caught != nil, "boom should throw")
+    testing.expect(caught.contains("deliberate"),
                    "thrown message round-trips: %{caught}")
 })
 
@@ -63,7 +63,7 @@ testing.test("C facade: native that returns NULL without praia_throw still throw
     // in the facade.
     let caught = nil
     try { cmod.add("not", "ints") } catch (e) { caught = str(e) }
-    testing.assert(caught.contains("must be ints"),
+    testing.expect(caught.contains("must be ints"),
                    "type-error message round-trips: %{caught}")
 })
 
@@ -71,11 +71,11 @@ testing.test("C facade: external handle deleter fires deterministically on drop"
     let before = cmod.box_freed_count()
     let h = cmod.box()
     // While the handle is live, unwrap reads the underlying int.
-    testing.assertEqual(cmod.box_unwrap(h), 42, "external pointer dereferences")
-    testing.assertEqual(cmod.box_freed_count(), before,
+    testing.expectEqual(cmod.box_unwrap(h), 42, "external pointer dereferences")
+    testing.expectEqual(cmod.box_freed_count(), before,
                        "deleter doesn't fire while a reference exists")
     h = nil
-    testing.assertEqual(cmod.box_freed_count() - before, 1,
+    testing.expectEqual(cmod.box_freed_count() - before, 1,
                        "deleter fires exactly once when the last reference drops")
 })
 
@@ -83,22 +83,22 @@ testing.test("C facade: external handle type guard catches type confusion", lam{
     // Passing a non-external to box_unwrap should throw, not segfault.
     let caught = nil
     try { cmod.box_unwrap("not a handle") } catch (e) { caught = str(e) }
-    testing.assert(caught != nil, "type guard fires")
-    testing.assert(caught.contains("external") || caught.contains("type"),
+    testing.expect(caught != nil, "type guard fires")
+    testing.expect(caught.contains("external") || caught.contains("type"),
                    "diagnostic mentions the type-confusion: %{caught}")
 })
 
 testing.test("C facade: map construction via praia_value_new_map + map_set", lam{ in
     let m = cmod.dict("answer", 42)
-    testing.assertEqual(m.answer, 42, nil)
+    testing.expectEqual(m.answer, 42, nil)
     let m2 = cmod.dict("greeting", "hello")
-    testing.assertEqual(m2.greeting, "hello", "string values round-trip too")
+    testing.expectEqual(m2.greeting, "hello", "string values round-trip too")
 })
 
 testing.test("C facade: arity mismatch caught by the engine before the callback runs", lam{ in
     let caught = nil
     try { cmod.add(1) } catch (e) { caught = str(e) }
-    testing.assert(caught != nil, "engine throws on arity mismatch")
+    testing.expect(caught != nil, "engine throws on arity mismatch")
 })
 
 testing.test("C facade: add overflow guard fires instead of UB-ing", lam{ in
@@ -107,8 +107,8 @@ testing.test("C facade: add overflow guard fires instead of UB-ing", lam{ in
     // cmod_add catches it and throws a Praia error.
     let caught = nil
     try { cmod.add(9223372036854775807, 1) } catch (e) { caught = str(e) }
-    testing.assert(caught != nil, "overflow throws")
-    testing.assert(caught.contains("overflow"),
+    testing.expect(caught != nil, "overflow throws")
+    testing.expect(caught.contains("overflow"),
                    "error message identifies the overflow: %{caught}")
 })
 
@@ -120,7 +120,7 @@ testing.test("C facade: praia_last_error + praia_take_error round-trip", lam{ in
     //   2. after the drain, the staged slot is empty — so the
     //      native returning non-NULL doesn't leak a stale error.
     let s = cmod.error_intercept("hello")
-    testing.assertEqual(s, "intercepted: hello", nil)
+    testing.expectEqual(s, "intercepted: hello", nil)
 })
 
 testing.test("C facade: error slot is reset between native calls", lam{ in
@@ -129,8 +129,8 @@ testing.test("C facade: error slot is reset between native calls", lam{ in
     // carry over and corrupt the second call's return.
     let caught = nil
     try { cmod.boom() } catch (e) { caught = str(e) }
-    testing.assert(caught.contains("deliberate"), "first call's error surfaced")
-    testing.assertEqual(cmod.add(2, 3), 5,
+    testing.expect(caught.contains("deliberate"), "first call's error surfaced")
+    testing.expectEqual(cmod.add(2, 3), 5,
                        "second call returns cleanly with no leaked error")
 })
 
@@ -138,12 +138,12 @@ testing.test("C facade: set ops via praia_value_new_set + set_add + set_values",
     // cmod.makeset(a, b, c, …) builds a set with each arg as a
     // member. Duplicate insertions are no-ops (set semantics).
     let s = cmod.makeset(1, 2, 3, 2, 1)
-    testing.assertEqual(type(s), "set", "returned value is a set")
-    testing.assertEqual(len(s), 3, "duplicates collapsed: 3 unique members")
-    testing.assert(s.has(1), "set contains 1")
-    testing.assert(s.has(2), "set contains 2")
-    testing.assert(s.has(3), "set contains 3")
-    testing.assert(!s.has(4), "set doesn't contain 4")
+    testing.expectEqual(type(s), "set", "returned value is a set")
+    testing.expectEqual(len(s), 3, "duplicates collapsed: 3 unique members")
+    testing.expect(s.has(1), "set contains 1")
+    testing.expect(s.has(2), "set contains 2")
+    testing.expect(s.has(3), "set contains 3")
+    testing.expect(!s.has(4), "set doesn't contain 4")
 })
 
 testing.test("C facade: non-hashable set element gets a precise diagnostic", lam{ in
@@ -151,8 +151,8 @@ testing.test("C facade: non-hashable set element gets a precise diagnostic", lam
     // ValueHash and refuse non-hashable members up front.
     let caught = nil
     try { cmod.makeset([1, 2]) } catch (e) { caught = str(e) }
-    testing.assert(caught != nil, "non-hashable set element throws")
-    testing.assert(caught.contains("hashable") || caught.contains("hash"),
+    testing.expect(caught != nil, "non-hashable set element throws")
+    testing.expect(caught.contains("hashable") || caught.contains("hash"),
                    "diagnostic names the constraint: %{caught}")
 })
 
@@ -163,8 +163,8 @@ testing.test("C facade: non-hashable map key gets a precise diagnostic", lam{ in
     // variant-side hash blow up with a generic error.
     let caught = nil
     try { cmod.dict([1, 2], "value") } catch (e) { caught = str(e) }
-    testing.assert(caught != nil, "non-hashable key throws")
-    testing.assert(caught.contains("hashable") || caught.contains("hash"),
+    testing.expect(caught != nil, "non-hashable key throws")
+    testing.expect(caught.contains("hashable") || caught.contains("hash"),
                    "diagnostic names the constraint: %{caught}")
 })
 

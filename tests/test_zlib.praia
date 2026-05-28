@@ -10,38 +10,38 @@ use "testing"
 testing.test("gzip roundtrip on text", lam{ in
     let s = "The quick brown fox jumps over the lazy dog. ".repeat(20)
     let gz = zlib.gzip(s)
-    testing.assert(len(gz.bytes()) < len(s.bytes()),
+    testing.expect(len(gz.bytes()) < len(s.bytes()),
                    "compressed output is smaller than input")
-    testing.assertEqual(zlib.gunzip(gz), s, nil)
+    testing.expectEqual(zlib.gunzip(gz), s, nil)
 })
 
 testing.test("gzip output has the RFC 1952 magic header", lam{ in
     // Per RFC 1952 §2.3: ID1=0x1F, ID2=0x8B, CM=0x08 (deflate).
     let header = bytes.hex(bytes.slice(zlib.gzip("hello"), 0, 3))
-    testing.assertEqual(header, "1f8b08", "gzip starts with magic 1f 8b 08")
+    testing.expectEqual(header, "1f8b08", "gzip starts with magic 1f 8b 08")
 })
 
 testing.test("gzip respects the optional compression level", lam{ in
     let s = "x".repeat(1000)
     // Level 0 = stored (no compression); level 9 = best.
     // The output should be markedly smaller at 9 than at 0.
-    testing.assert(len(zlib.gzip(s, 9).bytes()) < len(zlib.gzip(s, 0).bytes()),
+    testing.expect(len(zlib.gzip(s, 9).bytes()) < len(zlib.gzip(s, 0).bytes()),
                    "level 9 compresses better than level 0")
 })
 
 testing.test("gzip rejects level out of range", lam{ in
-    testing.assertThrows(lam{ in zlib.gzip("x", -1) }, "0..9")
-    testing.assertThrows(lam{ in zlib.gzip("x", 10) }, "0..9")
+    testing.expectThrows(lam{ in zlib.gzip("x", -1) }, "0..9")
+    testing.expectThrows(lam{ in zlib.gzip("x", 10) }, "0..9")
 })
 
 testing.test("gzip handles empty input", lam{ in
     let gz = zlib.gzip("")
-    testing.assert(len(gz.bytes()) > 0, "empty input still produces gzip frame")
-    testing.assertEqual(zlib.gunzip(gz), "", nil)
+    testing.expect(len(gz.bytes()) > 0, "empty input still produces gzip frame")
+    testing.expectEqual(zlib.gunzip(gz), "", nil)
 })
 
 testing.test("gunzip on garbage throws", lam{ in
-    testing.assertThrows(lam{ in zlib.gunzip("not a gzip stream") },
+    testing.expectThrows(lam{ in zlib.gunzip("not a gzip stream") },
                          "zlib: inflate failed")
 })
 
@@ -50,24 +50,24 @@ testing.test("gunzip on garbage throws", lam{ in
 testing.test("deflate roundtrip on text", lam{ in
     let s = "abracadabra ".repeat(50)
     let d = zlib.deflate(s)
-    testing.assert(len(d.bytes()) < len(s.bytes()), nil)
-    testing.assertEqual(zlib.inflate(d), s, nil)
+    testing.expect(len(d.bytes()) < len(s.bytes()), nil)
+    testing.expectEqual(zlib.inflate(d), s, nil)
 })
 
 testing.test("deflate output is shorter than gzip (no header overhead)", lam{ in
     let s = "hi"
     // The gzip frame adds 10 header bytes + 8 trailer bytes (crc32 + isize),
     // so for a tiny payload the raw deflate is meaningfully smaller.
-    testing.assert(len(zlib.deflate(s).bytes()) < len(zlib.gzip(s).bytes()),
+    testing.expect(len(zlib.deflate(s).bytes()) < len(zlib.gzip(s).bytes()),
                    "raw deflate has no framing overhead")
 })
 
 testing.test("deflate handles empty input", lam{ in
-    testing.assertEqual(zlib.inflate(zlib.deflate("")), "", nil)
+    testing.expectEqual(zlib.inflate(zlib.deflate("")), "", nil)
 })
 
 testing.test("inflate on garbage throws", lam{ in
-    testing.assertThrows(lam{ in zlib.inflate("not deflate-formatted bytes") },
+    testing.expectThrows(lam{ in zlib.inflate("not deflate-formatted bytes") },
                          "zlib: inflate failed")
 })
 
@@ -75,12 +75,12 @@ testing.test("inflate on garbage throws", lam{ in
 
 testing.test("gunzip on raw deflate throws (different framing)", lam{ in
     let d = zlib.deflate("hello world")
-    testing.assertThrows(lam{ in zlib.gunzip(d) }, "zlib: inflate failed")
+    testing.expectThrows(lam{ in zlib.gunzip(d) }, "zlib: inflate failed")
 })
 
 testing.test("inflate on gzip-framed bytes throws", lam{ in
     let gz = zlib.gzip("hello world")
-    testing.assertThrows(lam{ in zlib.inflate(gz) }, "zlib: inflate failed")
+    testing.expectThrows(lam{ in zlib.inflate(gz) }, "zlib: inflate failed")
 })
 
 // ── Binary roundtrip ───────────────────────────────────────────
@@ -90,7 +90,7 @@ testing.test("gzip roundtrip on arbitrary binary input", lam{ in
     let arr = []
     for (i in 0..256) { push(arr, i) }
     let b = bytes.from(arr)
-    testing.assertEqual(zlib.gunzip(zlib.gzip(b)), b,
+    testing.expectEqual(zlib.gunzip(zlib.gzip(b)), b,
                         "every byte value roundtrips")
 })
 

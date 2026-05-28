@@ -7,7 +7,7 @@ testing.test("throw and catch", lam{ in
     } catch (err) {
         caught = err
     }
-    testing.assertEqual(caught, "boom", nil)
+    testing.expectEqual(caught, "boom", nil)
 })
 
 testing.test("throw with structured payload", lam{ in
@@ -17,8 +17,8 @@ testing.test("throw with structured payload", lam{ in
     } catch (err) {
         caught = err
     }
-    testing.assertEqual(caught.code, 404, nil)
-    testing.assertEqual(caught.message, "not found", nil)
+    testing.expectEqual(caught.code, 404, nil)
+    testing.expectEqual(caught.message, "not found", nil)
 })
 
 testing.test("catch runtime error", lam{ in
@@ -28,7 +28,58 @@ testing.test("catch runtime error", lam{ in
     } catch (err) {
         caught = err
     }
-    testing.assert(caught.contains("Division"), nil)
+    testing.expect(caught.contains("Division"), nil)
+})
+
+// ── Global assert builtin ─────────────────────────────────────
+
+testing.test("assert: truthy condition returns nil, no throw", lam{ in
+    // Just exercises the no-throw path. The return value is
+    // unspecified (it's nil today) — callers shouldn't read it,
+    // they should treat assert as a statement.
+    assert(true)
+    assert(1)
+    assert("non-empty")
+    assert([])           // arrays are truthy even when empty
+    testing.expect(true, "no throw on any truthy value")
+})
+
+testing.test("assert: falsy condition throws with default message", lam{ in
+    let caught = nil
+    try { assert(false) } catch (e) { caught = str(e) }
+    testing.expectEqual(caught, "assertion failed", nil)
+})
+
+testing.test("assert: falsy condition with custom message", lam{ in
+    let caught = nil
+    try { assert(false, "math broken") } catch (e) { caught = str(e) }
+    testing.expectEqual(caught, "assertion failed: math broken", nil)
+})
+
+testing.test("assert: nil and false trigger the throw", lam{ in
+    // Praia's isTruthy treats only nil and false as falsy
+    // (Lua/Ruby-style; 0 and "" are truthy). assert tracks
+    // isTruthy, so 0 and "" must NOT throw — they bind/pass
+    // through like any other value.
+    testing.expectThrows(lam{ in assert(nil) }, "expected assert(nil) to throw")
+    testing.expectThrows(lam{ in assert(false) }, "expected assert(false) to throw")
+    // These should be no-ops (Praia 0 and "" are truthy).
+    assert(0)
+    assert("")
+    testing.expect(true, "0 and empty-string are truthy, assert passes them through")
+})
+
+testing.test("assert: non-string message is coerced via toString", lam{ in
+    // Lets the user pass a number, map, or other value as the
+    // message without forcing them to str(...) it first.
+    let caught = nil
+    try { assert(false, 42) } catch (e) { caught = str(e) }
+    testing.expectEqual(caught, "assertion failed: 42", nil)
+})
+
+testing.test("assert: arity errors fire on 0 or 3+ arguments", lam{ in
+    testing.expectThrows(lam{ in assert() }, "1 or 2 arguments")
+    testing.expectThrows(lam{ in assert(true, "msg", "extra") }, "1 or 2 arguments")
 })
 
 testing.test("ensure early exit", lam{ in
@@ -36,8 +87,8 @@ testing.test("ensure early exit", lam{ in
         ensure (x > 0) else { throw "must be positive" }
         return x * 2
     }
-    testing.assertEqual(check(5), 10, nil)
-    testing.assertThrows(lam{ in check(-1) }, nil)
+    testing.expectEqual(check(5), 10, nil)
+    testing.expectThrows(lam{ in check(-1) }, nil)
 })
 
 testing.test("ensure: return is a valid terminator", lam{ in
@@ -45,8 +96,8 @@ testing.test("ensure: return is a valid terminator", lam{ in
         ensure (x >= 0) else { return nil }
         return x * 2
     }
-    testing.assertEqual(bounded(5), 10, nil)
-    testing.assertEqual(bounded(-1), nil, "else's return is taken")
+    testing.expectEqual(bounded(5), 10, nil)
+    testing.expectEqual(bounded(-1), nil, "else's return is taken")
 })
 
 testing.test("ensure: break is a valid terminator (inside a loop)", lam{ in
@@ -55,7 +106,7 @@ testing.test("ensure: break is a valid terminator (inside a loop)", lam{ in
         ensure (i < 3) else { break }
         last_i = i
     }
-    testing.assertEqual(last_i, 2, "loop broke on the first ensure failure")
+    testing.expectEqual(last_i, 2, "loop broke on the first ensure failure")
 })
 
 testing.test("ensure: nested if-else both terminating counts as terminator", lam{ in
@@ -70,11 +121,11 @@ testing.test("ensure: nested if-else both terminating counts as terminator", lam
         }
         return "nonzero"
     }
-    testing.assertEqual(classify(5), "nonzero", "non-zero path skips the else")
+    testing.expectEqual(classify(5), "nonzero", "non-zero path skips the else")
     // classify(0): outer ensure fires (0 != 0 is false), inner
     // if/elif both false, the else throws "zero" — assertThrows
     // confirms that terminator actually runs.
-    testing.assertThrows(lam{ in classify(0) }, "zero")
+    testing.expectThrows(lam{ in classify(0) }, "zero")
 })
 
 testing.test("ensure let: binds the unwrapped value on non-nil", lam{ in
@@ -87,9 +138,9 @@ testing.test("ensure let: binds the unwrapped value on non-nil", lam{ in
         if (len(str) == 0) { return "(empty)" }
         return str.slice(0, 1)
     }
-    testing.assertEqual(first_char("hello"), "h", nil)
-    testing.assertEqual(first_char(""), "(empty)", "empty string is NOT nil — binds and continues")
-    testing.assertEqual(first_char(nil), "(no input)", "nil triggers the else")
+    testing.expectEqual(first_char("hello"), "h", nil)
+    testing.expectEqual(first_char(""), "(empty)", "empty string is NOT nil — binds and continues")
+    testing.expectEqual(first_char(nil), "(no input)", "nil triggers the else")
 })
 
 testing.test("ensure let: falsy-but-non-nil values bind and skip the else", lam{ in
@@ -101,10 +152,10 @@ testing.test("ensure let: falsy-but-non-nil values bind and skip the else", lam{
         ensure let v = x else { return "nil-path" }
         return "bound=%{v}"
     }
-    testing.assertEqual(tag(false), "bound=false", "false binds")
-    testing.assertEqual(tag(0),     "bound=0",     "0 binds")
-    testing.assertEqual(tag(""),    "bound=",      "empty string binds")
-    testing.assertEqual(tag(nil),   "nil-path",    "nil takes the else")
+    testing.expectEqual(tag(false), "bound=false", "false binds")
+    testing.expectEqual(tag(0),     "bound=0",     "0 binds")
+    testing.expectEqual(tag(""),    "bound=",      "empty string binds")
+    testing.expectEqual(tag(nil),   "nil-path",    "nil takes the else")
 })
 
 testing.test("ensure let: binding is visible for the rest of the enclosing scope", lam{ in
@@ -117,8 +168,8 @@ testing.test("ensure let: binding is visible for the rest of the enclosing scope
         let doubled = n * 2
         return doubled + 1
     }
-    testing.assertEqual(compute(5), 11, nil)
-    testing.assertEqual(compute(nil), -1, nil)
+    testing.expectEqual(compute(5), 11, nil)
+    testing.expectEqual(compute(nil), -1, nil)
 })
 
 testing.test("ensure let: parser rejects non-terminating else (binding form)", lam{ in
@@ -129,11 +180,11 @@ testing.test("ensure let: parser rejects non-terminating else (binding form)", l
     // message for ONE form gets caught here too.
     let bad = "func f(x) { ensure let v = x else { print(\"oops\") } ; print(v) }"
     let r = sys.exec(["./praia", "-c", bad])
-    testing.assert(r.exitCode != 0, "non-terminating ensure-let must fail parse")
+    testing.expect(r.exitCode != 0, "non-terminating ensure-let must fail parse")
     let blob = r.stdout + r.stderr
-    testing.assert(blob.contains("ensure"),
+    testing.expect(blob.contains("ensure"),
                    "error names the construct: %{blob}")
-    testing.assert(blob.contains("terminate") || blob.contains("return") ||
+    testing.expect(blob.contains("terminate") || blob.contains("return") ||
                    blob.contains("throw"),
                    "error names the required action: %{blob}")
 })
@@ -147,7 +198,7 @@ testing.test("ensure: continue is a valid terminator (inside a loop)", lam{ in
         ensure (i % 2 == 0) else { continue }
         sum = sum + i
     }
-    testing.assertEqual(sum, 20, "only even iterations contributed")
+    testing.expectEqual(sum, 20, "only even iterations contributed")
 })
 
 testing.test("ensure: sys.exit(...) ALONE is NOT a recognised terminator", lam{ in
@@ -160,7 +211,7 @@ testing.test("ensure: sys.exit(...) ALONE is NOT a recognised terminator", lam{ 
     // absolute.
     let bad = "func f(x) { ensure (x) else { sys.exit(1) } ; print(\"unreached\") }"
     let r = sys.exec(["./praia", "-c", bad])
-    testing.assert(r.exitCode != 0, "bare sys.exit no longer counts: stdout=%{r.stdout} stderr=%{r.stderr}")
+    testing.expect(r.exitCode != 0, "bare sys.exit no longer counts: stdout=%{r.stdout} stderr=%{r.stderr}")
 })
 
 testing.test("ensure: sys.exit(...) + return is the canonical CLI bail-out", lam{ in
@@ -169,7 +220,7 @@ testing.test("ensure: sys.exit(...) + return is the canonical CLI bail-out", lam
     // gives the parser the syntactic terminator it requires.
     let ok = "func f(x) { ensure (x) else { sys.exit(1); return } ; print(\"unreached\") }"
     let r = sys.exec(["./praia", "-c", ok])
-    testing.assertEqual(r.exitCode, 0, "sys.exit+return parses: stderr=%{r.stderr}")
+    testing.expectEqual(r.exitCode, 0, "sys.exit+return parses: stderr=%{r.stderr}")
 })
 
 testing.test("ensure: parser rejects non-terminating else block", lam{ in
@@ -179,11 +230,11 @@ testing.test("ensure: parser rejects non-terminating else block", lam{ in
     // test_lex_parse.praia and friends.
     let bad = "func f(x) { ensure (x) else { print(\"hi\") } }"
     let r = sys.exec(["./praia", "-c", bad])
-    testing.assert(r.exitCode != 0, "non-terminating ensure must fail parse")
+    testing.expect(r.exitCode != 0, "non-terminating ensure must fail parse")
     let blob = r.stdout + r.stderr
-    testing.assert(blob.contains("ensure"),
+    testing.expect(blob.contains("ensure"),
                    "error names the construct: %{blob}")
-    testing.assert(blob.contains("terminate") || blob.contains("return") ||
+    testing.expect(blob.contains("terminate") || blob.contains("return") ||
                    blob.contains("throw"),
                    "error names the required action: %{blob}")
 })
@@ -194,7 +245,7 @@ testing.test("ensure: parser rejects nested if without else (fall-through)", lam
     // to call this a terminator.
     let bad = "func f(x) { ensure (x) else { if (x) { return } } }"
     let r = sys.exec(["./praia", "-c", bad])
-    testing.assert(r.exitCode != 0, "fall-through nested if must fail parse")
+    testing.expect(r.exitCode != 0, "fall-through nested if must fail parse")
 })
 
 testing.test("try in try", lam{ in
@@ -208,13 +259,13 @@ testing.test("try in try", lam{ in
     } catch (e) {
         outer = e
     }
-    testing.assertEqual(outer, "rewrapped: inner", nil)
+    testing.expectEqual(outer, "rewrapped: inner", nil)
 })
 
 testing.test("assertThrows catches runtime errors too", lam{ in
-    testing.assertThrows(lam{ in num("not a number") }, nil)
-    testing.assertThrows(lam{ in pop([]) }, nil)
-    testing.assertThrows(lam{ in [1, 2][10] }, nil)
+    testing.expectThrows(lam{ in num("not a number") }, nil)
+    testing.expectThrows(lam{ in pop([]) }, nil)
+    testing.expectThrows(lam{ in [1, 2][10] }, nil)
 })
 
 testing.test("finally runs after try", lam{ in
@@ -226,7 +277,7 @@ testing.test("finally runs after try", lam{ in
     } finally {
         push(log, "finally")
     }
-    testing.assertEqual(log, ["try", "finally"], nil)
+    testing.expectEqual(log, ["try", "finally"], nil)
 })
 
 testing.test("finally runs after catch", lam{ in
@@ -238,7 +289,7 @@ testing.test("finally runs after catch", lam{ in
     } finally {
         push(log, "finally")
     }
-    testing.assertEqual(log, ["catch", "finally"], nil)
+    testing.expectEqual(log, ["catch", "finally"], nil)
 })
 
 testing.test("finally runs even when catch rethrows", lam{ in
@@ -255,7 +306,7 @@ testing.test("finally runs even when catch rethrows", lam{ in
     } catch (e) {
         push(log, "outer-catch")
     }
-    testing.assertEqual(log, ["inner-catch", "inner-finally", "outer-catch"], nil)
+    testing.expectEqual(log, ["inner-catch", "inner-finally", "outer-catch"], nil)
 })
 
 testing.test("finally without error", lam{ in
@@ -267,7 +318,7 @@ testing.test("finally without error", lam{ in
     } finally {
         cleaned = true
     }
-    testing.assert(cleaned, nil)
+    testing.expect(cleaned, nil)
 })
 
 testing.test("finally runs on return from try", lam{ in
@@ -282,8 +333,8 @@ testing.test("finally runs on return from try", lam{ in
             push(log, "finally")
         }
     }
-    testing.assertEqual(test(), 42, nil)
-    testing.assertEqual(log, ["try", "finally"], nil)
+    testing.expectEqual(test(), 42, nil)
+    testing.expectEqual(log, ["try", "finally"], nil)
 })
 
 testing.test("finally runs on return from catch", lam{ in
@@ -298,23 +349,23 @@ testing.test("finally runs on return from catch", lam{ in
             push(log, "finally")
         }
     }
-    testing.assertEqual(test(), 99, nil)
-    testing.assertEqual(log, ["catch", "finally"], nil)
+    testing.expectEqual(test(), 99, nil)
+    testing.expectEqual(log, ["catch", "finally"], nil)
 })
 
 testing.test("error messages include column info", lam{ in
     // Runtime error — division by zero at a known column
     let r1 = sys.exec("./praia -c \"let x = 10 / 0\"")
-    testing.assert(r1.stderr.contains(":col "), "runtime error should include column")
-    testing.assert(r1.stderr.contains("[line 1:col 12]"), "division by zero at col 12")
+    testing.expect(r1.stderr.contains(":col "), "runtime error should include column")
+    testing.expect(r1.stderr.contains("[line 1:col 12]"), "division by zero at col 12")
 
     // Parse error — unexpected token at a known column
     let r2 = sys.exec("./praia -c \"let x = (1 + )\"")
-    testing.assert(r2.stderr.contains(":col "), "parse error should include column")
+    testing.expect(r2.stderr.contains(":col "), "parse error should include column")
 
     // Multiline — error on second line
     let r3 = sys.exec("./praia -c \"let a = 1\nlet b = a / 0\"")
-    testing.assert(r3.stderr.contains("[line 2:col"), "line 2 error should have column")
+    testing.expect(r3.stderr.contains("[line 2:col"), "line 2 error should have column")
 })
 
 // Regression: semicolons used to be discarded as whitespace by the
@@ -325,18 +376,18 @@ testing.test("error messages include column info", lam{ in
 // same line.
 testing.test("adjacent expressions require separator", lam{ in
     let r = sys.exec("./praia -c \"let x = 1 2; print(x)\"")
-    testing.assert(r.stderr.contains("between statements"),
+    testing.expect(r.stderr.contains("between statements"),
                    "adjacent statements without separator should error")
 })
 
 testing.test("adjacent let statements require separator", lam{ in
     let r = sys.exec("./praia -c \"let a = 1 let b = 2\"")
-    testing.assert(r.stderr.contains("between statements"), nil)
+    testing.expect(r.stderr.contains("between statements"), nil)
 })
 
 testing.test("semicolon separator accepts same-line statements", lam{ in
     let r = sys.exec("./praia -c \"let a = 1; let b = 2; print(a + b)\"")
-    testing.assertEqual(r.stdout.strip(), "3", nil)
+    testing.expectEqual(r.stdout.strip(), "3", nil)
 })
 
 testing.test("} ends a statement — same-line follow-up is legal", lam{ in
@@ -344,7 +395,7 @@ testing.test("} ends a statement — same-line follow-up is legal", lam{ in
     // brace is its own separator, so a return after `}` on the same
     // line is valid Praia style.
     let r = sys.exec("./praia -c \"func f(x) { if (x > 0) { return 1 } return 0 } print(f(5))\"")
-    testing.assertEqual(r.stdout.strip(), "1", nil)
+    testing.expectEqual(r.stdout.strip(), "1", nil)
 })
 
 testing.done()

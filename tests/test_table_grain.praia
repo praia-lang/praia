@@ -4,9 +4,9 @@ use "table"
 testing.test("table.render basic", lam{ in
     let rows = [{a: 1, b: 2}, {a: 3, b: 4}]
     let out = table.render(rows)
-    testing.assert(out.contains("+"), "should have border")
-    testing.assert(out.contains("1"), "should contain data")
-    testing.assert(out.contains("4"), "should contain data")
+    testing.expect(out.contains("+"), "should have border")
+    testing.expect(out.contains("1"), "should contain data")
+    testing.expect(out.contains("4"), "should contain data")
 })
 
 testing.test("table.render with columns and headers", lam{ in
@@ -15,31 +15,31 @@ testing.test("table.render with columns and headers", lam{ in
         columns: ["x", "y"],
         headers: {x: "X", y: "Y"}
     })
-    testing.assert(out.contains("X"), "should have custom header")
-    testing.assert(out.contains("Y"), "should have custom header")
+    testing.expect(out.contains("X"), "should have custom header")
+    testing.expect(out.contains("Y"), "should have custom header")
 })
 
 testing.test("table.render borderless", lam{ in
     let rows = [{a: 1}]
     let out = table.render(rows, {border: false})
-    testing.assert(!out.contains("+"), "should not have border")
-    testing.assert(out.contains("1"), "should contain data")
+    testing.expect(!out.contains("+"), "should not have border")
+    testing.expect(out.contains("1"), "should contain data")
 })
 
 testing.test("table.render right align", lam{ in
     let rows = [{n: 1}, {n: 100}]
     let out = table.render(rows, {columns: ["n"], align: {n: "right"}})
-    testing.assert(out.contains("  1"), "should right-align")
+    testing.expect(out.contains("  1"), "should right-align")
 })
 
 testing.test("table.render empty rows", lam{ in
-    testing.assertEqual(table.render([]), "", nil)
+    testing.expectEqual(table.render([]), "", nil)
 })
 
 testing.test("table.kv", lam{ in
     let out = table.kv({a: 1, b: 2})
-    testing.assert(out.contains("a"), "should contain key")
-    testing.assert(out.contains("1"), "should contain value")
+    testing.expect(out.contains("a"), "should contain key")
+    testing.expect(out.contains("1"), "should contain value")
 })
 
 testing.done()

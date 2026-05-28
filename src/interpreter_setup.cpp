@@ -200,6 +200,25 @@ Interpreter::Interpreter() {
             throw RuntimeError("len() requires an array, string, map, or set", 0);
         })));
 
+    // `assert(cond, msg?)` — always-on production assertion.
+    // Falsy `cond` throws a RuntimeError; the optional `msg` is
+    // appended to the default text. Distinct from
+    // `testing.expect`, which counts pass/fail for the test
+    // runner instead of throwing.
+    globals->define("assert", Value(makeNative("assert", -1,
+        [](const std::vector<Value>& args) -> Value {
+            if (args.empty() || args.size() > 2)
+                throw RuntimeError("assert() expects 1 or 2 arguments (condition, message?)", 0);
+            if (args[0].isTruthy()) return Value();
+            // toString on the message handles non-string values
+            // (numbers, maps, errors caught from elsewhere)
+            // without forcing the user to stringify by hand.
+            std::string msg = args.size() == 2
+                ? "assertion failed: " + args[1].toString()
+                : "assertion failed";
+            throw RuntimeError(msg, 0);
+        })));
+
     globals->define("push", Value(makeNative("push", 2,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray())

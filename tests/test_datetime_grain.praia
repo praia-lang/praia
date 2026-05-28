@@ -3,73 +3,73 @@ use "datetime"
 
 testing.test("create", lam{ in
     let dt = datetime.create(2026, 4, 25, 12, 30, 0, 0)
-    testing.assertEqual(dt.year, 2026, nil)
-    testing.assertEqual(dt.month, 4, nil)
-    testing.assertEqual(dt.day, 25, nil)
-    testing.assertEqual(dt.hour, 12, nil)
-    testing.assertEqual(dt.minute, 30, nil)
+    testing.expectEqual(dt.year, 2026, nil)
+    testing.expectEqual(dt.month, 4, nil)
+    testing.expectEqual(dt.day, 25, nil)
+    testing.expectEqual(dt.hour, 12, nil)
+    testing.expectEqual(dt.minute, 30, nil)
 })
 
 testing.test("now returns valid date", lam{ in
     let dt = datetime.now()
-    testing.assert(dt.year >= 2025, nil)
-    testing.assert(dt.month >= 1 && dt.month <= 12, nil)
-    testing.assert(dt.day >= 1 && dt.day <= 31, nil)
+    testing.expect(dt.year >= 2025, nil)
+    testing.expect(dt.month >= 1 && dt.month <= 12, nil)
+    testing.expect(dt.day >= 1 && dt.day <= 31, nil)
 })
 
 testing.test("today has zero time", lam{ in
     let dt = datetime.today()
-    testing.assertEqual(dt.hour, 0, nil)
-    testing.assertEqual(dt.minute, 0, nil)
-    testing.assertEqual(dt.second, 0, nil)
+    testing.expectEqual(dt.hour, 0, nil)
+    testing.expectEqual(dt.minute, 0, nil)
+    testing.expectEqual(dt.second, 0, nil)
 })
 
 testing.test("isLeapYear", lam{ in
-    testing.assert(datetime.isLeapYear(2024), nil)
-    testing.assert(!datetime.isLeapYear(2023), nil)
-    testing.assert(datetime.isLeapYear(2000), nil)
-    testing.assert(!datetime.isLeapYear(1900), nil)
+    testing.expect(datetime.isLeapYear(2024), nil)
+    testing.expect(!datetime.isLeapYear(2023), nil)
+    testing.expect(datetime.isLeapYear(2000), nil)
+    testing.expect(!datetime.isLeapYear(1900), nil)
 })
 
 testing.test("daysInMonth", lam{ in
-    testing.assertEqual(datetime.daysInMonth(2024, 2), 29, "leap feb")
-    testing.assertEqual(datetime.daysInMonth(2023, 2), 28, "normal feb")
-    testing.assertEqual(datetime.daysInMonth(2024, 1), 31, nil)
-    testing.assertEqual(datetime.daysInMonth(2024, 4), 30, nil)
+    testing.expectEqual(datetime.daysInMonth(2024, 2), 29, "leap feb")
+    testing.expectEqual(datetime.daysInMonth(2023, 2), 28, "normal feb")
+    testing.expectEqual(datetime.daysInMonth(2024, 1), 31, nil)
+    testing.expectEqual(datetime.daysInMonth(2024, 4), 30, nil)
 })
 
 testing.test("weekday", lam{ in
     // 2026-04-25 is a Saturday (day 6, 0=Sunday)
     let wd = datetime.weekday(2026, 4, 25)
-    testing.assertEqual(wd, 6, nil)
+    testing.expectEqual(wd, 6, nil)
 })
 
 testing.test("format iso", lam{ in
     let dt = datetime.create(2026, 4, 25, 12, 30, 45, 0)
     let iso = datetime.iso(dt)
-    testing.assertEqual(iso, "2026-04-25T12:30:45", nil)
+    testing.expectEqual(iso, "2026-04-25T12:30:45", nil)
 })
 
 testing.test("addDays", lam{ in
     let dt = datetime.create(2026, 4, 25, 0, 0, 0, 0)
     let next = datetime.addDays(dt, 7)
-    testing.assertEqual(next.month, 5, nil)
-    testing.assertEqual(next.day, 2, nil)
+    testing.expectEqual(next.month, 5, nil)
+    testing.expectEqual(next.day, 2, nil)
 })
 
 testing.test("diff", lam{ in
     let a = datetime.create(2026, 1, 1, 0, 0, 0, 0)
     let b = datetime.create(2026, 1, 10, 0, 0, 0, 0)
     let d = datetime.diff(a, b)
-    testing.assertEqual(d.days, 9, nil)
+    testing.expectEqual(d.days, 9, nil)
 })
 
 testing.test("isBefore isAfter", lam{ in
     let a = datetime.create(2026, 1, 1, 0, 0, 0, 0)
     let b = datetime.create(2026, 12, 31, 0, 0, 0, 0)
-    testing.assert(datetime.isBefore(a, b), nil)
-    testing.assert(datetime.isAfter(b, a), nil)
-    testing.assert(!datetime.isBefore(b, a), nil)
+    testing.expect(datetime.isBefore(a, b), nil)
+    testing.expect(datetime.isAfter(b, a), nil)
+    testing.expect(!datetime.isBefore(b, a), nil)
 })
 
 testing.done()

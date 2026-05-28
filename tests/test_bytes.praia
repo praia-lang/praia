@@ -2,82 +2,82 @@ use "testing"
 
 testing.test("bytes.from array to string", lam{ in
     let raw = bytes.from([72, 101, 108, 108, 111])
-    testing.assertEqual(raw, "Hello", nil)
+    testing.expectEqual(raw, "Hello", nil)
 })
 
 testing.test("bytes.toArray string to array", lam{ in
     let arr = bytes.toArray("Hello")
-    testing.assertEqual(arr, [72, 101, 108, 108, 111], nil)
+    testing.expectEqual(arr, [72, 101, 108, 108, 111], nil)
 })
 
 testing.test("bytes.from and toArray roundtrip", lam{ in
     let original = [0, 127, 255, 1, 128]
     let raw = bytes.from(original)
     let back = bytes.toArray(raw)
-    testing.assertEqual(back, original, nil)
+    testing.expectEqual(back, original, nil)
 })
 
 testing.test("bytes.hex", lam{ in
-    testing.assertEqual(bytes.hex("ABC"), "414243", nil)
-    testing.assertEqual(bytes.hex(""), "", nil)
-    testing.assertEqual(bytes.hex(fromCharCode(0)), "00", nil)
-    testing.assertEqual(bytes.hex(fromCharCode(255)), "c3bf", "U+00FF encodes as 2 UTF-8 bytes")
+    testing.expectEqual(bytes.hex("ABC"), "414243", nil)
+    testing.expectEqual(bytes.hex(""), "", nil)
+    testing.expectEqual(bytes.hex(fromCharCode(0)), "00", nil)
+    testing.expectEqual(bytes.hex(fromCharCode(255)), "c3bf", "U+00FF encodes as 2 UTF-8 bytes")
 })
 
 testing.test("bytes.fromHex", lam{ in
-    testing.assertEqual(bytes.fromHex("414243"), "ABC", nil)
-    testing.assertEqual(bytes.fromHex(""), "", nil)
-    testing.assertEqual(bytes.fromHex("00c3bf"), fromCharCode(0) + fromCharCode(255), "U+00FF = C3 BF in UTF-8")
+    testing.expectEqual(bytes.fromHex("414243"), "ABC", nil)
+    testing.expectEqual(bytes.fromHex(""), "", nil)
+    testing.expectEqual(bytes.fromHex("00c3bf"), fromCharCode(0) + fromCharCode(255), "U+00FF = C3 BF in UTF-8")
 })
 
 testing.test("bytes.fromHex rejects odd length", lam{ in
-    testing.assertThrows(lam{ in bytes.fromHex("abc") }, nil)
+    testing.expectThrows(lam{ in bytes.fromHex("abc") }, nil)
 })
 
 testing.test("bytes.hex and fromHex roundtrip", lam{ in
     let data = bytes.from([0, 1, 127, 128, 254, 255])
-    testing.assertEqual(bytes.fromHex(bytes.hex(data)), data, nil)
+    testing.expectEqual(bytes.fromHex(bytes.hex(data)), data, nil)
 })
 
 testing.test("bytes.len", lam{ in
-    testing.assertEqual(bytes.len("hello"), 5, nil)
-    testing.assertEqual(bytes.len(""), 0, nil)
-    testing.assertEqual(bytes.len(fromCharCode(0) + fromCharCode(0)), 2, nil)
+    testing.expectEqual(bytes.len("hello"), 5, nil)
+    testing.expectEqual(bytes.len(""), 0, nil)
+    testing.expectEqual(bytes.len(fromCharCode(0) + fromCharCode(0)), 2, nil)
 })
 
 testing.test("bytes.pack B", lam{ in
     let packed = bytes.pack("3B", [65, 66, 67])
-    testing.assertEqual(packed, "ABC", nil)
+    testing.expectEqual(packed, "ABC", nil)
 })
 
 testing.test("bytes.unpack B", lam{ in
     let vals = bytes.unpack("3B", "ABC")
-    testing.assertEqual(vals, [65, 66, 67], nil)
+    testing.expectEqual(vals, [65, 66, 67], nil)
 })
 
 testing.test("bytes.pack/unpack >H roundtrip", lam{ in
     let packed = bytes.pack(">2H", [8080, 443])
     let unpacked = bytes.unpack(">2H", packed)
-    testing.assertEqual(unpacked, [8080, 443], nil)
+    testing.expectEqual(unpacked, [8080, 443], nil)
 })
 
 testing.test("bytes.pack/unpack <I roundtrip", lam{ in
     let packed = bytes.pack("<I", [123456789])
     let unpacked = bytes.unpack("<I", packed)
-    testing.assertEqual(unpacked, [123456789], nil)
+    testing.expectEqual(unpacked, [123456789], nil)
 })
 
 testing.test("bytes.pack struct multi-field", lam{ in
     let data = bytes.pack(">BHI", [0xFF, 1234, 100000])
-    testing.assertEqual(bytes.len(data), 7, nil)
+    testing.expectEqual(bytes.len(data), 7, nil)
     let vals = bytes.unpack(">BHI", data)
-    testing.assertEqual(vals, [0xFF, 1234, 100000], nil)
+    testing.expectEqual(vals, [0xFF, 1234, 100000], nil)
 })
 
 testing.test("bytes.calcsize", lam{ in
-    testing.assertEqual(bytes.calcsize(">BHI"), 7, nil)
-    testing.assertEqual(bytes.calcsize(">3B2Hd"), 15, nil)
-    testing.assertEqual(bytes.calcsize("4x"), 4, nil)
+    testing.expectEqual(bytes.calcsize(">BHI"), 7, nil)
+    testing.expectEqual(bytes.calcsize(">3B2Hd"), 15, nil)
+    testing.expectEqual(bytes.calcsize("4x"), 4, nil)
 })
 
 testing.done()

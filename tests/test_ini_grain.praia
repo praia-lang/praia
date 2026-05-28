@@ -3,36 +3,36 @@ use "ini"
 
 testing.test("parse simple", lam{ in
     let data = ini.parse("key=value\nname=Ada")
-    testing.assertEqual(data.key, "value", nil)
-    testing.assertEqual(data.name, "Ada", nil)
+    testing.expectEqual(data.key, "value", nil)
+    testing.expectEqual(data.name, "Ada", nil)
 })
 
 testing.test("parse with sections", lam{ in
     let data = ini.parse("[server]\nhost=localhost\nport=8080\n[db]\nname=test")
-    testing.assertEqual(data.server.host, "localhost", nil)
-    testing.assertEqual(data.server.port, 8080, nil)
-    testing.assertEqual(data.db.name, "test", nil)
+    testing.expectEqual(data.server.host, "localhost", nil)
+    testing.expectEqual(data.server.port, 8080, nil)
+    testing.expectEqual(data.db.name, "test", nil)
 })
 
 testing.test("parse type conversion", lam{ in
     let data = ini.parse("a=42\nb=3.14\nc=true\nd=false")
-    testing.assertEqual(data.a, 42, nil)
-    testing.assertEqual(data.b, 3.14, nil)
-    testing.assertEqual(data.c, true, nil)
-    testing.assertEqual(data.d, false, nil)
+    testing.expectEqual(data.a, 42, nil)
+    testing.expectEqual(data.b, 3.14, nil)
+    testing.expectEqual(data.c, true, nil)
+    testing.expectEqual(data.d, false, nil)
 })
 
 testing.test("stringify", lam{ in
     let result = ini.stringify({name: "Ada", age: 36})
-    testing.assert(result.contains("name"), nil)
-    testing.assert(result.contains("Ada"), nil)
-    testing.assert(result.contains("36"), nil)
+    testing.expect(result.contains("name"), nil)
+    testing.expect(result.contains("Ada"), nil)
+    testing.expect(result.contains("36"), nil)
 })
 
 testing.test("stringify with sections", lam{ in
     let result = ini.stringify({server: {host: "localhost", port: 8080}})
-    testing.assert(result.contains("[server]"), nil)
-    testing.assert(result.contains("localhost"), nil)
+    testing.expect(result.contains("[server]"), nil)
+    testing.expect(result.contains("localhost"), nil)
 })
 
 testing.done()

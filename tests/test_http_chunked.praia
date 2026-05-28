@@ -135,40 +135,40 @@ let base = "http://localhost:" + str(TEST_PORT)
 
 testing.test("http.get decodes a chunked response", lam{ in
     let r = http.get(base + "/chunked")
-    testing.assertEqual(r.status, 200, nil)
-    testing.assertEqual(r.body, "Hello streaming world",
+    testing.expectEqual(r.status, 200, nil)
+    testing.expectEqual(r.body, "Hello streaming world",
         "chunked framing must be stripped — body is the decoded payload")
     // The header should still be present so callers can introspect.
-    testing.assertEqual(r.headers["transfer-encoding"], "chunked", nil)
+    testing.expectEqual(r.headers["transfer-encoding"], "chunked", nil)
 })
 
 testing.test("http.get handles chunk extensions", lam{ in
     let r = http.get(base + "/chunked-with-ext")
-    testing.assertEqual(r.body, "hello",
+    testing.expectEqual(r.body, "hello",
         "trailing ';name=foo' on the size line must be ignored")
 })
 
 testing.test("http.get discards trailer headers", lam{ in
     let r = http.get(base + "/chunked-trailer")
-    testing.assertEqual(r.body, "ping",
+    testing.expectEqual(r.body, "ping",
         "trailer headers after the 0-sized chunk must be skipped")
 })
 
 testing.test("http.get reassembles a 100 KiB chunked body", lam{ in
     let r = http.get(base + "/chunked-large")
-    testing.assertEqual(len(r.body.bytes()), 102000,
+    testing.expectEqual(len(r.body.bytes()), 102000,
         "full chunk must be delivered intact")
 })
 
 // ── Error paths: malformed chunk framing throws ──────────────
 
 testing.test("http.get throws on invalid hex chunk size", lam{ in
-    testing.assertThrows(lam{ in http.get(base + "/chunked-bad-hex") },
+    testing.expectThrows(lam{ in http.get(base + "/chunked-bad-hex") },
         "invalid hex")
 })
 
 testing.test("http.get throws on truncated chunk data", lam{ in
-    testing.assertThrows(lam{ in http.get(base + "/chunked-truncated") },
+    testing.expectThrows(lam{ in http.get(base + "/chunked-truncated") },
         "truncated")
 })
 
@@ -179,13 +179,13 @@ testing.test("Transfer-Encoding 'x-chunked-stuff' is NOT treated as chunked", la
     // plain body and throw. With token-exact matching, the body passes
     // through unchanged.
     let r = http.get(base + "/te-substring-trap")
-    testing.assertEqual(r.body, "plain body",
+    testing.expectEqual(r.body, "plain body",
         "TE token 'x-chunked-stuff' must not trigger chunked decoding")
 })
 
 testing.test("Transfer-Encoding 'gzip, chunked' detects chunked via token split", lam{ in
     let r = http.get(base + "/te-trailing-chunked")
-    testing.assertEqual(r.body, "hello",
+    testing.expectEqual(r.body, "hello",
         "chunked token in a comma-separated TE list must still be decoded")
 })
 
@@ -201,27 +201,27 @@ testing.test("Transfer-Encoding 'gzip, chunked' detects chunked via token split"
 
 testing.test("HEAD response: ignores body bytes", lam{ in
     let r = http.request({url: base + "/head-trap", method: "HEAD"})
-    testing.assertEqual(r.status, 200, nil)
-    testing.assertEqual(r.body, "",
+    testing.expectEqual(r.status, 200, nil)
+    testing.expectEqual(r.body, "",
         "HEAD body must be empty regardless of Content-Length / body bytes on the wire")
 })
 
 testing.test("204 No Content: ignores body bytes", lam{ in
     let r = http.get(base + "/no-body-204")
-    testing.assertEqual(r.status, 204, nil)
-    testing.assertEqual(r.body, "", "204 must have an empty body")
+    testing.expectEqual(r.status, 204, nil)
+    testing.expectEqual(r.body, "", "204 must have an empty body")
 })
 
 testing.test("304 Not Modified: ignores body bytes", lam{ in
     let r = http.get(base + "/no-body-304")
-    testing.assertEqual(r.status, 304, nil)
-    testing.assertEqual(r.body, "", "304 must have an empty body")
+    testing.expectEqual(r.status, 304, nil)
+    testing.expectEqual(r.body, "", "304 must have an empty body")
 })
 
 testing.test("205 Reset Content: ignores body bytes", lam{ in
     let r = http.get(base + "/no-body-205")
-    testing.assertEqual(r.status, 205, nil)
-    testing.assertEqual(r.body, "",
+    testing.expectEqual(r.status, 205, nil)
+    testing.expectEqual(r.body, "",
         "205 Reset Content must not include a body (RFC 9110 §15.3.6)")
 })
 
@@ -231,13 +231,13 @@ testing.test("short Content-Length response throws instead of returning truncate
     // Pre-fix the client would silently return the 4 bytes that
     // arrived as if they were the full payload. We surface the
     // truncation so callers can react (retry, fail, etc.).
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in http.get(base + "/short-cl") },
         "truncated")
 })
 
 testing.test("chunked body that EOFs before the terminator throws", lam{ in
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in http.get(base + "/short-chunked") },
         "truncated")
 })

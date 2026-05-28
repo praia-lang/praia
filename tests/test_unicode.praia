@@ -3,30 +3,30 @@ use "testing"
 // ── Length ──
 
 testing.test("len counts grapheme clusters", lam{ in
-    testing.assertEqual(len("hello"), 5, nil)
-    testing.assertEqual(len(""), 0, nil)
-    testing.assertEqual(len("\u{1F600}"), 1, "single emoji")
-    testing.assertEqual(len("A\u{1F600}B"), 3, "emoji in middle")
-    testing.assertEqual(len("caf\u{E9}"), 4, "e-acute as single codepoint")
+    testing.expectEqual(len("hello"), 5, nil)
+    testing.expectEqual(len(""), 0, nil)
+    testing.expectEqual(len("\u{1F600}"), 1, "single emoji")
+    testing.expectEqual(len("A\u{1F600}B"), 3, "emoji in middle")
+    testing.expectEqual(len("caf\u{E9}"), 4, "e-acute as single codepoint")
 })
 
 testing.test("len with complex emoji", lam{ in
     // Family emoji (ZWJ sequence): man + ZWJ + woman + ZWJ + girl + ZWJ + boy
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
-    testing.assertEqual(len(family), 1, "family emoji = 1 grapheme")
+    testing.expectEqual(len(family), 1, "family emoji = 1 grapheme")
     // Flag emoji (regional indicators)
     let flag = "\u{1F1FA}\u{1F1F8}"
-    testing.assertEqual(len(flag), 1, "flag emoji = 1 grapheme")
+    testing.expectEqual(len(flag), 1, "flag emoji = 1 grapheme")
 })
 
 // ── Indexing ──
 
 testing.test("grapheme indexing", lam{ in
     let s = "Hi\u{1F44B}"
-    testing.assertEqual(s[0], "H", nil)
-    testing.assertEqual(s[1], "i", nil)
-    testing.assertEqual(s[2], "\u{1F44B}", nil)
-    testing.assertEqual(s[-1], "\u{1F44B}", "negative index")
+    testing.expectEqual(s[0], "H", nil)
+    testing.expectEqual(s[1], "i", nil)
+    testing.expectEqual(s[2], "\u{1F44B}", nil)
+    testing.expectEqual(s[-1], "\u{1F44B}", "negative index")
 })
 
 // ── Iteration ──
@@ -36,140 +36,140 @@ testing.test("for-in iterates graphemes", lam{ in
     for (c in "A\u{1F600}B") {
         push(chars, c)
     }
-    testing.assertEqual(len(chars), 3, nil)
-    testing.assertEqual(chars[0], "A", nil)
-    testing.assertEqual(chars[1], "\u{1F600}", nil)
-    testing.assertEqual(chars[2], "B", nil)
+    testing.expectEqual(len(chars), 3, nil)
+    testing.expectEqual(chars[0], "A", nil)
+    testing.expectEqual(chars[1], "\u{1F600}", nil)
+    testing.expectEqual(chars[2], "B", nil)
 })
 
 // ── Case conversion ──
 
 testing.test("unicode upper/lower", lam{ in
-    testing.assertEqual("caf\u{E9}".upper(), "CAF\u{C9}", nil)
-    testing.assertEqual("\u{DC}ber".lower(), "\u{FC}ber", "u-umlaut")
-    testing.assertEqual("\u{3B1}\u{3B2}\u{3B3}".upper(), "\u{391}\u{392}\u{393}", "Greek")
+    testing.expectEqual("caf\u{E9}".upper(), "CAF\u{C9}", nil)
+    testing.expectEqual("\u{DC}ber".lower(), "\u{FC}ber", "u-umlaut")
+    testing.expectEqual("\u{3B1}\u{3B2}\u{3B3}".upper(), "\u{391}\u{392}\u{393}", "Greek")
 })
 
 testing.test("unicode title", lam{ in
-    testing.assertEqual("hello world".title(), "Hello World", nil)
-    testing.assertEqual("caf\u{E9} latte".title(), "Caf\u{E9} Latte", nil)
+    testing.expectEqual("hello world".title(), "Hello World", nil)
+    testing.expectEqual("caf\u{E9} latte".title(), "Caf\u{E9} Latte", nil)
 })
 
 testing.test("unicode capitalize", lam{ in
-    testing.assertEqual("\u{E9}cole".capitalize(), "\u{C9}cole", nil)
-    testing.assertEqual("HELLO".capitalize(), "Hello", nil)
+    testing.expectEqual("\u{E9}cole".capitalize(), "\u{C9}cole", nil)
+    testing.expectEqual("HELLO".capitalize(), "Hello", nil)
 })
 
 testing.test("unicode capitalizeFirst", lam{ in
-    testing.assertEqual("\u{E9}cole".capitalizeFirst(), "\u{C9}cole", nil)
-    testing.assertEqual("hELLO".capitalizeFirst(), "HELLO", nil)
+    testing.expectEqual("\u{E9}cole".capitalizeFirst(), "\u{C9}cole", nil)
+    testing.expectEqual("hELLO".capitalizeFirst(), "HELLO", nil)
 })
 
 // ── Slice ──
 
 testing.test("grapheme slice", lam{ in
-    testing.assertEqual("caf\u{E9}!".slice(0, 4), "caf\u{E9}", nil)
-    testing.assertEqual("A\u{1F600}BC".slice(1, 3), "\u{1F600}B", nil)
-    testing.assertEqual("hello".slice(-2), "lo", "negative start")
+    testing.expectEqual("caf\u{E9}!".slice(0, 4), "caf\u{E9}", nil)
+    testing.expectEqual("A\u{1F600}BC".slice(1, 3), "\u{1F600}B", nil)
+    testing.expectEqual("hello".slice(-2), "lo", "negative start")
 })
 
 // ── Split ──
 
 testing.test("split empty separator uses graphemes", lam{ in
     let parts = "\u{1F600}\u{1F601}".split("")
-    testing.assertEqual(len(parts), 2, nil)
-    testing.assertEqual(parts[0], "\u{1F600}", nil)
-    testing.assertEqual(parts[1], "\u{1F601}", nil)
+    testing.expectEqual(len(parts), 2, nil)
+    testing.expectEqual(parts[0], "\u{1F600}", nil)
+    testing.expectEqual(parts[1], "\u{1F601}", nil)
 })
 
 // ── indexOf / lastIndexOf ──
 
 testing.test("indexOf returns grapheme index", lam{ in
-    testing.assertEqual("A\u{1F600}BC".indexOf("B"), 2, nil)
-    testing.assertEqual("A\u{1F600}BC".indexOf("X"), -1, "not found")
-    testing.assertEqual("A\u{1F600}BC".lastIndexOf("C"), 3, nil)
+    testing.expectEqual("A\u{1F600}BC".indexOf("B"), 2, nil)
+    testing.expectEqual("A\u{1F600}BC".indexOf("X"), -1, "not found")
+    testing.expectEqual("A\u{1F600}BC".lastIndexOf("C"), 3, nil)
 })
 
 // ── charCode / fromCharCode ──
 
 testing.test("charCode returns codepoint", lam{ in
-    testing.assertEqual("A".charCode(), 65, nil)
-    testing.assertEqual("\u{1F600}".charCode(), 128512, nil)
-    testing.assertEqual("\u{E9}".charCode(), 233, nil)
+    testing.expectEqual("A".charCode(), 65, nil)
+    testing.expectEqual("\u{1F600}".charCode(), 128512, nil)
+    testing.expectEqual("\u{E9}".charCode(), 233, nil)
 })
 
 testing.test("fromCharCode full unicode", lam{ in
-    testing.assertEqual(fromCharCode(65), "A", nil)
-    testing.assertEqual(fromCharCode(0x1F600), "\u{1F600}", nil)
-    testing.assertEqual(fromCharCode(233), "\u{E9}", nil)
+    testing.expectEqual(fromCharCode(65), "A", nil)
+    testing.expectEqual(fromCharCode(0x1F600), "\u{1F600}", nil)
+    testing.expectEqual(fromCharCode(233), "\u{E9}", nil)
 })
 
 // ── New methods ──
 
 testing.test("graphemes method", lam{ in
     let g = "A\u{1F600}B".graphemes()
-    testing.assertEqual(len(g), 3, nil)
-    testing.assertEqual(g[0], "A", nil)
-    testing.assertEqual(g[1], "\u{1F600}", nil)
-    testing.assertEqual(g[2], "B", nil)
+    testing.expectEqual(len(g), 3, nil)
+    testing.expectEqual(g[0], "A", nil)
+    testing.expectEqual(g[1], "\u{1F600}", nil)
+    testing.expectEqual(g[2], "B", nil)
 })
 
 testing.test("codepoints method", lam{ in
     let cp = "A\u{1F600}".codepoints()
-    testing.assertEqual(len(cp), 2, nil)
-    testing.assertEqual(cp[0], 65, nil)
-    testing.assertEqual(cp[1], 128512, nil)
+    testing.expectEqual(len(cp), 2, nil)
+    testing.expectEqual(cp[0], 65, nil)
+    testing.expectEqual(cp[1], 128512, nil)
 })
 
 testing.test("bytes method", lam{ in
     let b = "A".bytes()
-    testing.assertEqual(b[0], 65, nil)
+    testing.expectEqual(b[0], 65, nil)
     let b2 = "\u{E9}".bytes()
-    testing.assertEqual(len(b2), 2, "e-acute is 2 UTF-8 bytes")
+    testing.expectEqual(len(b2), 2, "e-acute is 2 UTF-8 bytes")
 })
 
 // ── padStart / padEnd ──
 
 testing.test("pad counts graphemes", lam{ in
-    testing.assertEqual("hi".padStart(5), "   hi", nil)
-    testing.assertEqual("hi".padEnd(5), "hi   ", nil)
-    testing.assertEqual("\u{1F600}".padStart(3), "  \u{1F600}", nil)
+    testing.expectEqual("hi".padStart(5), "   hi", nil)
+    testing.expectEqual("hi".padEnd(5), "hi   ", nil)
+    testing.expectEqual("\u{1F600}".padStart(3), "  \u{1F600}", nil)
 })
 
 // ── Unicode escape in interpolation ──
 
 testing.test("unicode escape in strings", lam{ in
     let emoji = "\u{1F600}"
-    testing.assertEqual(emoji, "\u{1F600}", nil)
-    testing.assertEqual(len(emoji), 1, nil)
+    testing.expectEqual(emoji, "\u{1F600}", nil)
+    testing.expectEqual(len(emoji), 1, nil)
     let msg = "hi \u{1F44B}"
-    testing.assertEqual(len(msg), 4, nil)
+    testing.expectEqual(len(msg), 4, nil)
 })
 
 // ── Existing operations still work ──
 
 testing.test("contains/startsWith/endsWith with unicode", lam{ in
-    testing.assert("caf\u{E9}".contains("\u{E9}"), nil)
-    testing.assert("caf\u{E9}".startsWith("caf"), nil)
-    testing.assert("caf\u{E9}".endsWith("\u{E9}"), nil)
+    testing.expect("caf\u{E9}".contains("\u{E9}"), nil)
+    testing.expect("caf\u{E9}".startsWith("caf"), nil)
+    testing.expect("caf\u{E9}".endsWith("\u{E9}"), nil)
 })
 
 testing.test("replace with unicode", lam{ in
-    testing.assertEqual("caf\u{E9}".replace("\u{E9}", "e"), "cafe", nil)
+    testing.expectEqual("caf\u{E9}".replace("\u{E9}", "e"), "cafe", nil)
 })
 
 // ── Regex index consistency ──
 
 testing.test("regex match index is grapheme-based", lam{ in
     let m = "A\u{1F600}BC".match("[BC]+")
-    testing.assertEqual(m.index, 2, "B is at grapheme index 2")
-    testing.assertEqual(m.match, "BC", nil)
+    testing.expectEqual(m.index, 2, "B is at grapheme index 2")
+    testing.expectEqual(m.match, "BC", nil)
 })
 
 testing.test("regex matchAll index is grapheme-based", lam{ in
     let ms = "\u{E9}ab".matchAll("[ab]")
-    testing.assertEqual(ms[0].index, 1, "a is at grapheme index 1")
-    testing.assertEqual(ms[1].index, 2, "b is at grapheme index 2")
+    testing.expectEqual(ms[0].index, 1, "a is at grapheme index 1")
+    testing.expectEqual(ms[1].index, 2, "b is at grapheme index 2")
 })
 
 // ── Phase 1 of the Unicode rework: normalize / displayWidth / ──
@@ -178,56 +178,56 @@ testing.test("regex matchAll index is grapheme-based", lam{ in
 testing.test("normalize NFD then NFC returns the original NFC form", lam{ in
     let s = "h\u{E9}llo"
     let d = unicode.normalize(s, "NFD")
-    testing.assert(len(d.bytes()) > len(s.bytes()),
+    testing.expect(len(d.bytes()) > len(s.bytes()),
                    "NFD form is longer than NFC")
-    testing.assertEqual(unicode.normalize(d, "NFC"), s,
+    testing.expectEqual(unicode.normalize(d, "NFC"), s,
                         "NFC(NFD(s)) == original NFC")
 })
 
 testing.test("normalize NFKC folds compatibility forms", lam{ in
     // Full-width digit 1 (U+FF11) and ligature ﬁ (U+FB01).
-    testing.assertEqual(unicode.normalize("\u{FF11}", "NFKC"), "1", nil)
-    testing.assertEqual(unicode.normalize("\u{FB01}", "NFKC"), "fi", nil)
+    testing.expectEqual(unicode.normalize("\u{FF11}", "NFKC"), "1", nil)
+    testing.expectEqual(unicode.normalize("\u{FB01}", "NFKC"), "fi", nil)
 })
 
 testing.test("normalize rejects unknown form", lam{ in
-    testing.assertThrows(lam{ in unicode.normalize("x", "wat") },
+    testing.expectThrows(lam{ in unicode.normalize("x", "wat") },
                          "unknown form")
 })
 
 testing.test("displayWidth: ASCII is 1 per character", lam{ in
-    testing.assertEqual(unicode.displayWidth("hello"), 5, nil)
-    testing.assertEqual(unicode.displayWidth(""), 0, nil)
+    testing.expectEqual(unicode.displayWidth("hello"), 5, nil)
+    testing.expectEqual(unicode.displayWidth(""), 0, nil)
 })
 
 testing.test("displayWidth: precomposed and decomposed agree", lam{ in
     let pre = "h\u{E9}llo"
     let dec = unicode.normalize(pre, "NFD")
-    testing.assertEqual(unicode.displayWidth(pre), 5, "precomposed")
-    testing.assertEqual(unicode.displayWidth(dec), 5, "decomposed")
+    testing.expectEqual(unicode.displayWidth(pre), 5, "precomposed")
+    testing.expectEqual(unicode.displayWidth(dec), 5, "decomposed")
 })
 
 testing.test("displayWidth: CJK is wide (2 cells per char)", lam{ in
     // 你好 — two CJK ideographs, each cell-width 2.
-    testing.assertEqual(unicode.displayWidth("\u{4F60}\u{597D}"), 4, nil)
+    testing.expectEqual(unicode.displayWidth("\u{4F60}\u{597D}"), 4, nil)
 })
 
 testing.test("displayWidth: emoji ZWJ cluster is a single wide unit", lam{ in
     // Family ZWJ: width is the base emoji's width (2), not the sum
     // of each component glyph (8).
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
-    testing.assertEqual(unicode.displayWidth(family), 2, nil)
+    testing.expectEqual(unicode.displayWidth(family), 2, nil)
 })
 
 testing.test("collateKey is case-insensitive", lam{ in
-    testing.assertEqual(unicode.collateKey("Apple"),
+    testing.expectEqual(unicode.collateKey("Apple"),
                         unicode.collateKey("apple"), nil)
 })
 
 testing.test("collateKey sorts unaccented before accented", lam{ in
     // Documented behavior: NFD + casefold sends combining-mark bytes
     // to the back of their letter's range. "elan" < "Élan".
-    testing.assert(unicode.collateKey("elan") < unicode.collateKey("\u{C9}lan"),
+    testing.expect(unicode.collateKey("elan") < unicode.collateKey("\u{C9}lan"),
                    "'elan' < 'Élan' under collateKey")
 })
 
@@ -236,32 +236,32 @@ testing.test("collateKey produces a usable case-insensitive sort", lam{ in
     let sorted = sort(names, lam{ a, b in
         unicode.collateKey(a) < unicode.collateKey(b)
     })
-    testing.assertEqual(sorted, ["Adam", "edge", "elan", "Eve", "\u{C9}lan"], nil)
+    testing.expectEqual(sorted, ["Adam", "edge", "elan", "Eve", "\u{C9}lan"], nil)
 })
 
 testing.test("foldKey makes accented and unaccented compare equal", lam{ in
-    testing.assertEqual(unicode.foldKey("\u{C9}lan"),
+    testing.expectEqual(unicode.foldKey("\u{C9}lan"),
                         unicode.foldKey("elan"),
                         "accents stripped")
-    testing.assertEqual(unicode.foldKey("caf\u{E9}"),
+    testing.expectEqual(unicode.foldKey("caf\u{E9}"),
                         unicode.foldKey("CAFE"),
                         "accents + case both folded")
-    testing.assertEqual(unicode.foldKey("na\u{EF}ve"),
+    testing.expectEqual(unicode.foldKey("na\u{EF}ve"),
                         unicode.foldKey("naive"), nil)
 })
 
 testing.test("foldKey still distinguishes different letters", lam{ in
-    testing.assert(unicode.foldKey("cafe") != unicode.foldKey("cape"),
+    testing.expect(unicode.foldKey("cafe") != unicode.foldKey("cape"),
                    "different base letters still differ")
 })
 
 testing.test("reverse on ASCII", lam{ in
-    testing.assertEqual("hello".reverse(), "olleh", nil)
-    testing.assertEqual("".reverse(), "", nil)
+    testing.expectEqual("hello".reverse(), "olleh", nil)
+    testing.expectEqual("".reverse(), "", nil)
 })
 
 testing.test("reverse keeps precomposed accents attached", lam{ in
-    testing.assertEqual("h\u{E9}llo".reverse(), "oll\u{E9}h", nil)
+    testing.expectEqual("h\u{E9}llo".reverse(), "oll\u{E9}h", nil)
 })
 
 testing.test("reverse keeps DECOMPOSED accents attached to base", lam{ in
@@ -271,13 +271,13 @@ testing.test("reverse keeps DECOMPOSED accents attached to base", lam{ in
     // to the precomposed-reverse form.
     let decomposed = unicode.normalize("h\u{E9}llo", "NFD")
     let reversed = decomposed.reverse()
-    testing.assertEqual(unicode.normalize(reversed, "NFC"),
+    testing.expectEqual(unicode.normalize(reversed, "NFC"),
                         "oll\u{E9}h", nil)
 })
 
 testing.test("reverse keeps emoji ZWJ cluster intact", lam{ in
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
-    testing.assertEqual(family.reverse(), family,
+    testing.expectEqual(family.reverse(), family,
                         "single cluster reverses to itself")
 })
 
@@ -287,7 +287,7 @@ testing.test("reverse pair: two emoji clusters swap as units", lam{ in
     // whole — not interleave their underlying codepoints.
     let se = "\u{1F1F8}\u{1F1EA}"
     let us = "\u{1F1FA}\u{1F1F8}"
-    testing.assertEqual((se + us).reverse(), us + se, nil)
+    testing.expectEqual((se + us).reverse(), us + se, nil)
 })
 
 testing.done()

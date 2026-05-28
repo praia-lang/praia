@@ -21,12 +21,12 @@ testing.test("manifest write quotes values with YAML metacharacters", lam{ in
 
     manifest.write(dir, m)
     let r = manifest.read(dir)
-    testing.assertEqual(r.description, "A test: with a colon and #hash",
+    testing.expectEqual(r.description, "A test: with a colon and #hash",
         "colon + hash survive round-trip")
-    testing.assertEqual(r.author, "true",
+    testing.expectEqual(r.author, "true",
         "ambiguous boolean-like author survives as string")
-    testing.assertEqual(r.bin.tool, "bin/tool.praia", nil)
-    testing.assertEqual(r.dependencies["weird-dep"], "github.com/x/y", nil)
+    testing.expectEqual(r.bin.tool, "bin/tool.praia", nil)
+    testing.expectEqual(r.dependencies["weird-dep"], "github.com/x/y", nil)
 })
 
 testing.test("manifest read throws on a comment-only grain.yaml", lam{ in
@@ -37,7 +37,7 @@ testing.test("manifest read throws on a comment-only grain.yaml", lam{ in
     let dir = testing.tempDir(nil)
     fs.write(path.join(dir, "grain.yaml"),
         "# I forgot to write the actual manifest\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in manifest.read(dir) },
         "not valid YAML")
 })
@@ -48,7 +48,7 @@ testing.test("manifest read accepts a literally empty grain.yaml", lam{ in
     // callers handled it; we preserve that.
     let dir = testing.tempDir(nil)
     fs.write(path.join(dir, "grain.yaml"), "")
-    testing.assertEqual(manifest.read(dir), nil,
+    testing.expectEqual(manifest.read(dir), nil,
         "empty manifest reads as nil, not an error")
 })
 
@@ -65,9 +65,9 @@ testing.test("registry write quotes commit/integrity/installed safely", lam{ in
     }
     registry.add(lockPath, "thing", info)
     let r = registry.get(lockPath, "thing")
-    testing.assertEqual(r.commit,    "abc123", nil)
-    testing.assertEqual(r.integrity, "sha256-deadbeef", nil)
-    testing.assertEqual(r.installed, "2026-05-20", nil)
+    testing.expectEqual(r.commit,    "abc123", nil)
+    testing.expectEqual(r.integrity, "sha256-deadbeef", nil)
+    testing.expectEqual(r.installed, "2026-05-20", nil)
 })
 
 testing.test("registry load throws on a non-parseable lockfile", lam{ in
@@ -84,7 +84,7 @@ testing.test("registry load throws on a non-parseable lockfile", lam{ in
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "# was a lockfile, got nuked by a merge\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in registry.load(lockPath) },
         "not valid YAML")
 })
@@ -93,7 +93,7 @@ testing.test("registry load rejects a scalar top-level document", lam{ in
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "42\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in registry.load(lockPath) },
         "top-level must be a YAML mapping")
 })
@@ -102,7 +102,7 @@ testing.test("registry load rejects a sequence top-level document", lam{ in
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "- a\n- b\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in registry.load(lockPath) },
         "top-level must be a YAML mapping")
 })
@@ -115,7 +115,7 @@ testing.test("registry load rejects grains: <scalar>", lam{ in
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "grains: nope\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in registry.load(lockPath) },
         "'grains:' must be a YAML mapping")
 })
@@ -129,7 +129,7 @@ testing.test("registry load rejects grains: false (not coerced to empty)", lam{ 
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "grains: false\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in registry.load(lockPath) },
         "grains: false rejected, not silently treated as empty")
 })
@@ -138,7 +138,7 @@ testing.test("registry load rejects grains: 0 (not coerced to empty)", lam{ in
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "grains: 0\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in registry.load(lockPath) },
         "grains: 0 rejected, not silently treated as empty")
 })
@@ -151,7 +151,7 @@ testing.test("registry load accepts grains: with no value (explicit empty)", lam
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "grains:\n")
     let r = registry.load(lockPath)
-    testing.assertEqual(len(keys(r.grains)), 0,
+    testing.expectEqual(len(keys(r.grains)), 0,
         "explicit-nil grains: normalizes to empty map")
 })
 
@@ -159,7 +159,7 @@ testing.test("registry load rejects grains: <list>", lam{ in
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "grains:\n  - first\n  - second\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in registry.load(lockPath) },
         "'grains:' must be a YAML mapping")
 })
@@ -168,7 +168,7 @@ testing.test("registry load rejects an entry that isn't a mapping", lam{ in
     let dir = testing.tempDir(nil)
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "grains:\n  thing: scalar-not-map\n")
-    testing.assertThrows(
+    testing.expectThrows(
         lam{ in registry.load(lockPath) },
         "entry 'thing' must be a YAML mapping")
 })
@@ -181,7 +181,7 @@ testing.test("registry load accepts an empty lockfile as no-grains", lam{ in
     let lockPath = path.join(dir, ".sand-lock.yaml")
     fs.write(lockPath, "")
     let r = registry.load(lockPath)
-    testing.assertEqual(len(keys(r.grains)), 0,
+    testing.expectEqual(len(keys(r.grains)), 0,
         "empty lockfile loads as empty registry")
 })
 
@@ -195,7 +195,7 @@ testing.test("manifest survives a description containing only spaces", lam{ in
     m.description = " "
     manifest.write(dir, m)
     let r = manifest.read(dir)
-    testing.assertEqual(r.description, " ",
+    testing.expectEqual(r.description, " ",
         "single-space description survives the YAML round-trip")
 })
 

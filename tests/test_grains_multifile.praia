@@ -8,14 +8,14 @@ testing.test("collections grain loads", lam{ in
     let s = collections.Stack()
     s.push(1)
     s.push(2)
-    testing.assertEqual(s.size(), 2, nil)
-    testing.assertEqual(s.pop(), 2, nil)
-    testing.assertEqual(s.peek(), 1, nil)
+    testing.expectEqual(s.size(), 2, nil)
+    testing.expectEqual(s.pop(), 2, nil)
+    testing.expectEqual(s.peek(), 1, nil)
 
     let q = collections.Queue()
     q.enqueue("a")
     q.enqueue("b")
-    testing.assertEqual(q.dequeue(), "a", nil)
+    testing.expectEqual(q.dequeue(), "a", nil)
 })
 
 testing.test("math is builtin (not a grain)", lam{ in
@@ -24,21 +24,21 @@ testing.test("math is builtin (not a grain)", lam{ in
     // print nil because the grain only exported square/cube. The
     // grain is gone now; square and cube are builtins, so all of
     // math.PI, math.square, math.cube live on the same namespace.
-    testing.assertEqual(math.square(5), 25, nil)
-    testing.assertEqual(math.cube(2), 8, nil)
-    testing.assert(math.PI > 3.141 && math.PI < 3.142, "math.PI is the builtin")
+    testing.expectEqual(math.square(5), 25, nil)
+    testing.expectEqual(math.cube(2), 8, nil)
+    testing.expect(math.PI > 3.141 && math.PI < 3.142, "math.PI is the builtin")
 })
 
 testing.test("strings grain loads", lam{ in
     use "strings"
-    testing.assert(type(strings) == "map", "strings should be a map")
+    testing.expect(type(strings) == "map", "strings should be a map")
 })
 
 testing.test("uuid grain loads", lam{ in
     use "uuid"
     let id = uuid.v4()
-    testing.assertEqual(len(id), 36, "UUID should be 36 chars")
-    testing.assert(id[8] == "-", "UUID format check")
+    testing.expectEqual(len(id), 36, "UUID should be 36 chars")
+    testing.expect(id[8] == "-", "UUID format check")
 })
 
 testing.done()

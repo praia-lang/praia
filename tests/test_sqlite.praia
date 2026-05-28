@@ -19,7 +19,7 @@ if (!_haveSqlite) {
 
 testing.test("handle prints as <external:sqlite.connection>", lam{ in
     let c = sqlite.open(":memory:")
-    testing.assertEqual(str(c), "<external:sqlite.connection>", nil)
+    testing.expectEqual(str(c), "<external:sqlite.connection>", nil)
     sqlite.close(c)
 })
 
@@ -28,16 +28,16 @@ testing.test("round-trip via run + query", lam{ in
     sqlite.run(c, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
     let ins1 = sqlite.run(c, "INSERT INTO users (name, age) VALUES (?, ?)", ["alice", 30])
     let ins2 = sqlite.run(c, "INSERT INTO users (name, age) VALUES (?, ?)", ["bob", 25])
-    testing.assertEqual(ins1.changes, 1, nil)
-    testing.assertEqual(ins1.lastId, 1, nil)
-    testing.assertEqual(ins2.lastId, 2, nil)
+    testing.expectEqual(ins1.changes, 1, nil)
+    testing.expectEqual(ins1.lastId, 1, nil)
+    testing.expectEqual(ins2.lastId, 2, nil)
 
     let rows = sqlite.query(c, "SELECT name, age FROM users ORDER BY id")
-    testing.assertEqual(len(rows), 2, nil)
-    testing.assertEqual(rows[0].name, "alice", nil)
-    testing.assertEqual(rows[0].age, 30, nil)
-    testing.assertEqual(rows[1].name, "bob", nil)
-    testing.assertEqual(rows[1].age, 25, nil)
+    testing.expectEqual(len(rows), 2, nil)
+    testing.expectEqual(rows[0].name, "alice", nil)
+    testing.expectEqual(rows[0].age, 30, nil)
+    testing.expectEqual(rows[1].name, "bob", nil)
+    testing.expectEqual(rows[1].age, 25, nil)
     sqlite.close(c)
 })
 
@@ -50,7 +50,7 @@ testing.test("INTEGER columns preserve int64 precision (>2^53)", lam{ in
     let huge = 9007199254740993   // 2^53 + 1
     sqlite.run(c, "INSERT INTO big VALUES (?)", [huge])
     let r = sqlite.query(c, "SELECT v FROM big")
-    testing.assertEqual(r[0].v, huge, "int64 fidelity")
+    testing.expectEqual(r[0].v, huge, "int64 fidelity")
     sqlite.close(c)
 })
 
@@ -60,10 +60,10 @@ testing.test("named-parameter binding via positional ? placeholders", lam{ in
     sqlite.run(c, "INSERT INTO t (a, b, f, n) VALUES (?, ?, ?, ?)",
                ["hi", 7, 3.5, nil])
     let r = sqlite.query(c, "SELECT * FROM t")
-    testing.assertEqual(r[0].a, "hi", nil)
-    testing.assertEqual(r[0].b, 7, nil)
-    testing.assertEqual(r[0].f, 3.5, nil)
-    testing.assertEqual(r[0].n, nil, "nil binds as NULL, reads back as nil")
+    testing.expectEqual(r[0].a, "hi", nil)
+    testing.expectEqual(r[0].b, 7, nil)
+    testing.expectEqual(r[0].f, 3.5, nil)
+    testing.expectEqual(r[0].n, nil, "nil binds as NULL, reads back as nil")
     sqlite.close(c)
 })
 
@@ -75,7 +75,7 @@ testing.test("connection persists state across separate calls", lam{ in
     sqlite.run(c, "INSERT INTO t VALUES (1)")
     sqlite.run(c, "INSERT INTO t VALUES (2)")
     let r = sqlite.query(c, "SELECT count(*) AS n FROM t")
-    testing.assertEqual(r[0].n, 2, nil)
+    testing.expectEqual(r[0].n, 2, nil)
     sqlite.close(c)
 })
 
@@ -87,7 +87,7 @@ testing.test("transactions: BEGIN + ROLLBACK leaves no rows", lam{ in
     sqlite.run(c, "INSERT INTO t VALUES (2)")
     sqlite.run(c, "ROLLBACK")
     let r = sqlite.query(c, "SELECT count(*) AS n FROM t")
-    testing.assertEqual(r[0].n, 0, "rolled-back inserts must not persist")
+    testing.expectEqual(r[0].n, 0, "rolled-back inserts must not persist")
     sqlite.close(c)
 })
 
@@ -96,8 +96,8 @@ testing.test("non-handle argument throws with sqlite.connection wording", lam{ i
     // throws with "expected an external handle of type 'sqlite.connection'".
     let err = nil
     try { sqlite.query("not a connection", "SELECT 1") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw on non-external")
-    testing.assert(err.contains("external handle") && err.contains("sqlite.connection"),
+    testing.expect(err != nil, "must throw on non-external")
+    testing.expect(err.contains("external handle") && err.contains("sqlite.connection"),
         "error names the expected type: " + str(err))
 })
 
@@ -112,13 +112,13 @@ testing.test("use-after-close throws Database is closed", lam{ in
     sqlite.close(c)
     let err = nil
     try { sqlite.query(c, "SELECT 1") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "must throw post-close")
-    testing.assert(err.contains("Database is closed"), str(err))
+    testing.expect(err != nil, "must throw post-close")
+    testing.expect(err.contains("Database is closed"), str(err))
 
     err = nil
     try { sqlite.run(c, "CREATE TABLE x (a INTEGER)") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "run() must also throw post-close")
-    testing.assert(err.contains("Database is closed"), str(err))
+    testing.expect(err != nil, "run() must also throw post-close")
+    testing.expect(err.contains("Database is closed"), str(err))
 })
 
 testing.test("bind validation: non-array params is rejected", lam{ in
@@ -126,8 +126,8 @@ testing.test("bind validation: non-array params is rejected", lam{ in
     sqlite.run(c, "CREATE TABLE t (a INTEGER)")
     let err = nil
     try { sqlite.run(c, "INSERT INTO t VALUES (?)", "not an array") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "non-array params must throw")
-    testing.assert(err.contains("must be an array"), str(err))
+    testing.expect(err != nil, "non-array params must throw")
+    testing.expect(err.contains("must be an array"), str(err))
     sqlite.close(c)
 })
 
@@ -142,20 +142,20 @@ testing.test("bind validation: param count must match placeholder count", lam{ i
     // Too few params (1 of 2).
     let err = nil
     try { sqlite.run(c, "INSERT INTO t VALUES (?, ?)", [1]) } catch (e) { err = str(e) }
-    testing.assert(err != nil, "too-few params must throw")
-    testing.assert(err.contains("expected 2") && err.contains("got 1"), str(err))
+    testing.expect(err != nil, "too-few params must throw")
+    testing.expect(err.contains("expected 2") && err.contains("got 1"), str(err))
 
     // Too many params (3 of 2).
     err = nil
     try { sqlite.run(c, "INSERT INTO t VALUES (?, ?)", [1, "x", 9]) } catch (e) { err = str(e) }
-    testing.assert(err != nil, "too-many params must throw")
-    testing.assert(err.contains("expected 2") && err.contains("got 3"), str(err))
+    testing.expect(err != nil, "too-many params must throw")
+    testing.expect(err.contains("expected 2") && err.contains("got 3"), str(err))
 
     // Placeholders present but params arg omitted entirely.
     err = nil
     try { sqlite.run(c, "INSERT INTO t VALUES (?, ?)") } catch (e) { err = str(e) }
-    testing.assert(err != nil, "omitted params with placeholders must throw")
-    testing.assert(err.contains("params argument was omitted"), str(err))
+    testing.expect(err != nil, "omitted params with placeholders must throw")
+    testing.expect(err.contains("params argument was omitted"), str(err))
     sqlite.close(c)
 })
 
@@ -164,8 +164,8 @@ testing.test("query also surfaces bind mismatches", lam{ in
     let c = sqlite.open(":memory:")
     let err = nil
     try { sqlite.query(c, "SELECT ? + ?", [1]) } catch (e) { err = str(e) }
-    testing.assert(err != nil, nil)
-    testing.assert(err.contains("expected 2") && err.contains("got 1"), str(err))
+    testing.expect(err != nil, nil)
+    testing.expect(err.contains("expected 2") && err.contains("got 1"), str(err))
     sqlite.close(c)
 })
 
@@ -196,7 +196,7 @@ testing.test("query surfaces non-DONE terminal step rc", lam{ in
     // simply NULL depending on version. If it just returns NULL the
     // query succeeds (no error) — only assert when an error fires.
     if (err != nil) {
-        testing.assert(err.contains("SQL error"),
+        testing.expect(err.contains("SQL error"),
             "step error must be reported as SQL error: " + str(err))
     }
     sqlite.close(c)
@@ -221,7 +221,7 @@ testing.test("GC-driven close: many discarded handles don't leak", lam{ in
         c = sqlite.open(":memory:")
     }
     c = nil
-    testing.assert(true, nil)
+    testing.expect(true, nil)
 })
 
 testing.done()

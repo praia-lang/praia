@@ -7,130 +7,130 @@ use "testing"
 // ── Basic verbs ────────────────────────────────────────────────
 
 testing.test("%s formats strings", lam{ in
-    testing.assertEqual(fmt.sprintf("hi %s", "world"), "hi world", nil)
-    testing.assertEqual(fmt.sprintf("%s %s", "a", "b"), "a b", nil)
+    testing.expectEqual(fmt.sprintf("hi %s", "world"), "hi world", nil)
+    testing.expectEqual(fmt.sprintf("%s %s", "a", "b"), "a b", nil)
 })
 
 testing.test("%d formats integers", lam{ in
-    testing.assertEqual(fmt.sprintf("%d", 42), "42", nil)
-    testing.assertEqual(fmt.sprintf("%d", -7), "-7", nil)
-    testing.assertEqual(fmt.sprintf("%d", 0), "0", nil)
+    testing.expectEqual(fmt.sprintf("%d", 42), "42", nil)
+    testing.expectEqual(fmt.sprintf("%d", -7), "-7", nil)
+    testing.expectEqual(fmt.sprintf("%d", 0), "0", nil)
 })
 
 testing.test("%d accepts integer-valued floats", lam{ in
     // Praia ↔ number promotion is easy to hit by accident; being strict
     // would surprise users who never thought about int/float storage.
-    testing.assertEqual(fmt.sprintf("%d", 7.0), "7", nil)
+    testing.expectEqual(fmt.sprintf("%d", 7.0), "7", nil)
 })
 
 testing.test("%d rejects non-integer floats and non-numbers", lam{ in
-    testing.assertThrows(lam{ in fmt.sprintf("%d", 3.14) }, "requires an integer")
-    testing.assertThrows(lam{ in fmt.sprintf("%d", "x")  }, "requires an integer")
+    testing.expectThrows(lam{ in fmt.sprintf("%d", 3.14) }, "requires an integer")
+    testing.expectThrows(lam{ in fmt.sprintf("%d", "x")  }, "requires an integer")
 })
 
 testing.test("%b %o %x %X — integer bases", lam{ in
-    testing.assertEqual(fmt.sprintf("%b", 5),    "101", nil)
-    testing.assertEqual(fmt.sprintf("%o", 8),    "10", nil)
-    testing.assertEqual(fmt.sprintf("%x", 255),  "ff", nil)
-    testing.assertEqual(fmt.sprintf("%X", 255),  "FF", nil)
+    testing.expectEqual(fmt.sprintf("%b", 5),    "101", nil)
+    testing.expectEqual(fmt.sprintf("%o", 8),    "10", nil)
+    testing.expectEqual(fmt.sprintf("%x", 255),  "ff", nil)
+    testing.expectEqual(fmt.sprintf("%X", 255),  "FF", nil)
 })
 
 testing.test("# flag adds 0b / 0o / 0x prefix", lam{ in
-    testing.assertEqual(fmt.sprintf("%#b", 5),    "0b101", nil)
-    testing.assertEqual(fmt.sprintf("%#o", 8),    "0o10",  nil)
-    testing.assertEqual(fmt.sprintf("%#x", 255),  "0xff",  nil)
-    testing.assertEqual(fmt.sprintf("%#X", 255),  "0XFF",  nil)
+    testing.expectEqual(fmt.sprintf("%#b", 5),    "0b101", nil)
+    testing.expectEqual(fmt.sprintf("%#o", 8),    "0o10",  nil)
+    testing.expectEqual(fmt.sprintf("%#x", 255),  "0xff",  nil)
+    testing.expectEqual(fmt.sprintf("%#X", 255),  "0XFF",  nil)
 })
 
 testing.test("%f / %e / %g format floats", lam{ in
-    testing.assertEqual(fmt.sprintf("%.3f", 3.14159), "3.142", nil)
-    testing.assertEqual(fmt.sprintf("%.0f", 3.7),     "4",     nil)
-    testing.assertEqual(fmt.sprintf("%.2e", 12345.0), "1.23e+04", nil)
-    testing.assertEqual(fmt.sprintf("%.5g", 2.71828), "2.7183", nil)
+    testing.expectEqual(fmt.sprintf("%.3f", 3.14159), "3.142", nil)
+    testing.expectEqual(fmt.sprintf("%.0f", 3.7),     "4",     nil)
+    testing.expectEqual(fmt.sprintf("%.2e", 12345.0), "1.23e+04", nil)
+    testing.expectEqual(fmt.sprintf("%.5g", 2.71828), "2.7183", nil)
 })
 
 testing.test("%f handles NaN and Inf", lam{ in
     let nan = math.INF - math.INF
-    testing.assertEqual(fmt.sprintf("%f", math.INF), "Inf", nil)
-    testing.assertEqual(fmt.sprintf("%f", -math.INF), "-Inf", nil)
-    testing.assertEqual(fmt.sprintf("%f", nan), "NaN", nil)
+    testing.expectEqual(fmt.sprintf("%f", math.INF), "Inf", nil)
+    testing.expectEqual(fmt.sprintf("%f", -math.INF), "-Inf", nil)
+    testing.expectEqual(fmt.sprintf("%f", nan), "NaN", nil)
 })
 
 testing.test("%t formats bools", lam{ in
-    testing.assertEqual(fmt.sprintf("%t", true), "true", nil)
-    testing.assertEqual(fmt.sprintf("%t", false), "false", nil)
-    testing.assertThrows(lam{ in fmt.sprintf("%t", "true") }, "requires a bool")
+    testing.expectEqual(fmt.sprintf("%t", true), "true", nil)
+    testing.expectEqual(fmt.sprintf("%t", false), "false", nil)
+    testing.expectThrows(lam{ in fmt.sprintf("%t", "true") }, "requires a bool")
 })
 
 testing.test("%c formats a Unicode codepoint as a character", lam{ in
-    testing.assertEqual(fmt.sprintf("%c", 65), "A", nil)
-    testing.assertEqual(fmt.sprintf("%c", 0x1F600), "\u{1F600}", "supplementary plane emoji")
-    testing.assertThrows(lam{ in fmt.sprintf("%c", -1) }, "Unicode codepoint")
+    testing.expectEqual(fmt.sprintf("%c", 65), "A", nil)
+    testing.expectEqual(fmt.sprintf("%c", 0x1F600), "\u{1F600}", "supplementary plane emoji")
+    testing.expectThrows(lam{ in fmt.sprintf("%c", -1) }, "Unicode codepoint")
 })
 
 testing.test("%q produces Go-style quoted strings", lam{ in
-    testing.assertEqual(fmt.sprintf("%q", "hello"), "\"hello\"", nil)
-    testing.assertEqual(fmt.sprintf("%q", "with \"quotes\""),
+    testing.expectEqual(fmt.sprintf("%q", "hello"), "\"hello\"", nil)
+    testing.expectEqual(fmt.sprintf("%q", "with \"quotes\""),
                         "\"with \\\"quotes\\\"\"", nil)
-    testing.assertEqual(fmt.sprintf("%q", "a\nb\tc"),
+    testing.expectEqual(fmt.sprintf("%q", "a\nb\tc"),
                         "\"a\\nb\\tc\"", nil)
 })
 
 testing.test("%v is default formatting (via toString)", lam{ in
-    testing.assertEqual(fmt.sprintf("%v", 1), "1", nil)
-    testing.assertEqual(fmt.sprintf("%v", "x"), "x", nil)
-    testing.assertEqual(fmt.sprintf("%v", [1, 2]), "[1, 2]", nil)
-    testing.assertEqual(fmt.sprintf("%v", nil), "nil", nil)
+    testing.expectEqual(fmt.sprintf("%v", 1), "1", nil)
+    testing.expectEqual(fmt.sprintf("%v", "x"), "x", nil)
+    testing.expectEqual(fmt.sprintf("%v", [1, 2]), "[1, 2]", nil)
+    testing.expectEqual(fmt.sprintf("%v", nil), "nil", nil)
 })
 
 testing.test("%T returns the value's type name", lam{ in
-    testing.assertEqual(fmt.sprintf("%T", 1),       "int", nil)
-    testing.assertEqual(fmt.sprintf("%T", 3.14),    "float", nil)
-    testing.assertEqual(fmt.sprintf("%T", "x"),     "string", nil)
-    testing.assertEqual(fmt.sprintf("%T", true),    "bool", nil)
-    testing.assertEqual(fmt.sprintf("%T", [1]),     "array", nil)
-    testing.assertEqual(fmt.sprintf("%T", {a: 1}),  "map", nil)
-    testing.assertEqual(fmt.sprintf("%T", nil),     "nil", nil)
+    testing.expectEqual(fmt.sprintf("%T", 1),       "int", nil)
+    testing.expectEqual(fmt.sprintf("%T", 3.14),    "float", nil)
+    testing.expectEqual(fmt.sprintf("%T", "x"),     "string", nil)
+    testing.expectEqual(fmt.sprintf("%T", true),    "bool", nil)
+    testing.expectEqual(fmt.sprintf("%T", [1]),     "array", nil)
+    testing.expectEqual(fmt.sprintf("%T", {a: 1}),  "map", nil)
+    testing.expectEqual(fmt.sprintf("%T", nil),     "nil", nil)
 })
 
 testing.test("%% is a literal percent", lam{ in
-    testing.assertEqual(fmt.sprintf("100%%"), "100%", nil)
-    testing.assertEqual(fmt.sprintf("%d%%", 42), "42%", nil)
+    testing.expectEqual(fmt.sprintf("100%%"), "100%", nil)
+    testing.expectEqual(fmt.sprintf("%d%%", 42), "42%", nil)
 })
 
 // ── Width / precision / flags ──────────────────────────────────
 
 testing.test("width right-aligns by default", lam{ in
-    testing.assertEqual(fmt.sprintf("|%10s|", "hi"),     "|        hi|", nil)
-    testing.assertEqual(fmt.sprintf("|%10d|", 42),       "|        42|", nil)
+    testing.expectEqual(fmt.sprintf("|%10s|", "hi"),     "|        hi|", nil)
+    testing.expectEqual(fmt.sprintf("|%10d|", 42),       "|        42|", nil)
 })
 
 testing.test("- flag left-aligns", lam{ in
-    testing.assertEqual(fmt.sprintf("|%-10s|", "hi"),    "|hi        |", nil)
-    testing.assertEqual(fmt.sprintf("|%-10d|", 42),      "|42        |", nil)
+    testing.expectEqual(fmt.sprintf("|%-10s|", "hi"),    "|hi        |", nil)
+    testing.expectEqual(fmt.sprintf("|%-10d|", 42),      "|42        |", nil)
 })
 
 testing.test("0 flag zero-pads numeric verbs", lam{ in
-    testing.assertEqual(fmt.sprintf("%05d", 42),         "00042", nil)
-    testing.assertEqual(fmt.sprintf("%05d", -42),        "-0042", "zero-pad AFTER sign")
-    testing.assertEqual(fmt.sprintf("%010.2f", 3.5),     "0000003.50", nil)
+    testing.expectEqual(fmt.sprintf("%05d", 42),         "00042", nil)
+    testing.expectEqual(fmt.sprintf("%05d", -42),        "-0042", "zero-pad AFTER sign")
+    testing.expectEqual(fmt.sprintf("%010.2f", 3.5),     "0000003.50", nil)
 })
 
 testing.test("+ flag forces sign on positives", lam{ in
-    testing.assertEqual(fmt.sprintf("%+d", 42),  "+42", nil)
-    testing.assertEqual(fmt.sprintf("%+d", -42), "-42", nil)
-    testing.assertEqual(fmt.sprintf("%+.1f", 3.5), "+3.5", nil)
+    testing.expectEqual(fmt.sprintf("%+d", 42),  "+42", nil)
+    testing.expectEqual(fmt.sprintf("%+d", -42), "-42", nil)
+    testing.expectEqual(fmt.sprintf("%+.1f", 3.5), "+3.5", nil)
 })
 
 testing.test("space flag uses ' ' as sign placeholder for positives", lam{ in
-    testing.assertEqual(fmt.sprintf("% d", 42), " 42", nil)
-    testing.assertEqual(fmt.sprintf("% d", -42), "-42", nil)
+    testing.expectEqual(fmt.sprintf("% d", 42), " 42", nil)
+    testing.expectEqual(fmt.sprintf("% d", -42), "-42", nil)
 })
 
 testing.test("precision truncates strings by grapheme", lam{ in
-    testing.assertEqual(fmt.sprintf("%.3s", "hello world"), "hel", nil)
+    testing.expectEqual(fmt.sprintf("%.3s", "hello world"), "hel", nil)
     // Two CJK chars (each 1 grapheme) → truncate to first 1.
-    testing.assertEqual(fmt.sprintf("%.1s", "\u{4F60}\u{597D}"), "\u{4F60}", nil)
+    testing.expectEqual(fmt.sprintf("%.1s", "\u{4F60}\u{597D}"), "\u{4F60}", nil)
 })
 
 testing.test("width counts graphemes for non-numeric verbs", lam{ in
@@ -138,39 +138,39 @@ testing.test("width counts graphemes for non-numeric verbs", lam{ in
     // padding lands at column 10 in both forms.
     let pre = "h\u{E9}llo"
     let dec = unicode.normalize(pre, "NFD")
-    testing.assertEqual(fmt.sprintf("|%10s|", pre), "|     h\u{E9}llo|", nil)
-    testing.assertEqual(fmt.sprintf("|%10s|", dec), "|     " + dec + "|",
+    testing.expectEqual(fmt.sprintf("|%10s|", pre), "|     h\u{E9}llo|", nil)
+    testing.expectEqual(fmt.sprintf("|%10s|", dec), "|     " + dec + "|",
                         "decomposed form pads to same visual width")
 })
 
 // ── Error cases ────────────────────────────────────────────────
 
 testing.test("not enough arguments throws", lam{ in
-    testing.assertThrows(lam{ in fmt.sprintf("%d %d", 1) },
+    testing.expectThrows(lam{ in fmt.sprintf("%d %d", 1) },
                          "not enough arguments")
 })
 
 testing.test("too many arguments throws", lam{ in
-    testing.assertThrows(lam{ in fmt.sprintf("%d", 1, 2) },
+    testing.expectThrows(lam{ in fmt.sprintf("%d", 1, 2) },
                          "too many arguments")
 })
 
 testing.test("unknown verb throws", lam{ in
-    testing.assertThrows(lam{ in fmt.sprintf("%z", 1) }, "unknown verb")
+    testing.expectThrows(lam{ in fmt.sprintf("%z", 1) }, "unknown verb")
 })
 
 testing.test("incomplete spec throws", lam{ in
-    testing.assertThrows(lam{ in fmt.sprintf("%5.2") }, "incomplete format specifier")
+    testing.expectThrows(lam{ in fmt.sprintf("%5.2") }, "incomplete format specifier")
 })
 
 testing.test("missing format string throws", lam{ in
-    testing.assertThrows(lam{ in fmt.sprintf() }, "requires a format string")
+    testing.expectThrows(lam{ in fmt.sprintf() }, "requires a format string")
 })
 
 // ── errorf / println surface ──────────────────────────────────
 
 testing.test("fmt.errorf returns a formatted string", lam{ in
-    testing.assertEqual(fmt.errorf("bad value: %v", 42),
+    testing.expectEqual(fmt.errorf("bad value: %v", 42),
                         "bad value: 42", nil)
 })
 
@@ -181,7 +181,7 @@ testing.test("fmt.errorf can be used directly with throw", lam{ in
     } catch (e) {
         caught = e
     }
-    testing.assertEqual(caught, "value out of range: 999", nil)
+    testing.expectEqual(caught, "value out of range: 999", nil)
 })
 
 testing.done()

@@ -25,14 +25,14 @@ testing.test("grain.yaml main: cannot point outside the grain directory", lam{ i
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(root, "main.praia")])
-    testing.assert(r.exitCode != 0,
+    testing.expect(r.exitCode != 0,
         "import must fail (exit=%{str(r.exitCode)}): " + r.stdout + r.stderr)
-    testing.assert(!r.stdout.contains("stolen"),
+    testing.expect(!r.stdout.contains("stolen"),
         "victim's exports must not be visible: " + r.stdout)
     // Defensive — the error message comes through the standard
     // "grain not found" path. Don't pin exact wording; just confirm
     // that the runtime tells the user something went wrong.
-    testing.assert((r.stderr + r.stdout).contains("evil"),
+    testing.expect((r.stderr + r.stdout).contains("evil"),
         "error mentions the grain name: " + r.stderr + r.stdout)
 })
 
@@ -48,8 +48,8 @@ testing.test("victim grain is still loadable directly under its own name", lam{ 
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(root, "main.praia")])
-    testing.assertEqual(r.exitCode, 0, r.stderr)
-    testing.assertEqual(r.stdout.strip(), "ok",
+    testing.expectEqual(r.exitCode, 0, r.stderr)
+    testing.expectEqual(r.stdout.strip(), "ok",
         "victim still loads from its own directory")
 })
 
@@ -67,9 +67,9 @@ testing.test("grain.yaml main: cannot reach upward via deeper paths", lam{ in
 
     let praiaBin = path.join(sys.cwd(), "praia")
     let r = sys.exec([praiaBin, path.join(root, "main.praia")])
-    testing.assert(r.exitCode != 0,
+    testing.expect(r.exitCode != 0,
         "nested traversal must fail (exit=%{str(r.exitCode)}): " + r.stderr)
-    testing.assert(!r.stdout.contains("oops"),
+    testing.expect(!r.stdout.contains("oops"),
         "must not expose host's exports: " + r.stdout)
 })
 
