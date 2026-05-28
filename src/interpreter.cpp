@@ -1179,10 +1179,6 @@ Value Interpreter::evaluate(const Expr* expr) {
             if (left.isNumber() && right.isNumber()) {
                 if (right.asNumber() == 0)
                     throw RuntimeError("Division by zero", e->line, e->column);
-                if (left.isInt() && right.isInt()) {
-                    int64_t a = left.asInt(), b = right.asInt();
-                    if (a % b == 0) return Value(a / b);
-                }
                 return Value(left.asNumber() / right.asNumber());
             }
             throw RuntimeError("Operands of '/' must be numbers", e->line, e->column);
