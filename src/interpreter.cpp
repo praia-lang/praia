@@ -871,9 +871,23 @@ void Interpreter::execute(const Stmt* stmt) {
     }
     case StmtType::Ensure: {
         auto* s = static_cast<const EnsureStmt*>(stmt);
-        Value cond = evaluate(s->condition.get());
-        if (!cond.isTruthy())
-            execute(s->elseBody.get());
+        Value v = evaluate(s->condition.get());
+        if (s->bindingName.empty()) {
+            // ensure (cond) else { ... } — falsy triggers the else
+            if (!v.isTruthy()) execute(s->elseBody.get());
+        } else {
+            // ensure let <name> = <expr> else { ... } — only nil
+            // triggers the else; non-nil values (including false,
+            // 0, "") bind to the name and continue. Matches Swift's
+            // `guard let` semantics (it triggers exclusively on the
+            // optional being .none, not on any "empty"-looking
+            // value).
+            if (v.isNil()) {
+                execute(s->elseBody.get());
+            } else {
+                env->define(s->bindingName, v);
+            }
+        }
         break;
     }
     case StmtType::Defer: {

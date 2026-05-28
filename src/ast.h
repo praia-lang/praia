@@ -360,11 +360,19 @@ struct TryCatchStmt : Stmt {
     StmtPtr finallyBody; // nullptr if no finally
 };
 
-// ensure (condition) else { body }
+// Two shapes share this node:
+//   • Conditional: `ensure (cond) else { body }` — elseBody runs
+//     when `condition` is falsy. `bindingName` is empty.
+//   • Optional-unwrap (Swift `guard let`-style):
+//     `ensure let <name> = <expr> else { body }` — `condition`
+//     holds the expression; when its value is nil, elseBody runs.
+//     Otherwise the value is bound to `<name>` in the enclosing
+//     scope. `bindingName` is the identifier.
 struct EnsureStmt : Stmt {
     EnsureStmt() : Stmt(StmtType::Ensure) {}
     ExprPtr condition;
     StmtPtr elseBody;
+    std::string bindingName;   // empty for the conditional form
 };
 
 struct DeferStmt : Stmt {

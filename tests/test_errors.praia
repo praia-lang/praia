@@ -77,6 +77,67 @@ testing.test("ensure: nested if-else both terminating counts as terminator", lam
     testing.assertThrows(lam{ in classify(0) }, "zero")
 })
 
+testing.test("ensure let: binds the unwrapped value on non-nil", lam{ in
+    // Swift-style `guard let x = expr else { ... }`. The else
+    // block fires only when the expression evaluates to nil;
+    // any other value (including falsy: false / 0 / "") binds
+    // to the name and the function continues.
+    func first_char(s) {
+        ensure let str = s else { return "(no input)" }
+        if (len(str) == 0) { return "(empty)" }
+        return str.slice(0, 1)
+    }
+    testing.assertEqual(first_char("hello"), "h", nil)
+    testing.assertEqual(first_char(""), "(empty)", "empty string is NOT nil — binds and continues")
+    testing.assertEqual(first_char(nil), "(no input)", "nil triggers the else")
+})
+
+testing.test("ensure let: falsy-but-non-nil values bind and skip the else", lam{ in
+    // Specifically calls out the divergence from the conditional
+    // form: `ensure (false) else {...}` would fire the else
+    // because false is falsy, but `ensure let v = false else
+    // {...}` binds v = false because false isn't nil.
+    func tag(x) {
+        ensure let v = x else { return "nil-path" }
+        return "bound=%{v}"
+    }
+    testing.assertEqual(tag(false), "bound=false", "false binds")
+    testing.assertEqual(tag(0),     "bound=0",     "0 binds")
+    testing.assertEqual(tag(""),    "bound=",      "empty string binds")
+    testing.assertEqual(tag(nil),   "nil-path",    "nil takes the else")
+})
+
+testing.test("ensure let: binding is visible for the rest of the enclosing scope", lam{ in
+    // The unwrapped value must live past the ensure-let
+    // statement — Swift's whole point of the construct is the
+    // binding survives into the surrounding code.
+    func compute(input) {
+        ensure let n = input else { return -1 }
+        // `n` accessible here:
+        let doubled = n * 2
+        return doubled + 1
+    }
+    testing.assertEqual(compute(5), 11, nil)
+    testing.assertEqual(compute(nil), -1, nil)
+})
+
+testing.test("ensure let: parser rejects non-terminating else (binding form)", lam{ in
+    // Same guard-contract check applies to both forms; the
+    // diagnostic itself is the same string the conditional-form
+    // test checks for at line 167, so we mirror its assertions
+    // exactly. That way a future regression that changes the
+    // message for ONE form gets caught here too.
+    let bad = "func f(x) { ensure let v = x else { print(\"oops\") } ; print(v) }"
+    let r = sys.exec(["./praia", "-c", bad])
+    testing.assert(r.exitCode != 0, "non-terminating ensure-let must fail parse")
+    let blob = r.stdout + r.stderr
+    testing.assert(blob.contains("ensure"),
+                   "error names the construct: %{blob}")
+    testing.assert(blob.contains("terminate") || blob.contains("return") ||
+                   blob.contains("throw"),
+                   "error names the required action: %{blob}")
+})
+
 testing.test("ensure: continue is a valid terminator (inside a loop)", lam{ in
     // Same recognised-terminator family as break/return — the
     // else skips to the next iteration. Sums only even values:

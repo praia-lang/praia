@@ -1047,6 +1047,36 @@ void Compiler::compileTryCatchStmt(const TryCatchStmt* stmt) {
 }
 
 void Compiler::compileEnsureStmt(const EnsureStmt* stmt) {
+    if (!stmt->bindingName.empty()) {
+        // ensure let <name> = <expr> else { body }
+        //
+        // Stack-machine shape (mirrors the `??` nil-coalesce
+        // pattern in compileExpr): push the value, branch
+        // OP_JUMP_IF_NOT_NIL — the value STAYS on the stack on
+        // the taken branch — so when we patch the jump to the
+        // bind site we have the unwrapped value right where
+        // addLocal / OP_DEFINE_GLOBAL expects it.
+        //
+        // Falls through into the else body iff the value is nil;
+        // POP discards the nil first so the stack is balanced
+        // before the body's statements run. The body must
+        // terminate (return/throw/break/continue) — the parser
+        // already enforced that, so we don't need an explicit
+        // post-body jump back over the bind path.
+        compileExpr(stmt->condition.get());
+        int bindJump = emitJump(OpCode::OP_JUMP_IF_NOT_NIL, stmt->line, stmt->column);
+        emit(OpCode::OP_POP, stmt->line, stmt->column);  // discard the nil
+        compileStmt(stmt->elseBody.get());
+        patchJump(bindJump);
+        if (current->scopeDepth > 0) {
+            addLocal(stmt->bindingName);
+        } else {
+            emit(OpCode::OP_DEFINE_GLOBAL, stmt->line, stmt->column);
+            emitU16(identifierConstant(stmt->bindingName), stmt->line, stmt->column);
+        }
+        return;
+    }
+
     // ensure (condition) else { body }
     // Compiled as: if (!condition) { body }
     compileExpr(stmt->condition.get());
