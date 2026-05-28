@@ -46,4 +46,74 @@ testing.test("highlightCSS exists", lam{ in
     testing.expect(len(markdown.highlightCSS) > 0, "should have CSS content")
 })
 
+// XSS guards: link/image href and src must be escaped so a URL
+// containing `"><script>...` can't break out of the attribute, and
+// `javascript:` / `vbscript:` / `data:text/html` schemes must
+// collapse to `#` so they don't execute on click. These pin the
+// markdown.praia fix that switched from `replacePattern` (which
+// substitutes captures verbatim) to `html.a` / `html.img` plus a
+// `_safeUrl` scheme guard.
+testing.test("link attribute breakout is escaped", lam{ in
+    let result = markdown.render("[ok](x\"><script>alert(1)</script>)")
+    testing.expect(!result.contains("<script>alert"),
+                   "raw <script> must not appear inside the link attribute")
+    testing.expect(result.contains("&quot;") && result.contains("&lt;"),
+                   "href quote/bracket must be html-escaped")
+})
+
+testing.test("image attribute breakout is escaped", lam{ in
+    let result = markdown.render("![alt](x\"><script>alert(1)</script>)")
+    testing.expect(!result.contains("<script>alert"),
+                   "raw <script> must not appear inside the img attribute")
+    testing.expect(result.contains("&quot;") && result.contains("&lt;"),
+                   "src quote/bracket must be html-escaped")
+})
+
+testing.test("javascript: URL collapses to # in links", lam{ in
+    let result = markdown.render("[click](javascript:alert(1))")
+    testing.expect(result.contains("href=\"#\""),
+                   "javascript: scheme must be replaced with #")
+    testing.expect(!result.contains("javascript:alert"),
+                   "raw javascript: payload must not survive")
+})
+
+testing.test("dangerous schemes are blocked case-insensitively", lam{ in
+    // Browsers lowercase the scheme before dispatch, so the guard
+    // must too. Also: ASCII whitespace and control bytes inside the
+    // scheme are stripped by browsers, so the guard strips them too.
+    let cases = [
+        "[a](JavaScript:alert(1))",
+        "[a](  javascript:alert(1))",
+        "[a](java\tscript:alert(1))",
+        "[a](VBScript:msgbox(1))",
+        "[a](data:text/html,<script>alert(1)</script>)"
+    ]
+    for (c in cases) {
+        let out = markdown.render(c)
+        testing.expect(out.contains("href=\"#\""),
+                       "should neutralize: " + c)
+    }
+})
+
+testing.test("benign links/images render unchanged", lam{ in
+    let r1 = markdown.render("[Praia](https://praia.sh)")
+    testing.expect(r1.contains("href=\"https://praia.sh\""), nil)
+    let r2 = markdown.render("![logo](/img/logo.png)")
+    testing.expect(r2.contains("src=\"/img/logo.png\""), nil)
+    let r3 = markdown.render("[top](#top)")
+    testing.expect(r3.contains("href=\"#top\""), nil)
+    let r4 = markdown.render("[mail](mailto:hi@example.com)")
+    testing.expect(r4.contains("href=\"mailto:hi@example.com\""), nil)
+})
+
+testing.test("multi-byte input keeps link stitching correct", lam{ in
+    // Regression: matchAll reports `index` in graphemes (same unit
+    // slice/len use), so the stitch arithmetic stays correct even
+    // when the prefix contains an emoji.
+    let result = markdown.render("👋 [hi](https://x.com) 🎉")
+    testing.expect(result.contains("👋"), "leading emoji preserved")
+    testing.expect(result.contains("🎉"), "trailing emoji preserved")
+    testing.expect(result.contains("href=\"https://x.com\""), "link still emitted")
+})
+
 testing.done()

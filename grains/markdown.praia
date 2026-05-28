@@ -161,15 +161,78 @@ func render(text) {
     return result
 }
 
+// Reject hrefs whose scheme can run code in the browser. The check
+// tolerates leading whitespace, ASCII control bytes, and mixed case
+// because user agents normalize all of those before scheme dispatch.
+// Anything blocked collapses to "#" — the link still renders, but
+// clicking it is a no-op instead of a script invocation. Same list
+// the OWASP HTML sanitizer cheat-sheet calls out.
+func _safeUrl(url) {
+    let trimmed = url.strip().lower()
+    // ASCII control bytes inside the scheme are stripped by browsers
+    // before matching, so `j\tavascript:` is still javascript: to a
+    // browser. We do the same so the guard isn't trivially bypassed.
+    let stripped = ""
+    let i = 0
+    while (i < len(trimmed)) {
+        let c = trimmed[i]
+        // U+0009 (\t), U+000A (\n), U+000D (\r), and any C0 control < 0x20
+        if (c != "\t" && c != "\n" && c != "\r" && c.codepoints()[0] >= 32) {
+            stripped = stripped + c
+        }
+        i = i + 1
+    }
+    let blocked = ["javascript:", "vbscript:", "data:text/html", "data:application"]
+    for (b in blocked) {
+        if (stripped.startsWith(b)) { return "#" }
+    }
+    return url
+}
+
+// Substitute every match of `pattern` in `s` by invoking
+// `builder(groups)` on each. Unlike `replacePattern`, builder runs
+// arbitrary Praia code on the captured groups — so callers can
+// escape captures before splicing them into HTML attributes.
+// `matchAll` reports `index` in grapheme units (same units `slice`
+// and `len` use), so the stitching arithmetic stays consistent
+// even when the input contains multi-byte characters.
+func _replaceMatches(s, pattern, builder) {
+    let matches = s.matchAll(pattern)
+    if (len(matches) == 0) { return s }
+    let out = ""
+    let pos = 0
+    for (m in matches) {
+        out = out + s.slice(pos, m.index)
+        out = out + builder(m.groups)
+        pos = m.index + len(m.match)
+    }
+    out = out + s.slice(pos, len(s))
+    return out
+}
+
 // Process inline formatting
 func _inline(text) {
     let s = text
 
-    // Images ![alt](url)
-    s = s.replacePattern("!\\[([^\\]]*)\\]\\(([^)]+)\\)", "<img src=\"$2\" alt=\"$1\">")
-
-    // Links [text](url)
-    s = s.replacePattern("\\[([^\\]]*)\\]\\(([^)]+)\\)", "<a href=\"$2\">$1</a>")
+    // Images ![alt](url) and links [text](url). We use html.img /
+    // html.a (rather than building the tag inline) so attribute
+    // values are escaped — without that, a URL like
+    // `x"><script>...` breaks out of the href attribute. `_safeUrl`
+    // additionally neutralizes `javascript:` and similar
+    // code-executing schemes that surviving the attribute escape
+    // alone (escaped quotes don't help when the browser still
+    // dispatches the scheme on click).
+    //
+    // Images must run before links because `\[...\]\(...\)` is a
+    // substring of `!\[...\]\(...\)`, so a link pass before image
+    // pass would consume the bracket part of an image and leave a
+    // stray `!`.
+    s = _replaceMatches(s, "!\\[([^\\]]*)\\]\\(([^)]+)\\)", lam{ g in
+        htmlUtil.img(_safeUrl(g[1]), g[0], nil)
+    })
+    s = _replaceMatches(s, "\\[([^\\]]*)\\]\\(([^)]+)\\)", lam{ g in
+        htmlUtil.a(_safeUrl(g[1]), g[0], nil)
+    })
 
     // Inline code `code`
     s = s.replacePattern("`([^`]+)`", "<code>$1</code>")
