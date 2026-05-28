@@ -727,13 +727,13 @@ type(3.14)      // "float"
 ### Arithmetic rules
 
 - `int + int`, `int - int`, `int * int`, `int % int` → int
-- Anything involving a double → double
-- `/` always returns double: `7 / 2` → `3.5` (like Python 3)
+- Anything involving a float → float
+- `/` always returns float: `7 / 2` → `3.5` (like Python 3)
 
 ```praia
 42 + 8          // 50 (int)
-42 + 0.5        // 42.5 (number)
-7 / 2           // 3.5 (always double)
+42 + 0.5        // 42.5 (float)
+7 / 2           // 3.5 (always float)
 7 % 2           // 1 (int)
 ```
 
