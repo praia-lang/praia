@@ -1299,24 +1299,24 @@ Interpreter::Interpreter() {
     };
 
     // Register canonical fs.* entries.
-    fsMap->entries[Value("read")]        = Value(makeNative("fs.read",        1,  fsRead));
-    fsMap->entries[Value("write")]       = Value(makeNative("fs.write",       2,  fsWrite));
-    fsMap->entries[Value("append")]      = Value(makeNative("fs.append",      2,  fsAppend));
-    fsMap->entries[Value("exists")]      = Value(makeNative("fs.exists",      1,  fsExists));
-    fsMap->entries[Value("mkdir")]       = Value(makeNative("fs.mkdir",       1,  fsMkdir));
+    fsMap->entries[Value("read")]        = Value(makeNative("fs.read",        1,  fsRead,        {"path"}));
+    fsMap->entries[Value("write")]       = Value(makeNative("fs.write",       2,  fsWrite,       {"path", "data"}));
+    fsMap->entries[Value("append")]      = Value(makeNative("fs.append",      2,  fsAppend,      {"path", "data"}));
+    fsMap->entries[Value("exists")]      = Value(makeNative("fs.exists",      1,  fsExists,      {"path"}));
+    fsMap->entries[Value("mkdir")]       = Value(makeNative("fs.mkdir",       1,  fsMkdir,       {"path"}));
     fsMap->entries[Value("tempDir")]     = Value(makeNative("fs.tempDir",     -1, fsTempDir));
-    fsMap->entries[Value("remove")]      = Value(makeNative("fs.remove",      1,  fsRemove));
-    fsMap->entries[Value("readDir")]     = Value(makeNative("fs.readDir",     1,  fsReadDir));
-    fsMap->entries[Value("copy")]        = Value(makeNative("fs.copy",        2,  fsCopy));
-    fsMap->entries[Value("move")]        = Value(makeNative("fs.move",        2,  fsMove));
-    fsMap->entries[Value("stat")]        = Value(makeNative("fs.stat",        1,  fsStat));
-    fsMap->entries[Value("lstat")]       = Value(makeNative("fs.lstat",       1,  fsLstat));
-    fsMap->entries[Value("chmod")]       = Value(makeNative("fs.chmod",       2,  fsChmod));
-    fsMap->entries[Value("symlink")]     = Value(makeNative("fs.symlink",     2,  fsSymlink));
-    fsMap->entries[Value("readlink")]    = Value(makeNative("fs.readlink",    1,  fsReadlink));
-    fsMap->entries[Value("atomicWrite")] = Value(makeNative("fs.atomicWrite", 2,  fsAtomicWrite));
+    fsMap->entries[Value("remove")]      = Value(makeNative("fs.remove",      1,  fsRemove,      {"path"}));
+    fsMap->entries[Value("readDir")]     = Value(makeNative("fs.readDir",     1,  fsReadDir,     {"path"}));
+    fsMap->entries[Value("copy")]        = Value(makeNative("fs.copy",        2,  fsCopy,        {"src", "dst"}));
+    fsMap->entries[Value("move")]        = Value(makeNative("fs.move",        2,  fsMove,        {"src", "dst"}));
+    fsMap->entries[Value("stat")]        = Value(makeNative("fs.stat",        1,  fsStat,        {"path"}));
+    fsMap->entries[Value("lstat")]       = Value(makeNative("fs.lstat",       1,  fsLstat,       {"path"}));
+    fsMap->entries[Value("chmod")]       = Value(makeNative("fs.chmod",       2,  fsChmod,       {"path", "mode"}));
+    fsMap->entries[Value("symlink")]     = Value(makeNative("fs.symlink",     2,  fsSymlink,     {"target", "linkPath"}));
+    fsMap->entries[Value("readlink")]    = Value(makeNative("fs.readlink",    1,  fsReadlink,    {"path"}));
+    fsMap->entries[Value("atomicWrite")] = Value(makeNative("fs.atomicWrite", 2,  fsAtomicWrite, {"path", "data"}));
     fsMap->entries[Value("mktemp")]      = Value(makeNative("fs.mktemp",      -1, fsMktemp));
-    fsMap->entries[Value("open")]        = Value(makeNative("fs.open",        2,  fsOpen));
+    fsMap->entries[Value("open")]        = Value(makeNative("fs.open",        2,  fsOpen,        {"path", "mode"}));
 
     // Helper: register a deprecated sys.<name> forwarder that calls
     // through to the canonical fs.<name> implementation, emitting a
@@ -2550,7 +2550,7 @@ Interpreter::Interpreter() {
                     std::to_string(src.size()) + ")", 0);
             }
             return jsonParse(src);
-        }));
+        }, {"input", "maxLength"}));
 
     jsonMap->entries[Value("stringify")] = Value(makeNative("json.stringify", -1,
         [](const std::vector<Value>& args) -> Value {
@@ -2560,7 +2560,7 @@ Interpreter::Interpreter() {
             if (args.size() > 1 && args[1].isNumber())
                 indent = static_cast<int>(args[1].asNumber());
             return Value(jsonStringify(args[0], indent, 0));
-        }));
+        }, {"value", "indent"}));
 
     // json.parser(input) — pull-parser for streaming reads. `input`
     // is either a string (parsed in-memory) or a file handle with a
@@ -3457,7 +3457,7 @@ Interpreter::Interpreter() {
             int hi = static_cast<int>(args[1].asNumber());
             std::uniform_int_distribution<int> dist(lo, hi);
             return Value(static_cast<int64_t>(dist(*rng)));
-        }));
+        }, {"min", "max"}));
 
     randomMap->entries[Value("float")] = Value(makeNative("random.float", 0,
         [rng](const std::vector<Value>&) -> Value {
@@ -3474,7 +3474,7 @@ Interpreter::Interpreter() {
                 throw RuntimeError("random.choice() on empty array", 0);
             std::uniform_int_distribution<size_t> dist(0, elems.size() - 1);
             return elems[dist(*rng)];
-        }));
+        }, {"array"}));
 
     randomMap->entries[Value("shuffle")] = Value(makeNative("random.shuffle", 1,
         [rng](const std::vector<Value>& args) -> Value {
@@ -3483,7 +3483,7 @@ Interpreter::Interpreter() {
             auto& elems = args[0].asArray()->elements;
             std::shuffle(elems.begin(), elems.end(), *rng);
             return args[0];
-        }));
+        }, {"array"}));
 
     randomMap->entries[Value("seed")] = Value(makeNative("random.seed", 1,
         [rng](const std::vector<Value>& args) -> Value {
@@ -3521,7 +3521,7 @@ Interpreter::Interpreter() {
                     throw RuntimeError("Interrupted", 0);
             }
             return Value();
-        }));
+        }, {"milliseconds"}));
 
     timeMap->entries[Value("format")] = Value(makeNative("time.format", -1,
         [](const std::vector<Value>& args) -> Value {
@@ -3545,7 +3545,7 @@ Interpreter::Interpreter() {
             std::ostringstream oss;
             oss << std::put_time(&tm, fmt.c_str());
             return Value(oss.str());
-        }));
+        }, {"format", "timestamp", "utc"}));
 
     timeMap->entries[Value("epoch")] = Value(makeNative("time.epoch", 0,
         [](const std::vector<Value>&) -> Value {
@@ -3589,7 +3589,7 @@ Interpreter::Interpreter() {
             auto [ok2, ms2] = parseWith("%Y-%m-%d");
             if (ok2) return Value(ms2);
             throw RuntimeError("time.parse() could not parse '" + dateStr + "'", 0);
-        }));
+        }, {"dateString", "format", "utc"}));
 
     // Helper: convert ms timestamp to std::tm
     auto msToTm = [](const std::vector<Value>& args, const char* name) -> std::tm {
@@ -3873,7 +3873,7 @@ Interpreter::Interpreter() {
             result->elements.push_back(Value(std::move(line)));
         return Value(result);
     };
-    fsMap->entries[Value("readLines")] = Value(makeNative("fs.readLines", 1, fsReadLines));
+    fsMap->entries[Value("readLines")] = Value(makeNative("fs.readLines", 1, fsReadLines, {"path"}));
     {
         auto warned = std::make_shared<std::atomic<bool>>(false);
         sysMap->entries[Value("readLines")] = Value(makeNative("sys.readLines", 1,

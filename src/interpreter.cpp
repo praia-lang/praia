@@ -1310,7 +1310,17 @@ Value Interpreter::evaluate(const Expr* expr) {
             pendingArgsFilled_ = mask;
         }
 
-        return callWithContext(*this, callee.asCallable(), args, e->line);
+        // Reset `pendingArgsFilled_` after the call so the mask never
+        // leaks into the next dispatch. User-function callables consume
+        // and reset the mask themselves (interpreter_callables.cpp:58,
+        // :103); natives don't touch it. Without this, a named-arg
+        // native call (e.g. `fs.read(path: x)`) leaves the mask set
+        // for the next, possibly positional, call — which then
+        // misinterprets its positional args as missing and
+        // defaults-substitutes them.
+        Value _result = callWithContext(*this, callee.asCallable(), args, e->line);
+        pendingArgsFilled_ = ~0ULL;
+        return _result;
     }
 
     // ── Array literal ──
@@ -1407,7 +1417,12 @@ Value Interpreter::evaluate(const Expr* expr) {
                 pendingArgsFilled_ = mask;
             }
 
-            return callWithContext(*this, callee.asCallable(), args, e->line);
+            // See the matching note at the regular call dispatch
+            // above — reset the mask after the call so it never
+            // bleeds into the next dispatch.
+            Value _result = callWithContext(*this, callee.asCallable(), args, e->line);
+            pendingArgsFilled_ = ~0ULL;
+            return _result;
         }
 
         // Right side is just a function name: f → f(leftVal)

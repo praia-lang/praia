@@ -1337,7 +1337,21 @@ func format(value, prefix = "", suffix = "") {
 42 |> format(suffix: "!")  // "42!"
 ```
 
-Unknown parameter names and duplicate names throw a runtime error. Native built-in functions do not support named arguments.
+Unknown parameter names and duplicate names throw a runtime error.
+
+Named arguments also work for stdlib natives whose positional slots are documented (most of `crypto`, `fs`, `time`, `random`, `json`, `bytes`, etc.):
+
+```praia
+let k = crypto.randomBytes(count: 32)
+let iv = crypto.randomBytes(count: 16)
+let ct = crypto.encrypt(plaintext: "hello", key: k, iv: iv)
+
+fs.write(path: "/tmp/x.txt", data: "hi")
+random.int(min: 1, max: 100)
+json.stringify(value: data, indent: 2)
+```
+
+Nullary and trivially-unary natives (`len`, `str`, `num`, `type`, `print`, `keys`, `values`) stay positional-only — naming them adds noise. Calling those with names throws `Named arguments not supported for '<name>'`. Native param names are part of the API contract; renames are breaking changes.
 
 ### Implicit nil Return
 

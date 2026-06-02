@@ -1,0 +1,95 @@
+use "testing"
+
+// Phase 1 named-arg adoption: every multi-arg native registered with
+// a `paramNames` vector accepts the same call by name and by position.
+// Reordering proves the names route through `reorderNamedArgs`
+// (interpreter.cpp) / OP_CALL_NAMED (vm.cpp) and not by lucky stacking.
+// A negative-control test against `len` pins the rule that
+// unlabelled natives keep throwing — the gate is intact.
+
+testing.test("crypto.encrypt + decrypt round-trip by name", lam{ in
+    let key = crypto.randomBytes(count: 32)
+    let iv  = crypto.randomBytes(count: 16)
+    let ct  = crypto.encrypt(plaintext: "hello world", key: key, iv: iv)
+    testing.expectEqual(crypto.decrypt(ciphertext: ct, key: key, iv: iv),
+                        "hello world", nil)
+})
+
+testing.test("crypto.seal + open with AAD by name", lam{ in
+    let key = crypto.randomBytes(count: 32)
+    let sealed = crypto.seal(plaintext: "secret payload", key: key, aad: "user:42")
+    testing.expectEqual(crypto.open(sealed: sealed, key: key, aad: "user:42"),
+                        "secret payload", nil)
+    testing.expectThrows(
+        lam{ in crypto.open(sealed: sealed, key: key, aad: "user:43") },
+        "authentication")
+})
+
+testing.test("crypto.hashPassword honors named iterations", lam{ in
+    let res = crypto.hashPassword(password: "pw", iterations: 1000)
+    testing.expectEqual(res.iterations, 1000, nil)
+    testing.expect(crypto.verifyPassword(
+        password: "pw",
+        hash: res.hash,
+        salt: res.salt,
+        iterations: 1000), "round-trip verifies")
+})
+
+testing.test("fs.write + fs.read by name", lam{ in
+    let tmp = testing.tempDir() + "/named.txt"
+    fs.write(path: tmp, data: "by name")
+    testing.expectEqual(fs.read(path: tmp), "by name", nil)
+})
+
+testing.test("named args reordering: fs.write with data before path", lam{ in
+    // Same call, args swapped. The engine reorders by name before
+    // invoking the native — there's no positional cue.
+    let tmp = testing.tempDir() + "/reordered.txt"
+    fs.write(data: "swapped", path: tmp)
+    testing.expectEqual(fs.read(path: tmp), "swapped", nil)
+})
+
+testing.test("random.int reordered", lam{ in
+    let n = random.int(max: 100, min: 1)
+    testing.expect(n >= 1 && n <= 100, "range respected with reordered names")
+})
+
+testing.test("json.stringify with named indent", lam{ in
+    let out = json.stringify(value: {a: 1}, indent: 2)
+    testing.expect(out.contains("\n"), "indented form has newlines")
+    testing.expect(out.contains("  "), "indented form has two-space indent")
+})
+
+testing.test("time.format with named timestamp + format", lam{ in
+    let t = 1700000000000   // 2023-11-14 22:13:20 UTC
+    let s = time.format(format: "%Y", timestamp: t, utc: true)
+    testing.expectEqual(s, "2023", nil)
+})
+
+testing.test("bytes.slice with named args", lam{ in
+    testing.expectEqual(bytes.slice(string: "abcdef", start: 1, end: 4), "bcd", nil)
+})
+
+// NOTE: A regression test for the "unknown parameter" diagnostic
+// would naturally live here — calling `fs.read(paht: ...)` and
+// expecting `expectThrows(..., "unknown parameter")`. Skipped today
+// because of a pre-existing VM bug: `try { fs.read(paht: ...) }
+// catch (e) { ... }` doesn't catch the OP_CALL_NAMED unknown-
+// parameter error on the VM, even though the same call WITHOUT a
+// surrounding try (at top level) throws "fs.read() unknown
+// parameter 'paht'" correctly. Tree-walker handles both. The VM
+// `try`-vs-OP_CALL_NAMED interaction is orthogonal to this Phase 1
+// labelling work — file separately and add this test back once it's
+// fixed.
+
+testing.test("unlabelled native still rejects names (negative control)", lam{ in
+    // `len` is intentionally unlabelled per the convention: trivially-
+    // unary natives stay positional. The engine must still throw the
+    // standard rejection; this is the negative control that says we
+    // haven't accidentally made paramNames non-optional.
+    testing.expectThrows(
+        lam{ in len(value: [1, 2, 3]) },
+        "Named arguments not supported")
+})
+
+testing.done()

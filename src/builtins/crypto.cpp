@@ -1049,7 +1049,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (algo != "sha256" && algo != "sha1" && algo != "sha512" && algo != "md5")
                 throw RuntimeError("crypto.hmac() algorithm must be 'sha256', 'sha1', 'sha512', or 'md5'", 0);
             return Value(hmac_compute(args[0].asString(), args[1].asString(), algo));
-        }));
+        }, {"key", "message", "algorithm"}));
 
     // crypto.hkdf(key, salt, info, length, hash?) — RFC 5869 HKDF.
     //
@@ -1154,7 +1154,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             if (count < 0 || count > 65536)
                 throw RuntimeError("crypto.randomBytes() count must be 0-65536", 0);
             return Value(generateRandomBytes(count));
-        }));
+        }, {"count"}));
 
     // ── AES-256-GCM AEAD (requires OpenSSL) ──
     //
@@ -1233,7 +1233,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
                 throw RuntimeError("crypto.seal(): tag retrieval failed", 0);
 
             return Value(nonce + ct + tag);
-        }));
+        }, {"plaintext", "key", "aad"}));
 
     cryptoMap->entries[Value("open")] = Value(makeNative("crypto.open", -1,
         [](const std::vector<Value>& args) -> Value {
@@ -1297,7 +1297,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             totalLen += finalLen;
             pt.resize(totalLen);
             return Value(std::move(pt));
-        }));
+        }, {"sealed", "key", "aad"}));
 #endif
 
     // ── AES-256-CBC (requires OpenSSL) — UNAUTHENTICATED, low-level ──
@@ -1344,7 +1344,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             totalLen += len;
             ciphertext.resize(totalLen);
             return Value(std::move(ciphertext));
-        }));
+        }, {"plaintext", "key", "iv"}));
 
     // crypto.decrypt(ciphertext, key, iv) — AES-256-CBC, returns plaintext
     cryptoMap->entries[Value("decrypt")] = Value(makeNative("crypto.decrypt", 3,
@@ -1380,7 +1380,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             totalLen += len;
             plaintext.resize(totalLen);
             return Value(std::move(plaintext));
-        }));
+        }, {"ciphertext", "key", "iv"}));
 #endif
 
     // ── Password hashing (bcrypt-style using PBKDF2, requires OpenSSL) ──
@@ -1431,7 +1431,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             result->entries[Value("salt")] = Value(toHexString(reinterpret_cast<const uint8_t*>(salt.data()), salt.size()));
             result->entries[Value("iterations")] = Value(static_cast<int64_t>(iterations));
             return Value(result);
-        }));
+        }, {"password", "salt", "iterations"}));
 
     // crypto.verifyPassword(password, hash, salt, iterations?) — verify PBKDF2
     cryptoMap->entries[Value("verifyPassword")] = Value(makeNative("crypto.verifyPassword", -1,
@@ -1493,7 +1493,7 @@ void registerCryptoBuiltins(std::shared_ptr<PraiaMap> cryptoMap) {
             for (size_t i = 0; i < n; i++)
                 diff |= actualHex[i] ^ expectedHex[i];
             return Value(diff == 0);
-        }));
+        }, {"password", "hash", "salt", "iterations"}));
 
     // ── Modern password KDFs (scrypt + argon2id) ─────────────
     //
