@@ -1301,23 +1301,28 @@ Value Interpreter::evaluate(const Expr* expr) {
             }
         }
 
-        // Reorder named arguments if present
+        // Reorder named arguments if present. The mask is only meaningful
+        // for user-function callables (interpreter_callables.cpp:58, :103
+        // consume and reset it to default missing positions). Natives
+        // ignore the mask entirely — `reorderNamedArgs` already padded
+        // any unfilled positions with nil, and the native body reads
+        // `args.size()` to decide what's missing. Skipping the mask-set
+        // for natives matters: if a native (e.g. `sort(comparator: f)`)
+        // re-enters the engine to invoke a user callback (the comparator),
+        // a stale mask would leak into the callback and cause its
+        // positional args past the mask boundary to be wrongly defaulted.
         bool hasNamed = false;
         for (auto& n : e->argNames) { if (!n.empty()) { hasNamed = true; break; } }
+        bool calleeIsNative = (dynamic_cast<NativeFunction*>(callee.asCallable().get()) != nullptr);
         if (hasNamed) {
             uint64_t mask = 0;
             args = reorderNamedArgs(callee.asCallable(), args, e->argNames, e->line, &mask);
-            pendingArgsFilled_ = mask;
+            if (!calleeIsNative) pendingArgsFilled_ = mask;
         }
 
-        // Reset `pendingArgsFilled_` after the call so the mask never
-        // leaks into the next dispatch. User-function callables consume
-        // and reset the mask themselves (interpreter_callables.cpp:58,
-        // :103); natives don't touch it. Without this, a named-arg
-        // native call (e.g. `fs.read(path: x)`) leaves the mask set
-        // for the next, possibly positional, call — which then
-        // misinterprets its positional args as missing and
-        // defaults-substitutes them.
+        // Reset the mask after the call so it never leaks into the next
+        // dispatch. User-function callees already reset it on entry, but
+        // anything that throws mid-call would otherwise leave it set.
         Value _result = callWithContext(*this, callee.asCallable(), args, e->line);
         pendingArgsFilled_ = ~0ULL;
         return _result;

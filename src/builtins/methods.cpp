@@ -95,7 +95,7 @@ Value getStringMethod(const std::string& strRef,
                 pos += to.size();
             }
             return Value(std::move(result));
-        }));
+        }, {"pattern", "replacement"}));
     }
     if (name == "startsWith") {
         return Value(makeNative("startsWith", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -179,7 +179,7 @@ Value getStringMethod(const std::string& strRef,
                 throw RuntimeError("charCode index out of bounds", 0);
             return Value(static_cast<int64_t>(static_cast<unsigned char>(str[idx])));
 #endif
-        }));
+        }, {"index"}));
     }
     if (name == "test") {
         return Value(makeNative("test", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -340,7 +340,7 @@ Value getStringMethod(const std::string& strRef,
                 throw RuntimeError(std::string("Invalid regex: ") + e.what(), 0);
             }
 #endif
-        }));
+        }, {"pattern", "replacement"}));
     }
     if (name == "slice") {
         return Value(makeNative("slice", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -378,7 +378,7 @@ Value getStringMethod(const std::string& strRef,
             }
             return Value(str.substr(start));
 #endif
-        }));
+        }, {"start", "end"}));
     }
     if (name == "indexOf") {
         return Value(makeNative("indexOf", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -404,7 +404,7 @@ Value getStringMethod(const std::string& strRef,
             auto pos = str.find(args[0].asString(), startPos);
             return Value(pos == std::string::npos ? static_cast<int64_t>(-1) : static_cast<int64_t>(pos));
 #endif
-        }));
+        }, {"substring", "start"}));
     }
     if (name == "lastIndexOf") {
         return Value(makeNative("lastIndexOf", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -452,7 +452,7 @@ Value getStringMethod(const std::string& strRef,
                 result = pad + result;
 #endif
             return Value(std::move(result));
-        }));
+        }, {"width", "fillString"}));
     }
     if (name == "padEnd") {
         return Value(makeNative("padEnd", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -475,7 +475,7 @@ Value getStringMethod(const std::string& strRef,
                 result += pad;
 #endif
             return Value(std::move(result));
-        }));
+        }, {"width", "fillString"}));
     }
     if (name == "trimStart") {
         return Value(makeNative("trimStart", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
@@ -595,7 +595,7 @@ Value getStringMethod(const std::string& strRef,
             result += str;
             for (int i = 0; i < right; i++) result += pad;
             return Value(std::move(result));
-        }));
+        }, {"width", "fillString"}));
     }
     if (name == "isDigit") {
         return Value(makeNative("isDigit", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
@@ -720,7 +720,7 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
             auto result = gcNew<PraiaArray>();
             result->elements.assign(arr->elements.begin() + start, arr->elements.begin() + end);
             return Value(result);
-        }));
+        }, {"start", "end"}));
     }
     if (name == "indexOf") {
         return Value(makeNative("indexOf", 1, [arr](const std::vector<Value>& args) -> Value {
@@ -770,7 +770,7 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
                 });
             }
             return Value(sorted);
-        }));
+        }, {"comparator"}));
     }
     throw RuntimeError("Array has no method '" + name + "'", line);
 }
@@ -790,7 +790,7 @@ Value getMapMethod(std::shared_ptr<PraiaMap> map,
             if (it != map->entries.end()) return it->second;
             if (args.size() > 1) return args[1];
             return Value();
-        }));
+        }, {"key", "default"}));
     }
     if (name == "delete") {
         return Value(makeNative("delete", 1, [map](const std::vector<Value>& args) -> Value {

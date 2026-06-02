@@ -1435,20 +1435,37 @@ VM::Result VM::execute(int baseFrameCount_) {
             if (!params) { RUNTIME_ERR("Named arguments not supported for '" + callee.asCallable()->name() + "'"); }
 
             int paramCount = static_cast<int>(params->size());
-            // Pop args from stack (in reverse order)
-            std::vector<Value> args(argc);
-            for (int i = argc - 1; i >= 0; i--) args[i] = pop();
-            pop(); // pop callee
 
-            // Reorder named args to match parameter positions
-            std::vector<Value> reordered(paramCount);
+            // Pre-validate names while the stack still matches the
+            // surrounding try handler's saved stackTop. Earlier
+            // versions popped args + callee first and then ran
+            // these checks — when a check fired inside a `try {}`,
+            // tryHandleError's `stackTop = handler.stackTop` restore
+            // overshot by `argc + 1` slots and corrupted the catch
+            // frame. Two invariants this block now upholds:
+            //
+            //   1. No `pop()` happens until validation succeeds, so
+            //      the surrounding try handler's stackTop is correct.
+            //   2. A validation error captures the message into
+            //      `errMsg`, then drops out of the for loop, and a
+            //      single error-handling step runs at case scope.
+            //      We can't use the `RUNTIME_ERR` macro directly
+            //      inside the inner loop because its `continue` would
+            //      target THAT loop instead of the outer dispatch
+            //      loop, letting validation "fall through" into the
+            //      pop / dispatch path with a stale stack.
+            std::vector<int> targetSlot(argc);
             std::vector<bool> filled(paramCount, false);
             int positionalIdx = 0;
+            std::string errMsg;
             for (int i = 0; i < argc; i++) {
-                std::string name = namesArr[i].asString();
+                const std::string& name = namesArr[i].asString();
                 if (name.empty()) {
-                    if (positionalIdx >= paramCount) { RUNTIME_ERR(callee.asCallable()->name() + "() too many arguments"); }
-                    reordered[positionalIdx] = args[i];
+                    if (positionalIdx >= paramCount) {
+                        errMsg = callee.asCallable()->name() + "() too many arguments";
+                        break;
+                    }
+                    targetSlot[i] = positionalIdx;
                     filled[positionalIdx] = true;
                     positionalIdx++;
                 } else {
@@ -1456,12 +1473,27 @@ VM::Result VM::execute(int baseFrameCount_) {
                     for (int p = 0; p < paramCount; p++) {
                         if ((*params)[p] == name) { found = p; break; }
                     }
-                    if (found == -1) { RUNTIME_ERR(callee.asCallable()->name() + "() unknown parameter '" + name + "'"); }
-                    if (filled[found]) { RUNTIME_ERR(callee.asCallable()->name() + "() parameter '" + name + "' specified twice"); }
-                    reordered[found] = args[i];
+                    if (found == -1) {
+                        errMsg = callee.asCallable()->name() + "() unknown parameter '" + name + "'";
+                        break;
+                    }
+                    if (filled[found]) {
+                        errMsg = callee.asCallable()->name() + "() parameter '" + name + "' specified twice";
+                        break;
+                    }
+                    targetSlot[i] = found;
                     filled[found] = true;
                 }
             }
+            if (!errMsg.empty()) { RUNTIME_ERR(errMsg); }
+
+            // Validation passed — now safe to mutate the stack.
+            std::vector<Value> args(argc);
+            for (int i = argc - 1; i >= 0; i--) args[i] = pop();
+            pop(); // pop callee
+
+            std::vector<Value> reordered(paramCount);
+            for (int i = 0; i < argc; i++) reordered[targetSlot[i]] = args[i];
 
             // Push callee back + reordered args
             push(callee);

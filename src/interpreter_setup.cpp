@@ -2853,7 +2853,7 @@ Interpreter::Interpreter() {
                 }
             }
             return Value(arr);
-        }));
+        }, {"dir", "pattern"}));
 
     // path.isDir(path) — check if path is a directory
     pathMap->entries[Value("isDir")] = Value(makeNative("path.isDir", 1,
@@ -3723,7 +3723,7 @@ Interpreter::Interpreter() {
                 throw RuntimeError("Division by zero", 0);
             double result = args[0].asNumber() / args[1].asNumber();
             return Value(static_cast<int64_t>(result > 0 ? std::floor(result) : std::ceil(result)));
-        }));
+        }, {"a", "b"}));
     mathFn1("abs", std::fabs);
     mathFn1("log", std::log);
     mathFn1("log2", std::log2);
@@ -3735,21 +3735,21 @@ Interpreter::Interpreter() {
             if (!args[0].isNumber() || !args[1].isNumber())
                 throw RuntimeError("math.pow() requires two numbers", 0);
             return Value(std::pow(args[0].asNumber(), args[1].asNumber()));
-        }));
+        }, {"base", "exponent"}));
 
     mathMap->entries[Value("min")] = Value(makeNative("math.min", 2,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isNumber() || !args[1].isNumber())
                 throw RuntimeError("math.min() requires two numbers", 0);
             return Value(std::fmin(args[0].asNumber(), args[1].asNumber()));
-        }));
+        }, {"a", "b"}));
 
     mathMap->entries[Value("max")] = Value(makeNative("math.max", 2,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isNumber() || !args[1].isNumber())
                 throw RuntimeError("math.max() requires two numbers", 0);
             return Value(std::fmax(args[0].asNumber(), args[1].asNumber()));
-        }));
+        }, {"a", "b"}));
 
     mathMap->entries[Value("clamp")] = Value(makeNative("math.clamp", 3,
         [](const std::vector<Value>& args) -> Value {
@@ -3757,14 +3757,14 @@ Interpreter::Interpreter() {
                 throw RuntimeError("math.clamp() requires three numbers", 0);
             double x = args[0].asNumber(), lo = args[1].asNumber(), hi = args[2].asNumber();
             return Value(std::fmax(lo, std::fmin(x, hi)));
-        }));
+        }, {"x", "min", "max"}));
 
     mathMap->entries[Value("atan2")] = Value(makeNative("math.atan2", 2,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isNumber() || !args[1].isNumber())
                 throw RuntimeError("math.atan2() requires two numbers", 0);
             return Value(std::atan2(args[0].asNumber(), args[1].asNumber()));
-        }));
+        }, {"y", "x"}));
 
     mathMap->entries[Value("isNan")] = Value(makeNative("math.isNan", 1,
         [](const std::vector<Value>& args) -> Value {
@@ -3785,7 +3785,7 @@ Interpreter::Interpreter() {
             double a = args[0].asNumber(), b = args[1].asNumber();
             double epsilon = (args.size() >= 3 && args[2].isNumber()) ? args[2].asNumber() : 1e-9;
             return Value(std::fabs(a - b) < epsilon);
-        }));
+        }, {"a", "b", "epsilon"}));
 
     mathMap->entries[Value("square")] = Value(makeNative("math.square", 1,
         [](const std::vector<Value>& args) -> Value {
