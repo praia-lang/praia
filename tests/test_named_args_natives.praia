@@ -142,12 +142,32 @@ testing.test("bytes.pack/unpack with named args", lam{ in
     testing.expectEqual(unpacked, [1, 2], nil)
 })
 
-testing.test("net.query with named args returns array", lam{ in
-    // Pin that net.query accepts named args. The lookup is for
-    // localhost so the result shape (an array) is the assertion —
-    // contents may vary across hosts.
-    let r = net.query(name: "localhost", type: "A")
-    testing.expectEqual(type(r), "array", nil)
+testing.test("net.query routes named args into the native", lam{ in
+    // Pin that net.query accepts named args. We avoid asserting the
+    // actual network outcome because it varies: a local dev box with
+    // a working resolver returns `[]` for an `.invalid` TLD (RFC 2606),
+    // while a sandboxed CI runner (macOS GitHub Actions) throws
+    // "DNS query failed" because the resolver itself is unreachable.
+    // The only invariant we care about here is that the engine
+    // dispatched the named-arg call into net.query — i.e. it does NOT
+    // surface "Named arguments not supported" or "unknown parameter".
+    // Either a successful return or a DNS-layer throw counts as proof
+    // of dispatch; an engine-level rejection would be the bug.
+    let dispatched = false
+    try {
+        net.query(name: "this-name-definitely-does-not.invalid", type: "A")
+        dispatched = true
+    } catch (e) {
+        let msg = e.toString()
+        ensure (!msg.contains("Named arguments not supported")) else {
+            throw "net.query rejected named args at the engine level: " + msg
+        }
+        ensure (!msg.contains("unknown parameter")) else {
+            throw "net.query name->slot mapping failed: " + msg
+        }
+        dispatched = true
+    }
+    testing.expect(dispatched, "named-arg call routed into net.query")
 })
 
 testing.done()
