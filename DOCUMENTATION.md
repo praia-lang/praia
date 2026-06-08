@@ -1353,6 +1353,8 @@ json.stringify(value: data, indent: 2)
 
 Nullary and trivially-unary natives (`len`, `str`, `num`, `type`, `print`, `keys`, `values`) stay positional-only — naming them adds noise. Calling those with names throws `Named arguments not supported for '<name>'`. Native param names are part of the API contract; renames are breaking changes.
 
+A handful of natives where `nil` is a meaningful value (notably `map.get(key, default?)`, since `nil` is a valid map key) also stay positional-only. The reason: native dispatch pads omitted positions with `nil` before the native body runs, so a hypothetical `m.get(default: 99)` would arrive as `[nil, 99]` and probe the map for a literal-nil key — silently wrong. Call these positionally: `m.get(key)` or `m.get(key, default)`.
+
 ### Implicit nil Return
 
 Functions without an explicit `return` return `nil`.

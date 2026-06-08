@@ -1461,6 +1461,20 @@ VM::Result VM::execute(int baseFrameCount_) {
             for (int i = 0; i < argc; i++) {
                 const std::string& name = namesArr[i].asString();
                 if (name.empty()) {
+                    // Walk past any slot that's already bound by a
+                    // named arg. Praia's surface syntax disallows
+                    // positional-after-named, so today this loop is a
+                    // no-op — but a future syntax extension, a buggy
+                    // compiler emit, or a spread/pipe interaction that
+                    // interleaves names mustn't silently overwrite a
+                    // named-bound slot with a positional value (the
+                    // targetSlot would end up pointing to the same
+                    // slot as the named arg's targetSlot, and the
+                    // reorder loop later would let the second write
+                    // win). Defensive, cheap.
+                    while (positionalIdx < paramCount && filled[positionalIdx]) {
+                        positionalIdx++;
+                    }
                     if (positionalIdx >= paramCount) {
                         errMsg = callee.asCallable()->name() + "() too many arguments";
                         break;
@@ -2346,6 +2360,12 @@ VM::Result VM::execute(int baseFrameCount_) {
                 int positionalIdx = 0;
                 for (int i = 0; i < argc; i++) {
                     if (argNamesList[i].empty()) {
+                        // Walk past slots already bound by a named arg
+                        // — same defensive logic as OP_CALL_NAMED. See
+                        // the matching comment in that handler.
+                        while (positionalIdx < paramCount && filled[positionalIdx]) {
+                            positionalIdx++;
+                        }
                         if (positionalIdx >= paramCount) {
                             namedErr = callable->name() + "() too many arguments";
                             break;

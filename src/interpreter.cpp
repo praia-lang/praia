@@ -1519,11 +1519,17 @@ Value Interpreter::evaluate(const Expr* expr) {
         // We capture the mask and assign it on the task side instead.
         bool hasNamed = false;
         for (auto& n : call->argNames) { if (!n.empty()) { hasNamed = true; break; } }
+        bool calleeIsNative = (dynamic_cast<NativeFunction*>(callee.asCallable().get()) != nullptr);
         uint64_t namedArgsMask = ~0ULL;
         if (hasNamed) {
             uint64_t mask = 0;
             args = reorderNamedArgs(callee.asCallable(), args, call->argNames, e->line, &mask);
-            namedArgsMask = mask;
+            // Only user-function callees consume the mask. Natives ignore
+            // it, AND a native can re-enter the engine to invoke a user
+            // callback (a sort comparator, a logger formatter, etc.) —
+            // the mask must not leak into that callback's call frame.
+            // Same rule the sync Call path enforces.
+            if (!calleeIsNative) namedArgsMask = mask;
         }
 
         auto callable = callee.asCallable();
