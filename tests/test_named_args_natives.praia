@@ -1,0 +1,290 @@
+use "testing"
+
+// Phase 1 named-arg adoption: every multi-arg native registered with
+// a `paramNames` vector accepts the same call by name and by position.
+// Reordering proves the names route through `reorderNamedArgs`
+// (interpreter.cpp) / OP_CALL_NAMED (vm.cpp) and not by lucky stacking.
+// A negative-control test against `len` pins the rule that
+// unlabelled natives keep throwing — the gate is intact.
+
+testing.test("crypto.encrypt + decrypt round-trip by name", lam{ in
+    let key = crypto.randomBytes(count: 32)
+    let iv  = crypto.randomBytes(count: 16)
+    let ct  = crypto.encrypt(plaintext: "hello world", key: key, iv: iv)
+    testing.expectEqual(crypto.decrypt(ciphertext: ct, key: key, iv: iv),
+                        "hello world", nil)
+})
+
+testing.test("crypto.seal + open with AAD by name", lam{ in
+    let key = crypto.randomBytes(count: 32)
+    let sealed = crypto.seal(plaintext: "secret payload", key: key, aad: "user:42")
+    testing.expectEqual(crypto.open(sealed: sealed, key: key, aad: "user:42"),
+                        "secret payload", nil)
+    testing.expectThrows(
+        lam{ in crypto.open(sealed: sealed, key: key, aad: "user:43") },
+        "authentication")
+})
+
+testing.test("crypto.hashPassword honors named iterations", lam{ in
+    let res = crypto.hashPassword(password: "pw", iterations: 1000)
+    testing.expectEqual(res.iterations, 1000, nil)
+    testing.expect(crypto.verifyPassword(
+        password: "pw",
+        hash: res.hash,
+        salt: res.salt,
+        iterations: 1000), "round-trip verifies")
+})
+
+testing.test("fs.write + fs.read by name", lam{ in
+    let tmp = testing.tempDir() + "/named.txt"
+    fs.write(path: tmp, data: "by name")
+    testing.expectEqual(fs.read(path: tmp), "by name", nil)
+})
+
+testing.test("named args reordering: fs.write with data before path", lam{ in
+    // Same call, args swapped. The engine reorders by name before
+    // invoking the native — there's no positional cue.
+    let tmp = testing.tempDir() + "/reordered.txt"
+    fs.write(data: "swapped", path: tmp)
+    testing.expectEqual(fs.read(path: tmp), "swapped", nil)
+})
+
+testing.test("random.int reordered", lam{ in
+    let n = random.int(max: 100, min: 1)
+    testing.expect(n >= 1 && n <= 100, "range respected with reordered names")
+})
+
+testing.test("json.stringify with named indent", lam{ in
+    let out = json.stringify(value: {a: 1}, indent: 2)
+    testing.expect(out.contains("\n"), "indented form has newlines")
+    testing.expect(out.contains("  "), "indented form has two-space indent")
+})
+
+testing.test("time.format with named timestamp + format", lam{ in
+    let t = 1700000000000   // 2023-11-14 22:13:20 UTC
+    let s = time.format(format: "%Y", timestamp: t, utc: true)
+    testing.expectEqual(s, "2023", nil)
+})
+
+testing.test("bytes.slice with named args", lam{ in
+    testing.expectEqual(bytes.slice(string: "abcdef", start: 1, end: 4), "bcd", nil)
+})
+
+testing.test("typo in named arg surfaces a clear error", lam{ in
+    // Regression for an earlier VM bug where OP_CALL_NAMED popped
+    // args + callee BEFORE running validation, leaving the
+    // surrounding `try`'s saved stackTop stale — the catch handler
+    // got a misaligned frame and the unknown-parameter throw was
+    // effectively uncaught. Fixed by reordering OP_CALL_NAMED to
+    // validate names first, then mutate the stack
+    // (src/vm/vm.cpp:1426).
+    testing.expectThrows(
+        lam{ in fs.read(paht: "/tmp/none") },
+        "unknown parameter")
+})
+
+testing.test("unlabelled native still rejects names (negative control)", lam{ in
+    // `len` is intentionally unlabelled per the convention: trivially-
+    // unary natives stay positional. The engine must still throw the
+    // standard rejection; this is the negative control that says we
+    // haven't accidentally made paramNames non-optional.
+    testing.expectThrows(
+        lam{ in len(value: [1, 2, 3]) },
+        "Named arguments not supported")
+})
+
+// ── Phase 2 coverage: methods + math + bytes + net ──
+
+testing.test("string method padStart with named args", lam{ in
+    testing.expectEqual("hi".padStart(width: 5, fillString: "0"), "000hi", nil)
+    // Reordered — pins that the name resolution doesn't depend on
+    // surface order.
+    testing.expectEqual("hi".padStart(fillString: "0", width: 5), "000hi", nil)
+})
+
+testing.test("string method replace with named args", lam{ in
+    testing.expectEqual(
+        "hello world".replace(pattern: "world", replacement: "praia"),
+        "hello praia", nil)
+})
+
+testing.test("string slice with named args", lam{ in
+    testing.expectEqual("abcdef".slice(start: 1, end: 4), "bcd", nil)
+})
+
+testing.test("array sort with named comparator", lam{ in
+    let desc = [3, 1, 2].sort(comparator: lam{ a, b in b - a })
+    testing.expectEqual(desc, [3, 2, 1], nil)
+})
+
+testing.test("map.get is positional-only (pinned)", lam{ in
+    // map.get was intentionally rolled back from named-callable
+    // because the native dispatch pads omitted positions with nil,
+    // and `m.get(default: 1)` would arrive as `[nil, 1]` and probe
+    // the map for a literal nil key. Until we plumb an
+    // "omitted-arg" signal into native bodies, the safer rule is
+    // positional only. Verify both behaviours: positional works,
+    // named args throw the standard rejection.
+    testing.expectEqual({a: 1}.get("missing", 99), 99, "positional default fires")
+    testing.expectEqual({a: 1}.get("a", 99), 1, "positional present overrides default")
+    testing.expectThrows(
+        lam{ in {a: 1}.get(key: "x") },
+        "Named arguments not supported")
+})
+
+testing.test("math.clamp with named args, including reordered", lam{ in
+    testing.expectEqual(math.clamp(x: 15, min: 0, max: 10), 10, nil)
+    testing.expectEqual(math.clamp(max: 10, min: 0, x: 15), 10, nil)
+    testing.expectEqual(math.clamp(x: -5, min: 0, max: 10), 0, nil)
+})
+
+testing.test("math.atan2 named (y, x) — order matters", lam{ in
+    // atan2 is famously easy to flip; named args eliminate the
+    // (y, x) vs (x, y) ambiguity for callers who reach for it.
+    let r = math.atan2(y: 1, x: 0)
+    testing.expect(r > 1.5 && r < 1.6, "atan2(1, 0) ≈ π/2")
+})
+
+testing.test("bytes.pack/unpack with named args", lam{ in
+    let packed = bytes.pack(format: "BB", values: [1, 2])
+    testing.expectEqual(bytes.hex(string: packed), "0102", nil)
+    let unpacked = bytes.unpack(format: "BB", data: packed)
+    testing.expectEqual(unpacked, [1, 2], nil)
+})
+
+testing.test("net.query routes named args into the native", lam{ in
+    // Pin that net.query accepts named args. We avoid asserting the
+    // actual network outcome because it varies: a local dev box with
+    // a working resolver returns `[]` for an `.invalid` TLD (RFC 2606),
+    // while a sandboxed CI runner (macOS GitHub Actions) throws
+    // "DNS query failed" because the resolver itself is unreachable.
+    // The only invariant we care about here is that the engine
+    // dispatched the named-arg call into net.query — i.e. it does NOT
+    // surface "Named arguments not supported" or "unknown parameter".
+    // Either a successful return or a DNS-layer throw counts as proof
+    // of dispatch; an engine-level rejection would be the bug.
+    let dispatched = false
+    try {
+        net.query(name: "this-name-definitely-does-not.invalid", type: "A")
+        dispatched = true
+    } catch (e) {
+        let msg = e.toString()
+        ensure (!msg.contains("Named arguments not supported")) else {
+            throw "net.query rejected named args at the engine level: " + msg
+        }
+        ensure (!msg.contains("unknown parameter")) else {
+            throw "net.query name->slot mapping failed: " + msg
+        }
+        dispatched = true
+    }
+    testing.expect(dispatched, "named-arg call routed into net.query")
+})
+
+// ── Phase 2 follow-up: edge cases caught in review ──
+
+testing.test("string.replace rejects empty search string", lam{ in
+    // Regression: an empty `from` made result.find match at every
+    // position; combined with an empty `to`, the loop never advanced
+    // and the function infinite-looped. Now it throws up front.
+    testing.expectThrows(
+        lam{ in "abc".replace(pattern: "", replacement: "x") },
+        "must not be empty")
+})
+
+testing.test("padStart / padEnd / center pad to EXACT width", lam{ in
+    // Regression: the loop appended whole `pad` chunks, so when
+    // `need % len(pad) != 0` the result overshot the requested width.
+    testing.expectEqual(len("hi".padStart(width: 5, fillString: "ab")), 5,
+                        "padStart hits target exactly")
+    testing.expectEqual(len("hi".padEnd(width: 5, fillString: "ab")), 5,
+                        "padEnd hits target exactly")
+    testing.expectEqual(len("hi".center(width: 7, fillString: "ab")), 7,
+                        "center hits target exactly")
+})
+
+testing.test("pad functions default empty fillString to space", lam{ in
+    // Regression: an empty pad would either set padLen=1 (UTF8 path)
+    // and inflate currentLen without growing the result, or simply
+    // infinite-loop (non-UTF8 path). Defaulting to ' ' fails safely.
+    testing.expectEqual("x".padStart(width: 3, fillString: ""), "  x", nil)
+    testing.expectEqual("x".padEnd(width: 3, fillString: ""), "x  ", nil)
+})
+
+testing.test("fs.tempDir accepts named prefix", lam{ in
+    let dir = fs.tempDir(prefix: "myapp-")
+    testing.expect(dir.contains("myapp-"), "prefix appears in path")
+})
+
+testing.test("net.setTimeout accepts ms by name", lam{ in
+    // Regression: the param-name was registered as "timeoutMs" but
+    // the lambda's variable and error message say "ms". Pin the
+    // canonical name. Use a socket fd we know will error so we don't
+    // hold network state — the only invariant is that the named-arg
+    // dispatch reaches the native (no engine-level rejection).
+    let dispatched = false
+    try {
+        net.setTimeout(socket: -1, ms: 100)
+        dispatched = true
+    } catch (e) {
+        let msg = e.toString()
+        // Both substrings indicate an engine-level rejection. The
+        // first catches a typoed / renamed name; the second catches
+        // a regression where someone drops paramNames entirely and
+        // the engine falls back to "Named arguments not supported
+        // for 'net.setTimeout'". Either is a real bug.
+        ensure (!msg.contains("unknown parameter") && !msg.contains("Named arguments not supported")) else {
+            throw "net.setTimeout name->slot mapping failed: " + msg
+        }
+        dispatched = true
+    }
+    testing.expect(dispatched, "ms: dispatched into net.setTimeout")
+})
+
+testing.test("async named-arg propagates missing mask to task", lam{ in
+    // Regression: the named-arg fill mask was set on the caller's
+    // interpreter (tree-walker) / not propagated at all (VM async
+    // dispatch). User functions then saw missing positional params
+    // as ~0ULL (all-filled) and tried to use nil where a default
+    // should kick in. crypto.hashPassword is a native, but it has
+    // a similar effect: it checks `args.size() > 2 && !args[2].isNil()`
+    // to decide whether the caller supplied iterations. If the
+    // omitted-position bit gets set wrong on the task side, the
+    // optional `salt` slot (position 1) sneaks in as nil from the
+    // wrong place.
+    let r = async crypto.hashPassword(password: "x", iterations: 1234)
+    let result = await r
+    testing.expectEqual(result.iterations, 1234,
+                        "iterations propagated; salt auto-generated")
+    testing.expect(len(result.salt) == 32, "salt was auto-generated (16 bytes hex)")
+})
+
+testing.test("exception mid-call does not leak named-arg mask", lam{ in
+    // Regression: pendingArgsFilled_ was set before callWithContext
+    // and reset only on the normal return path. A Praia `throw`
+    // bubbled out via a C++ exception and skipped the reset, leaving
+    // the mask set for the next call on the same interpreter.
+    //
+    // To make the leak visible, the throw site must NOT fill every
+    // bit — otherwise the leaked mask is `~0ULL` (the harmless
+    // default) and a subsequent positional call sees all positions
+    // as filled regardless. We call `throwingNamed(x: 1)` so only
+    // bit 0 is set; without the catch-arm reset, the next call
+    // (`twoArgs(10, 20)`) would see position 1 as "missing" and
+    // default `b` to nil, returning `[10, nil]` instead of `[10, 20]`.
+    func throwingNamed(x, y) { throw "boom" }
+    // Pin that the throw is the one we expect — without this, a
+    // pre-call engine error (e.g. "unknown parameter 'x'" from a
+    // regression that broke the named-arg path) would be silently
+    // swallowed and the test would still go on to call twoArgs.
+    // We want to test the mask-leak path AFTER a known throw, not
+    // accidentally pass because of a different earlier failure.
+    let caught = nil
+    try { throwingNamed(x: 1) } catch (e) { caught = e }
+    testing.expectEqual(caught, "boom",
+                        "throwingNamed must actually throw 'boom' (not an engine error)")
+    func twoArgs(a, b) { return [a, b] }
+    testing.expectEqual(twoArgs(10, 20), [10, 20],
+                        "positional dispatch unaffected by prior throw")
+})
+
+testing.done()

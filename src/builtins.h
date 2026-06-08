@@ -32,6 +32,15 @@ inline std::shared_ptr<NativeFunction> makeNative(
 // Safe callback invocation for tree-walker native code.
 // Validates arity and pads missing args with nil before calling, preventing
 // crashes from NativeFunction callbacks receiving wrong arg count.
+//
+// Clears `pendingArgsFilled_` before dispatch. The mask is set by the
+// named-arg dispatch site for the OUTER call (the native, e.g. sort);
+// when that native re-enters the engine via callSafe to invoke a
+// user-supplied callback (the comparator), the callback's positional
+// args should be treated as fully filled — not as "everything beyond
+// position N is missing" per the outer call's mask. Without this
+// reset, the comparator's second positional arg gets defaulted to
+// nil and `b - a` throws "Operands of '-' must be numbers".
 inline Value callSafe(Interpreter& interp, std::shared_ptr<Callable> callable,
                       const std::vector<Value>& args) {
     int arity = callable->arity();

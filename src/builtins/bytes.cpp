@@ -156,7 +156,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
                 vi++;
             }
             return Value(std::move(result));
-        }));
+        }, {"format", "values"}));
 
     // bytes.unpack(format, data) — returns array of numbers
     bytesMap->entries[Value("unpack")] = Value(makeNative("bytes.unpack", 2,
@@ -164,7 +164,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             if (!args[0].isString() || !args[1].isString())
                 throw RuntimeError("bytes.unpack(format, data) requires strings", 0);
             return bytesUnpack(args[0].asString(), args[1].asString());
-        }));
+        }, {"format", "data"}));
 
     // bytes.calcsize(format) — return total byte size of a struct format
     bytesMap->entries[Value("calcsize")] = Value(makeNative("bytes.calcsize", 1,
@@ -190,7 +190,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
                 result += static_cast<char>(static_cast<int>(v.asNumber()) & 0xFF);
             }
             return Value(std::move(result));
-        }));
+        }, {"array"}));
 
     // bytes.toArray("Hel") → [72, 101, 108] — string to array of byte values
     bytesMap->entries[Value("toArray")] = Value(makeNative("bytes.toArray", 1,
@@ -201,7 +201,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             for (unsigned char c : args[0].asString())
                 result->elements.push_back(Value(static_cast<int64_t>(c)));
             return Value(result);
-        }));
+        }, {"string"}));
 
     // bytes.hex("AB") → "4142" — string to hex representation
     bytesMap->entries[Value("hex")] = Value(makeNative("bytes.hex", 1,
@@ -215,7 +215,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
                 result += digits[c & 0xF];
             }
             return Value(std::move(result));
-        }));
+        }, {"string"}));
 
     // bytes.fromHex("4142") → "AB" — hex string to raw bytes
     bytesMap->entries[Value("fromHex")] = Value(makeNative("bytes.fromHex", 1,
@@ -235,7 +235,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             for (size_t i = 0; i < hex.size(); i += 2)
                 result += static_cast<char>((hexVal(hex[i]) << 4) | hexVal(hex[i + 1]));
             return Value(std::move(result));
-        }));
+        }, {"hex"}));
 
     // bytes.len(str) — byte length (same as len() but semantically clear for binary data)
     bytesMap->entries[Value("len")] = Value(makeNative("bytes.len", 1,
@@ -261,7 +261,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             } catch (const praia::encoding::EncodingError& e) {
                 throw RuntimeError(std::string("bytes.decode(): ") + e.what(), 0);
             }
-        }));
+        }, {"data", "encoding"}));
 
     // bytes.slice(s, start, end?) — byte-indexed substring (string is treated as raw bytes)
     // Negative indices count from the end. Useful when a string holds binary data
@@ -286,7 +286,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
                 if (end > slen) end = slen;
             }
             return Value(s.substr(start, end - start));
-        }));
+        }, {"string", "start", "end"}));
 
     // bytes.split(s, sep) — byte-indexed split. The string method works on bytes
     // already, but mirroring it here keeps "treat as bytes" intent explicit.
@@ -308,7 +308,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             }
             arr->elements.push_back(Value(s.substr(pos)));
             return Value(arr);
-        }));
+        }, {"data", "separator"}));
 
     // bytes.startsWith / bytes.endsWith — byte-prefix/suffix tests.
     bytesMap->entries[Value("startsWith")] = Value(makeNative("bytes.startsWith", 2,
@@ -318,7 +318,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             auto& s = args[0].asString();
             auto& p = args[1].asString();
             return Value(s.size() >= p.size() && s.compare(0, p.size(), p) == 0);
-        }));
+        }, {"data", "prefix"}));
     bytesMap->entries[Value("endsWith")] = Value(makeNative("bytes.endsWith", 2,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isString() || !args[1].isString())
@@ -327,7 +327,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             auto& p = args[1].asString();
             return Value(s.size() >= p.size() &&
                          s.compare(s.size() - p.size(), p.size(), p) == 0);
-        }));
+        }, {"data", "suffix"}));
 
     // bytes.indexOf(s, sub, startByte?) — byte-indexed find. Returns byte offset or -1.
     bytesMap->entries[Value("indexOf")] = Value(makeNative("bytes.indexOf", -1,
@@ -345,7 +345,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             auto pos = s.find(sub, startByte);
             if (pos == std::string::npos) return Value(static_cast<int64_t>(-1));
             return Value(static_cast<int64_t>(pos));
-        }));
+        }, {"data", "substring", "start"}));
 
     // bytes.xor(data, mask) — XOR data with a repeating mask. Both are raw byte strings.
     bytesMap->entries[Value("xor")] = Value(makeNative("bytes.xor", 2,
@@ -360,6 +360,6 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
             for (size_t i = 0; i < data.size(); i++)
                 result[i] = data[i] ^ mask[i % maskLen];
             return Value(std::move(result));
-        }));
+        }, {"data", "mask"}));
 
 }

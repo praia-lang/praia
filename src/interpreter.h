@@ -309,7 +309,9 @@ private:
     // Pending "filled" mask for the next call. Bits set = positions actually
     // provided by the caller. Default (UINT64_MAX) means "all provided"
     // (positional call). Named-arg call sites set this before invoking, and
-    // the receiving call path consumes-and-resets it on entry.
+    // the receiving (user-function) call path consumes-and-resets it on
+    // entry. Native callees are never given the mask — see the named-arg
+    // dispatch in interpreter.cpp where the mask-set is skipped for natives.
     uint64_t pendingArgsFilled_ = ~0ULL;
 
     // (interpMutex removed — async tasks use task-local Interpreters instead)

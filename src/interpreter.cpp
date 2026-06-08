@@ -134,6 +134,17 @@ static std::vector<Value> reorderNamedArgs(
 
     for (size_t i = 0; i < args.size(); i++) {
         if (names[i].empty()) {
+            // Walk past slots already bound by a named arg. Praia's
+            // surface syntax disallows positional-after-named so
+            // today this loop is a no-op, but it matches the VM's
+            // OP_CALL_NAMED defensive behaviour — a future syntax
+            // extension or compiler change that interleaves names
+            // mustn't silently overwrite a named-bound slot with a
+            // positional value (which would happen because both
+            // would target the same `result` index).
+            while (positionalIdx < paramCount && filled[positionalIdx]) {
+                positionalIdx++;
+            }
             if (positionalIdx >= paramCount)
                 throw RuntimeError(callable->name() + "() too many arguments", line);
             result[positionalIdx] = args[i];
@@ -1301,16 +1312,41 @@ Value Interpreter::evaluate(const Expr* expr) {
             }
         }
 
-        // Reorder named arguments if present
+        // Reorder named arguments if present. The mask is only meaningful
+        // for user-function callables (interpreter_callables.cpp:58, :103
+        // consume and reset it to default missing positions). Natives
+        // ignore the mask entirely — `reorderNamedArgs` already padded
+        // any unfilled positions with nil, and the native body reads
+        // `args.size()` to decide what's missing. Skipping the mask-set
+        // for natives matters: if a native (e.g. `sort(comparator: f)`)
+        // re-enters the engine to invoke a user callback (the comparator),
+        // a stale mask would leak into the callback and cause its
+        // positional args past the mask boundary to be wrongly defaulted.
         bool hasNamed = false;
         for (auto& n : e->argNames) { if (!n.empty()) { hasNamed = true; break; } }
+        bool calleeIsNative = (dynamic_cast<NativeFunction*>(callee.asCallable().get()) != nullptr);
         if (hasNamed) {
             uint64_t mask = 0;
             args = reorderNamedArgs(callee.asCallable(), args, e->argNames, e->line, &mask);
-            pendingArgsFilled_ = mask;
+            if (!calleeIsNative) pendingArgsFilled_ = mask;
         }
 
-        return callWithContext(*this, callee.asCallable(), args, e->line);
+        // Reset the mask after the call — under BOTH normal return AND
+        // exception unwind. A Praia `throw` inside the callee surfaces as
+        // a C++ exception bubbling through callWithContext; without the
+        // catch arm the mask would stay set and bleed into the NEXT call
+        // on this interpreter (often the one that catches the throw).
+        // User-function callees already reset on entry, but the mask must
+        // also be reset on the bubbling path.
+        Value _result;
+        try {
+            _result = callWithContext(*this, callee.asCallable(), args, e->line);
+        } catch (...) {
+            pendingArgsFilled_ = ~0ULL;
+            throw;
+        }
+        pendingArgsFilled_ = ~0ULL;
+        return _result;
     }
 
     // ── Array literal ──
@@ -1398,16 +1434,31 @@ Value Interpreter::evaluate(const Expr* expr) {
             // Reorder named args: prepend "" for the piped positional arg
             bool hasNamed = false;
             for (auto& n : call->argNames) { if (!n.empty()) { hasNamed = true; break; } }
+            bool calleeIsNative = (dynamic_cast<NativeFunction*>(callee.asCallable().get()) != nullptr);
             if (hasNamed) {
                 std::vector<std::string> names;
                 names.push_back("");
                 for (auto& n : call->argNames) names.push_back(n);
                 uint64_t mask = 0;
                 args = reorderNamedArgs(callee.asCallable(), args, names, e->line, &mask);
-                pendingArgsFilled_ = mask;
+                // Skip mask-set for natives — see the matching note
+                // at the regular call dispatch above. Otherwise the
+                // mask leaks into any user callback the native invokes.
+                if (!calleeIsNative) pendingArgsFilled_ = mask;
             }
 
-            return callWithContext(*this, callee.asCallable(), args, e->line);
+            // Reset the mask on both return and unwind so a Praia
+            // `throw` from inside the callee doesn't leave the mask
+            // set for the next call on this interpreter.
+            Value _result;
+            try {
+                _result = callWithContext(*this, callee.asCallable(), args, e->line);
+            } catch (...) {
+                pendingArgsFilled_ = ~0ULL;
+                throw;
+            }
+            pendingArgsFilled_ = ~0ULL;
+            return _result;
         }
 
         // Right side is just a function name: f → f(leftVal)
@@ -1470,13 +1521,26 @@ Value Interpreter::evaluate(const Expr* expr) {
         for (const auto& arg : call->args)
             args.push_back(evaluate(arg.get()));
 
-        // Reorder named arguments if present
+        // Reorder named arguments if present. Unlike the regular Call
+        // path, the actual invocation here runs on a *task* interpreter
+        // (`taskInterp` constructed inside std::async below) — writing
+        // the mask to `this` would either leak into the caller's next
+        // call (if the task hasn't started yet) OR be invisible to the
+        // task's user-function entry (which reads `taskInterp.pendingArgsFilled_`).
+        // We capture the mask and assign it on the task side instead.
         bool hasNamed = false;
         for (auto& n : call->argNames) { if (!n.empty()) { hasNamed = true; break; } }
+        bool calleeIsNative = (dynamic_cast<NativeFunction*>(callee.asCallable().get()) != nullptr);
+        uint64_t namedArgsMask = ~0ULL;
         if (hasNamed) {
             uint64_t mask = 0;
             args = reorderNamedArgs(callee.asCallable(), args, call->argNames, e->line, &mask);
-            pendingArgsFilled_ = mask;
+            // Only user-function callees consume the mask. Natives ignore
+            // it, AND a native can re-enter the engine to invoke a user
+            // callback (a sort comparator, a logger formatter, etc.) —
+            // the mask must not leak into that callback's call frame.
+            // Same rule the sync Call path enforces.
+            if (!calleeIsNative) namedArgsMask = mask;
         }
 
         auto callable = callee.asCallable();
@@ -1625,9 +1689,12 @@ Value Interpreter::evaluate(const Expr* expr) {
         for (auto& a : args) argsCopy.push_back(deepCopy(a));
 
         // Spawn the call in a background thread with a task-local Interpreter.
+        // The named-arg fill mask is installed on `taskInterp` rather than
+        // the caller — see the matching note where `namedArgsMask` is set.
         auto sharedFuture = std::async(std::launch::async,
-            [callable, argsCopy = std::move(argsCopy), taskGlobals]() -> Value {
+            [callable, argsCopy = std::move(argsCopy), taskGlobals, namedArgsMask]() -> Value {
                 Interpreter taskInterp(taskGlobals);
+                taskInterp.pendingArgsFilled_ = namedArgsMask;
                 GcHeap::current().disable(); // task interpreters are short-lived
                 return callable->call(taskInterp, argsCopy);
             }).share();

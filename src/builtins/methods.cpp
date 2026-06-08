@@ -88,6 +88,13 @@ Value getStringMethod(const std::string& strRef,
                 throw RuntimeError("replace() arguments must be strings", 0);
             auto& from = args[0].asString();
             auto& to = args[1].asString();
+            // An empty `from` would match at every position, and after
+            // each replace `pos += to.size()` either fails to advance
+            // (when `to` is also empty → infinite loop) or expands the
+            // string indefinitely between every character. Both are
+            // never what the caller meant — reject up front.
+            if (from.empty())
+                throw RuntimeError("replace() search string must not be empty", 0);
             std::string result = str;
             size_t pos = 0;
             while ((pos = result.find(from, pos)) != std::string::npos) {
@@ -95,7 +102,7 @@ Value getStringMethod(const std::string& strRef,
                 pos += to.size();
             }
             return Value(std::move(result));
-        }));
+        }, {"pattern", "replacement"}));
     }
     if (name == "startsWith") {
         return Value(makeNative("startsWith", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -179,7 +186,7 @@ Value getStringMethod(const std::string& strRef,
                 throw RuntimeError("charCode index out of bounds", 0);
             return Value(static_cast<int64_t>(static_cast<unsigned char>(str[idx])));
 #endif
-        }));
+        }, {"index"}));
     }
     if (name == "test") {
         return Value(makeNative("test", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -340,7 +347,7 @@ Value getStringMethod(const std::string& strRef,
                 throw RuntimeError(std::string("Invalid regex: ") + e.what(), 0);
             }
 #endif
-        }));
+        }, {"pattern", "replacement"}));
     }
     if (name == "slice") {
         return Value(makeNative("slice", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -378,7 +385,7 @@ Value getStringMethod(const std::string& strRef,
             }
             return Value(str.substr(start));
 #endif
-        }));
+        }, {"start", "end"}));
     }
     if (name == "indexOf") {
         return Value(makeNative("indexOf", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -404,7 +411,7 @@ Value getStringMethod(const std::string& strRef,
             auto pos = str.find(args[0].asString(), startPos);
             return Value(pos == std::string::npos ? static_cast<int64_t>(-1) : static_cast<int64_t>(pos));
 #endif
-        }));
+        }, {"substring", "start"}));
     }
     if (name == "lastIndexOf") {
         return Value(makeNative("lastIndexOf", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -438,21 +445,42 @@ Value getStringMethod(const std::string& strRef,
             int target = static_cast<int>(args[0].asNumber());
             std::string pad = " ";
             if (args.size() > 1 && args[1].isString()) pad = args[1].asString();
+            // Empty pad is invalid input — there's no width to pad
+            // with. Defaulting to a space is the least-surprising
+            // behaviour for callers who reach `padStart(n, "")` from
+            // a place where their pad var was lost (e.g. an unset
+            // map field). Throwing would be equally defensible.
+            if (pad.empty()) pad = " ";
             std::string result = str;
 #ifdef HAVE_UTF8PROC
             int currentLen = static_cast<int>(utf8_grapheme_count(result));
-            int padLen = static_cast<int>(utf8_grapheme_count(pad));
-            if (padLen < 1) padLen = 1; // avoid infinite loop on empty pad
-            while (currentLen < target) {
-                result = pad + result;
-                currentLen += padLen;
+            int need = target - currentLen;
+            if (need > 0) {
+                // Build a prefix of EXACTLY `need` graphemes by
+                // repeating pad, then truncating. The old loop
+                // appended whole `pad` chunks which overshot any
+                // time `need % graphemeCount(pad) != 0`.
+                std::string accum;
+                while (static_cast<int>(utf8_grapheme_count(accum)) < need)
+                    accum += pad;
+                auto gs = utf8_graphemes(accum);
+                std::string prefix;
+                for (int i = 0; i < need && i < static_cast<int>(gs.size()); i++)
+                    prefix += gs[i];
+                result = prefix + result;
             }
 #else
-            while (static_cast<int>(result.size()) < target)
-                result = pad + result;
+            int currentLen = static_cast<int>(result.size());
+            int need = target - currentLen;
+            if (need > 0) {
+                std::string accum;
+                while (static_cast<int>(accum.size()) < need)
+                    accum += pad;
+                result = accum.substr(0, need) + result;
+            }
 #endif
             return Value(std::move(result));
-        }));
+        }, {"width", "fillString"}));
     }
     if (name == "padEnd") {
         return Value(makeNative("padEnd", -1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
@@ -461,21 +489,31 @@ Value getStringMethod(const std::string& strRef,
             int target = static_cast<int>(args[0].asNumber());
             std::string pad = " ";
             if (args.size() > 1 && args[1].isString()) pad = args[1].asString();
+            if (pad.empty()) pad = " ";
             std::string result = str;
 #ifdef HAVE_UTF8PROC
             int currentLen = static_cast<int>(utf8_grapheme_count(result));
-            int padLen = static_cast<int>(utf8_grapheme_count(pad));
-            if (padLen < 1) padLen = 1; // avoid infinite loop on empty pad
-            while (currentLen < target) {
-                result += pad;
-                currentLen += padLen;
+            int need = target - currentLen;
+            if (need > 0) {
+                std::string accum;
+                while (static_cast<int>(utf8_grapheme_count(accum)) < need)
+                    accum += pad;
+                auto gs = utf8_graphemes(accum);
+                for (int i = 0; i < need && i < static_cast<int>(gs.size()); i++)
+                    result += gs[i];
             }
 #else
-            while (static_cast<int>(result.size()) < target)
-                result += pad;
+            int currentLen = static_cast<int>(result.size());
+            int need = target - currentLen;
+            if (need > 0) {
+                std::string accum;
+                while (static_cast<int>(accum.size()) < need)
+                    accum += pad;
+                result += accum.substr(0, need);
+            }
 #endif
             return Value(std::move(result));
-        }));
+        }, {"width", "fillString"}));
     }
     if (name == "trimStart") {
         return Value(makeNative("trimStart", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
@@ -581,6 +619,7 @@ Value getStringMethod(const std::string& strRef,
             int target = static_cast<int>(args[0].asNumber());
             std::string pad = " ";
             if (args.size() > 1 && args[1].isString()) pad = args[1].asString();
+            if (pad.empty()) pad = " ";
 #ifdef HAVE_UTF8PROC
             int currentLen = static_cast<int>(utf8_grapheme_count(str));
 #else
@@ -590,12 +629,29 @@ Value getStringMethod(const std::string& strRef,
             int total = target - currentLen;
             int left = total / 2;
             int right = total - left;
-            std::string result;
-            for (int i = 0; i < left; i++) result += pad;
-            result += str;
-            for (int i = 0; i < right; i++) result += pad;
-            return Value(std::move(result));
-        }));
+            // Previously this appended a full `pad` chunk per side per
+            // iteration, which overshot whenever the side need wasn't
+            // a multiple of pad's length and infinite-looped when pad
+            // was empty. Now we build the exact `left` / `right`
+            // sequences by repeating pad then truncating.
+            auto buildChunk = [&pad](int need) -> std::string {
+                std::string accum;
+#ifdef HAVE_UTF8PROC
+                while (static_cast<int>(utf8_grapheme_count(accum)) < need)
+                    accum += pad;
+                auto gs = utf8_graphemes(accum);
+                std::string out;
+                for (int i = 0; i < need && i < static_cast<int>(gs.size()); i++)
+                    out += gs[i];
+                return out;
+#else
+                while (static_cast<int>(accum.size()) < need)
+                    accum += pad;
+                return accum.substr(0, need);
+#endif
+            };
+            return Value(buildChunk(left) + str + buildChunk(right));
+        }, {"width", "fillString"}));
     }
     if (name == "isDigit") {
         return Value(makeNative("isDigit", 0, [s=str](const std::vector<Value>&) -> Value { const auto& str = *s;
@@ -720,7 +776,7 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
             auto result = gcNew<PraiaArray>();
             result->elements.assign(arr->elements.begin() + start, arr->elements.begin() + end);
             return Value(result);
-        }));
+        }, {"start", "end"}));
     }
     if (name == "indexOf") {
         return Value(makeNative("indexOf", 1, [arr](const std::vector<Value>& args) -> Value {
@@ -770,7 +826,7 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
                 });
             }
             return Value(sorted);
-        }));
+        }, {"comparator"}));
     }
     throw RuntimeError("Array has no method '" + name + "'", line);
 }
@@ -783,6 +839,14 @@ Value getMapMethod(std::shared_ptr<PraiaMap> map,
         }));
     }
     if (name == "get") {
+        // Intentionally NOT named-callable: the native dispatch
+        // pads omitted positions with nil before the lambda runs,
+        // so a call like `m.get(default: 1)` would arrive here as
+        // `args = [nil, 1]` and probe the map for a literal `nil`
+        // key — silently wrong when nil is a valid map key. Until
+        // there's a way to plumb a "this position was omitted"
+        // signal into native bodies, we keep `get` positional only.
+        // Callers write `m.get(key, default)` (or just `m.get(key)`).
         return Value(makeNative("get", -1, [map](const std::vector<Value>& args) -> Value {
             if (args.empty())
                 throw RuntimeError("get() requires at least a key argument", 0);

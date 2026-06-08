@@ -1337,7 +1337,23 @@ func format(value, prefix = "", suffix = "") {
 42 |> format(suffix: "!")  // "42!"
 ```
 
-Unknown parameter names and duplicate names throw a runtime error. Native built-in functions do not support named arguments.
+Unknown parameter names and duplicate names throw a runtime error.
+
+Named arguments also work for stdlib natives whose positional slots are documented (most of `crypto`, `fs`, `time`, `random`, `json`, `bytes`, etc.):
+
+```praia
+let k = crypto.randomBytes(count: 32)
+let iv = crypto.randomBytes(count: 16)
+let ct = crypto.encrypt(plaintext: "hello", key: k, iv: iv)
+
+fs.write(path: "/tmp/x.txt", data: "hi")
+random.int(min: 1, max: 100)
+json.stringify(value: data, indent: 2)
+```
+
+Nullary and trivially-unary natives (`len`, `str`, `num`, `type`, `print`, `keys`, `values`) stay positional-only — naming them adds noise. Calling those with names throws `Named arguments not supported for '<name>'`. Native param names are part of the API contract; renames are breaking changes.
+
+A handful of natives where `nil` is a meaningful value (notably `map.get(key, default?)`, since `nil` is a valid map key) also stay positional-only. The reason: native dispatch pads omitted positions with `nil` before the native body runs, so a hypothetical `m.get(default: 99)` would arrive as `[nil, 99]` and probe the map for a literal-nil key — silently wrong. Call these positionally: `m.get(key)` or `m.get(key, default)`.
 
 ### Implicit nil Return
 

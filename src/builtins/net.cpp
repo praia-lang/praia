@@ -297,7 +297,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             if (sock < 0)
                 throw RuntimeError(sysErr("Cannot connect to " + host + ":" + std::to_string(port)), 0);
             return Value(static_cast<int64_t>(sock));
-        }));
+        }, {"host", "port", "timeout"}));
 
     netMap->entries[Value("listen")] = Value(makeNative("net.listen", 1,
         [](const std::vector<Value>& args) -> Value {
@@ -422,7 +422,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                     throw RuntimeError(sysErr("Send failed"), 0);
             }
             return Value(static_cast<int64_t>(sent));
-        }));
+        }, {"socket", "data"}));
 
     netMap->entries[Value("recv")] = Value(makeNative("net.recv", -1,
         [](const std::vector<Value>& args) -> Value {
@@ -459,7 +459,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             }
             if (n == 0) return Value(std::string(""));
             return Value(std::string(buf.data(), n));
-        }));
+        }, {"socket", "maxBytes"}));
 
     netMap->entries[Value("recvAll")] = Value(makeNative("net.recvAll", 1,
         [](const std::vector<Value>& args) -> Value {
@@ -597,7 +597,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             (void)fd; (void)hostname; (void)verify;
             throw RuntimeError("net.tls() requires OpenSSL (build with HAVE_OPENSSL)", 0);
 #endif
-        }));
+        }, {"socket", "hostname", "options"}));
 
     // ── UDP ──
 
@@ -702,7 +702,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 throw RuntimeError("net.bindInterface() interface '" + ifname + "' not found or has no IPv4 address", 0);
 #endif
             return Value();
-        }));
+        }, {"socket", "ifname"}));
 
     // net.interfaces() — list network interfaces with their addresses
     netMap->entries[Value("interfaces")] = Value(makeNative("net.interfaces", 0,
@@ -770,7 +770,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             if (sent < 0)
                 throw RuntimeError(sysErr("sendTo failed"), 0);
             return Value(static_cast<int64_t>(sent));
-        }));
+        }, {"socket", "host", "port", "data"}));
 
     netMap->entries[Value("recvFrom")] = Value(makeNative("net.recvFrom", -1,
         [](const std::vector<Value>& args) -> Value {
@@ -814,7 +814,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             result->entries[Value("host")] = Value(std::string(addrBuf));
             result->entries[Value("port")] = Value(static_cast<int64_t>(port));
             return Value(result);
-        }));
+        }, {"socket", "maxBytes"}));
 
     // ── DNS + socket options ──
 
@@ -999,7 +999,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             }
 
             return Value(result);
-        }));
+        }, {"name", "type"}));
 
     // net.connectAll(targets, timeout) — concurrent TCP connect scan
     // targets: array of {host, port} or [host, port]
@@ -1164,7 +1164,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 result->elements.push_back(Value(entry));
             }
             return Value(result);
-        }));
+        }, {"targets", "timeout"}));
 
     netMap->entries[Value("setTimeout")] = Value(makeNative("net.setTimeout", 2,
         [](const std::vector<Value>& args) -> Value {
@@ -1183,7 +1183,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             setsockopt(rawFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             setsockopt(rawFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             return Value();
-        }));
+        }, {"socket", "ms"}));
 
     // ── Raw sockets ──
 
@@ -1259,7 +1259,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             if (sent < 0)
                 throw RuntimeError(sysErr("net.rawSend() failed"), 0);
             return Value(static_cast<int64_t>(sent));
-        }));
+        }, {"socket", "host", "data"}));
 
     // net.rawRecv(sock, maxBytes?) — receive raw data, returns {data, host}
     netMap->entries[Value("rawRecv")] = Value(makeNative("net.rawRecv", -1,
@@ -1294,7 +1294,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             result->entries[Value("data")] = Value(std::string(buf.data(), n));
             result->entries[Value("host")] = Value(std::string(addrBuf));
             return Value(result);
-        }));
+        }, {"socket", "maxBytes"}));
 
     // ── ICMP Ping ──
 
@@ -1377,7 +1377,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
 
             close(sock);
             return Value(result);
-        }));
+        }, {"host", "timeout"}));
 
     // net.pingAll(hosts, timeout?) — concurrent ICMP ping sweep
     // hosts: array of IP/hostname strings. timeout defaults to 1500ms.
@@ -1526,5 +1526,5 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 result->elements.push_back(Value(entry));
             }
             return Value(result);
-        }));
+        }, {"hosts", "timeout"}));
 }
