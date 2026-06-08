@@ -2385,14 +2385,39 @@ VM::Result VM::execute(int baseFrameCount_) {
             }
 
             // Build the missing-args mask the task frame will use. Set
-            // bits = positions NOT filled by the named-arg call. The
-            // task frame consults this to default-substitute omitted
-            // params (same field OP_CALL_NAMED writes for sync calls).
+            // bits = positions NOT filled by the call. The task frame
+            // consults this to default-substitute omitted params (same
+            // field OP_CALL_NAMED writes for sync calls).
+            //
+            // Two sources of "missing":
+            //   (1) Named-arg holes — slots not bound by any `name:` arg.
+            //   (2) Trailing positional omissions — when the caller passes
+            //       fewer args than the declared arity. The task lambda
+            //       below right-pads `paddedArgs` with `Value()` (nil) to
+            //       match arity; without marking these positions missing,
+            //       the receiver would treat them as explicit nils and
+            //       skip the parameter's default expression.
+            // Both apply: `async f(a: 1)` with `f(a, b=10)` covers (1);
+            // `async f(1)` with the same signature covers (2). Named-arg
+            // calls reorder to `args.size() == paramCount` so (2) is
+            // a no-op there; positional async calls leave the trailing
+            // loop to do all the work.
             uint64_t namedArgsMissingMask = 0;
+            int callableArity = callable->arity();
             if (hasNamedArgs) {
                 int n = std::min(paramCount, 64);
                 for (int p = 0; p < n; p++) {
                     if (!filled[p]) namedArgsMissingMask |= (uint64_t)1 << p;
+                }
+            }
+            // Mark slots past what the caller actually provided. Guarded
+            // on `callableArity > 0` to skip variadic functions (arity
+            // == -1) where rest-params get [] rather than a default.
+            if (callableArity > 0) {
+                int slotLimit = std::min(callableArity, 64);
+                int provided = static_cast<int>(args.size());
+                for (int p = provided; p < slotLimit; p++) {
+                    namedArgsMissingMask |= (uint64_t)1 << p;
                 }
             }
 

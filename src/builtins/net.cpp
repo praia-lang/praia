@@ -597,7 +597,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             (void)fd; (void)hostname; (void)verify;
             throw RuntimeError("net.tls() requires OpenSSL (build with HAVE_OPENSSL)", 0);
 #endif
-        }));
+        }, {"socket", "hostname", "options"}));
 
     // ── UDP ──
 
@@ -1259,7 +1259,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             if (sent < 0)
                 throw RuntimeError(sysErr("net.rawSend() failed"), 0);
             return Value(static_cast<int64_t>(sent));
-        }));
+        }, {"socket", "host", "data"}));
 
     // net.rawRecv(sock, maxBytes?) — receive raw data, returns {data, host}
     netMap->entries[Value("rawRecv")] = Value(makeNative("net.rawRecv", -1,
@@ -1294,7 +1294,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             result->entries[Value("data")] = Value(std::string(buf.data(), n));
             result->entries[Value("host")] = Value(std::string(addrBuf));
             return Value(result);
-        }));
+        }, {"socket", "maxBytes"}));
 
     // ── ICMP Ping ──
 
@@ -1526,5 +1526,5 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 result->elements.push_back(Value(entry));
             }
             return Value(result);
-        }));
+        }, {"hosts", "timeout"}));
 }

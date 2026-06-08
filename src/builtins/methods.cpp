@@ -839,6 +839,14 @@ Value getMapMethod(std::shared_ptr<PraiaMap> map,
         }));
     }
     if (name == "get") {
+        // Intentionally NOT named-callable: the native dispatch
+        // pads omitted positions with nil before the lambda runs,
+        // so a call like `m.get(default: 1)` would arrive here as
+        // `args = [nil, 1]` and probe the map for a literal `nil`
+        // key — silently wrong when nil is a valid map key. Until
+        // there's a way to plumb a "this position was omitted"
+        // signal into native bodies, we keep `get` positional only.
+        // Callers write `m.get(key, default)` (or just `m.get(key)`).
         return Value(makeNative("get", -1, [map](const std::vector<Value>& args) -> Value {
             if (args.empty())
                 throw RuntimeError("get() requires at least a key argument", 0);
@@ -846,7 +854,7 @@ Value getMapMethod(std::shared_ptr<PraiaMap> map,
             if (it != map->entries.end()) return it->second;
             if (args.size() > 1) return args[1];
             return Value();
-        }, {"key", "default"}));
+        }));
     }
     if (name == "delete") {
         return Value(makeNative("delete", 1, [map](const std::vector<Value>& args) -> Value {

@@ -117,9 +117,19 @@ testing.test("array sort with named comparator", lam{ in
     testing.expectEqual(desc, [3, 2, 1], nil)
 })
 
-testing.test("map get with named default", lam{ in
-    testing.expectEqual({a: 1}.get(key: "missing", default: 99), 99, nil)
-    testing.expectEqual({a: 1}.get(key: "a", default: 99), 1, nil)
+testing.test("map.get is positional-only (pinned)", lam{ in
+    // map.get was intentionally rolled back from named-callable
+    // because the native dispatch pads omitted positions with nil,
+    // and `m.get(default: 1)` would arrive as `[nil, 1]` and probe
+    // the map for a literal nil key. Until we plumb an
+    // "omitted-arg" signal into native bodies, the safer rule is
+    // positional only. Verify both behaviours: positional works,
+    // named args throw the standard rejection.
+    testing.expectEqual({a: 1}.get("missing", 99), 99, "positional default fires")
+    testing.expectEqual({a: 1}.get("a", 99), 1, "positional present overrides default")
+    testing.expectThrows(
+        lam{ in {a: 1}.get(key: "x") },
+        "Named arguments not supported")
 })
 
 testing.test("math.clamp with named args, including reordered", lam{ in
@@ -217,7 +227,12 @@ testing.test("net.setTimeout accepts ms by name", lam{ in
         dispatched = true
     } catch (e) {
         let msg = e.toString()
-        ensure (!msg.contains("unknown parameter")) else {
+        // Both substrings indicate an engine-level rejection. The
+        // first catches a typoed / renamed name; the second catches
+        // a regression where someone drops paramNames entirely and
+        // the engine falls back to "Named arguments not supported
+        // for 'net.setTimeout'". Either is a real bug.
+        ensure (!msg.contains("unknown parameter") && !msg.contains("Named arguments not supported")) else {
             throw "net.setTimeout name->slot mapping failed: " + msg
         }
         dispatched = true
@@ -248,10 +263,16 @@ testing.test("exception mid-call does not leak named-arg mask", lam{ in
     // and reset only on the normal return path. A Praia `throw`
     // bubbled out via a C++ exception and skipped the reset, leaving
     // the mask set for the next call on the same interpreter.
-    func throwingNamed(x, y) { throw "x" }
-    try { throwingNamed(x: 1, y: 2) } catch (e) {}
-    // Without the catch-arm reset, the next two-arg user-function
-    // call would see position 1 as "missing" and default to nil.
+    //
+    // To make the leak visible, the throw site must NOT fill every
+    // bit — otherwise the leaked mask is `~0ULL` (the harmless
+    // default) and a subsequent positional call sees all positions
+    // as filled regardless. We call `throwingNamed(x: 1)` so only
+    // bit 0 is set; without the catch-arm reset, the next call
+    // (`twoArgs(10, 20)`) would see position 1 as "missing" and
+    // default `b` to nil, returning `[10, nil]` instead of `[10, 20]`.
+    func throwingNamed(x, y) { throw "boom" }
+    try { throwingNamed(x: 1) } catch (e) {}
     func twoArgs(a, b) { return [a, b] }
     testing.expectEqual(twoArgs(10, 20), [10, 20],
                         "positional dispatch unaffected by prior throw")
