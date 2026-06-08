@@ -880,11 +880,28 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
     // failure to whichever file happened to be next in line.
     bool runnerError = false;
 
+    // User-triggered abort via Ctrl-C. The terminal sends SIGINT to
+    // the entire foreground process group, so any currently-running
+    // child also receives it and exits with code 130. The parent's
+    // installed handler (interpreter_setup.cpp `praiaSignalHandler`)
+    // just sets a bit in `g_pendingSignals` so the parent survives —
+    // we have to check the bit here, otherwise the loop happily
+    // spawns the next child (which gets killed instantly by the
+    // continuing SIGINT propagation if Ctrl-C is still held, or runs
+    // normally if not — either way, the user's "cancel the suite"
+    // intent is ignored). On observed SIGINT we stop enqueueing,
+    // wait for in-flight children to finish (they're dying already),
+    // and return the standard 128+SIGINT exit code.
+    bool interrupted = false;
+
     while (nextToSpawn < files.size() || !running.empty()) {
+        if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
+            interrupted = true;
+        }
         // Spawn until we hit the job cap (or run out of files), unless
-        // a runner-level error has occurred — then stop enqueueing
-        // and let pending children drain.
-        if (!runnerError) {
+        // a runner-level error or a user interrupt has occurred — then
+        // stop enqueueing and let pending children drain.
+        if (!runnerError && !interrupted) {
             while (nextToSpawn < files.size() && (int)running.size() < jobs) {
                 auto pt = spawnTestFile(files[nextToSpawn], useVm);
                 if (pt.pid < 0) {
@@ -967,16 +984,19 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
     }
 
     // Final progress bar + summary. When the runner aborted early
-    // (mkstemp/fork failure), draw the bar to actual completion and
-    // tag it "(aborted)" so the user doesn't see a full bar over an
-    // incomplete run.
+    // (mkstemp/fork failure or user Ctrl-C), draw the bar to actual
+    // completion and tag it "(aborted)" / "(interrupted)" so the
+    // user doesn't see a full bar over an incomplete run.
     {
         int barWidth = 20;
         int filled = (completed * barWidth) / std::max(total, 1);
         std::string bar(filled, '#');
         bar += std::string(barWidth - filled, '.');
+        const char* tag = interrupted ? " (interrupted)"
+                        : runnerError ? " (aborted)"
+                                      : " done";
         std::cout << "\r\033[K[" << bar << "] " << completed << "/" << total
-                  << (runnerError ? " (aborted)" : " done") << std::endl;
+                  << tag << std::endl;
     }
     std::cout << "═══ " << passed << "/" << files.size()
               << " test files passed ═══" << std::endl;
@@ -987,6 +1007,15 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
         std::sort(failedFiles.begin(), failedFiles.end());
         std::cout << "Failed:" << std::endl;
         for (auto& f : failedFiles) std::cout << "  " << f << std::endl;
+    }
+    // Precedence: user interrupt > runner error > pass/fail. SIGINT
+    // is the user's explicit "stop", so we report it before anything
+    // else even if a spawn happened to fail concurrently. Exit 130
+    // (128 + SIGINT) so shell `&&` chains stop and CI marks the job
+    // as cancelled rather than failed.
+    if (interrupted) {
+        std::cerr << "praia test: interrupted by SIGINT (Ctrl-C)" << std::endl;
+        return 130;
     }
     // Runner-level error (spawn failure) takes precedence over the
     // pass/fail tally: even if every test that *did* run passed, we
