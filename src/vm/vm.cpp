@@ -2323,27 +2323,34 @@ VM::Result VM::execute(int baseFrameCount_) {
 
             auto callable = callee.asCallable();
 
-            // Collect args
-            std::vector<Value> args(argc);
-            for (int i = argc - 1; i >= 0; i--) args[i] = pop();
-            pop(); // callee
-
-            // Reorder named args to match parameter positions
+            // Pre-validate named-arg positions BEFORE popping the
+            // stack — same fix as OP_CALL_NAMED. Otherwise a typo
+            // like `async fs.read(paht: …)` inside a try/catch would
+            // throw with the catch handler's saved stackTop pointing
+            // past the actually-popped args, corrupting the catch
+            // frame. And by computing the `filled` mask up front we
+            // can also propagate it into the task frame below so
+            // omitted named-arg positions get the same default
+            // treatment a sync named-arg call would get.
+            int paramCount = 0;
+            std::vector<int> targetSlot(argc);
+            std::vector<bool> filled;
+            std::string namedErr;
             if (hasNamedArgs) {
                 const auto* params = callable->paramNames();
                 if (!params) {
                     RUNTIME_ERR("Named arguments not supported for '" + callable->name() + "'");
                 }
-                int paramCount = static_cast<int>(params->size());
-                std::vector<Value> reordered(paramCount);
-                std::vector<bool> filled(paramCount, false);
+                paramCount = static_cast<int>(params->size());
+                filled.assign(paramCount, false);
                 int positionalIdx = 0;
                 for (int i = 0; i < argc; i++) {
                     if (argNamesList[i].empty()) {
                         if (positionalIdx >= paramCount) {
-                            RUNTIME_ERR(callable->name() + "() too many arguments");
+                            namedErr = callable->name() + "() too many arguments";
+                            break;
                         }
-                        reordered[positionalIdx] = args[i];
+                        targetSlot[i] = positionalIdx;
                         filled[positionalIdx] = true;
                         positionalIdx++;
                     } else {
@@ -2352,16 +2359,41 @@ VM::Result VM::execute(int baseFrameCount_) {
                             if ((*params)[p] == argNamesList[i]) { found = p; break; }
                         }
                         if (found == -1) {
-                            RUNTIME_ERR(callable->name() + "() unknown parameter '" + argNamesList[i] + "'");
+                            namedErr = callable->name() + "() unknown parameter '" + argNamesList[i] + "'";
+                            break;
                         }
                         if (filled[found]) {
-                            RUNTIME_ERR(callable->name() + "() parameter '" + argNamesList[i] + "' specified twice");
+                            namedErr = callable->name() + "() parameter '" + argNamesList[i] + "' specified twice";
+                            break;
                         }
-                        reordered[found] = args[i];
+                        targetSlot[i] = found;
                         filled[found] = true;
                     }
                 }
+                if (!namedErr.empty()) { RUNTIME_ERR(namedErr); }
+            }
+
+            // Validation passed — safe to pop and reorder.
+            std::vector<Value> args(argc);
+            for (int i = argc - 1; i >= 0; i--) args[i] = pop();
+            pop(); // callee
+
+            if (hasNamedArgs) {
+                std::vector<Value> reordered(paramCount);
+                for (int i = 0; i < argc; i++) reordered[targetSlot[i]] = args[i];
                 args = std::move(reordered);
+            }
+
+            // Build the missing-args mask the task frame will use. Set
+            // bits = positions NOT filled by the named-arg call. The
+            // task frame consults this to default-substitute omitted
+            // params (same field OP_CALL_NAMED writes for sync calls).
+            uint64_t namedArgsMissingMask = 0;
+            if (hasNamedArgs) {
+                int n = std::min(paramCount, 64);
+                for (int p = 0; p < n; p++) {
+                    if (!filled[p]) namedArgsMissingMask |= (uint64_t)1 << p;
+                }
             }
 
             /* Deep-copy heap-allocated values so the async task doesn't
@@ -2491,7 +2523,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                      receiverCopy = std::move(receiverCopy),
                      defClass = std::move(defClass),
                      rootsHolder, // pinned roots — keep alive while lambda lives
-                     isConstructor, klass]() mutable -> Value {
+                     isConstructor, klass,
+                     namedArgsMissingMask]() mutable -> Value {
                         VM taskVm;
                         GcHeap::current().disable(); // task VMs are short-lived
                         // Lazy/COW globals setup. globalsCopy here is the
@@ -2562,6 +2595,13 @@ VM::Result VM::execute(int baseFrameCount_) {
                         taskVm.frames[0].ip = fn->chunk.code.data();
                         taskVm.frames[0].baseSlot = 0;
                         taskVm.frames[0].definingClass = defClass;
+                        // Propagate the named-arg missing mask from the
+                        // caller so omitted positional params get the
+                        // same default-substitution behaviour they would
+                        // in a sync named-arg call (OP_CALL_NAMED writes
+                        // this same field after callValue pushes a frame).
+                        // Zero for plain `async f(...)` calls.
+                        taskVm.frames[0].missingArgsMask = namedArgsMissingMask;
                         taskVm.frameCount = 1;
 
                         auto result = taskVm.execute();

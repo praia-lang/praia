@@ -1304,7 +1304,7 @@ Interpreter::Interpreter() {
     fsMap->entries[Value("append")]      = Value(makeNative("fs.append",      2,  fsAppend,      {"path", "data"}));
     fsMap->entries[Value("exists")]      = Value(makeNative("fs.exists",      1,  fsExists,      {"path"}));
     fsMap->entries[Value("mkdir")]       = Value(makeNative("fs.mkdir",       1,  fsMkdir,       {"path"}));
-    fsMap->entries[Value("tempDir")]     = Value(makeNative("fs.tempDir",     -1, fsTempDir));
+    fsMap->entries[Value("tempDir")]     = Value(makeNative("fs.tempDir",     -1, fsTempDir,     {"prefix"}));
     fsMap->entries[Value("remove")]      = Value(makeNative("fs.remove",      1,  fsRemove,      {"path"}));
     fsMap->entries[Value("readDir")]     = Value(makeNative("fs.readDir",     1,  fsReadDir,     {"path"}));
     fsMap->entries[Value("copy")]        = Value(makeNative("fs.copy",        2,  fsCopy,        {"src", "dst"}));
@@ -1315,7 +1315,7 @@ Interpreter::Interpreter() {
     fsMap->entries[Value("symlink")]     = Value(makeNative("fs.symlink",     2,  fsSymlink,     {"target", "linkPath"}));
     fsMap->entries[Value("readlink")]    = Value(makeNative("fs.readlink",    1,  fsReadlink,    {"path"}));
     fsMap->entries[Value("atomicWrite")] = Value(makeNative("fs.atomicWrite", 2,  fsAtomicWrite, {"path", "data"}));
-    fsMap->entries[Value("mktemp")]      = Value(makeNative("fs.mktemp",      -1, fsMktemp));
+    fsMap->entries[Value("mktemp")]      = Value(makeNative("fs.mktemp",      -1, fsMktemp,      {"prefix"}));
     fsMap->entries[Value("open")]        = Value(makeNative("fs.open",        2,  fsOpen,        {"path", "mode"}));
 
     // Helper: register a deprecated sys.<name> forwarder that calls

@@ -88,6 +88,13 @@ Value getStringMethod(const std::string& strRef,
                 throw RuntimeError("replace() arguments must be strings", 0);
             auto& from = args[0].asString();
             auto& to = args[1].asString();
+            // An empty `from` would match at every position, and after
+            // each replace `pos += to.size()` either fails to advance
+            // (when `to` is also empty → infinite loop) or expands the
+            // string indefinitely between every character. Both are
+            // never what the caller meant — reject up front.
+            if (from.empty())
+                throw RuntimeError("replace() search string must not be empty", 0);
             std::string result = str;
             size_t pos = 0;
             while ((pos = result.find(from, pos)) != std::string::npos) {
@@ -438,18 +445,39 @@ Value getStringMethod(const std::string& strRef,
             int target = static_cast<int>(args[0].asNumber());
             std::string pad = " ";
             if (args.size() > 1 && args[1].isString()) pad = args[1].asString();
+            // Empty pad is invalid input — there's no width to pad
+            // with. Defaulting to a space is the least-surprising
+            // behaviour for callers who reach `padStart(n, "")` from
+            // a place where their pad var was lost (e.g. an unset
+            // map field). Throwing would be equally defensible.
+            if (pad.empty()) pad = " ";
             std::string result = str;
 #ifdef HAVE_UTF8PROC
             int currentLen = static_cast<int>(utf8_grapheme_count(result));
-            int padLen = static_cast<int>(utf8_grapheme_count(pad));
-            if (padLen < 1) padLen = 1; // avoid infinite loop on empty pad
-            while (currentLen < target) {
-                result = pad + result;
-                currentLen += padLen;
+            int need = target - currentLen;
+            if (need > 0) {
+                // Build a prefix of EXACTLY `need` graphemes by
+                // repeating pad, then truncating. The old loop
+                // appended whole `pad` chunks which overshot any
+                // time `need % graphemeCount(pad) != 0`.
+                std::string accum;
+                while (static_cast<int>(utf8_grapheme_count(accum)) < need)
+                    accum += pad;
+                auto gs = utf8_graphemes(accum);
+                std::string prefix;
+                for (int i = 0; i < need && i < static_cast<int>(gs.size()); i++)
+                    prefix += gs[i];
+                result = prefix + result;
             }
 #else
-            while (static_cast<int>(result.size()) < target)
-                result = pad + result;
+            int currentLen = static_cast<int>(result.size());
+            int need = target - currentLen;
+            if (need > 0) {
+                std::string accum;
+                while (static_cast<int>(accum.size()) < need)
+                    accum += pad;
+                result = accum.substr(0, need) + result;
+            }
 #endif
             return Value(std::move(result));
         }, {"width", "fillString"}));
@@ -461,18 +489,28 @@ Value getStringMethod(const std::string& strRef,
             int target = static_cast<int>(args[0].asNumber());
             std::string pad = " ";
             if (args.size() > 1 && args[1].isString()) pad = args[1].asString();
+            if (pad.empty()) pad = " ";
             std::string result = str;
 #ifdef HAVE_UTF8PROC
             int currentLen = static_cast<int>(utf8_grapheme_count(result));
-            int padLen = static_cast<int>(utf8_grapheme_count(pad));
-            if (padLen < 1) padLen = 1; // avoid infinite loop on empty pad
-            while (currentLen < target) {
-                result += pad;
-                currentLen += padLen;
+            int need = target - currentLen;
+            if (need > 0) {
+                std::string accum;
+                while (static_cast<int>(utf8_grapheme_count(accum)) < need)
+                    accum += pad;
+                auto gs = utf8_graphemes(accum);
+                for (int i = 0; i < need && i < static_cast<int>(gs.size()); i++)
+                    result += gs[i];
             }
 #else
-            while (static_cast<int>(result.size()) < target)
-                result += pad;
+            int currentLen = static_cast<int>(result.size());
+            int need = target - currentLen;
+            if (need > 0) {
+                std::string accum;
+                while (static_cast<int>(accum.size()) < need)
+                    accum += pad;
+                result += accum.substr(0, need);
+            }
 #endif
             return Value(std::move(result));
         }, {"width", "fillString"}));
@@ -581,6 +619,7 @@ Value getStringMethod(const std::string& strRef,
             int target = static_cast<int>(args[0].asNumber());
             std::string pad = " ";
             if (args.size() > 1 && args[1].isString()) pad = args[1].asString();
+            if (pad.empty()) pad = " ";
 #ifdef HAVE_UTF8PROC
             int currentLen = static_cast<int>(utf8_grapheme_count(str));
 #else
@@ -590,11 +629,28 @@ Value getStringMethod(const std::string& strRef,
             int total = target - currentLen;
             int left = total / 2;
             int right = total - left;
-            std::string result;
-            for (int i = 0; i < left; i++) result += pad;
-            result += str;
-            for (int i = 0; i < right; i++) result += pad;
-            return Value(std::move(result));
+            // Previously this appended a full `pad` chunk per side per
+            // iteration, which overshot whenever the side need wasn't
+            // a multiple of pad's length and infinite-looped when pad
+            // was empty. Now we build the exact `left` / `right`
+            // sequences by repeating pad then truncating.
+            auto buildChunk = [&pad](int need) -> std::string {
+                std::string accum;
+#ifdef HAVE_UTF8PROC
+                while (static_cast<int>(utf8_grapheme_count(accum)) < need)
+                    accum += pad;
+                auto gs = utf8_graphemes(accum);
+                std::string out;
+                for (int i = 0; i < need && i < static_cast<int>(gs.size()); i++)
+                    out += gs[i];
+                return out;
+#else
+                while (static_cast<int>(accum.size()) < need)
+                    accum += pad;
+                return accum.substr(0, need);
+#endif
+            };
+            return Value(buildChunk(left) + str + buildChunk(right));
         }, {"width", "fillString"}));
     }
     if (name == "isDigit") {

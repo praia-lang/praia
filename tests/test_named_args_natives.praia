@@ -170,4 +170,91 @@ testing.test("net.query routes named args into the native", lam{ in
     testing.expect(dispatched, "named-arg call routed into net.query")
 })
 
+// ── Phase 2 follow-up: edge cases caught in review ──
+
+testing.test("string.replace rejects empty search string", lam{ in
+    // Regression: an empty `from` made result.find match at every
+    // position; combined with an empty `to`, the loop never advanced
+    // and the function infinite-looped. Now it throws up front.
+    testing.expectThrows(
+        lam{ in "abc".replace(pattern: "", replacement: "x") },
+        "must not be empty")
+})
+
+testing.test("padStart / padEnd / center pad to EXACT width", lam{ in
+    // Regression: the loop appended whole `pad` chunks, so when
+    // `need % len(pad) != 0` the result overshot the requested width.
+    testing.expectEqual(len("hi".padStart(width: 5, fillString: "ab")), 5,
+                        "padStart hits target exactly")
+    testing.expectEqual(len("hi".padEnd(width: 5, fillString: "ab")), 5,
+                        "padEnd hits target exactly")
+    testing.expectEqual(len("hi".center(width: 7, fillString: "ab")), 7,
+                        "center hits target exactly")
+})
+
+testing.test("pad functions default empty fillString to space", lam{ in
+    // Regression: an empty pad would either set padLen=1 (UTF8 path)
+    // and inflate currentLen without growing the result, or simply
+    // infinite-loop (non-UTF8 path). Defaulting to ' ' fails safely.
+    testing.expectEqual("x".padStart(width: 3, fillString: ""), "  x", nil)
+    testing.expectEqual("x".padEnd(width: 3, fillString: ""), "x  ", nil)
+})
+
+testing.test("fs.tempDir accepts named prefix", lam{ in
+    let dir = fs.tempDir(prefix: "myapp-")
+    testing.expect(dir.contains("myapp-"), "prefix appears in path")
+})
+
+testing.test("net.setTimeout accepts ms by name", lam{ in
+    // Regression: the param-name was registered as "timeoutMs" but
+    // the lambda's variable and error message say "ms". Pin the
+    // canonical name. Use a socket fd we know will error so we don't
+    // hold network state — the only invariant is that the named-arg
+    // dispatch reaches the native (no engine-level rejection).
+    let dispatched = false
+    try {
+        net.setTimeout(socket: -1, ms: 100)
+        dispatched = true
+    } catch (e) {
+        let msg = e.toString()
+        ensure (!msg.contains("unknown parameter")) else {
+            throw "net.setTimeout name->slot mapping failed: " + msg
+        }
+        dispatched = true
+    }
+    testing.expect(dispatched, "ms: dispatched into net.setTimeout")
+})
+
+testing.test("async named-arg propagates missing mask to task", lam{ in
+    // Regression: the named-arg fill mask was set on the caller's
+    // interpreter (tree-walker) / not propagated at all (VM async
+    // dispatch). User functions then saw missing positional params
+    // as ~0ULL (all-filled) and tried to use nil where a default
+    // should kick in. crypto.hashPassword is a native, but it has
+    // a similar effect: it checks `args.size() > 2 && !args[2].isNil()`
+    // to decide whether the caller supplied iterations. If the
+    // omitted-position bit gets set wrong on the task side, the
+    // optional `salt` slot (position 1) sneaks in as nil from the
+    // wrong place.
+    let r = async crypto.hashPassword(password: "x", iterations: 1234)
+    let result = await r
+    testing.expectEqual(result.iterations, 1234,
+                        "iterations propagated; salt auto-generated")
+    testing.expect(len(result.salt) == 32, "salt was auto-generated (16 bytes hex)")
+})
+
+testing.test("exception mid-call does not leak named-arg mask", lam{ in
+    // Regression: pendingArgsFilled_ was set before callWithContext
+    // and reset only on the normal return path. A Praia `throw`
+    // bubbled out via a C++ exception and skipped the reset, leaving
+    // the mask set for the next call on the same interpreter.
+    func throwingNamed(x, y) { throw "x" }
+    try { throwingNamed(x: 1, y: 2) } catch (e) {}
+    // Without the catch-arm reset, the next two-arg user-function
+    // call would see position 1 as "missing" and default to nil.
+    func twoArgs(a, b) { return [a, b] }
+    testing.expectEqual(twoArgs(10, 20), [10, 20],
+                        "positional dispatch unaffected by prior throw")
+})
+
 testing.done()

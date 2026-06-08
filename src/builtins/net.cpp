@@ -702,7 +702,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 throw RuntimeError("net.bindInterface() interface '" + ifname + "' not found or has no IPv4 address", 0);
 #endif
             return Value();
-        }, {"socket", "iface"}));
+        }, {"socket", "ifname"}));
 
     // net.interfaces() — list network interfaces with their addresses
     netMap->entries[Value("interfaces")] = Value(makeNative("net.interfaces", 0,
@@ -1164,7 +1164,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
                 result->elements.push_back(Value(entry));
             }
             return Value(result);
-        }, {"hosts", "port"}));
+        }, {"targets", "timeout"}));
 
     netMap->entries[Value("setTimeout")] = Value(makeNative("net.setTimeout", 2,
         [](const std::vector<Value>& args) -> Value {
@@ -1183,7 +1183,7 @@ void registerNetBuiltins(std::shared_ptr<PraiaMap> netMap) {
             setsockopt(rawFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             setsockopt(rawFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             return Value();
-        }, {"socket", "timeoutMs"}));
+        }, {"socket", "ms"}));
 
     // ── Raw sockets ──
 
