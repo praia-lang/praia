@@ -134,6 +134,17 @@ static std::vector<Value> reorderNamedArgs(
 
     for (size_t i = 0; i < args.size(); i++) {
         if (names[i].empty()) {
+            // Walk past slots already bound by a named arg. Praia's
+            // surface syntax disallows positional-after-named so
+            // today this loop is a no-op, but it matches the VM's
+            // OP_CALL_NAMED defensive behaviour — a future syntax
+            // extension or compiler change that interleaves names
+            // mustn't silently overwrite a named-bound slot with a
+            // positional value (which would happen because both
+            // would target the same `result` index).
+            while (positionalIdx < paramCount && filled[positionalIdx]) {
+                positionalIdx++;
+            }
             if (positionalIdx >= paramCount)
                 throw RuntimeError(callable->name() + "() too many arguments", line);
             result[positionalIdx] = args[i];

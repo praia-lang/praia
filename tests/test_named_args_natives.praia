@@ -272,7 +272,16 @@ testing.test("exception mid-call does not leak named-arg mask", lam{ in
     // (`twoArgs(10, 20)`) would see position 1 as "missing" and
     // default `b` to nil, returning `[10, nil]` instead of `[10, 20]`.
     func throwingNamed(x, y) { throw "boom" }
-    try { throwingNamed(x: 1) } catch (e) {}
+    // Pin that the throw is the one we expect — without this, a
+    // pre-call engine error (e.g. "unknown parameter 'x'" from a
+    // regression that broke the named-arg path) would be silently
+    // swallowed and the test would still go on to call twoArgs.
+    // We want to test the mask-leak path AFTER a known throw, not
+    // accidentally pass because of a different earlier failure.
+    let caught = nil
+    try { throwingNamed(x: 1) } catch (e) { caught = e }
+    testing.expectEqual(caught, "boom",
+                        "throwingNamed must actually throw 'boom' (not an engine error)")
     func twoArgs(a, b) { return [a, b] }
     testing.expectEqual(twoArgs(10, 20), [10, 20],
                         "positional dispatch unaffected by prior throw")
