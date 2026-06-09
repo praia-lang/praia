@@ -322,7 +322,20 @@ bool Interpreter::interpret(const std::vector<StmtPtr>& program) {
         auto defers = std::move(deferStacks_.back());
         deferStacks_.pop_back();
         for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
-            try { evaluate(defers[i]); } catch (...) {}
+            try {
+                evaluate(defers[i]);
+            } catch (const ExitSignal&) {
+                // `sys.exit(N)` from inside a defer must still
+                // propagate — without this explicit re-throw the
+                // catch-all below would swallow it and the script
+                // would exit 0 instead of N. VM's runDefers has the
+                // same explicit ExitSignal arm (vm.cpp ~742).
+                throw;
+            } catch (...) {
+                // Any other defer error is swallowed so it can't
+                // mask the original throw/error path we're already
+                // unwinding from.
+            }
         }
     };
 

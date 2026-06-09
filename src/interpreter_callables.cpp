@@ -127,7 +127,17 @@ Value Interpreter::callBody(std::shared_ptr<Environment> callEnv,
         auto defers = std::move(deferStacks_.back());
         deferStacks_.pop_back();
         for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
-            try { evaluate(defers[i]); } catch (...) {}
+            try {
+                evaluate(defers[i]);
+            } catch (const ExitSignal&) {
+                // `sys.exit(N)` from inside a defer must still
+                // propagate — same fix as runScriptDefers in
+                // interpreter.cpp and VM's runDefers ExitSignal arm.
+                throw;
+            } catch (...) {
+                // Other defer errors are swallowed so they can't
+                // mask the original throw we're unwinding from.
+            }
         }
     };
 

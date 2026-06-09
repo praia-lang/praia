@@ -1004,6 +1004,16 @@ VM::Result VM::execute(int baseFrameCount_) {
         return Result::RUNTIME_ERROR; \
     }
 
+    // Used by sites that already reported the error (or had it
+    // reported by a sub-call like callValue) and just need to
+    // drain defers + bail out of execute(). Without this drain,
+    // top-level cleanup gets skipped on these uncaught paths and
+    // we'd silently regress the parity work in OP_THROW / RUNTIME_ERR.
+    #define FAIL_AND_DRAIN_DEFERS() { \
+        unwindFramesAndRunDefers(baseFrameCount_); \
+        return Result::RUNTIME_ERROR; \
+    }
+
     try {
     for (;;) {
         // Cross-thread post fast-path: a single acquire load per
@@ -1029,7 +1039,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 if (!hasUserHandler) {
                     if (tryHandleError(Value(std::string("Interrupted")))) continue;
                     runtimeError("Interrupted", CURRENT_LINE(), CURRENT_COLUMN());
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
                 }
                 // User handler exists — handled by sys.checkSignals()
             }
@@ -1428,7 +1438,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_CALL: {
             uint8_t argc = READ_BYTE();
             Value callee = peek(argc);
-            if (!callValue(callee, argc, CURRENT_LINE())) return Result::RUNTIME_ERROR;
+            if (!callValue(callee, argc, CURRENT_LINE())) FAIL_AND_DRAIN_DEFERS();
             break;
         }
 
@@ -1441,7 +1451,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             for (auto& elem : elems) push(elem);
             int argc = static_cast<int>(elems.size());
             Value callee = peek(argc);
-            if (!callValue(callee, argc, CURRENT_LINE())) return Result::RUNTIME_ERROR;
+            if (!callValue(callee, argc, CURRENT_LINE())) FAIL_AND_DRAIN_DEFERS();
             break;
         }
 
@@ -1535,7 +1545,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             push(callee);
             for (auto& a : reordered) push(a);
             int prevFrameCount = frameCount;
-            if (!callValue(callee, paramCount, CURRENT_LINE())) return Result::RUNTIME_ERROR;
+            if (!callValue(callee, paramCount, CURRENT_LINE())) FAIL_AND_DRAIN_DEFERS();
             // If a Praia frame was pushed, override its missing mask so that
             // omitted named-arg positions (which we filled with nil placeholders)
             // are treated as missing for default evaluation.
@@ -1898,7 +1908,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 } catch (const RuntimeError& err) {
                     if (tryHandleError(Value(std::string(err.what())))) break;
                     runtimeError(err.what(), CURRENT_LINE());
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
                 }
                 break;
             }
@@ -1908,7 +1918,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 } catch (const RuntimeError& err) {
                     if (tryHandleError(Value(std::string(err.what())))) break;
                     runtimeError(err.what(), CURRENT_LINE());
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
                 }
                 break;
             }
@@ -1918,7 +1928,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 } catch (const RuntimeError& err) {
                     if (tryHandleError(Value(std::string(err.what())))) break;
                     runtimeError(err.what(), CURRENT_LINE());
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
                 }
                 break;
             }
@@ -2302,7 +2312,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                     stack[stackTop - 1 - i] = stack[stackTop - 2 - i];
                 stack[stackTop - argc - 1] = gvm->globals[gslot];
                 if (!callValue(gvm->globals[gslot], argc, CURRENT_LINE()))
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
             } else {
                 auto tagged = gcNew<PraiaTagged>();
                 tagged->tag = tagName;
@@ -2318,7 +2328,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             (void)alias; // alias is handled by the compiler (defines the variable)
             Value exports = loadGrain(path, CURRENT_LINE());
             if (exports.isNil() && grainCache.find(path) == grainCache.end()) {
-                return Result::RUNTIME_ERROR;
+                FAIL_AND_DRAIN_DEFERS();
             }
             push(exports);
             break;

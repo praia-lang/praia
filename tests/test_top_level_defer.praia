@@ -85,4 +85,18 @@ testing.test("defer on engine-level error (not just user throw)", lam{ in
                    "tree-walker script defer fires on engine error")
 })
 
+testing.test("defer on call-dispatch error (non-callable invocation)", lam{ in
+    // Different uncaught path from the nil+1 case: call dispatch.
+    // The VM's OP_CALL family checks `callee.isCallable()` and bails
+    // with "Can only call functions" via the callValue-failed sites
+    // (vm.cpp:1441 / 1454 / 1548). Previously those `return
+    // Result::RUNTIME_ERROR` lines skipped the defer drain. Both
+    // engines should now run defers before exiting.
+    let r = runBoth("defer print(\"clean\"); let x = 42; x()")
+    testing.expect(r.vm.stdout.contains("clean"),
+                   "VM script defer fires on call-dispatch error")
+    testing.expect(r.tree.stdout.contains("clean"),
+                   "tree-walker script defer fires on call-dispatch error")
+})
+
 testing.done()
