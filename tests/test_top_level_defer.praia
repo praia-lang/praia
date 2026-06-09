@@ -1,0 +1,88 @@
+use "testing"
+
+// Top-level `defer` parity between VM and tree-walker.
+//
+// The bug: tree-walker `Interpreter::interpret()` didn't push a
+// script-scope defer stack, so the StmtType::Defer handler's
+// `if (!deferStacks_.empty())` gate silently dropped top-level
+// defers. VM worked correctly because its main-chunk execution sets
+// up a frame whose deferStack is unconditionally populated.
+//
+// Secondary parity work: both engines now also run defers on
+// uncaught throw and on sys.exit(). Previously only the
+// happy-path case worked (VM via OP_RETURN; tree-walker not at all).
+//
+// We invoke `./praia` as a subprocess for each scenario — top-level
+// behaviour can't be exercised from inside a `testing.test` lambda
+// because that body is, by definition, a function (and function-
+// scope defer was never broken).
+
+func runBoth(script) {
+    // Returns a map: {vm: {stdout, exitCode}, tree: {stdout, exitCode}}
+    let vm   = sys.exec(["./praia",          "-c", script])
+    let tree = sys.exec(["./praia", "--tree", "-c", script])
+    return {vm: vm, tree: tree}
+}
+
+// sys.exec strips the trailing newline that print() emits — assertions
+// below compare against the resulting payload without the final "\n".
+
+testing.test("top-level defer fires on normal exit", lam{ in
+    let r = runBoth("defer print(\"end\"); print(\"start\")")
+    testing.expectEqual(r.vm.stdout,   "start\nend",
+                        "VM runs script-scope defer on normal exit")
+    testing.expectEqual(r.tree.stdout, "start\nend",
+                        "tree-walker runs script-scope defer on normal exit")
+})
+
+testing.test("multiple top-level defers run LIFO", lam{ in
+    let r = runBoth("defer print(1); defer print(2); defer print(3); print(0)")
+    testing.expectEqual(r.vm.stdout,   "0\n3\n2\n1",
+                        "VM unwinds defers in reverse declaration order")
+    testing.expectEqual(r.tree.stdout, "0\n3\n2\n1",
+                        "tree-walker matches VM ordering")
+})
+
+testing.test("top-level defer fires on uncaught throw", lam{ in
+    // Defers run on the uncaught-error path; we look at stdout for
+    // the defer's print and stderr for the engine's error report.
+    // Exit code is whatever Praia uses for uncaught (non-zero) —
+    // assert that, not a specific number, to avoid coupling the
+    // test to the internal `ExitCode` enum.
+    let r = runBoth("defer print(\"cleanup\"); throw \"boom\"")
+    testing.expect(r.vm.stdout.contains("cleanup"),
+                   "VM script defer fires before exit")
+    testing.expect(r.vm.stderr.contains("Uncaught error"),
+                   "VM still prints uncaught-error diagnostic")
+    testing.expect(r.vm.exitCode != 0, "VM exits non-zero on uncaught throw")
+    testing.expect(r.tree.stdout.contains("cleanup"),
+                   "tree-walker script defer fires before exit")
+    testing.expect(r.tree.stderr.contains("Uncaught error"),
+                   "tree-walker still prints uncaught-error diagnostic")
+    testing.expect(r.tree.exitCode != 0, "tree-walker exits non-zero on uncaught throw")
+})
+
+testing.test("top-level defer fires before sys.exit", lam{ in
+    let r = runBoth("defer print(\"clean\"); sys.exit(42)")
+    testing.expectEqual(r.vm.stdout,   "clean",
+                        "VM script defer runs before exit code propagates")
+    testing.expectEqual(r.vm.exitCode, 42,
+                        "VM preserves the user-chosen exit code")
+    testing.expectEqual(r.tree.stdout, "clean",
+                        "tree-walker script defer runs before exit code propagates")
+    testing.expectEqual(r.tree.exitCode, 42,
+                        "tree-walker preserves the user-chosen exit code")
+})
+
+testing.test("defer on engine-level error (not just user throw)", lam{ in
+    // RUNTIME_ERR-style engine errors (type mismatch, etc.) also
+    // count as "uncaught" for defer purposes — both engines should
+    // run script defers before exiting.
+    let r = runBoth("defer print(\"clean\"); let x = nil + 1")
+    testing.expect(r.vm.stdout.contains("clean"),
+                   "VM script defer fires on engine error")
+    testing.expect(r.tree.stdout.contains("clean"),
+                   "tree-walker script defer fires on engine error")
+})
+
+testing.done()

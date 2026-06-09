@@ -698,6 +698,22 @@ bool VM::callValue(Value callee, int argCount, int line) {
     return false;
 }
 
+void VM::unwindFramesAndRunDefers(int targetFrameCount) {
+    // Mirrors the unwind loop in tryHandleError, but with no
+    // handler to stop at — used on uncaught-error / sys.exit
+    // paths so deferred cleanup fires before execute() exits.
+    // Defers swallow their own exceptions (see runDefers), so a
+    // broken defer can't mask the original error.
+    if (targetFrameCount < 0) targetFrameCount = 0;
+    while (frameCount > targetFrameCount) {
+        runDefers(frameCount - 1);
+        if (frameCount > 0) {
+            closeUpvalues(&stack[frames[frameCount - 1].baseSlot]);
+        }
+        frameCount--;
+    }
+}
+
 void VM::runDefers(int frameIdx) {
     auto defers = std::move(deferStack[frameIdx]);
     deferStack[frameIdx].clear();
@@ -979,7 +995,13 @@ VM::Result VM::execute(int baseFrameCount_) {
     #define RUNTIME_ERR(msg) { \
         std::string _msg = (msg); int _line = CURRENT_LINE(); int _col = CURRENT_COLUMN(); \
         if (tryHandleError(Value(_msg))) continue; \
-        runtimeError(_msg, _line, _col); return Result::RUNTIME_ERROR; \
+        /* Print first (formatStackTrace reads live frames), then \
+           drain defers so top-level cleanup still fires when an \
+           engine-level error (e.g. type mismatch, missing key) \
+           goes uncaught. */ \
+        runtimeError(_msg, _line, _col); \
+        unwindFramesAndRunDefers(baseFrameCount_); \
+        return Result::RUNTIME_ERROR; \
     }
 
     try {
@@ -2223,13 +2245,19 @@ VM::Result VM::execute(int baseFrameCount_) {
             Value error = pop();
             if (tryHandleError(error)) break;
 
-            // Uncaught in this execute scope
+            // Uncaught in this execute scope. Print the diagnostic
+            // BEFORE unwinding frames — formatStackTrace() needs the
+            // frames intact, and CURRENT_LINE()/COLUMN() likewise
+            // read the active frame's ip. Then drain defers so
+            // top-level (and function-scope) cleanup still runs on
+            // abnormal termination.
             lastError_ = error.toString();
             if (!suppressErrors_ && executeDepth_ <= 1) {
                 std::cerr << formatLocation(CURRENT_LINE(), CURRENT_COLUMN())
                           << " Uncaught error: " << error.toString() << std::endl;
                 std::cerr << formatStackTrace();
             }
+            unwindFramesAndRunDefers(baseFrameCount_);
             return Result::RUNTIME_ERROR;
         }
         case OpCode::OP_DEFER: {
@@ -2817,10 +2845,16 @@ VM::Result VM::execute(int baseFrameCount_) {
         }
     }
     } catch (const ExitSignal&) {
+        // Run defers before sys.exit() escapes to main(), so
+        // top-level cleanup fires on intentional script termination
+        // (matches the tree-walker's `catch (const ExitSignal&)` in
+        // Interpreter::interpret).
+        unwindFramesAndRunDefers(baseFrameCount_);
         throw; // propagate sys.exit() to main
     } catch (const RuntimeError& err) {
         // Fatal error (e.g. stack overflow from push())
         lastError_ = err.what();
+        unwindFramesAndRunDefers(baseFrameCount_);
         return Result::RUNTIME_ERROR;
     }
 

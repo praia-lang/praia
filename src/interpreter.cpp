@@ -307,23 +307,57 @@ std::string Interpreter::formatStackTrace() const {
 
 bool Interpreter::interpret(const std::vector<StmtPtr>& program) {
     GcHeap::current().setRootMarker([this](GcHeap& h) { gcMarkRoots(h); });
+
+    // Script-scope defer stack. Mirrors the per-function stack pushed
+    // in interpreter_callables.cpp:124 — without this, top-level
+    // `defer` statements get silently dropped at the StmtType::Defer
+    // handler (which gates on `!deferStacks_.empty()`). The VM has
+    // always run script-scope defers because its main-chunk execution
+    // sets up a frame whose deferStack is unconditionally populated;
+    // this brings the tree-walker into parity. REPL deliberately
+    // doesn't get the same treatment — see interpretRepl below.
+    deferStacks_.push_back({});
+    auto runScriptDefers = [this]() {
+        if (deferStacks_.empty()) return;
+        auto defers = std::move(deferStacks_.back());
+        deferStacks_.pop_back();
+        for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
+            try { evaluate(defers[i]); } catch (...) {}
+        }
+    };
+
     try {
         for (const auto& stmt : program) {
             execute(stmt.get());
             GcHeap::current().collectIfNeeded();
         }
+        runScriptDefers();
         return true;
     } catch (const ThrowSignal& t) {
+        // Print the diagnostic BEFORE running defers — matches the
+        // VM's order (OP_THROW prints then drains) and means a
+        // user-visible error message always appears even if a defer
+        // crashes or does noisy output. callStack and formatStackTrace
+        // use a separate vector so they survive across the defer run.
         std::cerr << formatLocation(t.line, t.column) << " Uncaught error: "
                   << t.value.toString() << std::endl;
         std::cerr << formatStackTrace();
+        runScriptDefers();
         callStack.clear();
         return false;
     } catch (const RuntimeError& e) {
         std::cerr << formatLocation(e.line, e.column) << " Runtime error: " << e.what() << std::endl;
         std::cerr << formatStackTrace();
+        runScriptDefers();
         callStack.clear();
         return false;
+    } catch (const ExitSignal&) {
+        // `sys.exit(N)` propagates as ExitSignal. Run script defers
+        // before the signal escapes to main(), matching the VM's
+        // ExitSignal catch arm. The signal keeps propagating after
+        // defers finish so main() can exit with the user's code.
+        runScriptDefers();
+        throw;
     }
 }
 

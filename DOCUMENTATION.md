@@ -1045,6 +1045,8 @@ try { f() } catch (e) {}
 
 If a defer itself throws, it doesn't prevent other defers from running.
 
+`defer` also works at the **top level of a script** — useful for closing sqlite handles, flushing logs, or restoring terminal state before the program exits. Top-level defers fire when the script finishes (normal completion, uncaught throw, or `sys.exit()`). The REPL is the one exception: defers entered at the prompt are silently dropped because there is no defined script end.
+
 ### ensure
 
 `ensure` is an early-exit guard, modelled on Swift's `guard`. If the condition is falsy, the `else` block runs — and the `else` block **must** terminate. The parser enforces this: code after the `ensure` only runs when the condition held. Recognised terminators (strictly syntactic):
