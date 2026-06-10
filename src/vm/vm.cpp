@@ -698,6 +698,22 @@ bool VM::callValue(Value callee, int argCount, int line) {
     return false;
 }
 
+void VM::unwindFramesAndRunDefers(int targetFrameCount) {
+    // Mirrors the unwind loop in tryHandleError, but with no
+    // handler to stop at — used on uncaught-error / sys.exit
+    // paths so deferred cleanup fires before execute() exits.
+    // Defers swallow their own exceptions (see runDefers), so a
+    // broken defer can't mask the original error.
+    if (targetFrameCount < 0) targetFrameCount = 0;
+    while (frameCount > targetFrameCount) {
+        runDefers(frameCount - 1);
+        if (frameCount > 0) {
+            closeUpvalues(&stack[frames[frameCount - 1].baseSlot]);
+        }
+        frameCount--;
+    }
+}
+
 void VM::runDefers(int frameIdx) {
     auto defers = std::move(deferStack[frameIdx]);
     deferStack[frameIdx].clear();
@@ -979,7 +995,23 @@ VM::Result VM::execute(int baseFrameCount_) {
     #define RUNTIME_ERR(msg) { \
         std::string _msg = (msg); int _line = CURRENT_LINE(); int _col = CURRENT_COLUMN(); \
         if (tryHandleError(Value(_msg))) continue; \
-        runtimeError(_msg, _line, _col); return Result::RUNTIME_ERROR; \
+        /* Print first (formatStackTrace reads live frames), then \
+           drain defers so top-level cleanup still fires when an \
+           engine-level error (e.g. type mismatch, missing key) \
+           goes uncaught. */ \
+        runtimeError(_msg, _line, _col); \
+        unwindFramesAndRunDefers(baseFrameCount_); \
+        return Result::RUNTIME_ERROR; \
+    }
+
+    // Used by sites that already reported the error (or had it
+    // reported by a sub-call like callValue) and just need to
+    // drain defers + bail out of execute(). Without this drain,
+    // top-level cleanup gets skipped on these uncaught paths and
+    // we'd silently regress the parity work in OP_THROW / RUNTIME_ERR.
+    #define FAIL_AND_DRAIN_DEFERS() { \
+        unwindFramesAndRunDefers(baseFrameCount_); \
+        return Result::RUNTIME_ERROR; \
     }
 
     try {
@@ -1007,7 +1039,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 if (!hasUserHandler) {
                     if (tryHandleError(Value(std::string("Interrupted")))) continue;
                     runtimeError("Interrupted", CURRENT_LINE(), CURRENT_COLUMN());
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
                 }
                 // User handler exists — handled by sys.checkSignals()
             }
@@ -1406,7 +1438,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_CALL: {
             uint8_t argc = READ_BYTE();
             Value callee = peek(argc);
-            if (!callValue(callee, argc, CURRENT_LINE())) return Result::RUNTIME_ERROR;
+            if (!callValue(callee, argc, CURRENT_LINE())) FAIL_AND_DRAIN_DEFERS();
             break;
         }
 
@@ -1419,7 +1451,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             for (auto& elem : elems) push(elem);
             int argc = static_cast<int>(elems.size());
             Value callee = peek(argc);
-            if (!callValue(callee, argc, CURRENT_LINE())) return Result::RUNTIME_ERROR;
+            if (!callValue(callee, argc, CURRENT_LINE())) FAIL_AND_DRAIN_DEFERS();
             break;
         }
 
@@ -1513,7 +1545,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             push(callee);
             for (auto& a : reordered) push(a);
             int prevFrameCount = frameCount;
-            if (!callValue(callee, paramCount, CURRENT_LINE())) return Result::RUNTIME_ERROR;
+            if (!callValue(callee, paramCount, CURRENT_LINE())) FAIL_AND_DRAIN_DEFERS();
             // If a Praia frame was pushed, override its missing mask so that
             // omitted named-arg positions (which we filled with nil placeholders)
             // are treated as missing for default evaluation.
@@ -1876,7 +1908,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 } catch (const RuntimeError& err) {
                     if (tryHandleError(Value(std::string(err.what())))) break;
                     runtimeError(err.what(), CURRENT_LINE());
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
                 }
                 break;
             }
@@ -1886,7 +1918,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 } catch (const RuntimeError& err) {
                     if (tryHandleError(Value(std::string(err.what())))) break;
                     runtimeError(err.what(), CURRENT_LINE());
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
                 }
                 break;
             }
@@ -1896,7 +1928,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 } catch (const RuntimeError& err) {
                     if (tryHandleError(Value(std::string(err.what())))) break;
                     runtimeError(err.what(), CURRENT_LINE());
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
                 }
                 break;
             }
@@ -2223,13 +2255,19 @@ VM::Result VM::execute(int baseFrameCount_) {
             Value error = pop();
             if (tryHandleError(error)) break;
 
-            // Uncaught in this execute scope
+            // Uncaught in this execute scope. Print the diagnostic
+            // BEFORE unwinding frames — formatStackTrace() needs the
+            // frames intact, and CURRENT_LINE()/COLUMN() likewise
+            // read the active frame's ip. Then drain defers so
+            // top-level (and function-scope) cleanup still runs on
+            // abnormal termination.
             lastError_ = error.toString();
             if (!suppressErrors_ && executeDepth_ <= 1) {
                 std::cerr << formatLocation(CURRENT_LINE(), CURRENT_COLUMN())
                           << " Uncaught error: " << error.toString() << std::endl;
                 std::cerr << formatStackTrace();
             }
+            unwindFramesAndRunDefers(baseFrameCount_);
             return Result::RUNTIME_ERROR;
         }
         case OpCode::OP_DEFER: {
@@ -2274,7 +2312,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                     stack[stackTop - 1 - i] = stack[stackTop - 2 - i];
                 stack[stackTop - argc - 1] = gvm->globals[gslot];
                 if (!callValue(gvm->globals[gslot], argc, CURRENT_LINE()))
-                    return Result::RUNTIME_ERROR;
+                    FAIL_AND_DRAIN_DEFERS();
             } else {
                 auto tagged = gcNew<PraiaTagged>();
                 tagged->tag = tagName;
@@ -2290,7 +2328,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             (void)alias; // alias is handled by the compiler (defines the variable)
             Value exports = loadGrain(path, CURRENT_LINE());
             if (exports.isNil() && grainCache.find(path) == grainCache.end()) {
-                return Result::RUNTIME_ERROR;
+                FAIL_AND_DRAIN_DEFERS();
             }
             push(exports);
             break;
@@ -2817,10 +2855,16 @@ VM::Result VM::execute(int baseFrameCount_) {
         }
     }
     } catch (const ExitSignal&) {
+        // Run defers before sys.exit() escapes to main(), so
+        // top-level cleanup fires on intentional script termination
+        // (matches the tree-walker's `catch (const ExitSignal&)` in
+        // Interpreter::interpret).
+        unwindFramesAndRunDefers(baseFrameCount_);
         throw; // propagate sys.exit() to main
     } catch (const RuntimeError& err) {
         // Fatal error (e.g. stack overflow from push())
         lastError_ = err.what();
+        unwindFramesAndRunDefers(baseFrameCount_);
         return Result::RUNTIME_ERROR;
     }
 

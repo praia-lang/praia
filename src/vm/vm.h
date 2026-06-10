@@ -198,6 +198,15 @@ private:
     std::vector<Value> deferStack[FRAMES_MAX];
     void runDefers(int frameIdx);
 
+    // Walk frames from current down to `targetFrameCount`, running
+    // each frame's defers and closing its upvalues. Called on the
+    // uncaught-error paths (OP_THROW past every handler, RUNTIME_ERR
+    // with no handler, ExitSignal escaping execute) so deferred
+    // cleanup fires on abnormal termination — without this, top-level
+    // and function-scope defers would silently drop when execution
+    // aborts via throw or sys.exit().
+    void unwindFramesAndRunDefers(int targetFrameCount);
+
     // Closures created during execution (RAII ownership)
     std::vector<std::unique_ptr<ObjClosure>> allClosures;
     std::vector<std::unique_ptr<ObjUpvalue>> allUpvalues;
