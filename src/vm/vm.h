@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class GcHeap;
@@ -136,7 +137,23 @@ public:
     static constexpr int FRAMES_MAX = 256;
     VMCallFrame frames[FRAMES_MAX];
     int frameCount = 0;
+
+    // --strict-tags toggle. When true, OP_TAG_OR_CALL throws instead
+    // of building a PraiaTagged for capitalized calls to undefined
+    // names. main.cpp sets this from the CLI flag before run().
+    void setStrictTags(bool v) { strictTags_ = v; }
+
+    // Append every global-callable name to `out`. Used by the
+    // tagged-value typo guard to suggest "did you mean 'Deque'?"
+    // when a capitalized call falls through. Honours the homeVm
+    // grain-isolation rule: callers should invoke on the same VM
+    // they'd query for OP_TAG_OR_CALL's global lookup.
+    void scanCallableGlobals(std::vector<std::string>& out) const;
 private:
+
+    // Tagged-value typo defenses — see Interpreter for parity notes.
+    bool strictTags_ = false;
+    std::unordered_set<std::string> warnedTagNames_;
 
     // Globals — slot-indexed for fast access. The compiler emits names as
     // constant-pool strings; the first OP_GET_GLOBAL / OP_SET_GLOBAL hit

@@ -686,7 +686,7 @@ struct PendingTest {
     std::string file;
 };
 
-static PendingTest spawnTestFile(const std::string& path, bool useVm) {
+static PendingTest spawnTestFile(const std::string& path, bool useVm, bool strictTags) {
     namespace fs = std::filesystem;
     PendingTest pt;
     pt.file = path;
@@ -778,6 +778,9 @@ static PendingTest spawnTestFile(const std::string& path, bool useVm) {
         std::vector<char*> argv;
         argv.push_back(const_cast<char*>(g_praiaExecPath.c_str()));
         if (!useVm) argv.push_back(const_cast<char*>("--tree"));
+        // Forward --strict-tags into the child so per-file tests
+        // observe the same tag policy the user invoked at the top.
+        if (strictTags) argv.push_back(const_cast<char*>("--strict-tags"));
         argv.push_back(const_cast<char*>("--test-file"));
         argv.push_back(const_cast<char*>(path.c_str()));
         argv.push_back(nullptr);
@@ -789,7 +792,7 @@ static PendingTest spawnTestFile(const std::string& path, bool useVm) {
     return pt;
 }
 
-static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
+static int runTestsCommand(const std::string& dir, bool useVm, bool strictTags, int jobs) {
     namespace fs = std::filesystem;
     if (g_praiaExecPath.empty()) {
         std::cerr << "praia test: could not locate own executable for "
@@ -903,7 +906,7 @@ static int runTestsCommand(const std::string& dir, bool useVm, int jobs) {
         // stop enqueueing and let pending children drain.
         if (!runnerError && !interrupted) {
             while (nextToSpawn < files.size() && (int)running.size() < jobs) {
-                auto pt = spawnTestFile(files[nextToSpawn], useVm);
+                auto pt = spawnTestFile(files[nextToSpawn], useVm, strictTags);
                 if (pt.pid < 0) {
                     runnerError = true;
                     break;
@@ -1108,6 +1111,8 @@ int main(int argc, char* argv[]) {
     bool showTokens = false;
     bool showAst = false;
     bool useVm = true; // VM is the default
+    bool strictTags = false; // --strict-tags: undeclared capitalized
+                             // calls error instead of becoming tags
     std::string filename;
     int fileArgIndex = -1;
 
@@ -1144,6 +1149,8 @@ int main(int argc, char* argv[]) {
                   << "  -c <code>        Evaluate a string as code\n"
                   << "  -j N             (test) Run up to N test files in parallel (default 1)\n"
                   << "  --tree           Use tree-walker interpreter instead of VM\n"
+                  << "  --strict-tags    Reject ad-hoc tagged-value construction; capitalized\n"
+                  << "                   calls to undefined names become RuntimeError\n"
                   << "  --tokens         Print lexer tokens and exit\n"
                   << "  --ast            Print parse tree and exit\n"
                   << "  --include-path   Print the header path for native plugins\n";
@@ -1155,6 +1162,7 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--tree") useVm = false;
         else if (arg == "--vm") useVm = true;
+        else if (arg == "--strict-tags") strictTags = true;
         else if (arg == "test") {
             // Scan remaining args for flags and an optional directory.
             // `-j N` opts into parallel subprocess execution; default
@@ -1216,7 +1224,7 @@ int main(int argc, char* argv[]) {
                     return ExitCode::UsageError;
                 }
             }
-            return runTestsCommand(dir, useVm, jobs);
+            return runTestsCommand(dir, useVm, strictTags, jobs);
         }
         else if (!arg.empty() && arg[0] != '-') break; // hit a non-flag, non-"test" arg (filename)
     }
@@ -1237,6 +1245,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--ast")      showAst = true;
         else if (arg == "--vm")       useVm = true;
         else if (arg == "--tree")     useVm = false;
+        else if (arg == "--strict-tags") strictTags = true;
         else if (arg == "--test-file") testFileMode = true;
         else if (arg == "-c") {
             if (i + 1 >= argc) {
@@ -1264,6 +1273,7 @@ int main(int argc, char* argv[]) {
                 extern void vmRegisterNatives(VM& vm);
                 VM vm;
                 vmRegisterNatives(vm);
+                vm.setStrictTags(strictTags);
                 std::vector<std::string> scriptArgs;
                 for (int i = cArgStart; i < argc; i++)
                     scriptArgs.push_back(argv[i]);
@@ -1275,6 +1285,7 @@ int main(int argc, char* argv[]) {
                 catch (const ExitSignal& e) { return e.code; }
             } else {
                 Interpreter interpreter;
+                interpreter.setStrictTags(strictTags);
                 std::vector<std::string> scriptArgs;
                 for (int i = cArgStart; i < argc; i++)
                     scriptArgs.push_back(argv[i]);
@@ -1324,6 +1335,7 @@ int main(int argc, char* argv[]) {
             extern void vmRegisterNatives(VM& vm);
             VM vm;
             vmRegisterNatives(vm);
+            vm.setStrictTags(strictTags);
             vm.setArgs(scriptArgs);
             vm.setCurrentFile(filename);
             try {
@@ -1335,6 +1347,7 @@ int main(int argc, char* argv[]) {
         } else {
             // Tree-walker path
             Interpreter interpreter;
+            interpreter.setStrictTags(strictTags);
             interpreter.setArgs(scriptArgs);
             interpreter.setCurrentFile(filename);
             try {
