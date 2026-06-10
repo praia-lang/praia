@@ -2101,19 +2101,20 @@ Value Interpreter::evaluate(const Expr* expr) {
         // position it already enforced a mandatory `_` arm so the
         // unreachable-fallthrough return is just a safety net for
         // statement-form usage (value would be discarded anyway).
-        auto evalArmAsExpr = [&](const Stmt* body) -> Value {
+        // `armEnv` is used directly as the body's scope — caller is
+        // responsible for allocating it (and for pre-defining any
+        // destructured bindings before calling). This lets the
+        // binding-pattern path reuse its `matchEnv` instead of
+        // allocating a separate blockEnv on top of it.
+        auto evalArmAsExpr = [&](const Stmt* body,
+                                 std::shared_ptr<Environment> armEnv) -> Value {
             if (!body || body->type != StmtType::Block) {
                 if (body) execute(body);
                 return Value(); // nil
             }
             auto* blk = static_cast<const BlockStmt*>(body);
-            // Run all statements except the last in a child env so
-            // arm-local bindings (declared by `let` inside the arm)
-            // don't leak. Treat the trailing ExpressionStatement, if
-            // any, as the produced value.
-            auto blockEnv = gcNew<Environment>(env);
             auto prevEnv = env;
-            env = blockEnv;
+            env = armEnv;
             Value result;
             try {
                 if (blk->statements.empty()) {
@@ -2139,20 +2140,24 @@ Value Interpreter::evaluate(const Expr* expr) {
             return result;
         };
 
+        auto freshArmEnv = [&]() {
+            return gcNew<Environment>(env);
+        };
+
         for (auto& c : e->cases) {
             if (!c.pattern && !c.isType && !c.guard) {
-                return evalArmAsExpr(c.body.get());
+                return evalArmAsExpr(c.body.get(), freshArmEnv());
             }
             if (c.isType) {
                 Value typeVal = evaluate(c.isType.get());
                 if (checkIs(subject, typeVal, e->line, e->column)) {
-                    return evalArmAsExpr(c.body.get());
+                    return evalArmAsExpr(c.body.get(), freshArmEnv());
                 }
                 continue;
             }
             if (c.guard) {
                 if (evaluate(c.guard.get()).isTruthy()) {
-                    return evalArmAsExpr(c.body.get());
+                    return evalArmAsExpr(c.body.get(), freshArmEnv());
                 }
                 continue;
             }
@@ -2172,25 +2177,19 @@ Value Interpreter::evaluate(const Expr* expr) {
                         for (auto& arg : call->args)
                             if (arg->type != ExprType::Identifier) { allIdents = false; break; }
                         if (allIdents) {
+                            // Define destructured bindings directly
+                            // into the env that the body will use —
+                            // saves the extra blockEnv allocation the
+                            // old code did on top of matchEnv.
                             auto matchEnv = gcNew<Environment>(env);
-                            auto prevEnv = env;
-                            env = matchEnv;
                             for (size_t i = 0; i < call->args.size(); i++) {
                                 auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
                                 matchEnv->define(argId->name, tag->values[i]);
                             }
-                            Value result;
-                            try {
-                                result = evalArmAsExpr(c.body.get());
-                            } catch (...) {
-                                env = prevEnv;
-                                throw;
-                            }
-                            env = prevEnv;
-                            return result;
+                            return evalArmAsExpr(c.body.get(), matchEnv);
                         }
                         Value pattern = evaluate(c.pattern.get());
-                        if (subject == pattern) return evalArmAsExpr(c.body.get());
+                        if (subject == pattern) return evalArmAsExpr(c.body.get(), freshArmEnv());
                         continue;
                     }
                     continue;
@@ -2203,7 +2202,7 @@ Value Interpreter::evaluate(const Expr* expr) {
                 } else {
                     matched = (subject == pattern);
                 }
-                if (matched) return evalArmAsExpr(c.body.get());
+                if (matched) return evalArmAsExpr(c.body.get(), freshArmEnv());
                 continue;
             }
             // Plain equality pattern
@@ -2215,7 +2214,7 @@ Value Interpreter::evaluate(const Expr* expr) {
             } else {
                 matched = (subject == pattern);
             }
-            if (matched) return evalArmAsExpr(c.body.get());
+            if (matched) return evalArmAsExpr(c.body.get(), freshArmEnv());
         }
         // Unreachable: parser enforced `_` arm.
         return Value();
