@@ -267,32 +267,28 @@ void Compiler::compileTernaryExpr(const TernaryExpr* expr) {
     patchJump(endJump);
 }
 
-// Compile a `match` expression. Mirrors compileMatchStmt's pattern
-// dispatch but each arm produces a value: a dedicated "result slot"
-// holds the arm's value while the per-arm scope cleans up its locals.
-// The parser guarantees a mandatory `_` arm, so this codegen never
-// reaches the post-loop "no arm matched" branch.
+// Compile a `match` expression. Each non-binding arm leaves its
+// value on the stack at convergence by popping the subject before
+// the arm body runs. No "result slot" is needed — the body's value
+// is the expression's value directly. Binding-pattern arms still
+// use a scope-with-addLocal to bind the destructured names; that
+// path requires the match expression to be at a "fresh stack"
+// position (let RHS, return value, statement, etc.), which covers
+// the overwhelmingly common cases. In statement-form usage (no `_`
+// arm guaranteed) a trailing OP_NIL feeds the surrounding ExprStmt's
+// OP_POP if no arm matches.
 void Compiler::compileMatchExpr(const MatchExpr* expr) {
-    // Reserve a placeholder local for the result. The arm bodies
-    // assign their value here via OP_SET_LOCAL; after all arms
-    // converge we OP_GET_LOCAL it to leave the value on top.
-    emit(OpCode::OP_NIL, expr->line, expr->column);
-    addLocal("__match_result__");
-    int resultSlot = static_cast<int>(current->locals.size()) - 1;
+    // Detect statement-form (no default arm) to know whether we
+    // need a trailing OP_NIL for the no-match fallthrough.
+    bool hasDefault = false;
+    for (auto& c : expr->cases) {
+        if (!c.pattern && !c.isType && !c.guard) { hasDefault = true; break; }
+    }
 
-    auto storeResult = [&](int line, int column) {
-        // Stack top = arm body's value. Copy it into the result slot
-        // and pop the original — leaves stack at +0 vs. before the
-        // arm body, with the value parked in the slot for retrieval
-        // after all arms converge.
-        emit(OpCode::OP_SET_LOCAL, line, column);
-        emitU16(static_cast<uint16_t>(resultSlot), line, column);
-        emit(OpCode::OP_POP, line, column);
-    };
-
-    // Compile a single arm body as an expression block — the last
-    // ExpressionStatement (if any) is the arm's value; otherwise nil.
-    // Mirrors lambda body handling and the tree-walker's evalArmAsExpr.
+    // Compile the arm body as an expression block — the trailing
+    // ExpressionStatement is the arm's value; otherwise the value
+    // is nil. Mirrors the tree-walker's evalArmAsExpr and the
+    // lambda last-expression rule.
     auto compileArmBodyAsExpr = [&](const Stmt* body, int line, int column) {
         if (!body || body->type != StmtType::Block) {
             if (body) compileStmt(body);
@@ -300,30 +296,23 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
             return;
         }
         auto* blk = static_cast<const BlockStmt*>(body);
-        beginScope();
         if (blk->statements.empty()) {
             emit(OpCode::OP_NIL, line, column);
-        } else {
-            for (size_t i = 0; i + 1 < blk->statements.size(); i++) {
-                compileStmt(blk->statements[i].get());
-            }
-            const Stmt* last = blk->statements.back().get();
-            if (last && last->type == StmtType::Expr) {
-                auto* es = static_cast<const ExprStmt*>(last);
-                compileExpr(es->expr.get());
-            } else {
-                if (last) compileStmt(last);
-                emit(OpCode::OP_NIL, line, column);
-            }
+            return;
         }
-        // Stack top = arm value. Park it in the result slot before
-        // endScope pops the arm-body's own locals (they'd otherwise
-        // pop our value with them).
-        storeResult(line, column);
-        endScope(line);
+        for (size_t i = 0; i + 1 < blk->statements.size(); i++) {
+            compileStmt(blk->statements[i].get());
+        }
+        const Stmt* last = blk->statements.back().get();
+        if (last && last->type == StmtType::Expr) {
+            auto* es = static_cast<const ExprStmt*>(last);
+            compileExpr(es->expr.get());
+        } else {
+            if (last) compileStmt(last);
+            emit(OpCode::OP_NIL, line, column);
+        }
     };
 
-    // Subject on stack throughout pattern tests.
     compileExpr(expr->subject.get());
 
     std::vector<int> endJumps;
@@ -331,8 +320,8 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
     for (auto& c : expr->cases) {
         int ln = expr->line, col = expr->column;
         if (!c.pattern && !c.isType && !c.guard) {
-            // Default arm — last by parser invariant. Pop subject,
-            // compile body, fall through to the post-loop GET_LOCAL.
+            // Default arm — pop subject, compile body, fall through.
+            // Last by parser invariant.
             emit(OpCode::OP_POP, ln, col);
             compileArmBodyAsExpr(c.body.get(), ln, col);
             break;
@@ -377,8 +366,14 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
                     if (arg->type != ExprType::Identifier) { isBindingPattern = false; break; }
                 }
                 if (isBindingPattern) {
-                    // Tag-name match, then bind args as locals before
-                    // running the body.
+                    // Tag-name match, then bind args as locals.
+                    // The body's value is left on top of the stack;
+                    // we then drop the bindings + subject below it
+                    // with a SWAP+POP loop so the value survives
+                    // scope cleanup intact. addLocal slot indices
+                    // here assume no surrounding temporaries — the
+                    // common case (let RHS, return value, statement
+                    // position).
                     emit(OpCode::OP_DUP, ln, col);
                     uint16_t tagFieldIdx = currentChunk().addConstant(Value(std::string("tag")));
                     emit(OpCode::OP_GET_PROPERTY, ln, col);
@@ -390,7 +385,7 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
                     int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
 
                     beginScope();
-                    addLocal(""); // subject occupies a local slot in this scope
+                    addLocal(""); // subject occupies slot 0 of this scope
                     int subjectSlot = static_cast<int>(current->locals.size()) - 1;
                     for (size_t i = 0; i < call->args.size(); i++) {
                         auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
@@ -404,10 +399,23 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
                         emit(OpCode::OP_INDEX_GET, ln, col);
                         addLocal(argId->name);
                     }
-                    // Body produces value; store into result slot,
-                    // then endScope cleans up subject + bindings.
                     compileArmBodyAsExpr(c.body.get(), ln, col);
-                    endScope(ln);
+                    // Stack: [..., subject, b0..bN-1, value].
+                    // Drop subject + bindings while preserving the
+                    // top via SWAP+POP repeated N+1 times. Manually
+                    // discard the locals from the compiler's table
+                    // (endScope would emit OP_POP and clobber the
+                    // value we just placed on top).
+                    int dropCount = static_cast<int>(call->args.size()) + 1;
+                    for (int i = 0; i < dropCount; i++) {
+                        emit(OpCode::OP_SWAP, ln, col);
+                        emit(OpCode::OP_POP, ln, col);
+                    }
+                    current->scopeDepth--;
+                    while (!current->locals.empty() &&
+                           current->locals.back().depth > current->scopeDepth) {
+                        current->locals.pop_back();
+                    }
                     endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
                     patchJump(skipJump);
                 } else {
@@ -447,15 +455,16 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
         patchJump(skipJump);
     }
 
-    for (int j : endJumps) patchJump(j);
+    if (!hasDefault) {
+        // Statement-form fallthrough: no arm matched, the subject is
+        // still on top of the stack. Pop it and push nil — the
+        // surrounding ExprStmt's OP_POP discards the nil, matching
+        // the silent-fallthrough contract.
+        emit(OpCode::OP_POP, expr->line, expr->column);
+        emit(OpCode::OP_NIL, expr->line, expr->column);
+    }
 
-    // All arms converge here. Push the parked result value on top.
-    // The placeholder local stays in `current->locals` for the rest
-    // of the enclosing scope — it gets cleaned up by the surrounding
-    // endScope (or by the function's return) along with any other
-    // locals.
-    emit(OpCode::OP_GET_LOCAL, expr->line, expr->column);
-    emitU16(static_cast<uint16_t>(resultSlot), expr->line, expr->column);
+    for (int j : endJumps) patchJump(j);
 }
 
 void Compiler::compilePipeExpr(const PipeExpr* expr) {

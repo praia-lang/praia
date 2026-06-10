@@ -1,0 +1,144 @@
+use "testing"
+
+// Match-as-expression: `match` is now a primary expression that
+// returns a value. The arm syntax is unchanged (`Pattern { body }`)
+// — in expression position the trailing ExpressionStatement of each
+// arm's body is the value of the arm, the same rule lambda bodies
+// already use. A default `_` arm is mandatory at parse time when
+// `match` appears in expression position. Statement-form match
+// (no surrounding value context) keeps today's silent-fallthrough
+// behavior unchanged.
+
+testing.test("basic value extraction with tagged destructure", lam{ in
+    let r = match (Ok(7)) {
+        Ok(v)  { v + 1 }
+        Err(_) { -1 }
+        _      { 0 }
+    }
+    testing.expectEqual(r, 8, "Ok(7) arm yields v + 1 = 8")
+})
+
+testing.test("dissimilar tag selects the matching arm", lam{ in
+    let f = lam{ x in
+        match (x) {
+            Ok(v)    { "ok:" + str(v) }
+            Err(msg) { "err:" + msg }
+            _        { "?" }
+        }
+    }
+    testing.expectEqual(f(Ok(1)),         "ok:1",
+                        "Ok variant routes to Ok arm")
+    testing.expectEqual(f(Err("nope")),   "err:nope",
+                        "Err variant routes to Err arm")
+    testing.expectEqual(f(Foo(1, 2)),     "?",
+                        "Unmatched tag routes to default")
+})
+
+testing.test("equality, is-type, and when-guard patterns coexist", lam{ in
+    let label = lam{ x in
+        match (x) {
+            0          { "zero" }
+            is "int"   { "small int" }
+            when x is "string" && len(x) > 3   { "long string" }
+            _          { "other" }
+        }
+    }
+    testing.expectEqual(label(0),       "zero",       "equality pattern fires first")
+    testing.expectEqual(label(42),      "small int",  "is-type fires when equality misses")
+    testing.expectEqual(label("hello"), "long string","when-guard fires when prior arms miss")
+    testing.expectEqual(label(3.14),    "other",      "default arm fires when no arm matches")
+})
+
+testing.test("multi-statement arm body: trailing expression is the value", lam{ in
+    let log = []
+    let r = match (Ok(5)) {
+        Ok(v) {
+            log.push("hit")
+            log.push(str(v))
+            v * 2
+        }
+        _ { -1 }
+    }
+    testing.expectEqual(r, 10,
+                        "trailing ExprStmt (v * 2) is the arm's value")
+    testing.expectEqual(log, ["hit", "5"],
+                        "intervening statements still run for their side effects")
+})
+
+testing.test("nested match expressions", lam{ in
+    // The inner match is the trailing expression of the outer arm's
+    // body block, so its value bubbles up. Outer parses as MatchExpr
+    // (let-RHS, default required); inner is parsed via the statement
+    // dispatch but still produces a value through the ExprStmt
+    // wrapper that the last-expression rule extracts.
+    let r = match (Ok(Err("boom"))) {
+        Ok(inner) {
+            match (inner) {
+                Err(e) { "wrapped: " + e }
+                _      { "?" }
+            }
+        }
+        _ { "outer-?" }
+    }
+    testing.expectEqual(r, "wrapped: boom",
+                        "outer arm value is the inner match's value")
+})
+
+testing.test("match expression in return and function-arg position", lam{ in
+    func describe(x) {
+        return match (x) {
+            Ok(v)    { "ok:" + str(v) }
+            Err(msg) { "err:" + msg }
+            _        { "fail" }
+        }
+    }
+    testing.expectEqual(describe(Ok(42)),       "ok:42",
+                        "match expression works in return position")
+    testing.expectEqual(describe(Err("bad")),   "err:bad",
+                        "Err variant routes correctly via return")
+
+    let labelOf = lam{ x in
+        str(match (x) {
+            0 { "zero" }
+            _ { "nonzero" }
+        })
+    }
+    testing.expectEqual(labelOf(0), "zero",
+                        "match expression nested in function call works")
+    testing.expectEqual(labelOf(7), "nonzero",
+                        "default fires from inside function call too")
+})
+
+testing.test("statement-form match keeps silent-fallthrough", lam{ in
+    // No `_` arm; subject doesn't match any arm. Value is discarded
+    // (we're in statement position), no error is raised. This is
+    // the contract documented at the existing match test sites and
+    // we explicitly preserve it.
+    let log = []
+    match (99) {
+        1 { log.push("one") }
+        2 { log.push("two") }
+    }
+    testing.expectEqual(log, [],
+                        "no arm matched, no side effect, no error")
+})
+
+testing.test("missing-default in expression position is a parse error", lam{ in
+    // We can't trigger a parse error from inside the same script —
+    // the file wouldn't compile — so spawn a child praia process and
+    // observe stderr. Use both engines to confirm both error paths
+    // produce the same diagnostic shape.
+    let snippet = "let r = match (1) { 1 { \"a\" } 2 { \"b\" } }; print(r)"
+    let vm   = sys.exec(["./praia", "-c", snippet])
+    let tree = sys.exec(["./praia", "--tree", "-c", snippet])
+    testing.expect(vm.exitCode != 0,
+                   "VM exits non-zero on missing-default in expression form")
+    testing.expect(tree.exitCode != 0,
+                   "tree-walker exits non-zero on missing-default")
+    testing.expect(vm.stderr.contains("match expression") && vm.stderr.contains("default"),
+                   "VM error message names match-expression + default")
+    testing.expect(tree.stderr.contains("match expression") && tree.stderr.contains("default"),
+                   "tree-walker error message matches")
+})
+
+testing.done()
