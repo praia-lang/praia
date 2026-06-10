@@ -11,6 +11,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class GcHeap;
@@ -255,6 +256,11 @@ public:
     void interpretRepl(const std::vector<StmtPtr>& program);
     void setArgs(const std::vector<std::string>& args);
     void setCurrentFile(const std::string& path);
+    // Toggle --strict-tags mode (capitalized call to undefined name
+    // becomes a RuntimeError instead of building a PraiaTagged).
+    // Default off; main.cpp sets it from the CLI flag before
+    // interpret() runs.
+    void setStrictTags(bool v) { strictTags_ = v; }
 
     // Public so PraiaFunction::call / PraiaLambda::call can use it
     void executeBlock(const BlockStmt* block, std::shared_ptr<Environment> env);
@@ -313,6 +319,16 @@ private:
     // entry. Native callees are never given the mask — see the named-arg
     // dispatch in interpreter.cpp where the mask-set is skipped for natives.
     uint64_t pendingArgsFilled_ = ~0ULL;
+
+    // Tagged-value typo defenses. `strictTags_` is the `--strict-tags`
+    // CLI flag: when true, the tag-construction fallback (capitalized
+    // call to an undefined name) becomes a hard RuntimeError instead of
+    // silently building a PraiaTagged. `warnedTagNames_` dedupes the
+    // typo warning so a typoed name inside a loop fires once, not once
+    // per iteration. Both are read at the tag fallback site in
+    // Interpreter::evaluate's Call handler.
+    bool strictTags_ = false;
+    std::unordered_set<std::string> warnedTagNames_;
 
     // (interpMutex removed — async tasks use task-local Interpreters instead)
 

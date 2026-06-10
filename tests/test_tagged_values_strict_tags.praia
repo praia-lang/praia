@@ -1,0 +1,84 @@
+use "testing"
+
+// Tagged-value typo defenses (Tier 1 + Tier 2).
+//
+// Tier 1 — lenient default: when a capitalized call to an undefined
+// name falls through to PraiaTagged construction, the engine checks
+// the global callable list for a near-match (Levenshtein <= 1 for
+// names of 3 chars or fewer, <= 2 otherwise) and emits a one-line
+// stderr warning. The tag is still constructed; warnings are deduped
+// per-name per-run so a tight loop doesn't flood.
+//
+// Tier 2 — `--strict-tags` flag: the fallback becomes a hard
+// RuntimeError regardless of whether a similar name exists. Explicit
+// class calls and other resolved callables keep working.
+//
+// All scenarios exercise both engines through `sys.exec` because the
+// CLI flag and stderr observation are part of the contract.
+
+func runBoth(args, script) {
+    // args: extra argv tokens before -c (e.g. ["--strict-tags"]).
+    let vmArgs   = ["./praia"]           + args + ["-c", script]
+    let treeArgs = ["./praia", "--tree"] + args + ["-c", script]
+    return {
+        vm:   sys.exec(vmArgs),
+        tree: sys.exec(treeArgs),
+    }
+}
+
+testing.test("lenient default: typo near a callable warns and still builds the tag", lam{ in
+    let r = runBoth([], "class Deque {} ; let x = Deqeu(); print(type(x))")
+    testing.expectEqual(r.vm.exitCode, 0,
+                        "VM exits 0 in lenient mode despite the warning")
+    testing.expectEqual(r.tree.exitCode, 0,
+                        "tree-walker exits 0 in lenient mode")
+    testing.expectEqual(r.vm.stdout, "tagged",
+                        "VM still constructs the tagged value")
+    testing.expectEqual(r.tree.stdout, "tagged",
+                        "tree-walker still constructs the tagged value")
+    let vmOk   = r.vm.stderr.contains("Deqeu") && r.vm.stderr.contains("Deque") && r.vm.stderr.contains("Warning")
+    let treeOk = r.tree.stderr.contains("Deqeu") && r.tree.stderr.contains("Deque") && r.tree.stderr.contains("Warning")
+    testing.expect(vmOk,   "VM warning names both the typo and the suggestion")
+    testing.expect(treeOk, "tree-walker warning names both the typo and the suggestion")
+})
+
+testing.test("lenient default: dissimilar name is silent (no false-positive warning)", lam{ in
+    let r = runBoth([], "let r = Ok(42); print(r.tag)")
+    testing.expectEqual(r.vm.exitCode,   0, "VM exits 0 for bare Ok(...)")
+    testing.expectEqual(r.tree.exitCode, 0, "tree-walker exits 0 for bare Ok(...)")
+    testing.expect(!r.vm.stderr.contains("Warning"),
+                   "VM emits no warning when no callable is similar")
+    testing.expect(!r.tree.stderr.contains("Warning"),
+                   "tree-walker emits no warning when no callable is similar")
+})
+
+testing.test("dedup: same typo in a tight loop warns exactly once", lam{ in
+    let r = runBoth([], "class Deque {} ; for (i in 0..5) { Deqeu() }")
+    testing.expectEqual(r.vm.stderr.count("Deqeu"), 1,
+                        "VM warns once across 5 loop iterations")
+    testing.expectEqual(r.tree.stderr.count("Deqeu"), 1,
+                        "tree-walker warns once across 5 loop iterations")
+})
+
+testing.test("--strict-tags: typo near a callable becomes a hard error", lam{ in
+    let r = runBoth(["--strict-tags"], "class Deque {} ; Deqeu()")
+    testing.expect(r.vm.exitCode != 0,
+                   "VM exits non-zero under --strict-tags on undeclared tag")
+    testing.expect(r.tree.exitCode != 0,
+                   "tree-walker exits non-zero under --strict-tags")
+    let vmOk   = r.vm.stderr.contains("Strict mode") && r.vm.stderr.contains("Deque")
+    let treeOk = r.tree.stderr.contains("Strict mode") && r.tree.stderr.contains("Deque")
+    testing.expect(vmOk,   "VM error mentions strict mode and the suggestion")
+    testing.expect(treeOk, "tree-walker error mentions strict mode and the suggestion")
+})
+
+testing.test("--strict-tags: an explicit class call still succeeds", lam{ in
+    let r = runBoth(["--strict-tags"],
+                    "class Deque {} ; print(type(Deque()))")
+    testing.expectEqual(r.vm.exitCode,   0, "VM exits 0 on a real class call")
+    testing.expectEqual(r.tree.exitCode, 0, "tree-walker exits 0 on a real class call")
+    testing.expectEqual(r.vm.stdout,   "instance", "VM still builds the instance")
+    testing.expectEqual(r.tree.stdout, "instance", "tree-walker still builds the instance")
+})
+
+testing.done()

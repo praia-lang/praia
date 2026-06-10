@@ -838,6 +838,19 @@ let f = Foo()   // class instance
 let t = Bar(1)  // tagged value (Bar is not a class)
 ```
 
+### Typo detection and strict mode
+
+Because *any* capitalized call to an undefined name produces a tagged value, a single-character typo in a class or constructor name is invisible at the call site — the program keeps running and the bug surfaces somewhere downstream. Praia layers two defenses on top of the lenient default:
+
+- **Typo warning (default).** When tag construction falls back for a name within a small edit distance of a global callable, Praia emits a one-line warning to stderr (e.g. `'Deqeu(...)' constructed a tagged value; a similarly-named callable 'Deque' is in scope — did you mean to call it?`). Each typo name warns at most once per run, so a tight loop doesn't flood output. Dissimilar names like `Ok(42)` stay silent.
+- **`--strict-tags` flag.** Promotes the fallback to a `RuntimeError` for *any* undeclared tag name — whether or not a similar callable exists. Resolved callables (classes, functions, locals) keep working unchanged. Opt in per-invocation; the flag is forwarded to `praia test` so the whole suite runs under the same policy.
+
+```sh
+praia                    -c 'class Deque {}; Deqeu()'   # warns on stderr, exits 0
+praia --strict-tags      -c 'class Deque {}; Deqeu()'   # RuntimeError, exits non-zero
+praia --strict-tags      -c 'class Deque {}; Deque()'   # OK — explicit class call
+```
+
 ---
 
 ## Control Flow

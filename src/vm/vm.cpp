@@ -6,6 +6,7 @@
 #include "../interpreter.h"
 #include "../lexer.h"
 #include "../parser.h"
+#include "../string_distance.h"
 #include "../unicode.h"
 #include <algorithm>
 #include <cstdio>          // std::fprintf in drainPosted's error logging
@@ -696,6 +697,23 @@ bool VM::callValue(Value callee, int argCount, int line) {
     if (tryHandleError(Value(std::string("Can only call functions")))) return true;
     runtimeError("Can only call functions", line);
     return false;
+}
+
+void VM::scanCallableGlobals(std::vector<std::string>& out) const {
+    out.reserve(out.size() + globalIndices.size());
+    for (auto& [name, slot] : globalIndices) {
+        if (slot < 0 || slot >= static_cast<int>(globals.size())) continue;
+        // For task VMs, an unloaded slot still has the snapshot value
+        // sitting in globalsSnapshot_; we check that first so a typo
+        // suggestion can still mention a class the task hasn't
+        // touched yet. This mirrors the lazy-load gate at
+        // OP_TAG_OR_CALL.
+        const Value& v = (isTaskVm_ && slot < static_cast<int>(loadedMask_.size())
+                          && !loadedMask_[slot] && slot < static_cast<int>(globalsSnapshot_.size()))
+            ? globalsSnapshot_[slot]
+            : globals[slot];
+        if (v.isCallable()) out.push_back(name);
+    }
 }
 
 void VM::unwindFramesAndRunDefers(int targetFrameCount) {
@@ -2314,6 +2332,32 @@ VM::Result VM::execute(int baseFrameCount_) {
                 if (!callValue(gvm->globals[gslot], argc, CURRENT_LINE()))
                     FAIL_AND_DRAIN_DEFERS();
             } else {
+                // Typo guard: same logic as the tree-walker at
+                // interpreter.cpp's tag-fallback site. Scans `gvm`
+                // (which respects grain isolation via homeVm) for a
+                // similarly-named callable. Strict mode throws via
+                // RUNTIME_ERR (which drains defers); the lenient path
+                // emits a deduped stderr warning.
+                std::vector<std::string> callableNames;
+                gvm->scanCallableGlobals(callableNames);
+                auto suggestion = praia::closestCallable(tagName, callableNames);
+
+                if (strictTags_) {
+                    std::string msg = "Strict mode: '" + tagName +
+                        "(...)' has no global callable; ad-hoc tag construction "
+                        "is disabled under --strict-tags";
+                    if (suggestion) msg += " (did you mean '" + *suggestion + "'?)";
+                    RUNTIME_ERR(msg);
+                }
+                if (suggestion && warnedTagNames_.insert(tagName).second) {
+                    std::cerr << formatLocation(CURRENT_LINE(), CURRENT_COLUMN())
+                              << " Warning: '" << tagName
+                              << "(...)' constructed a tagged value; "
+                              << "a similarly-named callable '" << *suggestion
+                              << "' is in scope — did you mean to call it?"
+                              << std::endl;
+                }
+
                 auto tagged = gcNew<PraiaTagged>();
                 tagged->tag = tagName;
                 tagged->values.resize(argc);

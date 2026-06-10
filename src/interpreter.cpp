@@ -6,6 +6,7 @@
 #include "signal_state.h"
 #include "lexer.h"
 #include "parser.h"
+#include "string_distance.h"
 #include "unicode.h"
 #include <algorithm>
 #include <cstdio>          // std::fprintf in drainPosted's error logging
@@ -1331,6 +1332,33 @@ Value Interpreter::evaluate(const Expr* expr) {
                         throw; // re-throw non-resolution errors
                 }
                 if (!resolved || !callee.isCallable()) {
+                    // Typo guard: walk the globals once looking for a
+                    // callable with a similar name. If found, either
+                    // throw under --strict-tags or emit a one-shot
+                    // stderr warning (deduped by tag name). See
+                    // string_distance.h for the threshold rule.
+                    std::vector<std::string> callableNames;
+                    for (auto& [name, val] : globals->variables) {
+                        if (val.isCallable()) callableNames.push_back(name);
+                    }
+                    auto suggestion = praia::closestCallable(id->name, callableNames);
+
+                    if (strictTags_) {
+                        std::string msg = "Strict mode: '" + id->name +
+                            "(...)' has no global callable; ad-hoc tag construction "
+                            "is disabled under --strict-tags";
+                        if (suggestion) msg += " (did you mean '" + *suggestion + "'?)";
+                        throw RuntimeError(msg, e->line, e->column);
+                    }
+                    if (suggestion && warnedTagNames_.insert(id->name).second) {
+                        std::cerr << formatLocation(e->line, e->column)
+                                  << " Warning: '" << id->name
+                                  << "(...)' constructed a tagged value; "
+                                  << "a similarly-named callable '" << *suggestion
+                                  << "' is in scope — did you mean to call it?"
+                                  << std::endl;
+                    }
+
                     auto tagged = gcNew<PraiaTagged>();
                     tagged->tag = id->name;
                     for (const auto& arg : e->args)
