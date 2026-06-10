@@ -575,95 +575,6 @@ void Interpreter::execute(const Stmt* stmt) {
         }
         break;
     }
-    case StmtType::Match: {
-        auto* s = static_cast<const MatchStmt*>(stmt);
-        Value subject = evaluate(s->subject.get());
-        for (auto& c : s->cases) {
-            bool matched = false;
-            if (!c.pattern && !c.isType && !c.guard) {
-                // Default case
-                matched = true;
-            } else if (c.isType) {
-                // Type pattern: is "typename" or is ClassName
-                Value typeVal = evaluate(c.isType.get());
-                matched = checkIs(subject, typeVal, s->line, s->column);
-            } else if (c.guard) {
-                // Guard clause: when condition
-                matched = evaluate(c.guard.get()).isTruthy();
-            } else if (c.pattern && c.pattern->type == ExprType::Call) {
-                auto* call = static_cast<const CallExpr*>(c.pattern.get());
-                bool isTagPattern = false;
-                if (call->callee->type == ExprType::Identifier) {
-                    auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
-                    if (!id->name.empty() && std::isupper(id->name[0]))
-                        isTagPattern = true;
-                }
-                if (isTagPattern && subject.isTagged()) {
-                    auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
-                    auto tag = subject.asTagged();
-                    if (tag->tag == id->name && call->args.size() == tag->values.size()) {
-                        // Check if all args are identifiers (binding pattern) vs values
-                        bool allIdents = true;
-                        for (auto& arg : call->args)
-                            if (arg->type != ExprType::Identifier) { allIdents = false; break; }
-
-                        if (allIdents) {
-                            // Binding pattern: Ok(val), Point(x, y)
-                            matched = true;
-                            auto matchEnv = gcNew<Environment>(env);
-                            auto prevEnv = env;
-                            env = matchEnv;
-                            for (size_t i = 0; i < call->args.size(); i++) {
-                                auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
-                                matchEnv->define(argId->name, tag->values[i]);
-                            }
-                            // Restore env on throw so the outer scope isn't
-                            // left pointing at matchEnv. (Outer executeBlock
-                            // calls also restore via savedEnvStack_, but
-                            // relying on that coupling is fragile.)
-                            try {
-                                execute(c.body.get());
-                            } catch (...) {
-                                env = prevEnv;
-                                throw;
-                            }
-                            env = prevEnv;
-                            break;
-                        } else {
-                            // Value pattern: Ok(42) — construct tagged and compare
-                            Value pattern = evaluate(c.pattern.get());
-                            matched = (subject == pattern);
-                        }
-                    }
-                    // else: tag mismatch or arity mismatch → matched stays false
-                } else {
-                    // Not a tagged match (either lowercase or subject isn't tagged)
-                    // Evaluate pattern and compare, supporting __eq for instances
-                    Value pattern = evaluate(c.pattern.get());
-                    if (subject.isInstance()) {
-                        auto [found, result] = callDunder(*this, subject.asInstance(), "__eq", {pattern});
-                        matched = found ? result.isTruthy() : (subject == pattern);
-                    } else {
-                        matched = (subject == pattern);
-                    }
-                }
-            } else {
-                // Equality pattern
-                Value pattern = evaluate(c.pattern.get());
-                if (subject.isInstance()) {
-                    auto [found, result] = callDunder(*this, subject.asInstance(), "__eq", {pattern});
-                    matched = found ? result.isTruthy() : (subject == pattern);
-                } else {
-                    matched = (subject == pattern);
-                }
-            }
-            if (matched) {
-                execute(c.body.get());
-                break;
-            }
-        }
-        break;
-    }
     case StmtType::While: {
         auto* s = static_cast<const WhileStmt*>(stmt);
         try {
@@ -2177,6 +2088,137 @@ Value Interpreter::evaluate(const Expr* expr) {
 
     case ExprType::Spread: {
         throw RuntimeError("Unexpected spread expression", expr->line);
+    }
+
+    case ExprType::Match: {
+        auto* e = static_cast<const MatchExpr*>(expr);
+        Value subject = evaluate(e->subject.get());
+        // Arm-test logic: equality / `is` / `when` guard / tagged
+        // destructure. On a successful arm the body block is
+        // evaluated as an expression: the trailing
+        // ExpressionStatement yields the arm's value (mirrors lambda
+        // bodies). When the parser was invoked from expression
+        // position it already enforced a mandatory `_` arm so the
+        // unreachable-fallthrough return is just a safety net for
+        // statement-form usage (value would be discarded anyway).
+        auto evalArmAsExpr = [&](const Stmt* body) -> Value {
+            if (!body || body->type != StmtType::Block) {
+                if (body) execute(body);
+                return Value(); // nil
+            }
+            auto* blk = static_cast<const BlockStmt*>(body);
+            // Run all statements except the last in a child env so
+            // arm-local bindings (declared by `let` inside the arm)
+            // don't leak. Treat the trailing ExpressionStatement, if
+            // any, as the produced value.
+            auto blockEnv = gcNew<Environment>(env);
+            auto prevEnv = env;
+            env = blockEnv;
+            Value result;
+            try {
+                if (blk->statements.empty()) {
+                    result = Value(); // nil
+                } else {
+                    for (size_t i = 0; i + 1 < blk->statements.size(); i++) {
+                        execute(blk->statements[i].get());
+                    }
+                    const Stmt* last = blk->statements.back().get();
+                    if (last && last->type == StmtType::Expr) {
+                        auto* es = static_cast<const ExprStmt*>(last);
+                        result = evaluate(es->expr.get());
+                    } else {
+                        if (last) execute(last);
+                        result = Value(); // nil
+                    }
+                }
+            } catch (...) {
+                env = prevEnv;
+                throw;
+            }
+            env = prevEnv;
+            return result;
+        };
+
+        for (auto& c : e->cases) {
+            if (!c.pattern && !c.isType && !c.guard) {
+                return evalArmAsExpr(c.body.get());
+            }
+            if (c.isType) {
+                Value typeVal = evaluate(c.isType.get());
+                if (checkIs(subject, typeVal, e->line, e->column)) {
+                    return evalArmAsExpr(c.body.get());
+                }
+                continue;
+            }
+            if (c.guard) {
+                if (evaluate(c.guard.get()).isTruthy()) {
+                    return evalArmAsExpr(c.body.get());
+                }
+                continue;
+            }
+            if (c.pattern && c.pattern->type == ExprType::Call) {
+                auto* call = static_cast<const CallExpr*>(c.pattern.get());
+                bool isTagPattern = false;
+                if (call->callee->type == ExprType::Identifier) {
+                    auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
+                    if (!id->name.empty() && std::isupper(id->name[0]))
+                        isTagPattern = true;
+                }
+                if (isTagPattern && subject.isTagged()) {
+                    auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
+                    auto tag = subject.asTagged();
+                    if (tag->tag == id->name && call->args.size() == tag->values.size()) {
+                        bool allIdents = true;
+                        for (auto& arg : call->args)
+                            if (arg->type != ExprType::Identifier) { allIdents = false; break; }
+                        if (allIdents) {
+                            auto matchEnv = gcNew<Environment>(env);
+                            auto prevEnv = env;
+                            env = matchEnv;
+                            for (size_t i = 0; i < call->args.size(); i++) {
+                                auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
+                                matchEnv->define(argId->name, tag->values[i]);
+                            }
+                            Value result;
+                            try {
+                                result = evalArmAsExpr(c.body.get());
+                            } catch (...) {
+                                env = prevEnv;
+                                throw;
+                            }
+                            env = prevEnv;
+                            return result;
+                        }
+                        Value pattern = evaluate(c.pattern.get());
+                        if (subject == pattern) return evalArmAsExpr(c.body.get());
+                        continue;
+                    }
+                    continue;
+                }
+                Value pattern = evaluate(c.pattern.get());
+                bool matched;
+                if (subject.isInstance()) {
+                    auto eq = callDunder(*this, subject.asInstance(), "__eq", {pattern});
+                    matched = eq.first ? eq.second.isTruthy() : (subject == pattern);
+                } else {
+                    matched = (subject == pattern);
+                }
+                if (matched) return evalArmAsExpr(c.body.get());
+                continue;
+            }
+            // Plain equality pattern
+            Value pattern = evaluate(c.pattern.get());
+            bool matched;
+            if (subject.isInstance()) {
+                auto eq = callDunder(*this, subject.asInstance(), "__eq", {pattern});
+                matched = eq.first ? eq.second.isTruthy() : (subject == pattern);
+            } else {
+                matched = (subject == pattern);
+            }
+            if (matched) return evalArmAsExpr(c.body.get());
+        }
+        // Unreachable: parser enforced `_` arm.
+        return Value();
     }
 
     default:

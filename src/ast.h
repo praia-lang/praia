@@ -18,11 +18,11 @@ enum class ExprType {
     InterpolatedString, Lambda, Ternary, Spread,
     ArrayLiteral, Index, IndexAssign, MapLiteral, SetLiteral,
     Dot, DotAssign, Pipe, PipeTry, Async, Await, Yield,
-    This, Super
+    This, Super, Match
 };
 
 enum class StmtType {
-    Expr, Let, Block, If, Match, While,
+    Expr, Let, Block, If, While,
     For, ForIn, Func, Return, Class, Enum,
     Break, Continue, Throw, TryCatch, Ensure,
     Defer, Use, Export
@@ -258,8 +258,17 @@ struct IfStmt : Stmt {
     StmtPtr elseBranch; // nullptr if no else
 };
 
-struct MatchStmt : Stmt {
-    MatchStmt() : Stmt(StmtType::Match) {}
+// `match` always parses to a MatchExpr. In expression position
+// (`let r = match ...`, return value, function arg, etc.) the
+// parser enforces a mandatory `_` arm so the expression cannot
+// fall through with no value. In statement position the parser
+// wraps a MatchExpr in an ExprStmt (its value is discarded) and
+// does not require a default — preserving the original silent-
+// fallthrough semantics. Arm bodies are statement blocks; in
+// expression position the trailing ExpressionStatement's value
+// is the arm's value (same rule lambda bodies use).
+struct MatchExpr : Expr {
+    MatchExpr() : Expr(ExprType::Match) {}
     ExprPtr subject;
     struct CaseBranch {
         ExprPtr pattern; // equality pattern (nullptr if not equality)

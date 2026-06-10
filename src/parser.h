@@ -26,6 +26,9 @@ private:
     StmtPtr enumStatement();
     StmtPtr ifStatement();
     StmtPtr matchStatement();
+    ExprPtr matchExpression();
+    void parseMatchArms(std::vector<MatchExpr::CaseBranch>& out,
+                        bool requireDefault, int matchLine, int matchColumn);
     StmtPtr whileStatement();
     StmtPtr forStatement();
     StmtPtr returnStatement();

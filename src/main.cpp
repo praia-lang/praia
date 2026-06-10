@@ -180,6 +180,12 @@ static void printExpr(const Expr* expr, int level) {
             printExpr(elem.get(), level + 1);
         break;
     }
+    case ExprType::Match: {
+        auto* e = static_cast<const MatchExpr*>(expr);
+        printIndent(level); std::cout << "Match\n";
+        printExpr(e->subject.get(), level + 1);
+        break;
+    }
     case ExprType::SetLiteral: {
         auto* e = static_cast<const SetLiteralExpr*>(expr);
         printIndent(level); std::cout << "SetLiteral\n";
@@ -284,12 +290,6 @@ static void printStmt(const Stmt* stmt, int level) {
             printIndent(level + 1); std::cout << "else:\n";
             printStmt(s->elseBranch.get(), level + 2);
         }
-        break;
-    }
-    case StmtType::Match: {
-        auto* s = static_cast<const MatchStmt*>(stmt);
-        printIndent(level); std::cout << "Match\n";
-        printExpr(s->subject.get(), level + 1);
         break;
     }
     case StmtType::While: {
