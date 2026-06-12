@@ -365,15 +365,22 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
                 for (auto& arg : call->args) {
                     if (arg->type != ExprType::Identifier) { isBindingPattern = false; break; }
                 }
-                if (isBindingPattern) {
-                    // Tag-name match, then bind args as locals.
-                    // The body's value is left on top of the stack;
-                    // we then drop the bindings + subject below it
-                    // with a SWAP+POP loop so the value survives
-                    // scope cleanup intact. addLocal slot indices
-                    // here assume no surrounding temporaries — the
-                    // common case (let RHS, return value, statement
-                    // position).
+
+                // Common to both binding- and value-pattern paths:
+                // pre-check the tag name when the subject is tagged.
+                // The runtime `is "tagged"` guard preserves the
+                // class-instance case — `Point(1,2)` against a class
+                // instance must still flow to plain equality (the
+                // class may have __eq), not blow up on GET "tag".
+                auto emitIsTaggedCheck = [&]() -> int {
+                    emit(OpCode::OP_DUP, ln, col);
+                    uint16_t taggedTypeIdx = currentChunk().addConstant(Value(std::string("tagged")));
+                    emit(OpCode::OP_CONSTANT, ln, col);
+                    emitU16(taggedTypeIdx, ln, col);
+                    emit(OpCode::OP_IS, ln, col);
+                    return emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+                };
+                auto emitTagNameCheck = [&]() -> int {
                     emit(OpCode::OP_DUP, ln, col);
                     uint16_t tagFieldIdx = currentChunk().addConstant(Value(std::string("tag")));
                     emit(OpCode::OP_GET_PROPERTY, ln, col);
@@ -382,10 +389,45 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
                     emit(OpCode::OP_CONSTANT, ln, col);
                     emitU16(tagNameIdx, ln, col);
                     emit(OpCode::OP_EQUAL, ln, col);
-                    int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+                    return emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+                };
 
+                if (isBindingPattern) {
+                    // Binding patterns can only match tagged values
+                    // — destructuring requires the .tag/.values
+                    // shape. If subject isn't tagged, skip the arm.
+                    int skipNotTaggedJump = emitIsTaggedCheck();
+                    int skipTagJump = emitTagNameCheck();
+
+                    // Arity check: tag name alone isn't enough — a
+                    // pattern `Ok(a, b)` against subject `Ok(1)` must
+                    // skip the arm rather than OOB on INDEX_GET. Use
+                    // the global `len` builtin against subject.values
+                    // and compare to the pattern's args count.
+                    emit(OpCode::OP_DUP, ln, col);
+                    uint16_t valuesIdx = currentChunk().addConstant(Value(std::string("values")));
+                    emit(OpCode::OP_GET_PROPERTY, ln, col);
+                    emitU16(valuesIdx, ln, col);
+                    uint16_t lenNameIdx = identifierConstant("len");
+                    emit(OpCode::OP_GET_GLOBAL, ln, col);
+                    emitU16(lenNameIdx, ln, col);
+                    emit(OpCode::OP_SWAP, ln, col); // → [..., subject, len, values]
+                    emit(OpCode::OP_CALL, ln, col);
+                    emit(static_cast<uint8_t>(1), ln, col); // → [..., subject, length]
+                    emit(OpCode::OP_CONSTANT, ln, col);
+                    emitU16(currentChunk().addConstant(
+                        Value(static_cast<int64_t>(call->args.size()))), ln, col);
+                    emit(OpCode::OP_EQUAL, ln, col);
+                    int skipArityJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+
+                    // Tag + arity match. Bind args as locals and run
+                    // the body. (Slot indexing assumes the match
+                    // expression is at a fresh-stack position — let
+                    // RHS, return value, statement, etc.; a known
+                    // limitation when the expression sits inside
+                    // another expression's argument list.)
                     beginScope();
-                    addLocal(""); // subject occupies slot 0 of this scope
+                    addLocal(""); // subject occupies the first slot of this scope
                     int subjectSlot = static_cast<int>(current->locals.size()) - 1;
                     for (size_t i = 0; i < call->args.size(); i++) {
                         auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
@@ -400,34 +442,62 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
                         addLocal(argId->name);
                     }
                     compileArmBodyAsExpr(c.body.get(), ln, col);
-                    // Stack: [..., subject, b0..bN-1, value].
-                    // Drop subject + bindings while preserving the
-                    // top via SWAP+POP repeated N+1 times. Manually
-                    // discard the locals from the compiler's table
-                    // (endScope would emit OP_POP and clobber the
-                    // value we just placed on top).
-                    int dropCount = static_cast<int>(call->args.size()) + 1;
-                    for (int i = 0; i < dropCount; i++) {
-                        emit(OpCode::OP_SWAP, ln, col);
-                        emit(OpCode::OP_POP, ln, col);
+                    // Stack: [..., subject, b0..bN-1, value]. Move
+                    // the value into the subject's slot (subject is
+                    // an anonymous local that user code can't have
+                    // captured) so the bindings stay in their
+                    // original stack positions. Then iterate the
+                    // bindings in reverse; OP_CLOSE_UPVALUE for any
+                    // captured ones works because the open upvalue
+                    // still points at the binding's original address
+                    // — a prior SWAP-based scheme broke this by
+                    // relocating the binding before the close.
+                    emit(OpCode::OP_SET_LOCAL, ln, col);
+                    emitU16(static_cast<uint16_t>(subjectSlot), ln, col);
+                    emit(OpCode::OP_POP, ln, col);
+                    int firstBindingIdx = subjectSlot + 1;
+                    for (int i = static_cast<int>(current->locals.size()) - 1;
+                         i >= firstBindingIdx; i--) {
+                        if (current->locals[i].isCaptured) {
+                            emit(OpCode::OP_CLOSE_UPVALUE, ln, col);
+                        } else {
+                            emit(OpCode::OP_POP, ln, col);
+                        }
                     }
+                    // Compiler bookkeeping: drop subject + bindings
+                    // from the locals table. The value now occupies
+                    // subject's slot, so the next addLocal in the
+                    // surrounding scope lands at that slot — exactly
+                    // the let-RHS / return-value convention.
                     current->scopeDepth--;
                     while (!current->locals.empty() &&
                            current->locals.back().depth > current->scopeDepth) {
                         current->locals.pop_back();
                     }
                     endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
-                    patchJump(skipJump);
+                    patchJump(skipArityJump);
+                    patchJump(skipTagJump);
+                    patchJump(skipNotTaggedJump);
                 } else {
-                    // Value pattern: Ok(42) etc.
+                    // Value pattern: `Ok(42)` (tagged) or
+                    // `Point(1,2)` (class instance — operator-
+                    // overloaded __eq). Only do the tag-name
+                    // pre-check when the subject is actually tagged
+                    // — otherwise fall straight through to plain
+                    // equality so class-instance __eq still works.
+                    int skipNotTaggedJump = emitIsTaggedCheck();
+                    int skipTagJump = emitTagNameCheck();
+                    patchJump(skipNotTaggedJump); // join non-tagged path
+
                     emit(OpCode::OP_DUP, ln, col);
                     compileExpr(c.pattern.get());
                     emit(OpCode::OP_EQUAL, ln, col);
-                    int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+                    int skipValueJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
                     emit(OpCode::OP_POP, ln, col);
                     compileArmBodyAsExpr(c.body.get(), ln, col);
                     endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
-                    patchJump(skipJump);
+                    patchJump(skipValueJump);
+                    patchJump(skipTagJump);
                 }
                 continue;
             }

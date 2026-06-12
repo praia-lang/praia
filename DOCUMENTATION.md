@@ -962,7 +962,7 @@ If no case matches and there's no default, nothing happens.
 
 ### Match as an expression
 
-`match` is also an **expression** that produces a value. The trailing expression of each arm's body block is the arm's value (same rule lambdas already use). Use it anywhere an expression is expected — a `let` initializer, a `return` value, a function argument, a pipe stage.
+`match` is also an **expression** that produces a value. The value of each arm is the trailing expression of its body block — intervening statements run for their side effects and only the last expression yields the arm's value. This is the *arm body* rule; it isn't the same as `lam` semantics, where a single-expression lambda body is auto-returned but a multi-statement lambda body needs an explicit `return`. In `match` arms, the trailing-expression rule applies whether the arm is one line or many.
 
 ```praia
 let label = match (result) {

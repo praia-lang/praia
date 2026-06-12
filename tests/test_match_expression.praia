@@ -129,8 +129,11 @@ testing.test("missing-default in expression position is a parse error", lam{ in
     // observe stderr. Use both engines to confirm both error paths
     // produce the same diagnostic shape.
     let snippet = "let r = match (1) { 1 { \"a\" } 2 { \"b\" } }; print(r)"
-    let vm   = sys.exec(["./praia", "-c", snippet])
-    let tree = sys.exec(["./praia", "--tree", "-c", snippet])
+    // Bounded timeout (5s) so a hung child fails the test rather than
+    // wedging the suite. Parser errors should exit near-instantly so
+    // any wait > a couple of seconds means something's wrong upstream.
+    let vm   = sys.exec(["./praia",          "-c", snippet], 5000)
+    let tree = sys.exec(["./praia", "--tree", "-c", snippet], 5000)
     testing.expect(vm.exitCode != 0,
                    "VM exits non-zero on missing-default in expression form")
     testing.expect(tree.exitCode != 0,
