@@ -1858,7 +1858,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                 auto& entries = obj.asMap()->entries;
                 auto it = entries.find(Value(name));
                 if (it != entries.end()) { push(it->second); break; }
-                if (name == "has" || name == "get" || name == "delete" || name == "merge" ||
+                if (name == "has" || name == "get" || name == "delete" ||
+                    name == "merge" || name == "mergeInPlace" ||
                     name == "entries" || name == "clear") {
                     push(getMapMethod(obj.asMap(), name, CURRENT_LINE()));
                     break;

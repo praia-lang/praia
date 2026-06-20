@@ -177,7 +177,7 @@ testing.test("set.toArray returns all elements", lam{ in
     testing.expectEqual(type(arr), "array", nil)
     testing.expectEqual(len(arr), 3, nil)
     // Order is unspecified — sort for deterministic comparison.
-    let sorted = arr.sort()
+    let sorted = arr.sorted()
     testing.expectEqual(sorted, [1, 2, 3], nil)
 })
 
@@ -234,7 +234,7 @@ testing.test("for-in over a set visits each element exactly once", lam{ in
     for (x in s) { seen.push(x) }
     testing.expectEqual(len(seen), 3, nil)
     // Order is unspecified — sort for comparison.
-    testing.expectEqual(seen.sort(), [10, 20, 30], nil)
+    testing.expectEqual(seen.sorted(), [10, 20, 30], nil)
 })
 
 testing.test("for-in over empty set is a no-op", lam{ in

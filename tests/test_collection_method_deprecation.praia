@@ -1,0 +1,107 @@
+use "testing"
+
+// Collection-method mutation conventions:
+//   - past-tense / noun-like names (`sorted`, `reversed`, `union`,
+//     `merge`) return a NEW collection; the receiver is untouched.
+//   - methods whose name ends in `InPlace` (`sortInPlace`,
+//     `reverseInPlace`, `unionInPlace`, `intersectionInPlace`,
+//     `differenceInPlace`, `mergeInPlace`) mutate the receiver and
+//     return nil.
+//   - The pre-rename names `.sort()` and `.reverse()` still work but
+//     emit a one-line stderr deprecation warning the first time
+//     they're hit in a run, pointing at both new names. The
+//     `--strict-deprecations` CLI flag promotes the warning to a
+//     hard RuntimeError so a CI build can gate against legacy usage.
+
+testing.test("arrays — pure variants don't touch the receiver", lam{ in
+    let a = [3, 1, 2]
+    let s = a.sorted()
+    testing.expectEqual(s, [1, 2, 3], "sorted() returns sorted copy")
+    testing.expectEqual(a, [3, 1, 2], "sorted() leaves the receiver alone")
+
+    let r = a.reversed()
+    testing.expectEqual(r, [2, 1, 3], "reversed() returns reversed copy")
+    testing.expectEqual(a, [3, 1, 2], "reversed() leaves the receiver alone")
+})
+
+testing.test("arrays — InPlace variants mutate and return nil", lam{ in
+    let a = [3, 1, 2]
+    let rs = a.sortInPlace()
+    testing.expectEqual(rs, nil, "sortInPlace() returns nil")
+    testing.expectEqual(a, [1, 2, 3], "sortInPlace() mutates the receiver")
+
+    let b = [1, 2, 3]
+    let rr = b.reverseInPlace()
+    testing.expectEqual(rr, nil, "reverseInPlace() returns nil")
+    testing.expectEqual(b, [3, 2, 1], "reverseInPlace() mutates the receiver")
+})
+
+testing.test("set in-place algebra mutates receiver, leaves operand alone", lam{ in
+    let a = #{1, 2, 3}
+    let b = #{3, 4, 5}
+    a.unionInPlace(b)
+    testing.expectEqual(a.toArray().sorted(), [1, 2, 3, 4, 5],
+                        "unionInPlace expands the receiver")
+    testing.expectEqual(b.toArray().sorted(), [3, 4, 5],
+                        "operand set is not modified")
+
+    let c = #{1, 2, 3, 4}
+    c.intersectionInPlace(#{2, 3, 9})
+    testing.expectEqual(c.toArray().sorted(), [2, 3],
+                        "intersectionInPlace drops elements not in operand")
+
+    let d = #{1, 2, 3, 4}
+    d.differenceInPlace(#{2, 3})
+    testing.expectEqual(d.toArray().sorted(), [1, 4],
+                        "differenceInPlace drops elements present in operand")
+})
+
+testing.test("map.mergeInPlace mutates receiver; other's values win", lam{ in
+    let m = {a: 1, b: 2}
+    let r = m.mergeInPlace({b: 99, c: 3})
+    testing.expectEqual(r, nil, "mergeInPlace() returns nil")
+    testing.expectEqual(m, {a: 1, b: 99, c: 3},
+                        "operand value wins on key collision")
+})
+
+testing.test("legacy .sort() / .reverse() still work and emit a warning", lam{ in
+    // The warning lands on stderr and is deduped per name; verify
+    // via a child praia invocation so we can inspect stderr.
+    let script = "let a = [3, 1, 2]; a.sort(); a.sort(); a.sort(); let b = [1,2,3]; b.reverse(); print(a); print(b)"
+    let vm   = sys.exec(["./praia",          "-c", script], 5000)
+    let tree = sys.exec(["./praia", "--tree", "-c", script], 5000)
+    testing.expectEqual(vm.exitCode,   0, "lenient mode succeeds on VM")
+    testing.expectEqual(tree.exitCode, 0, "lenient mode succeeds on tree-walker")
+    // Receiver-mutation behaviour preserved for the deprecated alias.
+    testing.expect(vm.stdout.contains("[3, 2, 1]"),
+                   "VM: .reverse() still mutates as before")
+    testing.expect(tree.stdout.contains("[3, 2, 1]"),
+                   "tree: .reverse() still mutates as before")
+    // Warning fires once per deprecated name despite three .sort() calls.
+    testing.expectEqual(vm.stderr.count("'.sort()' is deprecated"), 1,
+                        "VM: .sort() deprecation deduped to one warning")
+    testing.expectEqual(tree.stderr.count("'.sort()' is deprecated"), 1,
+                        "tree: .sort() deprecation deduped to one warning")
+    let sortHint = vm.stderr.contains("'.sorted()'") && vm.stderr.contains("'.sortInPlace()'")
+    testing.expect(sortHint,
+                   "VM: sort warning names both replacement methods")
+    let reverseHint = vm.stderr.contains("'.reversed()'") && vm.stderr.contains("'.reverseInPlace()'")
+    testing.expect(reverseHint,
+                   "VM: reverse warning names both replacement methods")
+})
+
+testing.test("--strict-deprecations promotes the warning to a RuntimeError", lam{ in
+    let script = "let a = [3, 1, 2]; a.sort()"
+    let vm   = sys.exec(["./praia",          "--strict-deprecations", "-c", script], 5000)
+    let tree = sys.exec(["./praia", "--tree", "--strict-deprecations", "-c", script], 5000)
+    testing.expect(vm.exitCode != 0,
+                   "VM exits non-zero on deprecated call under --strict-deprecations")
+    testing.expect(tree.exitCode != 0,
+                   "tree-walker exits non-zero on deprecated call")
+    testing.expect(vm.stderr.contains("Strict mode") && vm.stderr.contains(".sort()"),
+                   "VM error names strict mode and the offending method")
+    testing.expect(tree.stderr.contains("Strict mode") && tree.stderr.contains(".sort()"),
+                   "tree error names strict mode and the offending method")
+})
+
+testing.done()

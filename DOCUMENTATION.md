@@ -608,6 +608,7 @@ print(a)            // {x: 1, y: 2}
 | `.get(key, default?)` | Returns the value for key, or default (nil if omitted) |
 | `.delete(key)` | Removes the key, returns `true` if it existed |
 | `.merge(other)` | Returns a new map combining both, with `other`'s values taking priority |
+| `.mergeInPlace(other)` | Merge `other`'s entries into the receiver in place; returns nil |
 | `.entries()` | Returns `[[key, value], ...]` array of all entries |
 | `.clear()` | Remove all entries from the map |
 
@@ -667,6 +668,9 @@ for (x in s) { print(x) }
 | `.union(other)` | New set with every element of `self` or `other`. |
 | `.intersection(other)` | New set with elements present in both. |
 | `.difference(other)` | New set with elements in `self` but not in `other`. |
+| `.unionInPlace(other)` | Insert every element of `other` into the receiver in place; returns nil. |
+| `.intersectionInPlace(other)` | Drop elements of the receiver not present in `other`, in place; returns nil. |
+| `.differenceInPlace(other)` | Drop elements of the receiver also present in `other`, in place; returns nil. |
 | `.isSubset(other)` | `true` if every element of `self` is in `other` (the empty set is a subset of everything). |
 
 ```praia
@@ -850,6 +854,8 @@ praia                    -c 'class Deque {}; Deqeu()'   # warns on stderr, exits
 praia --strict-tags      -c 'class Deque {}; Deqeu()'   # RuntimeError, exits non-zero
 praia --strict-tags      -c 'class Deque {}; Deque()'   # OK — explicit class call
 ```
+
+The `--strict-deprecations` flag follows the same pattern for renamed collection methods: deprecated aliases like `arr.sort()` and `arr.reverse()` print a one-line stderr warning (deduped per name per run) and continue to behave like they used to. Under `--strict-deprecations` the same call becomes a hard `RuntimeError`, suitable as a CI gate against legacy method usage. The flag is forwarded to `praia test` for whole-suite enforcement.
 
 ---
 
@@ -2220,22 +2226,27 @@ Methods are called with dot notation on array values.
 | `.pop()` | Remove and return the last element |
 | `.contains(value)` | Check if value is in the array |
 | `.join(separator)` | Join elements into a string |
-| `.reverse()` | Reverse the array in place |
+| `.reversed()` | Return a reversed copy (receiver unchanged) |
+| `.reverseInPlace()` | Reverse the array in place; returns nil |
 | `.shift()` | Remove and return the first element |
 | `.unshift(val)` | Add element to the beginning |
 | `.slice(start, end?)` | Extract subarray (negative indices supported) |
 | `.indexOf(val)` | Find index of element (-1 if not found) |
 | `.find(fn)` | First element where fn returns truthy (nil if not found) |
 | `.lastIndexOf(val)` | Find last index of element (-1 if not found) |
-| `.sort(comparator?)` | Return sorted copy. Optional: `lam{ a, b in a - b }` |
+| `.sorted(comparator?)` | Return sorted copy. Optional: `lam{ a, b in a - b }` |
+| `.sortInPlace(comparator?)` | Sort the array in place; returns nil |
+| `.sort(...)`, `.reverse()` | **Deprecated** aliases — use the explicit forms above. Run with `--strict-deprecations` to hard-fail on these. |
 
 ```praia
 let arr = [1, 2, 3]
-arr.push(4)                     // [1, 2, 3, 4]
-arr.pop()                       // returns 4
-arr.contains(2)                 // true
-["a", "b", "c"].join(", ")     // "a, b, c"
-arr.reverse()                   // [3, 2, 1]
+arr.push(4)                       // [1, 2, 3, 4]
+arr.pop()                         // returns 4
+arr.contains(2)                   // true
+["a", "b", "c"].join(", ")        // "a, b, c"
+let r = [1, 2, 3].reversed()      // [3, 2, 1], original unchanged
+let s = [3, 1, 2].sorted()        // [1, 2, 3]
+[3, 1, 2].sortInPlace()           // mutates receiver
 ```
 
 ---
