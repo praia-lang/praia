@@ -63,7 +63,7 @@ private:
     void compileLetStmt(const LetStmt* stmt);
     void compileBlockStmt(const BlockStmt* stmt);
     void compileIfStmt(const IfStmt* stmt);
-    void compileMatchStmt(const MatchStmt* stmt);
+    void compileMatchExpr(const MatchExpr* expr);
     void compileWhileStmt(const WhileStmt* stmt);
     void compileForStmt(const ForStmt* stmt);
     void compileForInStmt(const ForInStmt* stmt);

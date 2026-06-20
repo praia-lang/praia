@@ -364,21 +364,15 @@ StmtPtr Parser::ifStatement() {
     return stmt;
 }
 
-StmtPtr Parser::matchStatement() {
-    int ln = previous().line;
-    int lnCol = previous().column;
-    consume(TokenType::LPAREN, "Expected '(' after 'match'");
-    auto subject = expression();
-    consume(TokenType::RPAREN, "Expected ')' after match subject");
-    consume(TokenType::LBRACE, "Expected '{' after match subject");
-
-    auto stmt = std::make_unique<MatchStmt>();
-    stmt->line = ln;
-    stmt->column = lnCol;
-    stmt->subject = std::move(subject);
-
+// Parse the body of a `match` block (the arms between `{` and `}`).
+// `requireDefault=true` is used by the expression form to enforce
+// a mandatory `_` arm so the match cannot fall through with no value.
+// `matchLine`/`matchColumn` point at the `match` keyword and are only
+// used to anchor the missing-default error at the construct's start.
+void Parser::parseMatchArms(std::vector<MatchExpr::CaseBranch>& out,
+                            bool requireDefault, int matchLine, int matchColumn) {
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
-        MatchStmt::CaseBranch branch;
+        MatchExpr::CaseBranch branch;
         if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
             advance(); // consume '_'
             // Default: all fields remain nullptr
@@ -395,13 +389,73 @@ StmtPtr Parser::matchStatement() {
         }
         consume(TokenType::LBRACE, "Expected '{' after match case");
         branch.body = block();
-        stmt->cases.push_back(std::move(branch));
-        auto& last = stmt->cases.back();
+        out.push_back(std::move(branch));
+        auto& last = out.back();
         if (!last.pattern && !last.guard && !last.isType) break; // default must be last
     }
+    if (requireDefault) {
+        bool hasDefault = !out.empty()
+            && !out.back().pattern
+            && !out.back().guard
+            && !out.back().isType;
+        if (!hasDefault) {
+            Token anchor = previous();
+            anchor.line = matchLine;
+            anchor.column = matchColumn;
+            throw error(anchor,
+                "match expression must end with a default '_' arm");
+        }
+    }
+}
+
+StmtPtr Parser::matchStatement() {
+    // Statement-form match. Builds a MatchExpr (no default required —
+    // statement form preserves the original silent-fallthrough
+    // semantics) and wraps it in an ExprStmt so the engines see a
+    // value-discarding expression statement. A nested `match` in an
+    // arm body therefore parses through this path and still produces
+    // a value usable by the surrounding arm's last-expression rule.
+    int ln = previous().line;
+    int lnCol = previous().column;
+    consume(TokenType::LPAREN, "Expected '(' after 'match'");
+    auto subject = expression();
+    consume(TokenType::RPAREN, "Expected ')' after match subject");
+    consume(TokenType::LBRACE, "Expected '{' after match subject");
+
+    auto expr = std::make_unique<MatchExpr>();
+    expr->line = ln;
+    expr->column = lnCol;
+    expr->subject = std::move(subject);
+
+    parseMatchArms(expr->cases, /*requireDefault=*/false, ln, lnCol);
 
     consume(TokenType::RBRACE, "Expected '}' to close match");
+
+    auto stmt = std::make_unique<ExprStmt>();
+    stmt->line = ln;
+    stmt->column = lnCol;
+    stmt->expr = std::move(expr);
     return stmt;
+}
+
+ExprPtr Parser::matchExpression() {
+    // Called from primary() after consuming the `match` keyword.
+    int ln = previous().line;
+    int lnCol = previous().column;
+    consume(TokenType::LPAREN, "Expected '(' after 'match'");
+    auto subject = expression();
+    consume(TokenType::RPAREN, "Expected ')' after match subject");
+    consume(TokenType::LBRACE, "Expected '{' after match subject");
+
+    auto expr = std::make_unique<MatchExpr>();
+    expr->line = ln;
+    expr->column = lnCol;
+    expr->subject = std::move(subject);
+
+    parseMatchArms(expr->cases, /*requireDefault=*/true, ln, lnCol);
+
+    consume(TokenType::RBRACE, "Expected '}' to close match");
+    return expr;
 }
 
 StmtPtr Parser::whileStatement() {
@@ -503,6 +557,7 @@ StmtPtr Parser::returnStatement() {
         case TokenType::LBRACE:
         case TokenType::HASH_LBRACE:
         case TokenType::LAM:
+        case TokenType::MATCH:
         case TokenType::ASYNC:
         case TokenType::AWAIT:
         case TokenType::YIELD:
@@ -1343,6 +1398,7 @@ ExprPtr Parser::primary() {
                 t == TokenType::TRUE || t == TokenType::FALSE ||
                 t == TokenType::NIL || t == TokenType::THIS ||
                 t == TokenType::SUPER || t == TokenType::LAM ||
+                t == TokenType::MATCH ||
                 t == TokenType::ASYNC || t == TokenType::AWAIT ||
                 t == TokenType::YIELD || t == TokenType::INTERP_START) {
                 e->value = expression();
@@ -1432,6 +1488,15 @@ ExprPtr Parser::primary() {
         }
         consume(TokenType::RBRACE, "Expected '}' after set elements");
         return set;
+    }
+
+    if (match(TokenType::MATCH)) {
+        // Expression form: `let r = match (x) { ... _ { default } }`.
+        // The statement form is dispatched from `statement()` before
+        // we ever reach `primary()`, so reaching MATCH here always
+        // means expression context — and parseMatchArms enforces the
+        // mandatory `_` arm.
+        return matchExpression();
     }
 
     if (match(TokenType::LAM)) {

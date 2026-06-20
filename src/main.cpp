@@ -180,6 +180,25 @@ static void printExpr(const Expr* expr, int level) {
             printExpr(elem.get(), level + 1);
         break;
     }
+    case ExprType::Match: {
+        auto* e = static_cast<const MatchExpr*>(expr);
+        printIndent(level); std::cout << "Match\n";
+        printIndent(level + 1); std::cout << "subject:\n";
+        printExpr(e->subject.get(), level + 2);
+        for (const auto& arm : e->cases) {
+            printIndent(level + 1);
+            if (arm.isType)        std::cout << "arm (is-type):\n";
+            else if (arm.guard)    std::cout << "arm (when-guard):\n";
+            else if (!arm.pattern) std::cout << "arm (default _):\n";
+            else                   std::cout << "arm (equality):\n";
+            if (arm.isType)  { printIndent(level + 2); std::cout << "type:\n";    printExpr(arm.isType.get(),  level + 3); }
+            if (arm.guard)   { printIndent(level + 2); std::cout << "guard:\n";   printExpr(arm.guard.get(),   level + 3); }
+            if (arm.pattern) { printIndent(level + 2); std::cout << "pattern:\n"; printExpr(arm.pattern.get(), level + 3); }
+            printIndent(level + 2); std::cout << "body:\n";
+            printStmt(arm.body.get(), level + 3);
+        }
+        break;
+    }
     case ExprType::SetLiteral: {
         auto* e = static_cast<const SetLiteralExpr*>(expr);
         printIndent(level); std::cout << "SetLiteral\n";
@@ -284,12 +303,6 @@ static void printStmt(const Stmt* stmt, int level) {
             printIndent(level + 1); std::cout << "else:\n";
             printStmt(s->elseBranch.get(), level + 2);
         }
-        break;
-    }
-    case StmtType::Match: {
-        auto* s = static_cast<const MatchStmt*>(stmt);
-        printIndent(level); std::cout << "Match\n";
-        printExpr(s->subject.get(), level + 1);
         break;
     }
     case StmtType::While: {

@@ -33,6 +33,7 @@ void Compiler::compileExpr(const Expr* expr) {
     case ExprType::Await:     compileAwaitExpr(static_cast<const AwaitExpr*>(expr)); break;
     case ExprType::Yield:     compileYieldExpr(static_cast<const YieldExpr*>(expr)); break;
     case ExprType::Spread:    error("Unexpected spread expression", expr->line); break;
+    case ExprType::Match:     compileMatchExpr(static_cast<const MatchExpr*>(expr)); break;
     default: error("Unknown expression type", expr->line); break;
     }
 }
@@ -264,6 +265,341 @@ void Compiler::compileTernaryExpr(const TernaryExpr* expr) {
     patchJump(elseJump);
     compileExpr(expr->elseExpr.get());
     patchJump(endJump);
+}
+
+// Compile a `match` expression. Each non-binding arm leaves its
+// value on the stack at convergence by popping the subject before
+// the arm body runs. No "result slot" is needed — the body's value
+// is the expression's value directly. Binding-pattern arms still
+// use a scope-with-addLocal to bind the destructured names; that
+// path requires the match expression to be at a "fresh stack"
+// position (let RHS, return value, statement, etc.), which covers
+// the overwhelmingly common cases. In statement-form usage (no `_`
+// arm guaranteed) a trailing OP_NIL feeds the surrounding ExprStmt's
+// OP_POP if no arm matches.
+void Compiler::compileMatchExpr(const MatchExpr* expr) {
+    // Detect statement-form (no default arm) to know whether we
+    // need a trailing OP_NIL for the no-match fallthrough.
+    bool hasDefault = false;
+    for (auto& c : expr->cases) {
+        if (!c.pattern && !c.isType && !c.guard) { hasDefault = true; break; }
+    }
+
+    // Compile the arm body as an expression block — the trailing
+    // ExpressionStatement is the arm's value; otherwise the value
+    // is nil. Mirrors the tree-walker's evalArmAsExpr.
+    //
+    // The body runs in its own lexical scope when it declares any
+    // top-level locals (`let`/`func`), so those declarations can't
+    // leak to the surrounding code. To carry the trailing
+    // expression's value past endScope (which would otherwise pop
+    // it together with the body's locals — and would miss
+    // OP_CLOSE_UPVALUE for any local captured by an inner closure)
+    // a placeholder slot is reserved at the parent scope; the body
+    // writes its result there via OP_SET_LOCAL before endScope.
+    //
+    // The placeholder path relies on local-slot indexing matching
+    // stack position — i.e. the match expression sits at a fresh-
+    // stack call site (let RHS, return value, statement position).
+    // When the body has no top-level declarations there's nothing
+    // to clean up, so we skip the scope/placeholder entirely and
+    // emit straight into the surrounding context. That keeps
+    // match-as-subexpression cases like `str(match (x) { ... })`
+    // working as long as their arm bodies don't declare locals.
+    auto bodyHasTopLevelLocals = [](const BlockStmt* blk) -> bool {
+        // Statement kinds whose compile path calls addLocal when
+        // scopeDepth > 0 — i.e. anything that would otherwise leak a
+        // binding into the surrounding scope. Keep this in sync with
+        // compileClassStmt / compileEnumStmt / compileFuncStmt /
+        // compileLetStmt in src/vm/compiler.cpp.
+        for (const auto& s : blk->statements) {
+            switch (s->type) {
+            case StmtType::Let:
+            case StmtType::Func:
+            case StmtType::Class:
+            case StmtType::Enum:
+                return true;
+            default:
+                break;
+            }
+        }
+        return false;
+    };
+    auto compileArmBodyAsExpr = [&](const Stmt* body, int line, int column) {
+        if (!body || body->type != StmtType::Block) {
+            if (body) compileStmt(body);
+            emit(OpCode::OP_NIL, line, column);
+            return;
+        }
+        auto* blk = static_cast<const BlockStmt*>(body);
+        if (blk->statements.empty()) {
+            emit(OpCode::OP_NIL, line, column);
+            return;
+        }
+
+        auto emitBodyStatements = [&]() {
+            for (size_t i = 0; i + 1 < blk->statements.size(); i++) {
+                compileStmt(blk->statements[i].get());
+            }
+            const Stmt* last = blk->statements.back().get();
+            if (last && last->type == StmtType::Expr) {
+                auto* es = static_cast<const ExprStmt*>(last);
+                compileExpr(es->expr.get());
+            } else {
+                if (last) compileStmt(last);
+                emit(OpCode::OP_NIL, line, column);
+            }
+        };
+
+        if (!bodyHasTopLevelLocals(blk)) {
+            // Nothing to clean up — emit body directly. Works in
+            // both fresh-stack and sub-expression call sites.
+            emitBodyStatements();
+            return;
+        }
+
+        // Scoped path: placeholder at parent scope, body inside a
+        // nested scope, result moved to placeholder before endScope.
+        emit(OpCode::OP_NIL, line, column);
+        addLocal("__arm_result__");
+        int resultSlot = static_cast<int>(current->locals.size()) - 1;
+
+        beginScope();
+        emitBodyStatements();
+        emit(OpCode::OP_SET_LOCAL, line, column);
+        emitU16(static_cast<uint16_t>(resultSlot), line, column);
+        emit(OpCode::OP_POP, line, column);
+        endScope(line);
+
+        // The placeholder is now the arm's value. Drop the local
+        // entry from the compiler's table without emitting any pop
+        // — the value at that stack position becomes the result the
+        // surrounding context consumes.
+        current->locals.pop_back();
+    };
+
+    compileExpr(expr->subject.get());
+
+    std::vector<int> endJumps;
+
+    for (auto& c : expr->cases) {
+        int ln = expr->line, col = expr->column;
+        if (!c.pattern && !c.isType && !c.guard) {
+            // Default arm — pop subject, compile body, fall through.
+            // Last by parser invariant.
+            emit(OpCode::OP_POP, ln, col);
+            compileArmBodyAsExpr(c.body.get(), ln, col);
+            break;
+        }
+
+        if (c.isType) {
+            emit(OpCode::OP_DUP, ln, col);
+            compileExpr(c.isType.get());
+            emit(OpCode::OP_IS, ln, col);
+            int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+            emit(OpCode::OP_POP, ln, col); // drop subject
+            compileArmBodyAsExpr(c.body.get(), ln, col);
+            endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
+            patchJump(skipJump);
+            continue;
+        }
+
+        if (c.guard) {
+            compileExpr(c.guard.get());
+            int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+            emit(OpCode::OP_POP, ln, col); // drop subject
+            compileArmBodyAsExpr(c.body.get(), ln, col);
+            endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
+            patchJump(skipJump);
+            continue;
+        }
+
+        if (c.pattern && c.pattern->type == ExprType::Call) {
+            auto* call = static_cast<const CallExpr*>(c.pattern.get());
+            bool isTagPattern = false;
+            std::string tagName;
+            if (call->callee->type == ExprType::Identifier) {
+                auto* id = static_cast<const IdentifierExpr*>(call->callee.get());
+                if (!id->name.empty() && std::isupper(id->name[0])) {
+                    isTagPattern = true;
+                    tagName = id->name;
+                }
+            }
+            if (isTagPattern) {
+                bool isBindingPattern = true;
+                for (auto& arg : call->args) {
+                    if (arg->type != ExprType::Identifier) { isBindingPattern = false; break; }
+                }
+
+                // Common to both binding- and value-pattern paths:
+                // pre-check the tag name when the subject is tagged.
+                // The runtime `is "tagged"` guard preserves the
+                // class-instance case — `Point(1,2)` against a class
+                // instance must still flow to plain equality (the
+                // class may have __eq), not blow up on GET "tag".
+                auto emitIsTaggedCheck = [&]() -> int {
+                    emit(OpCode::OP_DUP, ln, col);
+                    uint16_t taggedTypeIdx = currentChunk().addConstant(Value(std::string("tagged")));
+                    emit(OpCode::OP_CONSTANT, ln, col);
+                    emitU16(taggedTypeIdx, ln, col);
+                    emit(OpCode::OP_IS, ln, col);
+                    return emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+                };
+                auto emitTagNameCheck = [&]() -> int {
+                    emit(OpCode::OP_DUP, ln, col);
+                    uint16_t tagFieldIdx = currentChunk().addConstant(Value(std::string("tag")));
+                    emit(OpCode::OP_GET_PROPERTY, ln, col);
+                    emitU16(tagFieldIdx, ln, col);
+                    uint16_t tagNameIdx = currentChunk().addConstant(Value(tagName));
+                    emit(OpCode::OP_CONSTANT, ln, col);
+                    emitU16(tagNameIdx, ln, col);
+                    emit(OpCode::OP_EQUAL, ln, col);
+                    return emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+                };
+
+                if (isBindingPattern) {
+                    // Binding patterns can only match tagged values
+                    // — destructuring requires the .tag/.values
+                    // shape. If subject isn't tagged, skip the arm.
+                    int skipNotTaggedJump = emitIsTaggedCheck();
+                    int skipTagJump = emitTagNameCheck();
+
+                    // Arity check: tag name alone isn't enough — a
+                    // pattern `Ok(a, b)` against subject `Ok(1)` must
+                    // skip the arm rather than OOB on INDEX_GET. Use
+                    // the global `len` builtin against subject.values
+                    // and compare to the pattern's args count.
+                    emit(OpCode::OP_DUP, ln, col);
+                    uint16_t valuesIdx = currentChunk().addConstant(Value(std::string("values")));
+                    emit(OpCode::OP_GET_PROPERTY, ln, col);
+                    emitU16(valuesIdx, ln, col);
+                    uint16_t lenNameIdx = identifierConstant("len");
+                    emit(OpCode::OP_GET_GLOBAL, ln, col);
+                    emitU16(lenNameIdx, ln, col);
+                    emit(OpCode::OP_SWAP, ln, col); // → [..., subject, len, values]
+                    emit(OpCode::OP_CALL, ln, col);
+                    emit(static_cast<uint8_t>(1), ln, col); // → [..., subject, length]
+                    emit(OpCode::OP_CONSTANT, ln, col);
+                    emitU16(currentChunk().addConstant(
+                        Value(static_cast<int64_t>(call->args.size()))), ln, col);
+                    emit(OpCode::OP_EQUAL, ln, col);
+                    int skipArityJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+
+                    // Tag + arity match. Bind args as locals and run
+                    // the body. (Slot indexing assumes the match
+                    // expression is at a fresh-stack position — let
+                    // RHS, return value, statement, etc.; a known
+                    // limitation when the expression sits inside
+                    // another expression's argument list.)
+                    beginScope();
+                    addLocal(""); // subject occupies the first slot of this scope
+                    int subjectSlot = static_cast<int>(current->locals.size()) - 1;
+                    for (size_t i = 0; i < call->args.size(); i++) {
+                        auto* argId = static_cast<const IdentifierExpr*>(call->args[i].get());
+                        emit(OpCode::OP_GET_LOCAL, ln, col);
+                        emitU16(static_cast<uint16_t>(subjectSlot), ln, col);
+                        uint16_t vIdx = currentChunk().addConstant(Value(std::string("values")));
+                        emit(OpCode::OP_GET_PROPERTY, ln, col);
+                        emitU16(vIdx, ln, col);
+                        emit(OpCode::OP_CONSTANT, ln, col);
+                        emitU16(currentChunk().addConstant(Value(static_cast<int64_t>(i))), ln, col);
+                        emit(OpCode::OP_INDEX_GET, ln, col);
+                        addLocal(argId->name);
+                    }
+                    compileArmBodyAsExpr(c.body.get(), ln, col);
+                    // Stack: [..., subject, b0..bN-1, value]. Move
+                    // the value into the subject's slot (subject is
+                    // an anonymous local that user code can't have
+                    // captured) so the bindings stay in their
+                    // original stack positions. Then iterate the
+                    // bindings in reverse; OP_CLOSE_UPVALUE for any
+                    // captured ones works because the open upvalue
+                    // still points at the binding's original address
+                    // — a prior SWAP-based scheme broke this by
+                    // relocating the binding before the close.
+                    emit(OpCode::OP_SET_LOCAL, ln, col);
+                    emitU16(static_cast<uint16_t>(subjectSlot), ln, col);
+                    emit(OpCode::OP_POP, ln, col);
+                    int firstBindingIdx = subjectSlot + 1;
+                    for (int i = static_cast<int>(current->locals.size()) - 1;
+                         i >= firstBindingIdx; i--) {
+                        if (current->locals[i].isCaptured) {
+                            emit(OpCode::OP_CLOSE_UPVALUE, ln, col);
+                        } else {
+                            emit(OpCode::OP_POP, ln, col);
+                        }
+                    }
+                    // Compiler bookkeeping: drop subject + bindings
+                    // from the locals table. The value now occupies
+                    // subject's slot, so the next addLocal in the
+                    // surrounding scope lands at that slot — exactly
+                    // the let-RHS / return-value convention.
+                    current->scopeDepth--;
+                    while (!current->locals.empty() &&
+                           current->locals.back().depth > current->scopeDepth) {
+                        current->locals.pop_back();
+                    }
+                    endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
+                    patchJump(skipArityJump);
+                    patchJump(skipTagJump);
+                    patchJump(skipNotTaggedJump);
+                } else {
+                    // Value pattern: `Ok(42)` (tagged) or
+                    // `Point(1,2)` (class instance — operator-
+                    // overloaded __eq). Only do the tag-name
+                    // pre-check when the subject is actually tagged
+                    // — otherwise fall straight through to plain
+                    // equality so class-instance __eq still works.
+                    int skipNotTaggedJump = emitIsTaggedCheck();
+                    int skipTagJump = emitTagNameCheck();
+                    patchJump(skipNotTaggedJump); // join non-tagged path
+
+                    emit(OpCode::OP_DUP, ln, col);
+                    compileExpr(c.pattern.get());
+                    emit(OpCode::OP_EQUAL, ln, col);
+                    int skipValueJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+                    emit(OpCode::OP_POP, ln, col);
+                    compileArmBodyAsExpr(c.body.get(), ln, col);
+                    endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
+                    patchJump(skipValueJump);
+                    patchJump(skipTagJump);
+                }
+                continue;
+            }
+
+            // Non-tag call as equality pattern.
+            emit(OpCode::OP_DUP, ln, col);
+            compileExpr(c.pattern.get());
+            emit(OpCode::OP_EQUAL, ln, col);
+            int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+            emit(OpCode::OP_POP, ln, col);
+            compileArmBodyAsExpr(c.body.get(), ln, col);
+            endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
+            patchJump(skipJump);
+            continue;
+        }
+
+        // Plain equality pattern.
+        emit(OpCode::OP_DUP, ln, col);
+        compileExpr(c.pattern.get());
+        emit(OpCode::OP_EQUAL, ln, col);
+        int skipJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, ln, col);
+        emit(OpCode::OP_POP, ln, col);
+        compileArmBodyAsExpr(c.body.get(), ln, col);
+        endJumps.push_back(emitJump(OpCode::OP_JUMP, ln, col));
+        patchJump(skipJump);
+    }
+
+    if (!hasDefault) {
+        // Statement-form fallthrough: no arm matched, the subject is
+        // still on top of the stack. Pop it and push nil — the
+        // surrounding ExprStmt's OP_POP discards the nil, matching
+        // the silent-fallthrough contract.
+        emit(OpCode::OP_POP, expr->line, expr->column);
+        emit(OpCode::OP_NIL, expr->line, expr->column);
+    }
+
+    for (int j : endJumps) patchJump(j);
 }
 
 void Compiler::compilePipeExpr(const PipeExpr* expr) {
