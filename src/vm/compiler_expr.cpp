@@ -307,9 +307,21 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
     // match-as-subexpression cases like `str(match (x) { ... })`
     // working as long as their arm bodies don't declare locals.
     auto bodyHasTopLevelLocals = [](const BlockStmt* blk) -> bool {
+        // Statement kinds whose compile path calls addLocal when
+        // scopeDepth > 0 — i.e. anything that would otherwise leak a
+        // binding into the surrounding scope. Keep this in sync with
+        // compileClassStmt / compileEnumStmt / compileFuncStmt /
+        // compileLetStmt in src/vm/compiler.cpp.
         for (const auto& s : blk->statements) {
-            if (s->type == StmtType::Let || s->type == StmtType::Func)
+            switch (s->type) {
+            case StmtType::Let:
+            case StmtType::Func:
+            case StmtType::Class:
+            case StmtType::Enum:
                 return true;
+            default:
+                break;
+            }
         }
         return false;
     };
