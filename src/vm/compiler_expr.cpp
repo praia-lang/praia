@@ -287,8 +287,32 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
 
     // Compile the arm body as an expression block — the trailing
     // ExpressionStatement is the arm's value; otherwise the value
-    // is nil. Mirrors the tree-walker's evalArmAsExpr and the
-    // lambda last-expression rule.
+    // is nil. Mirrors the tree-walker's evalArmAsExpr.
+    //
+    // The body runs in its own lexical scope when it declares any
+    // top-level locals (`let`/`func`), so those declarations can't
+    // leak to the surrounding code. To carry the trailing
+    // expression's value past endScope (which would otherwise pop
+    // it together with the body's locals — and would miss
+    // OP_CLOSE_UPVALUE for any local captured by an inner closure)
+    // a placeholder slot is reserved at the parent scope; the body
+    // writes its result there via OP_SET_LOCAL before endScope.
+    //
+    // The placeholder path relies on local-slot indexing matching
+    // stack position — i.e. the match expression sits at a fresh-
+    // stack call site (let RHS, return value, statement position).
+    // When the body has no top-level declarations there's nothing
+    // to clean up, so we skip the scope/placeholder entirely and
+    // emit straight into the surrounding context. That keeps
+    // match-as-subexpression cases like `str(match (x) { ... })`
+    // working as long as their arm bodies don't declare locals.
+    auto bodyHasTopLevelLocals = [](const BlockStmt* blk) -> bool {
+        for (const auto& s : blk->statements) {
+            if (s->type == StmtType::Let || s->type == StmtType::Func)
+                return true;
+        }
+        return false;
+    };
     auto compileArmBodyAsExpr = [&](const Stmt* body, int line, int column) {
         if (!body || body->type != StmtType::Block) {
             if (body) compileStmt(body);
@@ -300,17 +324,46 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
             emit(OpCode::OP_NIL, line, column);
             return;
         }
-        for (size_t i = 0; i + 1 < blk->statements.size(); i++) {
-            compileStmt(blk->statements[i].get());
+
+        auto emitBodyStatements = [&]() {
+            for (size_t i = 0; i + 1 < blk->statements.size(); i++) {
+                compileStmt(blk->statements[i].get());
+            }
+            const Stmt* last = blk->statements.back().get();
+            if (last && last->type == StmtType::Expr) {
+                auto* es = static_cast<const ExprStmt*>(last);
+                compileExpr(es->expr.get());
+            } else {
+                if (last) compileStmt(last);
+                emit(OpCode::OP_NIL, line, column);
+            }
+        };
+
+        if (!bodyHasTopLevelLocals(blk)) {
+            // Nothing to clean up — emit body directly. Works in
+            // both fresh-stack and sub-expression call sites.
+            emitBodyStatements();
+            return;
         }
-        const Stmt* last = blk->statements.back().get();
-        if (last && last->type == StmtType::Expr) {
-            auto* es = static_cast<const ExprStmt*>(last);
-            compileExpr(es->expr.get());
-        } else {
-            if (last) compileStmt(last);
-            emit(OpCode::OP_NIL, line, column);
-        }
+
+        // Scoped path: placeholder at parent scope, body inside a
+        // nested scope, result moved to placeholder before endScope.
+        emit(OpCode::OP_NIL, line, column);
+        addLocal("__arm_result__");
+        int resultSlot = static_cast<int>(current->locals.size()) - 1;
+
+        beginScope();
+        emitBodyStatements();
+        emit(OpCode::OP_SET_LOCAL, line, column);
+        emitU16(static_cast<uint16_t>(resultSlot), line, column);
+        emit(OpCode::OP_POP, line, column);
+        endScope(line);
+
+        // The placeholder is now the arm's value. Drop the local
+        // entry from the compiler's table without emitting any pop
+        // — the value at that stack position becomes the result the
+        // surrounding context consumes.
+        current->locals.pop_back();
     };
 
     compileExpr(expr->subject.get());
