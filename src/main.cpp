@@ -1197,6 +1197,8 @@ int main(int argc, char* argv[]) {
                 std::string a = argv[j];
                 if (a == "--tree") useVm = false;
                 else if (a == "--vm") useVm = true;
+                else if (a == "--strict-tags") strictTags = true;
+                else if (a == "--strict-deprecations") strictDeprecations = true;
                 else if (a == "-j") {
                     if (j + 1 >= argc) {
                         std::cerr << "praia test: -j requires an integer (e.g. -j 4)\n";
