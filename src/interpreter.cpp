@@ -1677,9 +1677,16 @@ Value Interpreter::evaluate(const Expr* expr) {
         // Spawn the call in a background thread with a task-local Interpreter.
         // The named-arg fill mask is installed on `taskInterp` rather than
         // the caller — see the matching note where `namedArgsMask` is set.
+        // Strict-mode flags inherit from the parent so deprecated-method
+        // and tag-typo policy stays consistent inside async work.
+        bool taskStrictTags = strictTags_;
+        bool taskStrictDeprecations = strictDeprecations_;
         auto sharedFuture = std::async(std::launch::async,
-            [callable, argsCopy = std::move(argsCopy), taskGlobals, namedArgsMask]() -> Value {
+            [callable, argsCopy = std::move(argsCopy), taskGlobals, namedArgsMask,
+             taskStrictTags, taskStrictDeprecations]() -> Value {
                 Interpreter taskInterp(taskGlobals);
+                taskInterp.setStrictTags(taskStrictTags);
+                taskInterp.setStrictDeprecations(taskStrictDeprecations);
                 taskInterp.pendingArgsFilled_ = namedArgsMask;
                 GcHeap::current().disable(); // task interpreters are short-lived
                 return callable->call(taskInterp, argsCopy);
@@ -1967,7 +1974,8 @@ Value Interpreter::evaluate(const Expr* expr) {
             auto& entries = obj.asMap()->entries;
             auto it = entries.find(Value(e->field));
             if (it != entries.end()) return it->second;
-            if (e->field == "has" || e->field == "get" || e->field == "delete" || e->field == "merge" ||
+            if (e->field == "has" || e->field == "get" || e->field == "delete" ||
+                e->field == "merge" || e->field == "mergeInPlace" ||
                 e->field == "entries" || e->field == "clear")
                 return getMapMethod(obj.asMap(), e->field, e->line);
             // Fall through to universal methods below

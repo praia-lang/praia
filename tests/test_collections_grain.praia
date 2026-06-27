@@ -212,7 +212,7 @@ testing.test("Counter: mostCommon return shape has no internal fields", lam{ in
     // the returned maps — callers see only {key, count}.
     let c = collections.Counter(["a", "b", "a"])
     let top = c.mostCommon()
-    testing.expectEqual(keys(top[0]).sort(), ["count", "key"],
+    testing.expectEqual(keys(top[0]).sorted(), ["count", "key"],
         "returned entries must contain exactly 'key' and 'count'")
     testing.expectEqual(top[0]._idx, nil,
         "internal _idx must not be present on the returned pair")

@@ -113,7 +113,7 @@ testing.test("string slice with named args", lam{ in
 })
 
 testing.test("array sort with named comparator", lam{ in
-    let desc = [3, 1, 2].sort(comparator: lam{ a, b in b - a })
+    let desc = [3, 1, 2].sorted(comparator: lam{ a, b in b - a })
     testing.expectEqual(desc, [3, 2, 1], nil)
 })
 

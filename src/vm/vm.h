@@ -143,6 +143,15 @@ public:
     // names. main.cpp sets this from the CLI flag before run().
     void setStrictTags(bool v) { strictTags_ = v; }
 
+    // --strict-deprecations toggle. When true, deprecated method
+    // aliases throw RuntimeError instead of warning. Read by the
+    // method-dispatch path in src/builtins/methods.cpp.
+    void setStrictDeprecations(bool v) { strictDeprecations_ = v; }
+    bool strictDeprecations() const { return strictDeprecations_; }
+    std::unordered_set<std::string>& warnedDeprecationsSet() {
+        return warnedDeprecations_;
+    }
+
     // Append every global-callable name to `out`. Used by the
     // tagged-value typo guard to suggest "did you mean 'Deque'?"
     // when a capitalized call falls through. Honours the homeVm
@@ -154,6 +163,10 @@ private:
     // Tagged-value typo defenses — see Interpreter for parity notes.
     bool strictTags_ = false;
     std::unordered_set<std::string> warnedTagNames_;
+
+    // Method-deprecation state — see Interpreter for parity notes.
+    bool strictDeprecations_ = false;
+    std::unordered_set<std::string> warnedDeprecations_;
 
     // Globals — slot-indexed for fast access. The compiler emits names as
     // constant-pool strings; the first OP_GET_GLOBAL / OP_SET_GLOBAL hit

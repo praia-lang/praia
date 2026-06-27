@@ -699,7 +699,7 @@ struct PendingTest {
     std::string file;
 };
 
-static PendingTest spawnTestFile(const std::string& path, bool useVm, bool strictTags) {
+static PendingTest spawnTestFile(const std::string& path, bool useVm, bool strictTags, bool strictDeprecations) {
     namespace fs = std::filesystem;
     PendingTest pt;
     pt.file = path;
@@ -794,6 +794,8 @@ static PendingTest spawnTestFile(const std::string& path, bool useVm, bool stric
         // Forward --strict-tags into the child so per-file tests
         // observe the same tag policy the user invoked at the top.
         if (strictTags) argv.push_back(const_cast<char*>("--strict-tags"));
+        // Same forwarding for --strict-deprecations.
+        if (strictDeprecations) argv.push_back(const_cast<char*>("--strict-deprecations"));
         argv.push_back(const_cast<char*>("--test-file"));
         argv.push_back(const_cast<char*>(path.c_str()));
         argv.push_back(nullptr);
@@ -805,7 +807,7 @@ static PendingTest spawnTestFile(const std::string& path, bool useVm, bool stric
     return pt;
 }
 
-static int runTestsCommand(const std::string& dir, bool useVm, bool strictTags, int jobs) {
+static int runTestsCommand(const std::string& dir, bool useVm, bool strictTags, bool strictDeprecations, int jobs) {
     namespace fs = std::filesystem;
     if (g_praiaExecPath.empty()) {
         std::cerr << "praia test: could not locate own executable for "
@@ -919,7 +921,7 @@ static int runTestsCommand(const std::string& dir, bool useVm, bool strictTags, 
         // stop enqueueing and let pending children drain.
         if (!runnerError && !interrupted) {
             while (nextToSpawn < files.size() && (int)running.size() < jobs) {
-                auto pt = spawnTestFile(files[nextToSpawn], useVm, strictTags);
+                auto pt = spawnTestFile(files[nextToSpawn], useVm, strictTags, strictDeprecations);
                 if (pt.pid < 0) {
                     runnerError = true;
                     break;
@@ -1126,6 +1128,9 @@ int main(int argc, char* argv[]) {
     bool useVm = true; // VM is the default
     bool strictTags = false; // --strict-tags: undeclared capitalized
                              // calls error instead of becoming tags
+    bool strictDeprecations = false; // --strict-deprecations: calling
+                             // a deprecated method alias errors
+                             // instead of just warning
     std::string filename;
     int fileArgIndex = -1;
 
@@ -1164,6 +1169,9 @@ int main(int argc, char* argv[]) {
                   << "  --tree           Use tree-walker interpreter instead of VM\n"
                   << "  --strict-tags    Reject ad-hoc tagged-value construction; capitalized\n"
                   << "                   calls to undefined names become RuntimeError\n"
+                  << "  --strict-deprecations\n"
+                  << "                   Promote deprecated-method warnings to RuntimeError\n"
+                  << "                   (e.g. arr.sort(), arr.reverse() in CI builds)\n"
                   << "  --tokens         Print lexer tokens and exit\n"
                   << "  --ast            Print parse tree and exit\n"
                   << "  --include-path   Print the header path for native plugins\n";
@@ -1176,6 +1184,7 @@ int main(int argc, char* argv[]) {
         if (arg == "--tree") useVm = false;
         else if (arg == "--vm") useVm = true;
         else if (arg == "--strict-tags") strictTags = true;
+        else if (arg == "--strict-deprecations") strictDeprecations = true;
         else if (arg == "test") {
             // Scan remaining args for flags and an optional directory.
             // `-j N` opts into parallel subprocess execution; default
@@ -1188,6 +1197,8 @@ int main(int argc, char* argv[]) {
                 std::string a = argv[j];
                 if (a == "--tree") useVm = false;
                 else if (a == "--vm") useVm = true;
+                else if (a == "--strict-tags") strictTags = true;
+                else if (a == "--strict-deprecations") strictDeprecations = true;
                 else if (a == "-j") {
                     if (j + 1 >= argc) {
                         std::cerr << "praia test: -j requires an integer (e.g. -j 4)\n";
@@ -1237,7 +1248,7 @@ int main(int argc, char* argv[]) {
                     return ExitCode::UsageError;
                 }
             }
-            return runTestsCommand(dir, useVm, strictTags, jobs);
+            return runTestsCommand(dir, useVm, strictTags, strictDeprecations, jobs);
         }
         else if (!arg.empty() && arg[0] != '-') break; // hit a non-flag, non-"test" arg (filename)
     }
@@ -1259,6 +1270,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--vm")       useVm = true;
         else if (arg == "--tree")     useVm = false;
         else if (arg == "--strict-tags") strictTags = true;
+        else if (arg == "--strict-deprecations") strictDeprecations = true;
         else if (arg == "--test-file") testFileMode = true;
         else if (arg == "-c") {
             if (i + 1 >= argc) {
@@ -1287,6 +1299,7 @@ int main(int argc, char* argv[]) {
                 VM vm;
                 vmRegisterNatives(vm);
                 vm.setStrictTags(strictTags);
+                vm.setStrictDeprecations(strictDeprecations);
                 std::vector<std::string> scriptArgs;
                 for (int i = cArgStart; i < argc; i++)
                     scriptArgs.push_back(argv[i]);
@@ -1299,6 +1312,7 @@ int main(int argc, char* argv[]) {
             } else {
                 Interpreter interpreter;
                 interpreter.setStrictTags(strictTags);
+                interpreter.setStrictDeprecations(strictDeprecations);
                 std::vector<std::string> scriptArgs;
                 for (int i = cArgStart; i < argc; i++)
                     scriptArgs.push_back(argv[i]);
@@ -1349,6 +1363,7 @@ int main(int argc, char* argv[]) {
             VM vm;
             vmRegisterNatives(vm);
             vm.setStrictTags(strictTags);
+            vm.setStrictDeprecations(strictDeprecations);
             vm.setArgs(scriptArgs);
             vm.setCurrentFile(filename);
             try {
@@ -1361,6 +1376,7 @@ int main(int argc, char* argv[]) {
             // Tree-walker path
             Interpreter interpreter;
             interpreter.setStrictTags(strictTags);
+            interpreter.setStrictDeprecations(strictDeprecations);
             interpreter.setArgs(scriptArgs);
             interpreter.setCurrentFile(filename);
             try {

@@ -23,7 +23,7 @@ testing.test("array methods", lam{ in
     testing.expect(!a.contains(99), nil)
     testing.expectEqual([1, 2, 3].join("-"), "1-2-3", nil)
     let b = [1, 2, 3]
-    b.reverse()
+    b.reverseInPlace()
     testing.expectEqual(b[0], 3, nil)
 })
 

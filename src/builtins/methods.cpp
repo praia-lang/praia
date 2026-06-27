@@ -1,5 +1,7 @@
 #include "../builtins.h"
+#include "../deprecation.h"
 #include "../encoding.h"
+#include "../interpreter.h"
 #include "../unicode.h"
 #include "../value.h"
 #include "../vm/vm.h"
@@ -698,6 +700,25 @@ Value getStringMethod(const std::string& strRef,
     throw RuntimeError("String has no method '" + name + "'", line);
 }
 
+// Resolve which engine is driving this call and forward to the
+// shared deprecation helper. Method-dispatch already threads both
+// pointers (one will be null), so picking the right state set is a
+// single nullness check.
+static void noteDeprecatedMethod(Interpreter* interp, VM* vm,
+                                 const std::string& oldName,
+                                 const std::string& replacementPure,
+                                 const std::string& replacementMutating,
+                                 int line) {
+    bool strict = vm ? vm->strictDeprecations()
+                     : (interp ? interp->strictDeprecations() : false);
+    if (!interp && !vm) return; // defensive — shouldn't happen at runtime
+    auto& warned = vm ? vm->warnedDeprecationsSet()
+                      : interp->warnedDeprecationsSet();
+    praia::emitMethodDeprecation(strict, warned, oldName,
+                                 replacementPure, replacementMutating,
+                                 line);
+}
+
 Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
                      const std::string& name, int line,
                      Interpreter* interp, VM* vm) {
@@ -736,11 +757,23 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
             return Value(std::move(result));
         }));
     }
-    if (name == "reverse") {
-        return Value(makeNative("reverse", 0, [arr](const std::vector<Value>&) -> Value {
+    if (name == "reverseInPlace") {
+        return Value(makeNative("reverseInPlace", 0, [arr](const std::vector<Value>&) -> Value {
             std::reverse(arr->elements.begin(), arr->elements.end());
             return Value();
         }));
+    }
+    if (name == "reversed") {
+        return Value(makeNative("reversed", 0, [arr](const std::vector<Value>&) -> Value {
+            auto out = gcNew<PraiaArray>();
+            out->elements = arr->elements;
+            std::reverse(out->elements.begin(), out->elements.end());
+            return Value(out);
+        }));
+    }
+    if (name == "reverse") {
+        noteDeprecatedMethod(interp, vm, "reverse", "reversed", "reverseInPlace", line);
+        return getArrayMethod(arr, "reverseInPlace", line, interp, vm);
     }
     if (name == "shift") {
         return Value(makeNative("shift", 0, [arr](const std::vector<Value>&) -> Value {
@@ -805,11 +838,16 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
             return Value();
         }));
     }
-    if (name == "sort") {
-        return Value(makeNative("sort", -1, [arr, interp, vm](const std::vector<Value>& args) -> Value {
-            auto sorted = gcNew<PraiaArray>();
-            sorted->elements = arr->elements;
-            auto& elems = sorted->elements;
+    // `sorted` (pure) and `sortInPlace` (mutating) share the same
+    // comparator logic. Capture-by-reference of the same helper
+    // would tie one's behaviour to the other; instead, factor the
+    // comparator selection into an inline lambda used by both
+    // method bodies.
+    if (name == "sorted") {
+        return Value(makeNative("sorted", -1, [arr, interp, vm](const std::vector<Value>& args) -> Value {
+            auto out = gcNew<PraiaArray>();
+            out->elements = arr->elements;
+            auto& elems = out->elements;
             if (!args.empty() && args[0].isCallable()) {
                 auto cmp = args[0].asCallable();
                 std::sort(elems.begin(), elems.end(),
@@ -825,8 +863,33 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
                     return a.toString() < b.toString();
                 });
             }
-            return Value(sorted);
+            return Value(out);
         }, {"comparator"}));
+    }
+    if (name == "sortInPlace") {
+        return Value(makeNative("sortInPlace", -1, [arr, interp, vm](const std::vector<Value>& args) -> Value {
+            auto& elems = arr->elements;
+            if (!args.empty() && args[0].isCallable()) {
+                auto cmp = args[0].asCallable();
+                std::sort(elems.begin(), elems.end(),
+                    [&cmp, interp, vm](const Value& a, const Value& b) -> bool {
+                        Value result = vm ? callWithVM(*vm, cmp, {a, b})
+                                          : callSafe(*interp, cmp, {a, b});
+                        if (result.isNumber()) return result.asNumber() < 0;
+                        return result.isTruthy();
+                    });
+            } else {
+                std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
+                    if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
+                    return a.toString() < b.toString();
+                });
+            }
+            return Value();
+        }, {"comparator"}));
+    }
+    if (name == "sort") {
+        noteDeprecatedMethod(interp, vm, "sort", "sorted", "sortInPlace", line);
+        return getArrayMethod(arr, "sorted", line, interp, vm);
     }
     throw RuntimeError("Array has no method '" + name + "'", line);
 }
@@ -873,6 +936,17 @@ Value getMapMethod(std::shared_ptr<PraiaMap> map,
             for (auto& [k, v] : args[0].asMap()->entries)
                 result->entries[k] = v;
             return Value(result);
+        }));
+    }
+    if (name == "mergeInPlace") {
+        // Mutating sibling of `merge` — `other`'s values win on key
+        // collision, matching `merge`'s precedence rule.
+        return Value(makeNative("mergeInPlace", 1, [map](const std::vector<Value>& args) -> Value {
+            if (!args[0].isMap())
+                throw RuntimeError("mergeInPlace() requires a map argument", 0);
+            for (auto& [k, v] : args[0].asMap()->entries)
+                map->entries[k] = v;
+            return Value();
         }));
     }
     if (name == "entries") {
@@ -983,6 +1057,35 @@ Value getSetMethod(std::shared_ptr<PraiaSet> set,
             for (auto& e : set->elements)
                 if (other.find(e) == other.end()) result->elements.insert(e);
             return Value(result);
+        }));
+    }
+    // In-place set-algebra. Mutate the receiver; return nil.
+    if (name == "unionInPlace") {
+        return Value(makeNative("unionInPlace", 1, [set](const std::vector<Value>& args) -> Value {
+            if (!args[0].isSet())
+                throw RuntimeError("set.unionInPlace(): argument must be a set", 0);
+            for (auto& e : args[0].asSet()->elements) set->elements.insert(e);
+            return Value();
+        }));
+    }
+    if (name == "intersectionInPlace") {
+        return Value(makeNative("intersectionInPlace", 1, [set](const std::vector<Value>& args) -> Value {
+            if (!args[0].isSet())
+                throw RuntimeError("set.intersectionInPlace(): argument must be a set", 0);
+            auto& other = args[0].asSet()->elements;
+            for (auto it = set->elements.begin(); it != set->elements.end(); ) {
+                if (other.find(*it) == other.end()) it = set->elements.erase(it);
+                else ++it;
+            }
+            return Value();
+        }));
+    }
+    if (name == "differenceInPlace") {
+        return Value(makeNative("differenceInPlace", 1, [set](const std::vector<Value>& args) -> Value {
+            if (!args[0].isSet())
+                throw RuntimeError("set.differenceInPlace(): argument must be a set", 0);
+            for (auto& e : args[0].asSet()->elements) set->elements.erase(e);
+            return Value();
         }));
     }
     if (name == "isSubset") {

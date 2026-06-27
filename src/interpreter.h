@@ -261,6 +261,14 @@ public:
     // Default off; main.cpp sets it from the CLI flag before
     // interpret() runs.
     void setStrictTags(bool v) { strictTags_ = v; }
+    // Toggle --strict-deprecations mode (calling a deprecated method
+    // alias becomes a RuntimeError instead of warning). Read by the
+    // method-dispatch path in src/builtins/methods.cpp.
+    void setStrictDeprecations(bool v) { strictDeprecations_ = v; }
+    bool strictDeprecations() const { return strictDeprecations_; }
+    std::unordered_set<std::string>& warnedDeprecationsSet() {
+        return warnedDeprecations_;
+    }
 
     // Public so PraiaFunction::call / PraiaLambda::call can use it
     void executeBlock(const BlockStmt* block, std::shared_ptr<Environment> env);
@@ -329,6 +337,15 @@ private:
     // Interpreter::evaluate's Call handler.
     bool strictTags_ = false;
     std::unordered_set<std::string> warnedTagNames_;
+
+    // Method-deprecation state. `strictDeprecations_` is set by
+    // --strict-deprecations; under it, deprecated method aliases
+    // (e.g. `arr.sort()` after the rename to `sorted`/`sortInPlace`)
+    // throw RuntimeError instead of warning. `warnedDeprecations_`
+    // dedupes the warning per old method name per run, same dedup
+    // pattern as warnedTagNames_.
+    bool strictDeprecations_ = false;
+    std::unordered_set<std::string> warnedDeprecations_;
 
     // (interpMutex removed — async tasks use task-local Interpreters instead)
 
