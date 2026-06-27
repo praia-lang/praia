@@ -27,21 +27,16 @@ testing.test("Queue", lam{ in
     testing.expectEqual(q.size(), 2, "size should be 2")
 })
 
-testing.test("Set", lam{ in
-    let s = collections.Set()
-    s.add(1)
-    s.add(2)
-    s.add(2)
-    s.add(3)
+testing.test("Set (native #{} literal)", lam{ in
+    // collections.Set is now a deprecated wrapper; native sets are
+    // the recommended surface for new code.
+    let s = #{1, 2, 2, 3}
     testing.expectEqual(s.size(), 3, "set size should be 3 (no dupes)")
     testing.expect(s.has(2), "should have 2")
     s.remove(2)
     testing.expect(!s.has(2), "should not have 2 after remove")
 
-    let s2 = collections.Set()
-    s2.add(2)
-    s2.add(3)
-    s2.add(4)
+    let s2 = #{2, 3, 4}
     s.add(2)
     s.add(3)
     let u = s.union(s2)

@@ -1,0 +1,97 @@
+use "testing"
+use "collections"
+
+// `collections.Set` is now a deprecated wrapper around the native
+// `#{}` set:
+//   - first construction in a run emits a stderr warning;
+//   - subsequent constructions (and internal `_wrapSet` re-wraps
+//     used by .union/.intersect/.difference) are silent;
+//   - --strict-deprecations promotes the warning to a RuntimeError;
+//   - every legacy method (add, has, remove, size, isEmpty,
+//     toArray, union, intersect, difference) still works
+//     byte-for-byte against the pre-rename contract.
+//
+// We exercise the wrapper directly so changes to the legacy API
+// break this file rather than someone's production code.
+
+testing.test("wrapper preserves the legacy API", lam{ in
+    let s = collections.Set()
+    s.add(1)
+    s.add("hello")
+    s.add(true)
+    testing.expectEqual(s.size(), 3, "size after three adds")
+    testing.expect(s.has(1),          "has() finds inserted ints")
+    testing.expect(s.has("hello"),    "has() finds inserted strings")
+    testing.expect(!s.has("missing"), "has() returns false on absent")
+    testing.expect(!s.isEmpty(),      "isEmpty() returns false when size>0")
+    s.remove(1)
+    testing.expect(!s.has(1),         "remove() drops the element")
+    testing.expectEqual(s.size(), 2,  "size shrinks after remove")
+    let arr = sort(s.toArray())
+    // Order is unspecified; sort gives a stable comparison.
+    testing.expectEqual(len(arr), 2,  "toArray() returns one elem per set element")
+})
+
+testing.test("union / intersect / difference return wrapper Sets", lam{ in
+    let a = collections.Set()
+    for (v in [1, 2, 3, 4]) { a.add(v) }
+    let b = collections.Set()
+    for (v in [3, 4, 5, 6]) { b.add(v) }
+
+    let u = a.union(b)
+    let i = a.intersect(b)
+    let d = a.difference(b)
+
+    testing.expect(u is collections.Set, "union result is a wrapper Set")
+    testing.expect(i is collections.Set, "intersect result is a wrapper Set")
+    testing.expect(d is collections.Set, "difference result is a wrapper Set")
+
+    testing.expectEqual(sort(u.toArray()), [1, 2, 3, 4, 5, 6], "union elements")
+    testing.expectEqual(sort(i.toArray()), [3, 4],             "intersect elements")
+    testing.expectEqual(sort(d.toArray()), [1, 2],             "difference elements")
+})
+
+testing.test("add/remove preserve the legacy nil return contract", lam{ in
+    // Native sets return bool from add/remove (true if state
+    // changed). The wrapper drops that and returns nil to match the
+    // pre-rename grain Set, so any caller pattern-matching against
+    // the old contract keeps working.
+    let s = collections.Set()
+    testing.expectEqual(s.add(7),       nil, "add returns nil")
+    testing.expectEqual(s.add(7),       nil, "add of duplicate also returns nil")
+    testing.expectEqual(s.remove(7),    nil, "remove returns nil")
+    testing.expectEqual(s.remove(99),   nil, "remove of absent also returns nil")
+})
+
+testing.test("default-lenient deprecation warning fires once + names the migration", lam{ in
+    let script = "use \"collections\"; for (i in 0..5) { let s = collections.Set(); s.add(i); s.union(s) }"
+    let vm   = sys.exec(["./praia",          "-c", script], 5000)
+    let tree = sys.exec(["./praia", "--tree", "-c", script], 5000)
+    testing.expectEqual(vm.exitCode,   0, "lenient mode succeeds on VM")
+    testing.expectEqual(tree.exitCode, 0, "lenient mode succeeds on tree-walker")
+    // Exactly one warning despite multiple Set() and .union()
+    // constructions — the internal `_wrapSet` factory suppresses
+    // its inner Set() call, and the dedup set catches the rest.
+    testing.expectEqual(vm.stderr.count("'collections.Set' is deprecated"), 1,
+                        "VM: deprecation warning deduped to one")
+    testing.expectEqual(tree.stderr.count("'collections.Set' is deprecated"), 1,
+                        "tree: deprecation warning deduped to one")
+    let vmHint = vm.stderr.contains("#{}") && vm.stderr.contains(".intersection()")
+    testing.expect(vmHint, "VM warning names the native literal and a replacement method")
+})
+
+testing.test("--strict-deprecations promotes the warning to a RuntimeError", lam{ in
+    let script = "use \"collections\"; collections.Set()"
+    let vm   = sys.exec(["./praia",          "--strict-deprecations", "-c", script], 5000)
+    let tree = sys.exec(["./praia", "--tree", "--strict-deprecations", "-c", script], 5000)
+    testing.expect(vm.exitCode != 0,
+                   "VM exits non-zero on collections.Set() under --strict-deprecations")
+    testing.expect(tree.exitCode != 0,
+                   "tree-walker exits non-zero on collections.Set() under --strict-deprecations")
+    let vmErr = vm.stderr.contains("Strict mode") && vm.stderr.contains("collections.Set")
+    let treeErr = tree.stderr.contains("Strict mode") && tree.stderr.contains("collections.Set")
+    testing.expect(vmErr,   "VM error names strict mode and the deprecated class")
+    testing.expect(treeErr, "tree error names strict mode and the deprecated class")
+})
+
+testing.done()

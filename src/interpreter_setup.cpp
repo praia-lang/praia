@@ -1,5 +1,6 @@
 #include "builtins.h"
 #include "builtins/scope_guards.h"
+#include "deprecation.h"
 #include "gc_heap.h"
 #include "grain_resolve.h"
 #include "interpreter.h"
@@ -1491,6 +1492,32 @@ Interpreter::Interpreter() {
         });
     sysMap->entries[Value("exec")] = Value(std::static_pointer_cast<Callable>(execImpl));
     sysMap->entries[Value("run")] = Value(std::static_pointer_cast<Callable>(execImpl));
+
+    // sys.notifyDeprecation(name, hint) — surface a deprecation
+    // warning from grain/user code, sharing the same dedup-per-name
+    // and --strict-deprecations enforcement the C++ method-rename
+    // path uses. Resolves the calling engine at runtime via the
+    // thread-local current-pointers (VM takes precedence — if it's
+    // set we're running under bytecode); falls back to g_currentInterp
+    // for tree-walker calls.
+    sysMap->entries[Value("notifyDeprecation")] = Value(makeNative("sys.notifyDeprecation", 2,
+        [](const std::vector<Value>& args) -> Value {
+            if (!args[0].isString() || !args[1].isString())
+                throw RuntimeError("sys.notifyDeprecation() requires (name, hint) strings", 0);
+            const std::string& name = args[0].asString();
+            const std::string& hint = args[1].asString();
+            VM* vm = VM::current();
+            if (vm) {
+                praia::emitNamedDeprecation(vm->strictDeprecations(),
+                                            vm->warnedDeprecationsSet(),
+                                            name, hint, /*line=*/0);
+            } else if (g_currentInterp) {
+                praia::emitNamedDeprecation(g_currentInterp->strictDeprecations(),
+                                            g_currentInterp->warnedDeprecationsSet(),
+                                            name, hint, /*line=*/0);
+            }
+            return Value();
+        }, {"name", "hint"}));
 
     // sys.spawn(cmd) — launch a child process with stdin/stdout/stderr pipes.
     // cmd is either a string (run via /bin/sh -c) or an array of [argv0, ...args]

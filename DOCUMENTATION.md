@@ -2357,6 +2357,26 @@ proc.wait()
 
 Use `sys.exec` for fire-and-forget commands. Use `sys.spawn` when you need to pipe input, read output line-by-line, or interact with a long-running process.
 
+### Deprecation warnings from grain / user code
+
+`sys.notifyDeprecation(name, hint)` surfaces a deprecation warning from grain or user code through the same machinery that handles deprecated built-in methods (`arr.sort()`, `arr.reverse()`):
+
+- The warning is deduped per `name` per run, so a tight loop emits at most one line.
+- `--strict-deprecations` promotes the warning to a `RuntimeError` for CI gating.
+- The warning is forwarded across `praia test` subprocesses and into async tasks (tree-walker), matching the existing `--strict-deprecations` plumbing.
+
+```praia
+class OldThing {
+    func init() {
+        sys.notifyDeprecation("OldThing",
+            "use NewThing — see /docs/migration for details")
+        // ... constructor body ...
+    }
+}
+```
+
+This is the same primitive `collections.Set` uses to flag itself deprecated in favour of the native `#{}` set. New deprecations in stdlib grains or user code should follow the same idiom.
+
 ### Command-Line Arguments
 
 Arguments passed after the script name are available in `sys.args`:

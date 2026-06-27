@@ -45,4 +45,30 @@ inline void emitMethodDeprecation(
     }
 }
 
+// Sibling helper for grain-level / general-purpose deprecations.
+// Same dedup + strict-mode behaviour as `emitMethodDeprecation`,
+// but takes a single freeform `hint` string instead of the two
+// replacement-method names — grain-class deprecations carry richer
+// migration text than the method-rename pattern can express.
+//
+// Surfaced to user code via `sys.notifyDeprecation(name, hint)`,
+// so stdlib grains (and any future user-written deprecation) can
+// piggyback on the same warned-set dedup and `--strict-deprecations`
+// CI gate the C++ helper already provides.
+inline void emitNamedDeprecation(
+        bool strict,
+        std::unordered_set<std::string>& warnedSet,
+        const std::string& name,
+        const std::string& hint,
+        int line, int column = 0) {
+    std::string msg = "'" + name + "' is deprecated; " + hint;
+    if (strict) {
+        throw RuntimeError("Strict mode: " + msg, line, column);
+    }
+    if (warnedSet.insert(name).second) {
+        std::cerr << formatLocation(line, column)
+                  << " Warning: " << msg << std::endl;
+    }
+}
+
 } // namespace praia
