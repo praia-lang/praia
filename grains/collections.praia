@@ -250,16 +250,30 @@ class Set {
         return this._inner.toArray()
     }
 
+    // Accept either a wrapped `collections.Set` (peel its `_inner`)
+    // or a bare native set. Pre-deprecation grain code couldn't have
+    // passed a native — but during the deprecation window callers
+    // are likely to mix the two while migrating, and rejecting one
+    // half with "Set has no method '_inner'" would be a worse
+    // experience than the wrapper is meant to provide.
+    // (Inside this file `Set` resolves to the class defined above,
+    // which is the same class instances of `collections.Set` are
+    // members of.)
+    func _peel(other) {
+        if (other is Set) { return other._inner }
+        return other
+    }
+
     func union(other) {
-        return _wrapSet(this._inner.union(other._inner))
+        return _wrapSet(this._inner.union(this._peel(other)))
     }
 
     func intersect(other) {
-        return _wrapSet(this._inner.intersection(other._inner))
+        return _wrapSet(this._inner.intersection(this._peel(other)))
     }
 
     func difference(other) {
-        return _wrapSet(this._inner.difference(other._inner))
+        return _wrapSet(this._inner.difference(this._peel(other)))
     }
 }
 

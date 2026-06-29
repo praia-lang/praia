@@ -39,7 +39,12 @@ inline void emitMethodDeprecation(
     if (strict) {
         throw RuntimeError("Strict mode: " + msg, line, column);
     }
-    if (warnedSet.insert(oldName).second) {
+    // Namespace the dedup key so a method-rename warning for
+    // `arr.sort()` can't be silently suppressed by an unrelated
+    // `sys.notifyDeprecation("sort", ...)` (or vice versa). The set
+    // is shared across both call paths; the prefix keeps the
+    // categories distinct.
+    if (warnedSet.insert("method:" + oldName).second) {
         std::cerr << formatLocation(line, column)
                   << " Warning: " << msg << std::endl;
     }
@@ -65,7 +70,10 @@ inline void emitNamedDeprecation(
     if (strict) {
         throw RuntimeError("Strict mode: " + msg, line, column);
     }
-    if (warnedSet.insert(name).second) {
+    // Namespace the dedup key (see `emitMethodDeprecation` for the
+    // matching rationale). The two emitters share `warnedSet` but
+    // must not poison each other's dedup state.
+    if (warnedSet.insert("named:" + name).second) {
         std::cerr << formatLocation(line, column)
                   << " Warning: " << msg << std::endl;
     }
