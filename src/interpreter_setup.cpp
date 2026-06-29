@@ -1515,6 +1515,18 @@ Interpreter::Interpreter() {
                 praia::emitNamedDeprecation(g_currentInterp->strictDeprecations(),
                                             g_currentInterp->warnedDeprecationsSet(),
                                             name, hint, /*line=*/0);
+            } else {
+                // Neither current-engine pointer is set. In normal
+                // execution one of them always is (NativeFunction::call
+                // installs g_currentInterp before invoking the lambda;
+                // the VM mirrors via VM::current). Reaching this
+                // branch means the native was invoked from an
+                // unexpected context — fail loudly so the contract
+                // (in particular `--strict-deprecations` enforcement)
+                // can't be silently bypassed.
+                throw RuntimeError(
+                    "sys.notifyDeprecation(): no current Praia engine "
+                    "available to route the warning through", 0);
             }
             return Value();
         }, {"name", "hint"}));
