@@ -182,76 +182,98 @@ class Queue {
     }
 }
 
-// ── Set — unique values, map-backed ────────────────────────────
-// Pre-refactor this was array-backed with O(n) add/has/remove (a
-// trap on anything beyond a few dozen elements). Map-backed now,
-// so each of those is O(1) amortized. Any hashable value works as
-// an element — strings, numbers, bools, tagged values.
+// ── Set — DEPRECATED, wraps the native `#{}` set ───────────────
+// `collections.Set` predates native sets. New code should use the
+// `#{}` literal and its built-in methods (`.union`, `.intersection`,
+// `.difference`, `.unionInPlace`, …). The class is kept as a thin
+// wrapper so existing callers keep working byte-for-byte; it emits
+// a one-shot deprecation warning on first construction (deduped
+// per run, honours `--strict-deprecations`).
 //
-// Complexity (amortized):
-//   add, has, remove, size              O(1)
-//   toArray                             O(n)
-//   union, intersect, difference        O(n + m)  where m = |other|
+// Legacy contract preserved by the wrapper:
+//   - `intersect(other)`           (native is `intersection`)
+//   - `add(val)` / `remove(val)`   return nil (native returns bool)
+//   - `isEmpty()`                  no native equivalent
+//   - `union`/`intersect`/`difference` return a `collections.Set`
+//     instance, not a native set, so `obj is collections.Set`
+//     downstream checks still pass.
+//
+// Re-wrapping in `union`/`intersect`/`difference` would otherwise
+// re-trigger the deprecation warning per call; the module-level
+// `_setWarningSuppressed` flag short-circuits the notification in
+// the constructor for those internal `Set()` calls. The flag is
+// toggled inside the `_wrapSet` helper and reset immediately, so
+// any caller-driven `Set()` construction still warns.
+let _setWarningSuppressed = false
+
+func _wrapSet(inner) {
+    _setWarningSuppressed = true
+    let s = Set()
+    _setWarningSuppressed = false
+    s._inner = inner
+    return s
+}
+
 class Set {
     func init() {
-        this._m = {}
+        if (!_setWarningSuppressed) {
+            sys.notifyDeprecation(
+                "collections.Set",
+                "use the native `#{}` literal and methods like .intersection(), .union(), .difference()")
+        }
+        this._inner = #{}
     }
 
     func add(val) {
-        this._m[val] = true
+        this._inner.add(val)
+        return nil
     }
 
     func has(val) {
-        return this._m.has(val)
+        return this._inner.has(val)
     }
 
     func remove(val) {
-        if (this._m.has(val)) {
-            this._m.delete(val)
-        }
+        this._inner.remove(val)
+        return nil
     }
 
     func size() {
-        return len(keys(this._m))
+        return this._inner.size()
     }
 
     func isEmpty() {
-        return this.size() == 0
+        return this._inner.size() == 0
     }
 
     func toArray() {
-        let result = []
-        for (k in keys(this._m)) {
-            result.push(k)
-        }
-        return result
+        return this._inner.toArray()
+    }
+
+    // Accept either a wrapped `collections.Set` (peel its `_inner`)
+    // or a bare native set. Pre-deprecation grain code couldn't have
+    // passed a native — but during the deprecation window callers
+    // are likely to mix the two while migrating, and rejecting one
+    // half with "Set has no method '_inner'" would be a worse
+    // experience than the wrapper is meant to provide.
+    // (Inside this file `Set` resolves to the class defined above,
+    // which is the same class instances of `collections.Set` are
+    // members of.)
+    func _peel(other) {
+        if (other is Set) { return other._inner }
+        return other
     }
 
     func union(other) {
-        let result = Set()
-        for (k in keys(this._m))       { result.add(k) }
-        for (k in keys(other._m))      { result.add(k) }
-        return result
+        return _wrapSet(this._inner.union(this._peel(other)))
     }
 
     func intersect(other) {
-        let result = Set()
-        // Iterate the smaller side for better practical performance.
-        let a = this._m
-        let b = other._m
-        if (len(keys(b)) < len(keys(a))) { a = other._m; b = this._m }
-        for (k in keys(a)) {
-            if (b.has(k)) { result.add(k) }
-        }
-        return result
+        return _wrapSet(this._inner.intersection(this._peel(other)))
     }
 
     func difference(other) {
-        let result = Set()
-        for (k in keys(this._m)) {
-            if (!other._m.has(k)) { result.add(k) }
-        }
-        return result
+        return _wrapSet(this._inner.difference(this._peel(other)))
     }
 }
 

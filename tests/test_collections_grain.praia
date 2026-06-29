@@ -59,9 +59,13 @@ testing.test("Queue: dequeue on empty throws", lam{ in
 })
 
 // ── Set ───────────────────────────────────────────────────────
+// `collections.Set` is now a deprecated wrapper around the native
+// `#{}` set (see tests/test_grain_set_deprecation.praia for the
+// wrapper-specific coverage). These tests exercise the native API,
+// which is what new code should use.
 
-testing.test("Set: add / has / remove", lam{ in
-    let s = collections.Set()
+testing.test("native set: add / has / remove", lam{ in
+    let s = #{}
     s.add(1)
     s.add("hello")
     s.add(true)
@@ -74,35 +78,33 @@ testing.test("Set: add / has / remove", lam{ in
     testing.expectEqual(s.size(), 2, nil)
 })
 
-testing.test("Set: add is idempotent (no duplicates)", lam{ in
-    let s = collections.Set()
+testing.test("native set: add is idempotent (no duplicates)", lam{ in
+    let s = #{}
     s.add("x")
     s.add("x")
     s.add("x")
     testing.expectEqual(s.size(), 1, "three adds of same value → size 1")
 })
 
-testing.test("Set: union / intersect / difference", lam{ in
-    let a = collections.Set()
-    for (v in [1, 2, 3, 4]) { a.add(v) }
-    let b = collections.Set()
-    for (v in [3, 4, 5, 6]) { b.add(v) }
+testing.test("native set: union / intersection / difference", lam{ in
+    let a = #{1, 2, 3, 4}
+    let b = #{3, 4, 5, 6}
 
     let u = sort(a.union(b).toArray())
     testing.expectEqual(u, [1, 2, 3, 4, 5, 6], nil)
 
-    let i = sort(a.intersect(b).toArray())
+    let i = sort(a.intersection(b).toArray())
     testing.expectEqual(i, [3, 4], nil)
 
     let d = sort(a.difference(b).toArray())
     testing.expectEqual(d, [1, 2], "elements in a but not in b")
 })
 
-testing.test("Set: large-N regression (O(1) add/has)", lam{ in
-    // Pre-refactor Set was array-backed and O(n) per add; 10k inserts
-    // were ~50M comparisons. Map-backed now, so this should complete
-    // near-instantly.
-    let s = collections.Set()
+testing.test("native set: large-N regression (O(1) add/has)", lam{ in
+    // Pre-refactor `collections.Set` was array-backed and O(n) per
+    // add; 10k inserts were ~50M comparisons. Native sets are
+    // hash-backed in C++ — completes near-instantly.
+    let s = #{}
     for (i in 0..10000) { s.add(i) }
     testing.expectEqual(s.size(), 10000, nil)
     testing.expect(s.has(5000), nil)
