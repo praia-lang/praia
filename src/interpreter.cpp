@@ -1,4 +1,5 @@
 #include "builtins.h"
+#include "errors.h"
 #include "fiber.h"
 #include "gc_heap.h"
 #include "grain_resolve.h"
@@ -826,7 +827,8 @@ void Interpreter::execute(const Stmt* stmt) {
         } catch (const RuntimeError& re) {
             callStack.resize(savedStackSize);
             auto catchEnv = gcNew<Environment>(env);
-            catchEnv->define(s->errorVar, Value(std::string(re.what())));
+            catchEnv->define(s->errorVar,
+                             praia::wrapRuntimeErrorForInterpreter(*this, re));
             try {
                 executeBlock(static_cast<const BlockStmt*>(s->catchBody.get()), catchEnv);
             } catch (...) {
@@ -1464,7 +1466,7 @@ Value Interpreter::evaluate(const Expr* expr) {
             leftVal = evaluate(e->left.get());
         } catch (const RuntimeError& err) {
             caught = true;
-            error = Value(std::string(err.what()));
+            error = praia::wrapRuntimeErrorForInterpreter(*this, err);
         } catch (const ThrowSignal& ts) {
             caught = true;
             error = ts.value;

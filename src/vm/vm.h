@@ -158,6 +158,13 @@ public:
     // grain-isolation rule: callers should invoke on the same VM
     // they'd query for OP_TAG_OR_CALL's global lookup.
     void scanCallableGlobals(std::vector<std::string>& out) const;
+
+    // Look up a global by name and return its Value; returns nil
+    // Value if the name isn't defined. Used by the Error-class
+    // machinery in src/errors.cpp to fetch the `Error` (etc.) class
+    // during catch coercion.
+    Value lookupGlobal(const std::string& name) const;
+
 private:
 
     // Tagged-value typo defenses — see Interpreter for parity notes.

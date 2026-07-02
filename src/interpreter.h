@@ -248,10 +248,29 @@ class Interpreter {
         std::shared_ptr<Environment>, std::shared_ptr<Environment>,
         const std::vector<StmtPtr>&, std::shared_ptr<PraiaGenerator>);
 public:
-    Interpreter();
+    // Sentinel for the no-bootstrap constructor path. Used by
+    // vmRegisterNatives / callable-fallback sites that spin up a
+    // throwaway Interpreter just to source native registrations or
+    // provide a valid `Interpreter&` for a callable — none of which
+    // benefit from installing the Praia-side Error class hierarchy,
+    // and paying the parse+interpret cost on every such construction
+    // matters when the fallback fires per-callback.
+    struct NoErrorBootstrap {};
+
+    Interpreter() : Interpreter(true) {}
+    // Same registration path as the default ctor, minus the Error
+    // hierarchy bootstrap. See NoErrorBootstrap above.
+    explicit Interpreter(NoErrorBootstrap) : Interpreter(false) {}
     // Lightweight constructor for async tasks — shares globals, owns env
     explicit Interpreter(std::shared_ptr<Environment> sharedGlobals)
         : globals(sharedGlobals), env(sharedGlobals) {}
+private:
+    // Shared body for the two public constructors. `installErrorClasses`
+    // gates the Praia-side Error hierarchy bootstrap at the end of
+    // native registration; throwaway interpreters (vm_natives, VM
+    // callable-fallback) pass false to skip it.
+    explicit Interpreter(bool installErrorClasses);
+public:
     bool interpret(const std::vector<StmtPtr>& program);
     void interpretRepl(const std::vector<StmtPtr>& program);
     void setArgs(const std::vector<std::string>& args);

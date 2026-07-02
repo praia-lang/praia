@@ -1,6 +1,7 @@
 #include "builtins.h"
 #include "builtins/scope_guards.h"
 #include "deprecation.h"
+#include "errors.h"
 #include "gc_heap.h"
 #include "grain_resolve.h"
 #include "interpreter.h"
@@ -131,7 +132,7 @@ void installDefaultSignalHandlers() {
     sigaction(SIGINT, &sa, nullptr);
 }
 
-Interpreter::Interpreter() {
+Interpreter::Interpreter(bool installErrorClasses) {
     globals = gcNew<Environment>();
     env = globals;
     Interpreter* self = this;
@@ -4546,6 +4547,16 @@ Interpreter::Interpreter() {
 
             return Value(moduleMap);
         })));
+
+    // Install the builtin Error class hierarchy. Runs after every
+    // native/global is registered so the bootstrap source can
+    // reference `str`, `super`, etc. See src/errors.cpp for the
+    // class definitions. Skipped for throwaway interpreters
+    // (Interpreter::NoErrorBootstrap) — those never surface caught
+    // errors to user code.
+    if (installErrorClasses) {
+        praia::bootstrapErrorClasses(*this);
+    }
 }
 
 // Process-exit teardown for plugins that exported praia_at_exit.

@@ -1026,38 +1026,83 @@ try {
 
 ### throw
 
-Throw any value as an error. If not caught by a `try/catch`, the program terminates.
+Throw any value as an error. Praia ships a builtin **`Error` class hierarchy** — `Error` base plus typed subclasses (`TypeError`, `ValueError`, `IndexError`, `KeyError`, `NameError`, `AssertionError`, `IOError`, `NetworkError`, `HTTPError`, `TimeoutError`, `ParseError`) — that lets user code and the engine surface structured errors instead of bare strings. If not caught by a `try/catch`, the program terminates.
 
 ```praia
-func divide(a, b) {
-    if (b == 0) {
-        throw "division by zero"
-    }
-    return a / b
-}
-
 try {
-    print(divide(10, 0))
-} catch (err) {
-    print("error:", err)     // error: division by zero
+    if (!config.has("api_key")) {
+        throw ConfigError("missing api_key")   // user subclass, see below
+    }
+} catch (e) {
+    match (e) {
+        is ConfigError  { print("config: " + e.message) }
+        is IOError      { print("io: " + str(e.errno)) }
+        _               { print("other: " + str(e)) }
+    }
 }
 ```
 
-You can throw any value — strings, numbers, maps:
+**User throws are unchanged** — anything you `throw` still arrives at `catch (err)` verbatim. Strings stay strings, maps stay maps, tagged values stay tagged.
 
 ```praia
-throw {code: 404, message: "not found"}
+throw "boom"                                // catch (err) → err == "boom"
+throw {code: 404, message: "not found"}     // catch (err) → err.code, err.message
 ```
 
-Runtime errors (type errors, index out of bounds, etc.) are also caught:
+**Engine runtime errors** (type errors, index out of bounds, division by zero, IO failures, HTTP failures, etc.) arrive at `catch (err)` as `Error` **instances**. Reach the message via `.message` or `str(err)`:
 
 ```praia
 try {
     let arr = [1, 2, 3]
     print(arr[99])
-} catch (err) {
-    print(err)              // Array index out of bounds
+} catch (e) {
+    print(e is Error)      // true
+    print(e.type)          // "Error" (subclass name once the site migrates)
+    print(e.message)       // "Array index out of bounds"
+    print(str(e))          // "Error: Array index out of bounds"
 }
+```
+
+`Error` includes a small set of string-forwarding shims — `.contains(sub)`, `.startsWith(prefix)`, `.endsWith(suffix)` — that delegate to the stringified form so existing `err.contains("Division")` idioms keep working. For concat, use `str(err) + "…"` — the `+` operator is deliberately not overloaded on Error.
+
+#### Builtin Error subclasses
+
+| Class | Extends | Typical fields | When to use |
+|---|---|---|---|
+| `Error` | — | `.message`, `.type`, `.line`, `.column` | Base class. `err is Error` catches every builtin type. |
+| `TypeError` | `Error` | | Value of the wrong type in an operation. |
+| `ValueError` | `Error` | | Right type, invalid value (parse failure, out of range). |
+| `NameError` | `Error` | | Undefined variable / property / method. |
+| `IndexError` | `Error` | `.index` | Out-of-bounds array/string access. |
+| `KeyError` | `Error` | `.key` | Missing map key. |
+| `AssertionError` | `Error` | | Assertion failure (`assert`, `testing.expect`). |
+| `IOError` | `Error` | `.path`, `.errno` | Filesystem, subprocess, generic OS. |
+| `NetworkError` | `IOError` | `.host`, `.port`, `.errno` | TCP/UDP/DNS failures. |
+| `HTTPError` | `IOError` | `.status`, `.url`, `.body` | HTTP-level failures. |
+| `TimeoutError` | `IOError` | | Any wait timeout. |
+| `ParseError` | `Error` | `.line`, `.column`, `.source` | Parse failures (`json.parse`, `yaml.parse`, sqlite `prepare`). |
+
+Each takes a message string plus optional per-class fields as positional args (with `nil` defaults). Field access matches the table above.
+
+```praia
+throw IOError("no such file", "/etc/config", 2)
+throw HTTPError("bad gateway", 502, "http://api/x", "upstream error")
+throw ParseError("unexpected token", 12, 4, source_snippet)
+```
+
+#### Subclassing in user code
+
+```praia
+class ConfigError extends ValueError {
+    func init(message, path) {
+        super.init(message)
+        this.type = "ConfigError"
+        this.path = path
+    }
+}
+
+throw ConfigError("bad json", "/etc/x")
+// `is ConfigError`, `is ValueError`, `is Error` all match in a catch.
 ```
 
 ### defer

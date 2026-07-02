@@ -1,5 +1,6 @@
 #include "vm.h"
 #include "../builtins.h"
+#include "../errors.h"
 #include "../gc_heap.h"
 #include "../signal_state.h"
 #include "../grain_resolve.h"
@@ -687,14 +688,15 @@ bool VM::callValue(Value callee, int argCount, int line) {
       } catch (const ExitSignal&) {
           throw; // propagate sys.exit() to main
       } catch (const RuntimeError& err) {
-          if (tryHandleError(Value(std::string(err.what())))) return true;
+          if (tryHandleError(praia::wrapRuntimeErrorForVm(*this, err))) return true;
           runtimeError(err.what(), err.line > 0 ? err.line : line);
           return false;
       }
     }
 
     // Not callable at all (e.g., 42())
-    if (tryHandleError(Value(std::string("Can only call functions")))) return true;
+    if (tryHandleError(praia::wrapRuntimeErrorForVm(*this,
+            RuntimeError("Can only call functions", line)))) return true;
     runtimeError("Can only call functions", line);
     return false;
 }
@@ -714,6 +716,22 @@ void VM::scanCallableGlobals(std::vector<std::string>& out) const {
             : globals[slot];
         if (v.isCallable()) out.push_back(name);
     }
+}
+
+Value VM::lookupGlobal(const std::string& name) const {
+    auto it = globalIndices.find(name);
+    if (it == globalIndices.end()) return Value();
+    int slot = it->second;
+    if (slot < 0 || slot >= static_cast<int>(globals.size())) return Value();
+    // Same task-VM lazy-snapshot dance as scanCallableGlobals — if
+    // the slot hasn't been materialised in this task yet, read from
+    // the parent's snapshot.
+    if (isTaskVm_ && slot < static_cast<int>(loadedMask_.size())
+                  && !loadedMask_[slot]
+                  && slot < static_cast<int>(globalsSnapshot_.size())) {
+        return globalsSnapshot_[slot];
+    }
+    return globals[slot];
 }
 
 void VM::unwindFramesAndRunDefers(int targetFrameCount) {
@@ -955,6 +973,17 @@ Value VM::loadGrain(const std::string& importPath, int line) {
 VM::Result VM::run(std::shared_ptr<CompiledFunction> script) {
     GcHeap::current().setRootMarker([this](GcHeap& h) { gcMarkRoots(h); });
 
+    // Reset transient VM state so run() is safely re-entrant. The
+    // Error-class bootstrap (errors.cpp) calls run() once at VM
+    // setup; without this reset, its trailing OP_RETURN leaves the
+    // script's return value at stack[0] and stackTop=1, so a
+    // subsequent user-script run() lands its own script closure at
+    // stack[1] while frames[0].baseSlot=0 keeps pointing at the
+    // stale value. Mirrors runRepl's opening lines.
+    stackTop = 0;
+    frameCount = 0;
+    exceptionHandlers.clear();
+
     // Create a closure for the top-level script
     allClosures.push_back(std::make_unique<ObjClosure>(script));
     auto* scriptClosure = allClosures.back().get();
@@ -968,6 +997,11 @@ VM::Result VM::run(std::shared_ptr<CompiledFunction> script) {
     frames[0].ip = script->chunk.code.data();
     frames[0].baseSlot = 0;
     frames[0].missingArgsMask = 0;
+    // Match runRepl() below: clear the definingClass slot so a
+    // previous run() (e.g. the Error-class bootstrap) that left a
+    // class context in frames[0] doesn't leak into this run's
+    // top-level dispatch.
+    frames[0].definingClass = nullptr;
     frameCount = 1;
 
     return execute();
@@ -1012,7 +1046,7 @@ VM::Result VM::execute(int baseFrameCount_) {
     #define CURRENT_COLUMN() (FRAME.chunk().getColumn(CURRENT_OFFSET()))
     #define RUNTIME_ERR(msg) { \
         std::string _msg = (msg); int _line = CURRENT_LINE(); int _col = CURRENT_COLUMN(); \
-        if (tryHandleError(Value(_msg))) continue; \
+        if (tryHandleError(praia::wrapRuntimeErrorForVm(*this, RuntimeError(_msg, _line, _col)))) continue; \
         /* Print first (formatStackTrace reads live frames), then \
            drain defers so top-level cleanup still fires when an \
            engine-level error (e.g. type mismatch, missing key) \
@@ -1055,7 +1089,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                     hasUserHandler = g_signalHandlers.count(SIGINT) > 0;
                 }
                 if (!hasUserHandler) {
-                    if (tryHandleError(Value(std::string("Interrupted")))) continue;
+                    if (tryHandleError(praia::wrapRuntimeErrorForVm(*this,
+                            RuntimeError("Interrupted", CURRENT_LINE(), CURRENT_COLUMN())))) continue;
                     runtimeError("Interrupted", CURRENT_LINE(), CURRENT_COLUMN());
                     FAIL_AND_DRAIN_DEFERS();
                 }
@@ -1925,7 +1960,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 try {
                     push(getStringMethod(obj.asString(), name, CURRENT_LINE()));
                 } catch (const RuntimeError& err) {
-                    if (tryHandleError(Value(std::string(err.what())))) break;
+                    if (tryHandleError(praia::wrapRuntimeErrorForVm(*this, err))) break;
                     runtimeError(err.what(), CURRENT_LINE());
                     FAIL_AND_DRAIN_DEFERS();
                 }
@@ -1935,7 +1970,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 try {
                     push(getArrayMethod(obj.asArray(), name, CURRENT_LINE(), nullptr, this));
                 } catch (const RuntimeError& err) {
-                    if (tryHandleError(Value(std::string(err.what())))) break;
+                    if (tryHandleError(praia::wrapRuntimeErrorForVm(*this, err))) break;
                     runtimeError(err.what(), CURRENT_LINE());
                     FAIL_AND_DRAIN_DEFERS();
                 }
@@ -1945,7 +1980,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 try {
                     push(getSetMethod(obj.asSet(), name, CURRENT_LINE()));
                 } catch (const RuntimeError& err) {
-                    if (tryHandleError(Value(std::string(err.what())))) break;
+                    if (tryHandleError(praia::wrapRuntimeErrorForVm(*this, err))) break;
                     runtimeError(err.what(), CURRENT_LINE());
                     FAIL_AND_DRAIN_DEFERS();
                 }
@@ -2832,7 +2867,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                     }).share();
             } else {
                 // Bound methods, etc. — run synchronously
-                Interpreter dummy;
+                Interpreter dummy{Interpreter::NoErrorBootstrap{}};
                 Value result = callable->call(dummy, args);
                 std::promise<Value> p;
                 p.set_value(std::move(result));

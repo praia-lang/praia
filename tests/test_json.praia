@@ -42,7 +42,10 @@ testing.test("parse errors include context", lam{ in
     try {
         json.parse("{\"foo\": 12x}")
     } catch (err) {
-        msg = err
+        // Engine RuntimeError is now caught as an `Error` instance;
+        // reach the message text via `.message` (or `str(err)` for
+        // the class-prefixed form). See src/errors.cpp.
+        msg = err.message
     }
     // Should include both the position and the surrounding text
     testing.expect(msg.contains("position"), nil)
