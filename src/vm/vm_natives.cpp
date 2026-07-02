@@ -1,4 +1,5 @@
 #include "vm.h"
+#include "../errors.h"
 #include "../gc_heap.h"
 #include "../interpreter.h"
 #include "../environment.h"
@@ -469,4 +470,10 @@ void vmRegisterNatives(VM& vm) {
             }
             return Value(rest);
         }));
+
+    // Install the builtin Error class hierarchy after every native is
+    // registered so the bootstrap source can reference `str`, `super`,
+    // etc. via normal name resolution. Mirrors the tree-walker's
+    // call in Interpreter::Interpreter().
+    praia::bootstrapErrorClasses(vm);
 }

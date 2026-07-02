@@ -1,0 +1,205 @@
+use "testing"
+
+// Praia's builtin Error class hierarchy (see src/errors.cpp).
+// Every engine-thrown runtime error is caught as an `Error`
+// instance; user code can construct and throw typed subclasses
+// (`TypeError`, `IOError`, `HTTPError`, …) and dispatch via `is`
+// or `match { is X { ... } }` inside a catch.
+//
+// Backwards-compat contract:
+//   - User `throw <expr>` still flows verbatim through the catch
+//     boundary — strings stay strings, maps stay maps, tagged values
+//     stay tagged.
+//   - Engine RuntimeError catches now arrive as base `Error` instances
+//     rather than bare strings. `str(err)` and `err.message` give
+//     the message text; a small set of string-forwarding shims
+//     (`.contains`, `.startsWith`, `.endsWith`) delegate to
+//     `str(this).<op>()` so existing `err.contains(...)` idioms keep
+//     working. `err + "suffix"` is deliberately not supported —
+//     callers concat with `str(err)`.
+
+testing.test("base Error construction, .type, .message, __str", lam{ in
+    let e = Error("something failed")
+    testing.expect(e is Error, "Error() returns an Error instance")
+    testing.expectEqual(e.type, "Error", "type is the class name")
+    testing.expectEqual(e.message, "something failed", ".message preserves input")
+    testing.expectEqual(str(e), "Error: something failed", "__str renders 'Type: message'")
+})
+
+testing.test("each subclass constructs, records its type, and is-Errors", lam{ in
+    let subclasses = [
+        [TypeError, "TypeError"],
+        [ValueError, "ValueError"],
+        [NameError, "NameError"],
+        [IndexError, "IndexError"],
+        [KeyError, "KeyError"],
+        [AssertionError, "AssertionError"],
+        [IOError, "IOError"],
+        [NetworkError, "NetworkError"],
+        [HTTPError, "HTTPError"],
+        [TimeoutError, "TimeoutError"],
+        [ParseError, "ParseError"],
+    ]
+    for (pair in subclasses) {
+        let ctor = pair[0]
+        let name = pair[1]
+        let e = ctor("m")
+        testing.expect(e is Error, name + " is Error")
+        testing.expectEqual(e.type, name, name + ".type == class name")
+        testing.expectEqual(e.message, "m", name + ".message == 'm'")
+        testing.expectEqual(str(e), name + ": m", "__str prefixes with class name")
+    }
+})
+
+testing.test("IOError subclasses: NetworkError, HTTPError, TimeoutError", lam{ in
+    let n = NetworkError("dns down")
+    let h = HTTPError("server error")
+    let t = TimeoutError("read timed out")
+    testing.expect(n is IOError,   "NetworkError extends IOError")
+    testing.expect(h is IOError,   "HTTPError extends IOError")
+    testing.expect(t is IOError,   "TimeoutError extends IOError")
+    testing.expect(n is Error,     "NetworkError is Error via chain")
+    testing.expect(!(n is HTTPError), "NetworkError is not HTTPError")
+})
+
+testing.test("subclass fields land on the instance", lam{ in
+    let io = IOError("no such file", "/etc/config", 2)
+    testing.expectEqual(io.path,  "/etc/config", "path field")
+    testing.expectEqual(io.errno, 2,             "errno field")
+
+    let http = HTTPError("bad gateway", 502, "http://api/x", "upstream error")
+    testing.expectEqual(http.status, 502)
+    testing.expectEqual(http.url,    "http://api/x")
+    testing.expectEqual(http.body,   "upstream error")
+
+    let parse = ParseError("unexpected token", 12, 4, "json input")
+    testing.expectEqual(parse.line,   12)
+    testing.expectEqual(parse.column, 4)
+    testing.expectEqual(parse.source, "json input")
+})
+
+testing.test("match { is ... } dispatch on catch", lam{ in
+    let dispatched = ""
+    try {
+        throw IOError("missing")
+    } catch (e) {
+        match (e) {
+            is TypeError    { dispatched = "type" }
+            is IOError      { dispatched = "io" }
+            _               { dispatched = "unknown" }
+        }
+    }
+    testing.expectEqual(dispatched, "io",
+                        "IOError arm fires; base-class arms match too but IO is more specific")
+})
+
+testing.test("engine RuntimeError arrives as an Error instance", lam{ in
+    let caught = nil
+    try {
+        let x = 1 / 0
+    } catch (e) {
+        caught = e
+    }
+    testing.expect(caught is Error, "engine RuntimeError → Error instance")
+    testing.expect(str(caught).contains("Division"),
+                   "message survives the wrap")
+    testing.expect(caught.contains("Division"),
+                   ".contains shim forwards to the stringified form")
+    testing.expect(caught.message.contains("Division"),
+                   ".message field gives the raw text")
+})
+
+testing.test("user-thrown strings still flow verbatim", lam{ in
+    let s = nil; let m = nil; let t = nil
+    try { throw "boom" }              catch (e) { s = e }
+    try { throw {k: 1} }              catch (e) { m = e }
+    try { throw Ok(42) }              catch (e) { t = e }
+    testing.expectEqual(s, "boom",              "user string throw unchanged")
+    testing.expectEqual(m.k, 1,                 "user map throw unchanged")
+    testing.expect(t is "tagged",               "user tagged throw unchanged")
+})
+
+testing.test("user code can subclass builtin Errors", lam{ in
+    class ConfigError extends ValueError {
+        func init(msg, path) {
+            super.init(msg)
+            this.type = "ConfigError"
+            this.path = path
+        }
+    }
+    let caught = nil
+    try {
+        throw ConfigError("bad json", "/etc/x")
+    } catch (e) {
+        caught = e
+    }
+    testing.expect(caught is ConfigError, "subclass identity preserved")
+    testing.expect(caught is ValueError,  "walks up to ValueError")
+    testing.expect(caught is Error,       "walks up to Error base")
+    testing.expectEqual(caught.path, "/etc/x", "custom field survives")
+    testing.expectEqual(caught.message, "bad json", "message survives")
+})
+
+testing.test("re-throwing an Error instance keeps its class", lam{ in
+    let out = nil
+    try {
+        try {
+            throw HTTPError("upstream 500", 500)
+        } catch (inner) {
+            throw inner
+        }
+    } catch (outer) {
+        out = outer
+    }
+    testing.expect(out is HTTPError, "re-thrown instance keeps its class")
+    testing.expectEqual(out.status, 500,   "and its fields")
+})
+
+testing.test("string-forwarding compat shims work as documented", lam{ in
+    // The shims forward against `.message` (NOT `str(this)`) so the
+    // substring space matches the pre-hierarchy `err.what()` — a
+    // caller checking `err.contains("Error")` on a Division-by-zero
+    // error should NOT get a false positive from the `"Error: "`
+    // prefix `str(this)` prepends. See src/errors.cpp for the
+    // matching design note.
+    let e = IOError("no such file")
+    testing.expect(e.contains("no such"),  ".contains sees the message")
+    testing.expect(!e.contains("IOError"), ".contains does NOT see the class-name prefix")
+    testing.expect(e.startsWith("no"),     ".startsWith checks the message directly")
+    testing.expect(e.endsWith("file"),     ".endsWith checks the message directly")
+    // We don't advertise `e + "suffix"` — see errors.cpp for why.
+})
+
+testing.test("--strict-tags doesn't fire on Error class names", lam{ in
+    // Error class names are Capitalized like tag constructors. Verify
+    // that TypeError("x") under --strict-tags stays a normal class
+    // call (not a tag-typo warning), because the class IS defined.
+    let script = "let e = TypeError(\"bad\"); print(e.type)"
+    let vm   = sys.exec(["./praia",          "--strict-tags", "-c", script], 5000)
+    let tree = sys.exec(["./praia", "--tree", "--strict-tags", "-c", script], 5000)
+    testing.expectEqual(vm.exitCode,   0, "VM: TypeError() is a class call, not a tag")
+    testing.expectEqual(tree.exitCode, 0, "tree: same")
+    testing.expect(vm.stdout.contains("TypeError"),   "VM stdout")
+    testing.expect(tree.stdout.contains("TypeError"), "tree stdout")
+})
+
+testing.test("uncaught Error surfaces with a non-zero exit + stderr diagnostic", lam{ in
+    // The uncaught-error printer currently uses Value::toString on the
+    // thrown value, which for instances renders as "<instance>" rather
+    // than calling __str. Making the printer aware of the __str dunder
+    // is a small follow-up — see Out of scope in the plan — but the
+    // contract this test pins is the load-bearing one: an uncaught
+    // Error still exits non-zero with an "Uncaught error" diagnostic
+    // on stderr, so nothing is silently swallowed.
+    let script = "throw ValueError(\"bad input\")"
+    let vm   = sys.exec(["./praia",          "-c", script], 5000)
+    let tree = sys.exec(["./praia", "--tree", "-c", script], 5000)
+    testing.expect(vm.exitCode   != 0, "VM exits non-zero on uncaught throw")
+    testing.expect(tree.exitCode != 0, "tree exits non-zero on uncaught throw")
+    testing.expect(vm.stderr.contains("Uncaught error"),
+                   "VM stderr labels the diagnostic")
+    testing.expect(tree.stderr.contains("Uncaught error"),
+                   "tree stderr labels the diagnostic")
+})
+
+testing.done()

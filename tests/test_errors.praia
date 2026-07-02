@@ -28,7 +28,12 @@ testing.test("catch runtime error", lam{ in
     } catch (err) {
         caught = err
     }
-    testing.expect(caught.contains("Division"), nil)
+    // Engine-thrown runtime errors are now `Error` instances (see
+    // src/errors.cpp). Reach the message via .message or `str(err)`
+    // — the raw catch var is a class instance now, not a bare string.
+    testing.expect(caught is Error, "engine RuntimeError arrives as an Error instance")
+    testing.expect(str(caught).contains("Division"), nil)
+    testing.expect(caught.message.contains("Division"), nil)
 })
 
 // ── Global assert builtin ─────────────────────────────────────
@@ -46,13 +51,17 @@ testing.test("assert: truthy condition returns nil, no throw", lam{ in
 
 testing.test("assert: falsy condition throws with default message", lam{ in
     let caught = nil
-    try { assert(false) } catch (e) { caught = str(e) }
+    // `.message` is the raw text (no class-name prefix). `str(e)`
+    // would return "Error: assertion failed" — check the message
+    // field so this test is stable if `assert` later migrates to
+    // throwing `AssertionError` specifically.
+    try { assert(false) } catch (e) { caught = e.message }
     testing.expectEqual(caught, "assertion failed", nil)
 })
 
 testing.test("assert: falsy condition with custom message", lam{ in
     let caught = nil
-    try { assert(false, "math broken") } catch (e) { caught = str(e) }
+    try { assert(false, "math broken") } catch (e) { caught = e.message }
     testing.expectEqual(caught, "assertion failed: math broken", nil)
 })
 
@@ -73,7 +82,7 @@ testing.test("assert: non-string message is coerced via toString", lam{ in
     // Lets the user pass a number, map, or other value as the
     // message without forcing them to str(...) it first.
     let caught = nil
-    try { assert(false, 42) } catch (e) { caught = str(e) }
+    try { assert(false, 42) } catch (e) { caught = e.message }
     testing.expectEqual(caught, "assertion failed: 42", nil)
 })
 
