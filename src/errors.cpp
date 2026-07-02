@@ -9,7 +9,10 @@
 #include "vm/vm.h"
 
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <vector>
 
 namespace praia {
 
@@ -217,7 +220,13 @@ void bootstrapErrorClasses(Interpreter& interp) {
 void bootstrapErrorClasses(VM& vm) {
     auto program = parseBootstrapSource();
     if (!program) return;
-    retainBootstrapProgram(program);
+    // NOTE: no retainBootstrapProgram call here. The VM lowers the
+    // AST to bytecode inside `compiler.compile(*program)`; the
+    // resulting PraiaClass entries hold their methods in
+    // `vmMethods` (bytecode-based) and don't reference the AST
+    // nodes. Once the compiled script has run, the AST can be
+    // freed. Retaining it per VM would leak a copy per engine an
+    // embedder constructs.
     Compiler compiler;
     auto script = compiler.compile(*program);
     if (!script) {
@@ -255,6 +264,24 @@ Value makeErrorInstance(const Value& classValue,
     inst->fields["type"] = Value(className);
     inst->fields["line"] = Value(static_cast<int64_t>(line));
     inst->fields["column"] = Value(static_cast<int64_t>(column));
+    // Populate every subclass-declared field with nil so a caller
+    // that dispatches on the exact class (`e is IOError`) can safely
+    // read `e.path` / `e.errno` / `e.status` / … without getting a
+    // "no such property" runtime error. C++ callers of this helper
+    // bypass the class's Praia-side init (which is where those
+    // defaults would normally be set), so we mirror the field shape
+    // here. Keep in sync with the class definitions in
+    // `kErrorClassesSource`.
+    inst->fields["index"]  = Value();  // IndexError
+    inst->fields["key"]    = Value();  // KeyError
+    inst->fields["path"]   = Value();  // IOError (+ inherited)
+    inst->fields["errno"]  = Value();  // IOError, NetworkError
+    inst->fields["host"]   = Value();  // NetworkError
+    inst->fields["port"]   = Value();  // NetworkError
+    inst->fields["status"] = Value();  // HTTPError
+    inst->fields["url"]    = Value();  // HTTPError
+    inst->fields["body"]   = Value();  // HTTPError
+    inst->fields["source"] = Value();  // ParseError
     return Value(inst);
 }
 

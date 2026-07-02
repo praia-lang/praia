@@ -11,12 +11,15 @@ use "testing"
 //     boundary — strings stay strings, maps stay maps, tagged values
 //     stay tagged.
 //   - Engine RuntimeError catches now arrive as base `Error` instances
-//     rather than bare strings. `str(err)` and `err.message` give
-//     the message text; a small set of string-forwarding shims
-//     (`.contains`, `.startsWith`, `.endsWith`) delegate to
-//     `str(this).<op>()` so existing `err.contains(...)` idioms keep
-//     working. `err + "suffix"` is deliberately not supported —
-//     callers concat with `str(err)`.
+//     rather than bare strings. `str(err)` returns "<Type>: <message>"
+//     (via `__str`); `err.message` is the raw text. A small set of
+//     string-forwarding shims (`.contains`, `.startsWith`,
+//     `.endsWith`) delegate to `this.message` — NOT `str(this)` —
+//     so their substring space matches the pre-hierarchy
+//     `err.what()`-only semantics and `err.contains("Error")` on a
+//     Division-by-zero error doesn't get a false positive from the
+//     `"Error: "` prefix. `err + "suffix"` is deliberately not
+//     supported — callers concat with `str(err)`.
 
 testing.test("base Error construction, .type, .message, __str", lam{ in
     let e = Error("something failed")
@@ -181,6 +184,18 @@ testing.test("--strict-tags doesn't fire on Error class names", lam{ in
     testing.expectEqual(tree.exitCode, 0, "tree: same")
     testing.expect(vm.stdout.contains("TypeError"),   "VM stdout")
     testing.expect(tree.stdout.contains("TypeError"), "tree stdout")
+    // stderr must be silent — a spurious tag-typo warning or any
+    // other diagnostic would defeat the point of the test. If
+    // --strict-tags ever leaks a warning for `TypeError(...)` we
+    // want the regression caught here, not downstream.
+    testing.expect(!vm.stderr.contains("Warning"),
+                   "VM stderr must not warn about the Error class name")
+    testing.expect(!vm.stderr.contains("did you mean"),
+                   "VM stderr must not suggest a typo alternative")
+    testing.expect(!tree.stderr.contains("Warning"),
+                   "tree stderr must not warn about the Error class name")
+    testing.expect(!tree.stderr.contains("did you mean"),
+                   "tree stderr must not suggest a typo alternative")
 })
 
 testing.test("uncaught Error surfaces with a non-zero exit + stderr diagnostic", lam{ in

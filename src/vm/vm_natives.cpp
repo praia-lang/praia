@@ -50,14 +50,19 @@ Value callWithVM(VM& vm, std::shared_ptr<Callable> callable, const std::vector<V
     }
 
     // Fallback
-    Interpreter dummy;
+    Interpreter dummy{Interpreter::NoErrorBootstrap{}};
     return callable->call(dummy, args);
 }
 
 // Reuse ALL builtins from the tree-walker by creating an Interpreter
 // and copying its global environment into the VM.
 void vmRegisterNatives(VM& vm) {
-    Interpreter interp;
+    // Skip the Error-hierarchy bootstrap for this scratch Interpreter.
+    // We only harvest its native registrations here — the VM does its
+    // own Error bootstrap at the end of this function via
+    // `praia::bootstrapErrorClasses(vm)`. Paying the parse+interpret
+    // cost twice would just churn.
+    Interpreter interp{Interpreter::NoErrorBootstrap{}};
 
     auto globals = interp.getGlobals();
 

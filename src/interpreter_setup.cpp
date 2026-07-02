@@ -132,7 +132,7 @@ void installDefaultSignalHandlers() {
     sigaction(SIGINT, &sa, nullptr);
 }
 
-Interpreter::Interpreter() {
+Interpreter::Interpreter(bool installErrorClasses) {
     globals = gcNew<Environment>();
     env = globals;
     Interpreter* self = this;
@@ -4551,8 +4551,12 @@ Interpreter::Interpreter() {
     // Install the builtin Error class hierarchy. Runs after every
     // native/global is registered so the bootstrap source can
     // reference `str`, `super`, etc. See src/errors.cpp for the
-    // class definitions.
-    praia::bootstrapErrorClasses(*this);
+    // class definitions. Skipped for throwaway interpreters
+    // (Interpreter::NoErrorBootstrap) — those never surface caught
+    // errors to user code.
+    if (installErrorClasses) {
+        praia::bootstrapErrorClasses(*this);
+    }
 }
 
 // Process-exit teardown for plugins that exported praia_at_exit.

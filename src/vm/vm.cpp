@@ -2867,7 +2867,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                     }).share();
             } else {
                 // Bound methods, etc. — run synchronously
-                Interpreter dummy;
+                Interpreter dummy{Interpreter::NoErrorBootstrap{}};
                 Value result = callable->call(dummy, args);
                 std::promise<Value> p;
                 p.set_value(std::move(result));
