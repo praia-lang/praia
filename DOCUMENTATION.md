@@ -1,6 +1,6 @@
 # Praia Language Documentation
 
-Praia is a dynamically typed, interpreted programming language built in C++.
+Praia is a dynamically typed, interpreted programming language built in C++. You can also view the docs at [praia.sh](https://praia.sh).
 
 ## Table of Contents
 

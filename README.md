@@ -192,7 +192,7 @@ Praia is still in active development. The language is generally functional, but 
 
 ## Documentation
 
-See [DOCUMENTATION.md](DOCUMENTATION.md) for the complete reference.
+See [DOCUMENTATION.md](DOCUMENTATION.md) or [praia.sh](https://praia.sh) for the complete reference.
 
 ## License
 
