@@ -1,26 +1,66 @@
-// Run by test_async_native_callbacks.praia under the VM: a handler run by
-// `async server.listen` writes a global; the main script's value must not
-// change (the task has its own copy, as with `async f()`).
+// Run by test_async_native_callbacks.praia under the VM. A handler run by
+// `async server.listen` works on the task's snapshot of the globals, like
+// `async f()`: it doesn't see a global changed after the task started,
+// and its own writes don't reach the main script.
 let l = net.listen(0)
 let PORT = net.localAddr(l).port
 net.close(l)
 
+// Waits (up to 5 s) until something accepts connections on `port`
+func waitForServer(port) {
+    for (i in 0..100) {
+        try {
+            let probe = net.connect("127.0.0.1", port)
+            net.close(probe)
+            return nil
+        } catch (e) {
+            time.sleep(50)
+        }
+    }
+    throw "server on port %{port} didn't start"
+}
+
+// One request on a fresh connection; the response ends when the server
+// closes. net.recv returns "" on close and on timeout alike, so a read
+// that comes back empty only after the timeout means the response never
+// finished — an error, not a short response.
+func rawRequest(port, payload) {
+    let sock = net.connect("127.0.0.1", port)
+    net.setTimeout(sock, 5000)
+    net.send(sock, payload)
+    let resp = ""
+    while (true) {
+        let started = time.now()
+        let chunk = net.recv(sock, 4096)
+        if (chunk == nil || len(chunk) == 0) {
+            if (time.now() - started >= 4900) {
+                net.close(sock)
+                throw "rawRequest: timed out waiting for the response"
+            }
+            break
+        }
+        resp = resp + chunk
+    }
+    net.close(sock)
+    return resp
+}
+
+let label = "before"
 let counter = 0
 let server = http.createServer(lam{ req in
-    counter = counter + 100
-    return {status: 200, body: "counter=" + str(counter)}
+    if (req.path == "/write") {
+        counter = counter + 100
+        return {status: 200, body: "counter=" + str(counter)}
+    }
+    return {status: 200, body: "label=" + label}
 })
 async server.listen(PORT)
-time.sleep(100)
+waitForServer(PORT)
+label = "after"   // changed after the task started
 
-let sock = net.connect("127.0.0.1", PORT)
-net.send(sock, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-let resp = ""
-while (true) {
-    let chunk = net.recv(sock, 4096)
-    if (chunk == nil || len(chunk) == 0) { break }
-    resp = resp + chunk
-}
-net.close(sock)
-print(resp.contains("counter=100"), counter)
+let seen = rawRequest(PORT, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+let wrote = rawRequest(PORT, "GET /write HTTP/1.1\r\nHost: x\r\n\r\n")
+let seenBody = seen.split("\r\n\r\n")[1]
+let wroteBody = wrote.split("\r\n\r\n")[1]
+print(seenBody + " " + wroteBody + " main: counter=" + str(counter) + " label=" + label)
 sys.exit(0)

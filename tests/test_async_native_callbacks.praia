@@ -13,13 +13,39 @@ func freePort() {
     return port
 }
 
+// Waits (up to 5 s) until something accepts connections on `port`
+func waitForServer(port) {
+    for (i in 0..100) {
+        try {
+            let probe = net.connect("127.0.0.1", port)
+            net.close(probe)
+            return nil
+        } catch (e) {
+            time.sleep(50)
+        }
+    }
+    throw "server on port %{port} didn't start"
+}
+
+// One request on a fresh connection; the response ends when the server
+// closes. net.recv returns "" on close and on timeout alike, so a read
+// that comes back empty only after the timeout means the response never
+// finished — an error, not a short response.
 func rawRequest(port, payload) {
     let sock = net.connect("127.0.0.1", port)
+    net.setTimeout(sock, 5000)
     net.send(sock, payload)
     let resp = ""
     while (true) {
+        let started = time.now()
         let chunk = net.recv(sock, 4096)
-        if (chunk == nil || len(chunk) == 0) { break }
+        if (chunk == nil || len(chunk) == 0) {
+            if (time.now() - started >= 4900) {
+                net.close(sock)
+                throw "rawRequest: timed out waiting for the response"
+            }
+            break
+        }
         resp = resp + chunk
     }
     net.close(sock)
@@ -31,8 +57,6 @@ func statusOf(resp) {
     return int(resp.slice(9, 12))
 }
 
-let label = "main"
-
 let port = freePort()
 let server = http.createServer(lam{ req in
     if (req.path == "/boom") { throw "handler failed" }
@@ -42,10 +66,10 @@ let server = http.createServer(lam{ req in
             send("two")
         })
     }
-    return {status: 200, body: "label=" + label}
+    return {status: 200, body: "ok"}
 })
 async server.listen(port)
-time.sleep(100)
+waitForServer(port)
 
 testing.test("a throwing handler doesn't corrupt the main script", lam{ in
     for (i in 0..20) {
@@ -63,18 +87,15 @@ testing.test("a throwing handler doesn't corrupt the main script", lam{ in
     }
 })
 
-testing.test("the handler sees globals as they were when the task started", lam{ in
-    let r = rawRequest(port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-    testing.expectContains(r, "label=main", nil)
-})
-
-testing.test("a handler's writes to globals stay in the task (VM)", lam{ in
-    // Same isolation as `async f()`. VM only: the tree-walker shares the
+testing.test("the handler works on its own snapshot of the globals (VM)", lam{ in
+    // Same isolation as `async f()`: a global changed after the task
+    // started isn't seen by the handler, and the handler's own writes
+    // don't reach the main script. VM only: the tree-walker shares the
     // handler's environment with the main script instead.
     let r = sys.exec(["./praia", "tests/fixtures/async_native/global_writes.praia"], 20000)
     // Last line; the server prints its "listening" banner first
     let lines = r.stdout.split("\n")
-    testing.expectEqual(lines[len(lines) - 1], "true 0", r.stderr)
+    testing.expectEqual(lines[len(lines) - 1], "label=before counter=100 main: counter=0 label=after", r.stderr)
 })
 
 testing.test("SSE works through an async listen", lam{ in

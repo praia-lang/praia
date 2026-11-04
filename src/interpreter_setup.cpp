@@ -1988,11 +1988,22 @@ Interpreter::Interpreter(bool installErrorClasses) {
     // type including its ValueHash / ValueKeyEqual template params
     // without having to spell them.
     auto applyHttpOpts = [](HttpOptions& opts, const auto& m) {
+        // Seconds → milliseconds. nil or a nonpositive number means no
+        // limit; anything else that isn't a finite number is an error
+        // rather than silently "no limit". Large values are clamped to
+        // the int range instead of overflowing.
         auto secsToMs = [](const Value& v) -> int {
-            if (!v.isNumber()) return -1;
+            if (v.isNil()) return -1;
+            if (!v.isNumber())
+                throw RuntimeError("timeouts must be a number of seconds", 0);
             double secs = v.asNumber();
+            if (!std::isfinite(secs))
+                throw RuntimeError("timeouts must be a finite number of seconds", 0);
             if (secs <= 0) return -1;
-            return static_cast<int>(secs * 1000.0);
+            double ms = secs * 1000.0;
+            if (ms >= static_cast<double>(std::numeric_limits<int>::max()))
+                return std::numeric_limits<int>::max();
+            return std::max(1, static_cast<int>(ms));
         };
         if (m.count("timeout")) {
             // Shorthand: applies to all three axes simultaneously.
@@ -4510,9 +4521,70 @@ Interpreter::Interpreter(bool installErrorClasses) {
     // just the SELECT — so a second statement is an error now (trailing
     // whitespace, semicolons and comments are fine). NUL bytes are
     // rejected too: SQLite would stop reading the text there.
+    //
+    // The check happens before anything is prepared: SQLite applies some
+    // pragmas (PRAGMA foreign_keys=OFF, ...) while preparing, so even a
+    // rejected string must not reach sqlite3_prepare_v2. The first
+    // statement ends at the shortest prefix ending in ';' that
+    // sqlite3_complete accepts — it knows about string literals and
+    // trigger bodies, so semicolons inside those don't count.
     auto sqlitePrepareOne = [](sqlite3* conn, const std::string& sql, const char* fn) {
         if (sql.find('\0') != std::string::npos)
             throw RuntimeError(std::string(fn) + "(): SQL contains a NUL byte", 0);
+        // Only whitespace, semicolons and comments from `t` on?
+        auto onlyIgnorable = [](const char* t) {
+            while (t && *t) {
+                if (std::isspace(static_cast<unsigned char>(*t)) || *t == ';') {
+                    t++;
+                } else if (t[0] == '-' && t[1] == '-') {
+                    while (*t && *t != '\n') t++;
+                } else if (t[0] == '/' && t[1] == '*') {
+                    const char* end = std::strstr(t + 2, "*/");
+                    t = end ? end + 2 : t + std::strlen(t);   // unterminated: comment to the end
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        };
+        auto moreThanOne = [fn]() {
+            return RuntimeError(std::string(fn) +
+                "() runs one SQL statement; the text has more after the first — call it once per statement", 0);
+        };
+        // Only semicolons outside string literals, quoted identifiers and
+        // comments can end a statement, so only those are offered to
+        // sqlite3_complete — usually just one, a few inside a trigger
+        // body. One copy of the text, cut in place at each candidate.
+        std::string buf = sql;
+        for (size_t i = 0; i < buf.size(); i++) {
+            char c = buf[i];
+            if (c == '\'' || c == '"' || c == '`' || c == '[') {
+                char close = (c == '[') ? ']' : c;
+                for (i++; i < buf.size(); i++) {
+                    if (buf[i] != close) continue;
+                    // A doubled quote is an escaped quote, not the end
+                    if (close != ']' && i + 1 < buf.size() && buf[i + 1] == close) { i++; continue; }
+                    break;
+                }
+            } else if (c == '-' && i + 1 < buf.size() && buf[i + 1] == '-') {
+                while (i < buf.size() && buf[i] != '\n') i++;
+            } else if (c == '/' && i + 1 < buf.size() && buf[i + 1] == '*') {
+                size_t end = buf.find("*/", i + 2);
+                i = (end == std::string::npos) ? buf.size() : end + 1;
+            } else if (c == ';') {
+                // Cut the text just after this ';' (c_str() ends there anyway
+                // when it's the last character)
+                bool last = i + 1 == buf.size();
+                char next = last ? '\0' : buf[i + 1];
+                if (!last) buf[i + 1] = '\0';
+                bool complete = sqlite3_complete(buf.c_str()) != 0;
+                if (!last) buf[i + 1] = next;
+                if (complete) {
+                    if (!onlyIgnorable(sql.c_str() + i + 1)) throw moreThanOne();
+                    break;
+                }
+            }
+        }
         sqlite3_stmt* stmt = nullptr;
         const char* tail = nullptr;
         int rc = sqlite3_prepare_v2(conn, sql.c_str(), static_cast<int>(sql.size()) + 1, &stmt, &tail);
@@ -4520,16 +4592,10 @@ Interpreter::Interpreter(bool installErrorClasses) {
             std::string err = sqlite3_errmsg(conn);
             throw RuntimeError("SQL error: " + err, 0);
         }
-        if (tail && *tail) {
-            sqlite3_stmt* next = nullptr;
-            int rc2 = sqlite3_prepare_v2(conn, tail, -1, &next, nullptr);
-            bool another = (rc2 != SQLITE_OK) || next != nullptr;
-            if (next) sqlite3_finalize(next);
-            if (another) {
-                if (stmt) sqlite3_finalize(stmt);
-                throw RuntimeError(std::string(fn) +
-                    "() runs one SQL statement; the text has more after the first — call it once per statement", 0);
-            }
+        // Backstop: SQLite's own idea of where the statement ended
+        if (!onlyIgnorable(tail)) {
+            if (stmt) sqlite3_finalize(stmt);
+            throw moreThanOne();
         }
         return stmt;
     };

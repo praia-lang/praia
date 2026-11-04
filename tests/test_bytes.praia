@@ -102,6 +102,8 @@ testing.test("pack rejects numbers outside the integer range", lam{ in
     testing.expectThrows(lam{ in bytes.pack(">q", [1e30]) }, nil)
     testing.expectThrows(lam{ in bytes.pack(">q", [inf]) }, nil)
     testing.expectEqual(bytes.unpack(">q", bytes.pack(">q", [2.9])), [2], "truncated toward zero")
+    // Integers above 2^53 keep every bit (no detour through a double)
+    testing.expectEqual(bytes.unpack(">q", bytes.pack(">q", [9007199254740993])), [9007199254740993], nil)
 })
 
 testing.done()

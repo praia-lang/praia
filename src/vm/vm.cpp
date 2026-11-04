@@ -3113,6 +3113,23 @@ VM::Result VM::execute(int baseFrameCount_) {
         recordUncaught(err.line, err.column);
         unwindFramesAndRunDefers(baseFrameCount_);
         return Result::RUNTIME_ERROR;
+    } catch (const std::exception& err) {
+        // Natives are called directly (native->fn), so a C++ exception
+        // that isn't a RuntimeError (std::length_error, std::invalid_argument,
+        // ...) lands here. Unwind like any other error so the failed call's
+        // frames are popped and its upvalues closed — callers such as
+        // VMClosureCallable::call then reset the stack on the error result.
+        // Frames are still intact here, so the location is the failing
+        // instruction's
+        if (frameCount > 0) runtimeError(err.what(), CURRENT_LINE(), CURRENT_COLUMN());
+        else runtimeError(err.what(), 0);   // records it and reports it if uncaught
+        unwindFramesAndRunDefers(baseFrameCount_);
+        return Result::RUNTIME_ERROR;
+    } catch (...) {
+        if (frameCount > 0) runtimeError("unknown native error", CURRENT_LINE(), CURRENT_COLUMN());
+        else runtimeError("unknown native error", 0);
+        unwindFramesAndRunDefers(baseFrameCount_);
+        return Result::RUNTIME_ERROR;
     }
 
     #undef FRAME
