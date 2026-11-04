@@ -515,11 +515,33 @@ static bool responseIsChunked(const std::shared_ptr<PraiaMap>& headers) {
     return false;
 }
 
-// Limits for incoming requests
-// No body-size cap — handlers/middleware (e.g. middleware.bodyLimit) decide policy.
-// A reverse proxy is the right place for DoS-grade limits.
+// Limits for incoming requests. The body cap and the per-request
+// deadline come from HttpServerOptions (server.listen's opts).
 static constexpr size_t MAX_HEADER_SIZE = 64 * 1024;   // 64 KB headers
-static constexpr int    RECV_TIMEOUT_SECS = 30;
+
+using RequestDeadline = std::chrono::steady_clock::time_point;
+
+// recv() bounded by the request's overall deadline: the socket timeout is
+// set to whatever time is left, so a client trickling one byte at a time
+// can't hold the (one-connection-at-a-time) server past the deadline.
+static ssize_t recvBefore(int client, char* buf, size_t len, RequestDeadline deadline) {
+    auto left = std::chrono::duration_cast<std::chrono::microseconds>(
+        deadline - std::chrono::steady_clock::now()).count();
+    if (left <= 0) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    struct timeval tv;
+    tv.tv_sec = static_cast<time_t>(left / 1000000);
+    tv.tv_usec = static_cast<suseconds_t>(left % 1000000);
+    if (tv.tv_sec == 0 && tv.tv_usec < 1000) tv.tv_usec = 1000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    return recv(client, buf, len, 0);
+}
+
+// Thrown when a request body exceeds HttpServerOptions::maxBodySize;
+// answered with 413.
+struct RequestBodyTooLarge {};
 
 // Collect ALL values of a header (one entry per occurrence). Lets us
 // detect duplicate Content-Length and Transfer-Encoding.
@@ -602,12 +624,12 @@ static void sendBadRequest(int client, const std::string& reason) {
 }
 
 // Drain N more bytes from the socket into `data`, appending to whatever
-// is already buffered. Returns false on EOF or socket error before
-// reaching `needed`. Caller is responsible for any per-fd timeout.
-static bool recvAtLeast(int client, std::string& data, size_t needed) {
+// is already buffered. Returns false on EOF, socket error or the deadline
+// passing before reaching `needed`.
+static bool recvAtLeast(int client, std::string& data, size_t needed, RequestDeadline deadline) {
     char buf[8192];
     while (data.size() < needed) {
-        ssize_t n = recv(client, buf, sizeof(buf), 0);
+        ssize_t n = recvBefore(client, buf, sizeof(buf), deadline);
         if (n <= 0) return false;
         data.append(buf, n);
     }
@@ -620,10 +642,10 @@ static bool recvAtLeast(int client, std::string& data, size_t needed) {
 // updates `pos` past the trailer terminator. Throws RuntimeError on any
 // protocol violation — caller catches and replies 400.
 //
-// Cap on total decoded size is the same MAX_CHUNKED_BODY constant below.
+// The decoded size is capped at `maxBody` (throws RequestBodyTooLarge).
 // Without it, an attacker can pour gigabytes of zeroes through chunked.
-static constexpr size_t MAX_CHUNKED_BODY = 64ull * 1024 * 1024;
-static std::string decodeChunkedBody(int client, std::string& data, size_t& pos) {
+static std::string decodeChunkedBody(int client, std::string& data, size_t& pos,
+                                     size_t maxBody, RequestDeadline deadline) {
     std::string body;
     while (true) {
         // Find the size-line terminator. recv more if needed.
@@ -633,7 +655,7 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
             // make us buffer forever waiting for \r\n.
             if (data.size() - pos > 1024)
                 throw RuntimeError("chunk size line too long", 0);
-            if (!recvAtLeast(client, data, data.size() + 1))
+            if (!recvAtLeast(client, data, data.size() + 1, deadline))
                 throw RuntimeError("connection closed mid-chunk-size", 0);
         }
         std::string sizeLine = data.substr(pos, eol - pos);
@@ -662,12 +684,10 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
         }
         // Subtractive check — body.size() + chunkSize as a forward sum
         // could wrap size_t when chunkSize is near SIZE_MAX. After this
-        // passes, chunkSize <= MAX_CHUNKED_BODY, so all later additions
+        // passes, chunkSize <= maxBody, so all later additions
         // involving chunkSize (`pos + chunkSize + 2` below) are bounded.
-        if (chunkSize > MAX_CHUNKED_BODY - body.size())
-            throw RuntimeError(
-                "chunked body exceeds server limit (" +
-                std::to_string(MAX_CHUNKED_BODY) + " bytes)", 0);
+        if (chunkSize > maxBody - body.size())
+            throw RequestBodyTooLarge{};
         if (chunkSize == 0) {
             // Drain trailer section: zero or more header-lines, then \r\n.
             // We discard trailer values — request handlers don't expect
@@ -677,7 +697,7 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
                 while ((eol = data.find("\r\n", pos)) == std::string::npos) {
                     if (data.size() - pos > 8192)
                         throw RuntimeError("chunk trailer line too long", 0);
-                    if (!recvAtLeast(client, data, data.size() + 1))
+                    if (!recvAtLeast(client, data, data.size() + 1, deadline))
                         throw RuntimeError("connection closed in trailers", 0);
                 }
                 if (eol == pos) { pos += 2; break; }   // empty line — done
@@ -688,7 +708,7 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
         // Need chunkSize + 2 bytes (data + \r\n).
         size_t needed = pos + chunkSize + 2;
         if (data.size() < needed) {
-            if (!recvAtLeast(client, data, needed))
+            if (!recvAtLeast(client, data, needed, deadline))
                 throw RuntimeError("connection closed mid-chunk-data", 0);
         }
         body.append(data, pos, chunkSize);
@@ -702,12 +722,11 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
 // Parse a raw HTTP request from a client socket.
 // Returns a PraiaMap with method, path, query, headers, body.
 // Also outputs the raw client fd for SSE use.
-std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
-    // Set a receive timeout so slow/idle clients don't block the server
-    struct timeval tv;
-    tv.tv_sec = RECV_TIMEOUT_SECS;
-    tv.tv_usec = 0;
-    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+std::shared_ptr<PraiaMap> readAndParseRequest(int client, const HttpServerOptions& opts) {
+    // One deadline for the whole request — headers and body — so a slow
+    // or idle client can't hold the server longer than requestTimeoutMs
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(opts.requestTimeoutMs);
 
     std::string data;
     // Read until we see the end of headers (or hit the header size cap).
@@ -720,14 +739,35 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
                 sendBadRequest(client, "headers exceed limit");
                 return nullptr;
             }
-            ssize_t n = recv(client, buf, sizeof(buf), 0);
-            if (n <= 0) return nullptr;   // EOF or error — drop quietly
+            ssize_t n = recvBefore(client, buf, sizeof(buf), deadline);
+            if (n <= 0) return nullptr;   // EOF, error or deadline — drop quietly
             data.append(buf, n);
         }
     }
 
     size_t hend = data.find("\r\n\r\n");
     std::string hdr = data.substr(0, hend);
+
+    // RFC 7230 §3.2.4: no whitespace between a field name and its colon,
+    // and every field line has a name. A request with "Transfer-Encoding :
+    // chunked" would otherwise be read as having no body framing at all.
+    {
+        size_t lineStart = hdr.find("\r\n");
+        while (lineStart != std::string::npos) {
+            lineStart += 2;
+            size_t lineEnd = hdr.find("\r\n", lineStart);
+            std::string line = hdr.substr(lineStart, lineEnd == std::string::npos
+                                                         ? std::string::npos
+                                                         : lineEnd - lineStart);
+            size_t colon = line.find(':');
+            if (colon == std::string::npos || colon == 0 ||
+                line.find_first_of(" \t") < colon) {
+                sendBadRequest(client, "malformed header line");
+                return nullptr;
+            }
+            lineStart = lineEnd;
+        }
+    }
 
     // ── Framing-header validation (RFC 7230 §3.3 / §3.3.3) ──
     //
@@ -784,7 +824,10 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
     if (chunked) {
         try {
             size_t pos = bodyStart;
-            reqBody = decodeChunkedBody(client, data, pos);
+            reqBody = decodeChunkedBody(client, data, pos, opts.maxBodySize, deadline);
+        } catch (const RequestBodyTooLarge&) {
+            sendHttpResponse(client, 413, "Payload Too Large\r\n", {});
+            return nullptr;
         } catch (RuntimeError& e) {
             sendBadRequest(client, std::string("chunked decode: ") + e.what());
             return nullptr;
@@ -794,12 +837,13 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
             // parseContentLengthStrict caps overflow during parsing but
             // clen can still be near SIZE_MAX. Guard `bodyStart + clen`
             // before adding so we don't wrap and silently misread.
-            if (clen > std::numeric_limits<size_t>::max() - bodyStart) {
-                sendBadRequest(client, "Content-Length too large");
+            if (clen > opts.maxBodySize) {
+                // Refused before reading any of it
+                sendHttpResponse(client, 413, "Payload Too Large\r\n", {});
                 return nullptr;
             }
             size_t needed = bodyStart + clen;
-            if (!recvAtLeast(client, data, needed)) return nullptr;
+            if (!recvAtLeast(client, data, needed, deadline)) return nullptr;
             reqBody.assign(data, bodyStart, clen);
         }
     }
@@ -972,6 +1016,10 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
 }
 
 } // anonymous namespace
+
+bool httpHeaderFieldSafe(const std::string& name, const std::string& value) {
+    return headerFieldSafe(name, value);
+}
 
 // Forward declaration: defined below the streaming helpers (HttpStreamState
 // + detectStreamMode + streamEnsure) because it leans on them. Reads the
@@ -2574,23 +2622,53 @@ Value httpOpenStream(const std::string& method, const std::string& url,
     }
 }
 
-void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) throw RuntimeError("Cannot create server socket", 0);
-    praia::setCloexec(fd);
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp,
+                      const HttpServerOptions& opts) {
+    int fd = -1;
+    std::string where = "port " + std::to_string(port);
+    if (opts.host.empty()) {
+        // Every IPv4 interface
+        fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) throw RuntimeError("Cannot create server socket", 0);
+        praia::setCloexec(fd);
+        int opt = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
+        struct sockaddr_in addr = {};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(port);
 
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(fd); throw RuntimeError("Cannot bind to port " + std::to_string(port), 0);
+        if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(fd); throw RuntimeError("Cannot bind to port " + std::to_string(port), 0);
+        }
+    } else {
+        // A specific address or host name (IPv4 or IPv6)
+        where = opts.host + ":" + std::to_string(port);
+        struct addrinfo hints = {};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_PASSIVE;
+        struct addrinfo* res = nullptr;
+        std::string portStr = std::to_string(port);
+        int gai = getaddrinfo(opts.host.c_str(), portStr.c_str(), &hints, &res);
+        if (gai != 0 || !res)
+            throw RuntimeError("Cannot resolve listen host \"" + opts.host + "\": " + gai_strerror(gai), 0);
+        for (auto* ai = res; ai; ai = ai->ai_next) {
+            fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd < 0) continue;
+            praia::setCloexec(fd);
+            int opt = 1;
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            if (bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+            close(fd);
+            fd = -1;
+        }
+        freeaddrinfo(res);
+        if (fd < 0) throw RuntimeError("Cannot bind to " + where, 0);
     }
     if (::listen(fd, 64) < 0) {
-        close(fd); throw RuntimeError("Cannot listen on port " + std::to_string(port), 0);
+        close(fd); throw RuntimeError("Cannot listen on " + where, 0);
     }
 
     // Install signal handler for graceful shutdown
@@ -2603,10 +2681,10 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
 
-    std::cout << "Server listening on port " << port << std::endl;
+    std::cout << "Server listening on " << where << std::endl;
 
     while (!g_shutdownRequested.load()) {
-        struct sockaddr_in ca;
+        struct sockaddr_storage ca;
         socklen_t cl = sizeof(ca);
         int client = accept(fd, (struct sockaddr*)&ca, &cl);
         if (client < 0) {
@@ -2615,7 +2693,7 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
         }
         praia::setCloexec(client);
 
-        auto req = readAndParseRequest(client);
+        auto req = readAndParseRequest(client, opts);
         if (!req) { close(client); continue; }
 
         // Check if the handler returns an SSE response
@@ -2686,11 +2764,17 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
                 respHeaders["Content-Type"] = "text/plain";
             }
         } catch (const ThrowSignal& t) {
+            // The details go to the server's stderr, not to the client:
+            // error text can carry file paths, SQL, or other internals.
             respStatus = 500;
-            respBody = "Error: " + t.value.toString();
+            respBody = "Internal Server Error";
+            respHeaders = {{"Content-Type", "text/plain"}};
+            std::cerr << "[http] handler error: " << t.value.toString() << std::endl;
         } catch (const RuntimeError& e) {
             respStatus = 500;
-            respBody = "Error: " + std::string(e.what());
+            respBody = "Internal Server Error";
+            respHeaders = {{"Content-Type", "text/plain"}};
+            std::cerr << "[http] handler error: " << e.what() << std::endl;
         }
 
         if (sseHandled) {
@@ -2706,9 +2790,10 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
         }
         if (!streamFilePath.empty()) {
             if (!sendHttpFileResponse(client, respStatus, streamFilePath, respHeaders)) {
-                // File couldn't be opened — fall back to a 500.
-                sendHttpResponse(client, 500,
-                    "Error: cannot open file: " + streamFilePath,
+                // File couldn't be opened — fall back to a 500, without
+                // the path (logged instead).
+                std::cerr << "[http] cannot open file: " << streamFilePath << std::endl;
+                sendHttpResponse(client, 500, "Internal Server Error",
                     {{"Content-Type", "text/plain"}});
             }
         } else {

@@ -2295,21 +2295,51 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto handler = args[0].asCallable();
 
             auto server = gcNew<PraiaMap>();
-            server->entries[Value("listen")] = Value(makeNative("listen", 1,
+            // listen(port, opts?) — opts: host, maxBodySize (bytes),
+            // requestTimeout (seconds). See HttpServerOptions.
+            server->entries[Value("listen")] = Value(makeNative("listen", -1,
                 [handler](const std::vector<Value>& args) -> Value {
-                    if (!args[0].isNumber())
-                        throw RuntimeError("listen() requires a port number", 0);
-                    httpServerListen(static_cast<int>(args[0].asNumber()), handler, *g_currentInterp);
+                    if (args.empty() || args.size() > 2 || !args[0].isNumber())
+                        throw RuntimeError("listen() requires a port number and an optional options map", 0);
+                    HttpServerOptions opts;
+                    if (args.size() == 2 && !args[1].isNil()) {
+                        if (!args[1].isMap())
+                            throw RuntimeError("listen() options must be a map", 0);
+                        auto& m = args[1].asMap()->entries;
+                        if (m.count("host")) {
+                            if (!m.at("host").isString())
+                                throw RuntimeError("listen(): host must be a string", 0);
+                            opts.host = m.at("host").asString();
+                        }
+                        if (m.count("maxBodySize")) {
+                            const Value& v = m.at("maxBodySize");
+                            if (!v.isInt() || v.asInt() <= 0)
+                                throw RuntimeError("listen(): maxBodySize must be a positive integer (bytes)", 0);
+                            opts.maxBodySize = static_cast<size_t>(v.asInt());
+                        }
+                        if (m.count("requestTimeout")) {
+                            const Value& v = m.at("requestTimeout");
+                            if (!v.isNumber() || !(v.asNumber() > 0) || v.asNumber() > 86400)
+                                throw RuntimeError("listen(): requestTimeout must be a positive number of seconds", 0);
+                            opts.requestTimeoutMs = std::max(1, static_cast<int>(v.asNumber() * 1000.0));
+                        }
+                    }
+                    httpServerListen(static_cast<int>(args[0].asNumber()), handler, *g_currentInterp, opts);
                     return Value();
                 }));
             return Value(server);
         }));
 
-    // http.sse(req, callback) — Server-Sent Events
+    // http.sse(req, callback, opts?) — Server-Sent Events
     // callback receives a send function: send(data, event?)
     // The connection stays open until the callback returns.
-    httpMap->entries[Value("sse")] = Value(makeNative("http.sse", 2,
+    // opts.headers adds response headers. There's no CORS header by
+    // default; a stream meant for other origins adds
+    // Access-Control-Allow-Origin itself.
+    httpMap->entries[Value("sse")] = Value(makeNative("http.sse", -1,
         [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || args.size() > 3)
+                throw RuntimeError("http.sse() requires (req, callback) or (req, callback, opts)", 0);
             if (!args[0].isMap())
                 throw RuntimeError("http.sse() requires a request object", 0);
             if (!args[1].isCallable())
@@ -2323,12 +2353,29 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto callback = args[1].asCallable();
 
             // Send SSE headers
+            std::string extraHeaders;
+            if (args.size() == 3 && !args[2].isNil()) {
+                if (!args[2].isMap())
+                    throw RuntimeError("http.sse() options must be a map", 0);
+                auto& o = args[2].asMap()->entries;
+                auto hIt = o.find(Value("headers"));
+                if (hIt != o.end()) {
+                    if (!hIt->second.isMap())
+                        throw RuntimeError("http.sse(): headers must be a map", 0);
+                    for (auto& [k, v] : hIt->second.asMap()->entries) {
+                        std::string kn = k.toString(), vn = v.toString();
+                        if (!httpHeaderFieldSafe(kn, vn))
+                            throw RuntimeError("Invalid SSE header \"" + kn +
+                                               "\": contains CR/LF/NUL (header injection)", 0);
+                        extraHeaders += kn + ": " + vn + "\r\n";
+                    }
+                }
+            }
             std::string headers = "HTTP/1.1 200 OK\r\n"
                                   "Content-Type: text/event-stream\r\n"
                                   "Cache-Control: no-cache\r\n"
-                                  "Connection: keep-alive\r\n"
-                                  "Access-Control-Allow-Origin: *\r\n"
-                                  "\r\n";
+                                  "Connection: keep-alive\r\n" +
+                                  extraHeaders + "\r\n";
             send(clientFd, headers.c_str(), headers.size(), 0);
 
             // Create a send function for the callback

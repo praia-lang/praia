@@ -3721,6 +3721,22 @@ let server = http.createServer(lam{ req in
 server.listen(8080)     // blocks, prints "Server listening on port 8080"
 ```
 
+#### Listen options
+
+`server.listen(port, opts?)` takes an optional map:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `host` | all IPv4 interfaces (`0.0.0.0`) | Address or host name to bind. Use `"127.0.0.1"` for a server only this machine can reach. |
+| `maxBodySize` | 64 MiB | Largest request body accepted, in bytes, for both `Content-Length` and chunked bodies. Larger requests get `413 Payload Too Large` before the body is read. |
+| `requestTimeout` | 30 | Seconds allowed for receiving one request, headers and body together. A client that's slower than this is disconnected. |
+
+```praia
+server.listen(8080, {host: "127.0.0.1", maxBodySize: 1_000_000, requestTimeout: 10})
+```
+
+The server handles one connection at a time, so `requestTimeout` is also how long one slow or idle client can hold it up. For a public server, put a reverse proxy (nginx, caddy) in front.
+
 #### Request object
 
 The handler receives a map with:
@@ -3773,14 +3789,16 @@ server.listen(3000)
 
 #### Error handling
 
-If the handler throws an error, the server returns a 500 response and continues running.
+If the handler throws an error, the server returns a generic `500 Internal Server Error` and continues running. The error itself goes to the server's stderr (`[http] handler error: ...`), not to the client, since its text can include file paths, SQL, or other internals.
 
 #### Request body size and framing
 
 The server decodes both RFC 7230 body framings transparently before invoking the handler:
 
-- **`Content-Length: N`** — reads exactly N bytes into `req.body`. No built-in cap; this matches the philosophy of `net/http`, Flask, and Express.
-- **`Transfer-Encoding: chunked`** — decodes chunks (chunk extensions and trailers are accepted but discarded), capped at 64 MiB of decoded body to prevent unbounded chunked-stream DoS.
+- **`Content-Length: N`** — reads exactly N bytes into `req.body`. A request declaring more than `maxBodySize` (default 64 MiB) gets 413 before any of the body is read.
+- **`Transfer-Encoding: chunked`** — decodes chunks (chunk extensions and trailers are accepted but discarded), up to `maxBodySize` of decoded body; past that, 413.
+
+The whole request has to arrive within `requestTimeout` (default 30 seconds).
 
 Headers are capped at 64 KB regardless.
 
@@ -3790,8 +3808,9 @@ Malformed or conflicting framing is rejected with a `400 Bad Request` response b
 - Multiple `Content-Length` headers with different values, or multiple `Transfer-Encoding` headers.
 - `Content-Length` that isn't a non-negative decimal integer (no signs, no garbage suffix, no overflow).
 - `Transfer-Encoding` where `chunked` isn't the final coding.
+- A header line with whitespace before its colon, or with no name (RFC 7230 §3.2.4).
 
-If you need an explicit `Content-Length` cap on top of those checks, opt in:
+For a tighter limit on particular routes, or protection beyond what one process can give:
 
 - **Application-level** — use `middleware.bodyLimit(n)` from the middleware grain to reject requests with `Content-Length` over `n` bytes (returns 413).
 - **DoS-grade** — put a reverse proxy (nginx, caddy) in front. A determined attacker can lie about `Content-Length` or stream forever; only the proxy can short-circuit before the body is buffered.
@@ -3809,7 +3828,7 @@ sqlite.close(db)
 
 #### Server-Sent Events (SSE)
 
-`http.sse(req, callback)` keeps the connection open for real-time streaming. The callback receives a `send` function.
+`http.sse(req, callback, opts?)` keeps the connection open for real-time streaming. The callback receives a `send` function.
 
 ```praia
 server.get("/events", lam{ req, params in
@@ -3821,6 +3840,12 @@ server.get("/events", lam{ req, params in
         send("done", "close")
     })
 })
+```
+
+The response has no CORS header. A stream meant to be read from other origins (with `EventSource`) adds one through the options map, which takes any extra response headers:
+
+```praia
+return http.sse(req, callback, {headers: {"Access-Control-Allow-Origin": "https://app.example"}})
 ```
 
 The client receives standard SSE format:
@@ -3994,6 +4019,8 @@ server.get("/", lam{ req, params in
 
 server.listen(8080)
 ```
+
+`server.listen(port, opts?)` takes the same options as `http.createServer`'s listen: `host`, `maxBodySize`, `requestTimeout` (see [Listen options](#listen-options)).
 
 ### Path parameters
 

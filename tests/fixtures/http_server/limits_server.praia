@@ -1,0 +1,29 @@
+// Server for test_http_server_limits.praia, run as its own process:
+//   praia limits_server.praia <port> <limits|default|local>
+// GET /quit stops it.
+
+let port = int(sys.args[0])
+let mode = sys.args[1]
+
+func handler(req) {
+    if (req.path == "/quit") { sys.exit(0) }
+    if (req.path == "/boom") {
+        throw "db password is hunter2 at /srv/app/secret.conf"
+    }
+    if (req.path == "/sse") {
+        return http.sse(req, lam{ send in send("hi") })
+    }
+    if (req.path == "/sse-cors") {
+        return http.sse(req, lam{ send in send("hi") },
+                        {headers: {"Access-Control-Allow-Origin": "https://app.example"}})
+    }
+    if (req.path == "/sse-bad") {
+        return http.sse(req, lam{ send in send("hi") }, {headers: {"X-Bad": "a\r\nInjected: 1"}})
+    }
+    return {status: 200, body: "len=" + str(len(req.body))}
+}
+
+let opts = nil
+if (mode == "limits") { opts = {maxBodySize: 10, requestTimeout: 0.5} }
+elif (mode == "local") { opts = {host: "127.0.0.1"} }
+http.createServer(handler).listen(port, opts)

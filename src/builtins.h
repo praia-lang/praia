@@ -112,7 +112,26 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                      const std::unordered_map<std::string, std::string>& extraHeaders,
                      const HttpOptions& opts = {});
 
-void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp);
+// True if a header name/value pair is safe to write into a response
+// (no CR, LF or NUL — header injection). Defined in builtins/http.cpp.
+bool httpHeaderFieldSafe(const std::string& name, const std::string& value);
+
+// Options for server.listen(port, opts?)
+struct HttpServerOptions {
+    // Address to bind. Empty = every IPv4 interface (0.0.0.0); pass
+    // "127.0.0.1" (or "localhost") for a server only this machine reaches.
+    std::string host;
+    // Largest request body accepted, for both Content-Length and chunked
+    // framing; larger requests get 413 before the body is read.
+    size_t maxBodySize = 64ull * 1024 * 1024;
+    // Budget for receiving one request — headers and body together. The
+    // server handles one connection at a time, so this is what bounds how
+    // long a slow or idle client can hold it.
+    int requestTimeoutMs = 30000;
+};
+
+void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp,
+                      const HttpServerOptions& opts = {});
 
 // ── HTTP client sessions (keepalive + default opts/headers) ──
 //
