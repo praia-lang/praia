@@ -162,6 +162,34 @@ testing.test("a deadline hit on a pooled socket isn't retried", lam{ in
     testing.expectEqual(hits, "1", "the request was sent once")
 })
 
+// A server that accepts and then goes silent: never answers the TLS
+// ClientHello and never reads what's sent
+let STALL_PORT = freePort()
+let _stallServer = async lam{ in
+    let s = net.listen(STALL_PORT)
+    let held = []
+    while (true) { held.push(net.accept(s)) }
+}()
+time.sleep(150)
+
+testing.test("totalTimeout bounds a stalled TLS handshake", lam{ in
+    let start = time.now()
+    let msg = errorOf(lam{ in http.get("https://127.0.0.1:" + str(STALL_PORT) + "/",
+        {blockPrivateHosts: false, totalTimeout: 0.6, readTimeout: 30}) })
+    let elapsed = time.now() - start
+    testing.expectContains(msg, "total timeout", nil)
+    testing.expect(elapsed < 2500, "took %{elapsed}ms")
+})
+
+testing.test("totalTimeout bounds writing a body the server never reads", lam{ in
+    let start = time.now()
+    let msg = errorOf(lam{ in http.request({method: "POST", url: "http://127.0.0.1:" + str(STALL_PORT) + "/",
+        body: "z" * 64000000, blockPrivateHosts: false, totalTimeout: 0.8, readTimeout: 30}) })
+    let elapsed = time.now() - start
+    testing.expectContains(msg, "total timeout", nil)
+    testing.expect(elapsed < 3000, "took %{elapsed}ms")
+})
+
 testing.test("maxResponseSize must be an integer", lam{ in
     testing.expectThrows(lam{ in http.get(base + "/big", {blockPrivateHosts: false, maxResponseSize: "big"}) }, nil)
 })

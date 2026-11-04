@@ -2457,7 +2457,10 @@ Interpreter::Interpreter(bool installErrorClasses) {
                 // Client likely disconnected — not an error
             }
 
-            close(clientFd);
+            // The socket is left open: the server loop closes it once the
+            // handler returns. Closing it here too would be a double close,
+            // and by the second one another thread may already own the
+            // number.
 
             // Return a marker so the server loop knows not to send a response
             auto marker = gcNew<PraiaMap>();
@@ -4555,10 +4558,14 @@ Interpreter::Interpreter(bool installErrorClasses) {
         // comments can end a statement, so only those are offered to
         // sqlite3_complete — usually just one, a few inside a trigger
         // body. One copy of the text, cut in place at each candidate.
+        // Semicolons before the first real token are empty statements,
+        // which sqlite3_prepare_v2 skips, so they don't count.
         std::string buf = sql;
+        bool seenToken = false;
         for (size_t i = 0; i < buf.size(); i++) {
             char c = buf[i];
             if (c == '\'' || c == '"' || c == '`' || c == '[') {
+                seenToken = true;
                 char close = (c == '[') ? ']' : c;
                 for (i++; i < buf.size(); i++) {
                     if (buf[i] != close) continue;
@@ -4571,7 +4578,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             } else if (c == '/' && i + 1 < buf.size() && buf[i + 1] == '*') {
                 size_t end = buf.find("*/", i + 2);
                 i = (end == std::string::npos) ? buf.size() : end + 1;
-            } else if (c == ';') {
+            } else if (c == ';' && seenToken) {
                 // Cut the text just after this ';' (c_str() ends there anyway
                 // when it's the last character)
                 bool last = i + 1 == buf.size();
@@ -4583,6 +4590,8 @@ Interpreter::Interpreter(bool installErrorClasses) {
                     if (!onlyIgnorable(sql.c_str() + i + 1)) throw moreThanOne();
                     break;
                 }
+            } else if (c != ';' && !std::isspace(static_cast<unsigned char>(c))) {
+                seenToken = true;
             }
         }
         sqlite3_stmt* stmt = nullptr;

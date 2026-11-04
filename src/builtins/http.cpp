@@ -51,16 +51,54 @@ struct SocketConn {
     SocketConn& operator=(SocketConn&&) = delete;
 
     ssize_t write(const void* buf, size_t len) {
+        if (readDeadline == std::chrono::steady_clock::time_point::max()) return writeOnce(buf, len);
+        // Under a deadline: send in pieces, each allowed only the time
+        // left, so a peer that stops reading can't stall the request
+        // past it
+        const char* p = static_cast<const char*>(buf);
+        size_t done = 0;
+        while (done < len) {
+            setSendTimeout(timeLeftUs(), readTimeoutMs);
+            ssize_t n = writeOnce(p + done, std::min<size_t>(len - done, 16384));
+            if (n <= 0) {
+                if (std::chrono::steady_clock::now() >= readDeadline)
+                    throw RuntimeError("HTTP total timeout exceeded", 0);
+                return -1;
+            }
+            done += static_cast<size_t>(n);
+        }
+        return static_cast<ssize_t>(done);
+    }
+
+    ssize_t writeOnce(const void* buf, size_t len) {
 #ifdef HAVE_OPENSSL
         if (ssl) return SSL_write(ssl, buf, static_cast<int>(len));
 #endif
         return ::send(fd, buf, len, 0);
     }
 
-    // While a buffered request is reading its response: the request's
-    // overall deadline (totalTimeout) and its per-read budget. Each read
-    // waits no longer than whatever is left, so a server trickling bytes
-    // can't keep the request alive past the deadline. max() = no deadline.
+    // Microseconds until readDeadline; throws once it has passed
+    long long timeLeftUs() const {
+        auto leftUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            readDeadline - std::chrono::steady_clock::now()).count();
+        if (leftUs <= 0) throw RuntimeError("HTTP total timeout exceeded", 0);
+        return leftUs;
+    }
+
+    void setSendTimeout(long long leftUs, int capMs) {
+        long long us = leftUs + 1000;
+        if (capMs > 0 && static_cast<long long>(capMs) * 1000 < us) us = static_cast<long long>(capMs) * 1000;
+        struct timeval tv;
+        tv.tv_sec = static_cast<time_t>(us / 1000000);
+        tv.tv_usec = static_cast<suseconds_t>(us % 1000000);
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+
+    // While a buffered request is in flight: the request's overall
+    // deadline (totalTimeout) and its per-read budget. Each read and
+    // write waits no longer than whatever is left, so a server trickling
+    // bytes can't keep the request alive past the deadline. max() = no
+    // deadline.
     std::chrono::steady_clock::time_point readDeadline =
         std::chrono::steady_clock::time_point::max();
     int readTimeoutMs = 0;
@@ -303,7 +341,9 @@ static std::string sockaddrToString(const struct sockaddr* sa) {
 // blockPrivate: when true, refuses to connect if ANY resolved address is
 // private/loopback/link-local/reserved (SSRF protection). Re-applies per
 // call so the redirect loop in doHttpRequest naturally gates every hop.
-int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPrivate) {
+int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPrivate,
+                  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()) {
+    const bool hasDeadline = deadline != std::chrono::steady_clock::time_point::max();
     struct addrinfo hints = {};
     // AF_UNSPEC lets the resolver return both IPv4 and IPv6 records;
     // pre-Phase-2 this was hard-coded to AF_INET, which made IPv6-only
@@ -333,6 +373,15 @@ int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPr
 
     std::string lastErr;
     for (struct addrinfo* ai = ag.res; ai != nullptr; ai = ai->ai_next) {
+        // Every address shares the overall deadline, not a fresh
+        // connectTimeout each
+        int waitMs = timeoutMs;
+        if (hasDeadline) {
+            auto leftMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (leftMs <= 0) throw RuntimeError("HTTP total timeout exceeded", 0);
+            if (waitMs < 0 || waitMs > leftMs) waitMs = static_cast<int>(leftMs);
+        }
         praia::FdGuard sock(socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
         if (!sock) { lastErr = std::strerror(errno); continue; }
 
@@ -369,15 +418,17 @@ int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPr
         pfd.revents = 0;
         int polled;
         do {
-            polled = poll(&pfd, 1, timeoutMs);
+            polled = poll(&pfd, 1, waitMs);
         } while (polled < 0 && errno == EINTR);
 
         if (polled == 0) {
+            if (hasDeadline && std::chrono::steady_clock::now() >= deadline)
+                throw RuntimeError("HTTP total timeout exceeded", 0);
             // Timed out on THIS address — try the next one rather
             // than giving up. Real-world: A and AAAA records often
             // both exist; one may be unreachable due to NAT64 or
             // missing v6 transit.
-            lastErr = "connect timed out after " + std::to_string(timeoutMs) + "ms";
+            lastErr = "connect timed out after " + std::to_string(waitMs) + "ms";
             continue;
         }
         if (polled < 0) {
@@ -1305,13 +1356,51 @@ static void validateRequestParts(
     }
 }
 
+#ifdef HAVE_OPENSSL
+// SSL_connect, held to opts.deadline when there is one: the handshake
+// runs non-blocking and each wait is capped at the time left (and at
+// readTimeoutMs), so its several round trips can't outlast the deadline.
+// Returns SSL_connect's result; throws once the deadline passes.
+static int sslConnectBefore(SocketConn& conn, const HttpOptions& opts) {
+    if (opts.deadline == std::chrono::steady_clock::time_point::max()) return SSL_connect(conn.ssl);
+    int flags = fcntl(conn.fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(conn.fd, F_SETFL, flags | O_NONBLOCK) < 0) return SSL_connect(conn.ssl);
+    // Back to blocking for the reads and writes that follow (unless the
+    // socket was closed on the way out — its number may be reused)
+    struct RestoreFlags {
+        SocketConn& c;
+        int flags;
+        ~RestoreFlags() { if (c.fd >= 0) fcntl(c.fd, F_SETFL, flags); }
+    } restore{conn, flags};
+    while (true) {
+        int r = SSL_connect(conn.ssl);
+        if (r == 1) return r;
+        int err = SSL_get_error(conn.ssl, r);
+        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) return r;
+        auto leftMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            opts.deadline - std::chrono::steady_clock::now()).count() + 1;
+        if (leftMs <= 1) { conn.shutdown_close(); throw RuntimeError("HTTP total timeout exceeded", 0); }
+        int waitMs = static_cast<int>(std::min<long long>(leftMs, INT_MAX));
+        if (opts.readTimeoutMs > 0 && opts.readTimeoutMs < waitMs) waitMs = opts.readTimeoutMs;
+        struct pollfd pfd{conn.fd, static_cast<short>(err == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT), 0};
+        int polled;
+        do { polled = poll(&pfd, 1, waitMs); } while (polled < 0 && errno == EINTR);
+        if (polled == 0 && std::chrono::steady_clock::now() >= opts.deadline) {
+            conn.shutdown_close();
+            throw RuntimeError("HTTP total timeout exceeded", 0);
+        }
+        if (polled <= 0) return -1;   // read timeout or poll error: a failed handshake
+    }
+}
+#endif
+
 // Open a TCP socket + (for https) run the TLS handshake. Pulled out
 // of doOneHttpRequest so the keep-alive session path can call it
 // directly when its pool has no idle connection for the target host.
 // On any failure the conn's resources are cleaned up before throwing.
 static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
                              const HttpOptions& opts) {
-    conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs, opts.blockPrivateHosts);
+    conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs, opts.blockPrivateHosts, opts.deadline);
     // After connect, apply the read/write timeout to the socket so
     // subsequent recv()/send() calls (and the SSL_read/SSL_write
     // wrappers around them) bound their wait.
@@ -1377,7 +1466,7 @@ static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
             }
         }
 
-        if (SSL_connect(conn.ssl) <= 0) {
+        if (sslConnectBefore(conn, opts) <= 0) {
             // Verification errors (expired cert, hostname mismatch, etc.)
             // surface as SSL_connect failures. Surface the verify result
             // if it explains the failure; otherwise generic message.
@@ -2844,8 +2933,7 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
         }
 
         if (sseHandled) {
-            // SSE handler should have closed the socket; close again
-            // as a safety net (harmless if already closed).
+            // http.sse leaves the socket to us: this is its only close
             close(client);
             // afterResponse runs after socket close for SSE too
             for (auto& cb : afterCallbacks) {
