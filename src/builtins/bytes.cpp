@@ -12,7 +12,10 @@
 // File-scope (rather than scoped inside registerBytesBuiltins) so the fuzz
 // target in fuzz/fuzz_bytes_unpack.cpp can link against these symbols.
 
-struct StructField { char type; int size; };
+// One format item: `count` repeats of a `size`-byte `type` ("3B" is one
+// field with count 3). Kept unexpanded so a large repeat count costs one
+// entry, not millions.
+struct StructField { char type; int size; int64_t count; };
 
 // Per-field byte cap. `>9999999999h` would otherwise overflow the
 // count accumulator silently and push a near-infinite number of
@@ -22,9 +25,20 @@ struct StructField { char type; int size; };
 // accumulator is also bounded during digit parsing so a giant numeric
 // prefix throws before it can wrap.
 constexpr int64_t kMaxFieldBytes = 16 * 1024 * 1024;
+// Cap on a whole format (all fields together), so "16000000x" repeated
+// can't add up to gigabytes either.
+constexpr int64_t kMaxFormatBytes = 64 * 1024 * 1024;
+
+// Total bytes a parsed format describes (always <= kMaxFormatBytes).
+static int64_t structFmtBytes(const std::vector<StructField>& fields) {
+    int64_t total = 0;
+    for (auto& f : fields) total += f.size * f.count;
+    return total;
+}
 
 std::vector<StructField> parseStructFmt(const std::string& fmt, bool& bigEndian) {
     std::vector<StructField> fields;
+    int64_t total = 0;
     size_t i = 0;
     bigEndian = true; // default big-endian
     if (!fmt.empty() && (fmt[0] == '>' || fmt[0] == '!' || fmt[0] == '<' || fmt[0] == '=')) {
@@ -55,7 +69,10 @@ std::vector<StructField> parseStructFmt(const std::string& fmt, bool& bigEndian)
         }
         if (count * sz > kMaxFieldBytes)
             throw RuntimeError("Struct format field would consume more than 16 MiB", 0);
-        for (int64_t j = 0; j < count; j++) fields.push_back({c, sz});
+        total += count * sz;
+        if (total > kMaxFormatBytes)
+            throw RuntimeError("Struct format would consume more than 64 MiB", 0);
+        fields.push_back({c, sz, count});
     }
     return fields;
 }
@@ -67,13 +84,15 @@ Value bytesUnpack(const std::string& fmt, const std::string& data) {
     auto result = gcNew<PraiaArray>();
     bool big;
     auto fields = parseStructFmt(fmt, big);
+    // Checked up front, before allocating any results
+    if (structFmtBytes(fields) > static_cast<int64_t>(data.size()))
+        throw RuntimeError("bytes.unpack: data too short for format", 0);
     size_t pos = 0;
     auto b = [&](size_t i) -> uint8_t { return static_cast<uint8_t>(data[pos + i]); };
 
     for (auto& f : fields) {
-        if (pos + f.size > data.size())
-            throw RuntimeError("bytes.unpack: data too short for format", 0);
-        if (f.type == 'x') { pos += 1; continue; }
+      if (f.type == 'x') { pos += static_cast<size_t>(f.count); continue; }
+      for (int64_t rep = 0; rep < f.count; rep++) {
 
         if (f.type == 'f') {
             uint32_t bits = 0;
@@ -110,6 +129,7 @@ Value bytesUnpack(const std::string& fmt, const std::string& data) {
         }
         result->elements.push_back(Value(val));
         pos += f.size;
+      }
     }
     return Value(result);
 }
@@ -126,9 +146,11 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
 
             bool big;
             auto fields = parseStructFmt(fmt, big);
+            result.reserve(static_cast<size_t>(structFmtBytes(fields)));
             size_t vi = 0;
             for (auto& f : fields) {
-                if (f.type == 'x') { result += '\0'; continue; }
+              if (f.type == 'x') { result.append(static_cast<size_t>(f.count), '\0'); continue; }
+              for (int64_t rep = 0; rep < f.count; rep++) {
                 if (vi >= vals.size())
                     throw RuntimeError("bytes.pack: not enough values for format", 0);
                 if (!vals[vi].isNumber())
@@ -149,11 +171,20 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
                     vi++; continue;
                 }
 
-                int64_t n = vals[vi].isInt() ? vals[vi].asInt()
-                                             : static_cast<int64_t>(vals[vi].asNumber());
+                int64_t n;
+                if (vals[vi].isInt()) {
+                    n = vals[vi].asInt();
+                } else {
+                    // Casting NaN, infinity or anything outside int64 is UB
+                    double d = vals[vi].asNumber();
+                    if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0))
+                        throw RuntimeError("bytes.pack: value out of range for an integer field", 0);
+                    n = static_cast<int64_t>(d);
+                }
                 for (int j = 0; j < f.size; j++)
                     result += static_cast<char>((n >> (big ? ((f.size-1-j)*8) : (j*8))) & 0xFF);
                 vi++;
+              }
             }
             return Value(std::move(result));
         }, {"format", "values"}));
@@ -173,9 +204,7 @@ void registerBytesBuiltins(std::shared_ptr<PraiaMap> bytesMap) {
                 throw RuntimeError("bytes.calcsize() requires a format string", 0);
             bool big;
             auto fields = parseStructFmt(args[0].asString(), big);
-            int64_t total = 0;
-            for (auto& f : fields) total += f.size;
-            return Value(total);
+            return Value(structFmtBytes(fields));
         }));
 
     // bytes.from([72, 101, 108]) → "Hel" — array of byte values to string

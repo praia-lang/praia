@@ -57,7 +57,40 @@ struct SocketConn {
         return ::send(fd, buf, len, 0);
     }
 
+    // While a buffered request is reading its response: the request's
+    // overall deadline (totalTimeout) and its per-read budget. Each read
+    // waits no longer than whatever is left, so a server trickling bytes
+    // can't keep the request alive past the deadline. max() = no deadline.
+    std::chrono::steady_clock::time_point readDeadline =
+        std::chrono::steady_clock::time_point::max();
+    int readTimeoutMs = 0;
+
     ssize_t read(void* buf, size_t len) {
+        ssize_t n = readOnce(buf, len);
+        // A read cut short by the deadline is the overall timeout, not
+        // the per-read one — say which
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            readDeadline != std::chrono::steady_clock::time_point::max() &&
+            std::chrono::steady_clock::now() >= readDeadline)
+            throw RuntimeError("HTTP total timeout exceeded", 0);
+        return n;
+    }
+
+    ssize_t readOnce(void* buf, size_t len) {
+        if (readDeadline != std::chrono::steady_clock::time_point::max()) {
+            auto leftUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                readDeadline - std::chrono::steady_clock::now()).count();
+            if (leftUs <= 0) throw RuntimeError("HTTP total timeout exceeded", 0);
+            // Rounded up a millisecond, so a read capped by the deadline
+            // never times out just before it (see read())
+            long long us = leftUs + 1000;
+            if (readTimeoutMs > 0 && static_cast<long long>(readTimeoutMs) * 1000 < us)
+                us = static_cast<long long>(readTimeoutMs) * 1000;
+            struct timeval tv;
+            tv.tv_sec = static_cast<time_t>(us / 1000000);
+            tv.tv_usec = static_cast<suseconds_t>(us % 1000000);
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
 #ifdef HAVE_OPENSSL
         if (ssl) return SSL_read(ssl, buf, static_cast<int>(len));
 #endif
@@ -1029,7 +1062,7 @@ bool httpHeaderFieldSafe(const std::string& name, const std::string& value) {
 // regardless of any framing headers (see detectStreamMode).
 static std::pair<ResponseHeaderFields, std::string>
 readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
-                   const std::string& method);
+                   const std::string& method, int64_t maxBody);
 
 // Forward declaration: is the response framed in a way that lets us
 // safely return its socket to a keepalive pool? Defined alongside
@@ -1406,7 +1439,17 @@ static OneRequestResult doOneHttpRequestImpl(
     const std::string& method, const ParsedUrl& p,
     const std::string& body,
     const std::unordered_map<std::string, std::string>& extraHeaders,
-    bool wantKeepalive) {
+    bool wantKeepalive, const HttpOptions& opts) {
+
+    // Hold reads to the request's overall deadline while it's in flight;
+    // cleared afterwards so a pooled socket doesn't carry it to the next
+    // request
+    struct ReadDeadlineGuard {
+        SocketConn& c;
+        ~ReadDeadlineGuard() { c.readDeadline = std::chrono::steady_clock::time_point::max(); }
+    } readDeadlineGuard{conn};
+    conn.readDeadline = opts.deadline;
+    conn.readTimeoutMs = opts.readTimeoutMs;
 
     // Serialize straight to the wire — header validation already ran in
     // the caller (validateRequestParts) before any socket I/O.
@@ -1436,7 +1479,7 @@ static OneRequestResult doOneHttpRequestImpl(
     ResponseHeaderFields fields;
     std::string respBody;
     try {
-        auto pair = readFramedResponse(conn, connPtr, method);
+        auto pair = readFramedResponse(conn, connPtr, method, opts.maxResponseSize);
         fields   = std::move(pair.first);
         respBody = std::move(pair.second);
     } catch (...) {
@@ -1446,6 +1489,9 @@ static OneRequestResult doOneHttpRequestImpl(
         // it, then hung up without responding — replaying a POST in
         // that case would double-commit. We match Python requests'
         // default policy: only the RFC-7231-idempotent verbs retry.
+        // Never once the overall deadline has passed: the retry would
+        // re-send the request with no time left to read the reply.
+        if (std::chrono::steady_clock::now() >= opts.deadline) throw;
         if (!isFreshSocket && isIdempotentMethod(method))
             throw HttpRetryOnFresh{};
         throw;
@@ -1485,7 +1531,7 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
 
     auto r = doOneHttpRequestImpl(conn, /*isFreshSocket=*/true,
                                   method, p, body, extraHeaders,
-                                  /*wantKeepalive=*/false);
+                                  /*wantKeepalive=*/false, opts);
     return r.response;
 }
 
@@ -1738,7 +1784,7 @@ static Value httpSessionRequestOne(HttpSession& s, const std::string& method,
         try {
             auto r = doOneHttpRequestImpl(*conn, isFresh,
                                           method, p, body, headers,
-                                          /*wantKeepalive=*/true);
+                                          /*wantKeepalive=*/true, opts);
             if (r.keepalive) sessionReturnIdle(s, key, std::move(conn));
             else conn->shutdown_close();
             return r.response;
@@ -1786,6 +1832,7 @@ Value httpSessionRequest(const Value& session,
 
     while (true) {
         HttpOptions perReq = opts;
+        perReq.deadline = deadline;   // reads inside the response are held to it too
         if (opts.totalTimeoutMs > 0) {
             auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
@@ -1860,6 +1907,7 @@ Value doHttpRequest(const std::string& method, const std::string& url,
         // Cap per-request timeouts at the remaining total budget so a
         // pathological mid-redirect server can't outlast the deadline.
         HttpOptions perReq = opts;
+        perReq.deadline = deadline;   // reads inside the response are held to it too
         if (opts.totalTimeoutMs > 0) {
             auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
@@ -2263,7 +2311,7 @@ static void readHeadersInto(SocketConn& conn, std::string& headerText,
 // expects shared ownership.
 static std::pair<ResponseHeaderFields, std::string>
 readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
-                   const std::string& method) {
+                   const std::string& method, int64_t maxBody) {
     std::string headerText, bodyPrefix;
     readHeadersInto(conn, headerText, bodyPrefix);
     std::string headerSection = (headerText.size() >= 4)
@@ -2279,12 +2327,30 @@ readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
     state.scratchPos = 0;
     detectStreamMode(state, method);
 
+    // maxBody (maxResponseSize): a declared Content-Length over it fails
+    // before any of the body is read; otherwise the read stops as soon as
+    // the body passes it
+    auto tooLarge = [maxBody]() {
+        return RuntimeError("HTTP response body exceeds maxResponseSize (" +
+                            std::to_string(maxBody) + " bytes); raise maxResponseSize "
+                            "or use http.openStream for large responses", 0);
+    };
+    if (maxBody > 0 && state.mode == HttpStreamState::Mode::ContentLength &&
+        state.contentRemaining > maxBody) {
+        state.conn.reset();
+        throw tooLarge();
+    }
+
     std::string body;
     while (true) {
         streamEnsure(state);
         if (state.bufPos >= state.buf.size()) break;
-        body.append(state.buf.data() + state.bufPos,
-                    state.buf.size() - state.bufPos);
+        size_t n = state.buf.size() - state.bufPos;
+        if (maxBody > 0 && body.size() + n > static_cast<size_t>(maxBody)) {
+            state.conn.reset();
+            throw tooLarge();
+        }
+        body.append(state.buf.data() + state.bufPos, n);
         state.bufPos = state.buf.size();
     }
 

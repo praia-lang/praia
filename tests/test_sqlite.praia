@@ -224,4 +224,42 @@ testing.test("GC-driven close: many discarded handles don't leak", lam{ in
     testing.expect(true, nil)
 })
 
+testing.test("strings with NUL bytes round-trip", lam{ in
+    // Bound and read by byte length: a C-string length used to cut the
+    // value at its first NUL, so "admin\0evil" was stored as "admin"
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "CREATE TABLE t (name TEXT)")
+    sqlite.run(db, "INSERT INTO t VALUES (?)", ["admin\0evil"])
+    let rows = sqlite.query(db, "SELECT name FROM t")
+    testing.expectEqual(rows[0].name, "admin\0evil", nil)
+    testing.expectEqual(len(sqlite.query(db, "SELECT * FROM t WHERE name = ?", ["admin"])), 0,
+                        "no longer confused with \"admin\"")
+    sqlite.close(db)
+})
+
+testing.test("BLOB columns come back byte for byte", lam{ in
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "CREATE TABLE b (x BLOB)")
+    sqlite.run(db, "INSERT INTO b VALUES (x'00ff00')")
+    let bin = bytes.from([0, 255, 1, 0, 128])
+    sqlite.run(db, "INSERT INTO b VALUES (?)", [bin])
+    let rows = sqlite.query(db, "SELECT x FROM b")
+    testing.expectEqual(bytes.toArray(rows[0].x), [0, 255, 0], nil)
+    testing.expectEqual(bytes.toArray(rows[1].x), [0, 255, 1, 0, 128], nil)
+    sqlite.close(db)
+})
+
+testing.test("SQL with more than one statement is an error", lam{ in
+    // The text after the first statement used to be ignored silently
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "CREATE TABLE t (x INTEGER)")
+    testing.expectThrows(lam{ in sqlite.query(db, "SELECT 1; DROP TABLE t") }, nil)
+    testing.expectThrows(lam{ in sqlite.run(db, "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)") }, nil)
+    testing.expectEqual(len(sqlite.query(db, "SELECT * FROM t")), 0, "nothing ran")
+    // A trailing semicolon or comment is still one statement
+    testing.expectEqual(len(sqlite.query(db, "SELECT 1 AS a;  -- done\n")), 1, nil)
+    testing.expectThrows(lam{ in sqlite.run(db, "SELECT 1\0; DROP TABLE t") }, "NUL byte in the SQL")
+    sqlite.close(db)
+})
+
 testing.done()

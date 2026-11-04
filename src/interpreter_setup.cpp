@@ -2020,6 +2020,12 @@ Interpreter::Interpreter(bool installErrorClasses) {
             opts.caBundle = m.at("caBundle").asString();
         if (m.count("blockPrivateHosts") && m.at("blockPrivateHosts").isBool())
             opts.blockPrivateHosts = m.at("blockPrivateHosts").asBool();
+        if (m.count("maxResponseSize")) {
+            const Value& v = m.at("maxResponseSize");
+            if (!v.isInt())
+                throw RuntimeError("maxResponseSize must be an integer number of bytes", 0);
+            opts.maxResponseSize = v.asInt() > 0 ? v.asInt() : -1;
+        }
         if (m.count("redirectHeaders")) {
             const Value& v = m.at("redirectHeaders");
             if (v.isString() && v.asString() == "safe")
@@ -4480,8 +4486,15 @@ Interpreter::Interpreter(bool installErrorClasses) {
             // losing precision on the way in.
             else if (p.isInt()) rc = sqlite3_bind_int64(stmt, idx, p.asInt());
             else if (p.isNumber()) rc = sqlite3_bind_double(stmt, idx, p.asNumber());
-            else if (p.isString()) rc = sqlite3_bind_text(stmt, idx, p.asString().c_str(), -1, SQLITE_TRANSIENT);
-            else rc = sqlite3_bind_text(stmt, idx, p.toString().c_str(), -1, SQLITE_TRANSIENT);
+            // Explicit byte length: a C-string length would cut the
+            // value at its first NUL byte
+            else if (p.isString()) {
+                const std::string& str = p.asString();
+                rc = sqlite3_bind_text(stmt, idx, str.data(), static_cast<int>(str.size()), SQLITE_TRANSIENT);
+            } else {
+                std::string str = p.toString();
+                rc = sqlite3_bind_text(stmt, idx, str.data(), static_cast<int>(str.size()), SQLITE_TRANSIENT);
+            }
             if (rc != SQLITE_OK) {
                 std::string err = sqlite3_errstr(rc);
                 sqlite3_finalize(stmt);
@@ -4490,6 +4503,35 @@ Interpreter::Interpreter(bool installErrorClasses) {
                     ": " + err, 0);
             }
         }
+    };
+
+    // Prepares exactly one statement. SQL text past the first statement
+    // used to be ignored without a word — "SELECT 1; DROP TABLE t" ran
+    // just the SELECT — so a second statement is an error now (trailing
+    // whitespace, semicolons and comments are fine). NUL bytes are
+    // rejected too: SQLite would stop reading the text there.
+    auto sqlitePrepareOne = [](sqlite3* conn, const std::string& sql, const char* fn) {
+        if (sql.find('\0') != std::string::npos)
+            throw RuntimeError(std::string(fn) + "(): SQL contains a NUL byte", 0);
+        sqlite3_stmt* stmt = nullptr;
+        const char* tail = nullptr;
+        int rc = sqlite3_prepare_v2(conn, sql.c_str(), static_cast<int>(sql.size()) + 1, &stmt, &tail);
+        if (rc != SQLITE_OK) {
+            std::string err = sqlite3_errmsg(conn);
+            throw RuntimeError("SQL error: " + err, 0);
+        }
+        if (tail && *tail) {
+            sqlite3_stmt* next = nullptr;
+            int rc2 = sqlite3_prepare_v2(conn, tail, -1, &next, nullptr);
+            bool another = (rc2 != SQLITE_OK) || next != nullptr;
+            if (next) sqlite3_finalize(next);
+            if (another) {
+                if (stmt) sqlite3_finalize(stmt);
+                throw RuntimeError(std::string(fn) +
+                    "() runs one SQL statement; the text has more after the first — call it once per statement", 0);
+            }
+        }
+        return stmt;
     };
 
     auto sqliteMap = gcNew<PraiaMap>();
@@ -4517,7 +4559,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
         }));
 
     sqliteMap->entries[Value("query")] = Value(makeNative("sqlite.query", -1,
-        [sqliteBind](const std::vector<Value>& args) -> Value {
+        [sqliteBind, sqlitePrepareOne](const std::vector<Value>& args) -> Value {
             if (args.size() < 2 || args.size() > 3)
                 throw RuntimeError("sqlite.query() expected (conn, sql, params?)", 0);
             auto* w = praia::getExternal<SqliteConn>(args[0], kSqliteTypeTag);
@@ -4526,12 +4568,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             if (!args[1].isString())
                 throw RuntimeError("sqlite.query() argument 2 must be a string", 0);
 
-            sqlite3_stmt* stmt = nullptr;
-            int rc = sqlite3_prepare_v2(w->conn, args[1].asString().c_str(), -1, &stmt, nullptr);
-            if (rc != SQLITE_OK) {
-                std::string err = sqlite3_errmsg(w->conn);
-                throw RuntimeError("SQL error: " + err, 0);
-            }
+            sqlite3_stmt* stmt = sqlitePrepareOne(w->conn, args[1].asString(), "sqlite.query");
 
             if (args.size() == 3) {
                 sqliteBind(stmt, args[2], "sqlite.query");
@@ -4565,10 +4602,23 @@ Interpreter::Interpreter(bool installErrorClasses) {
                         case SQLITE_FLOAT:
                             row->entries[Value(name)] = Value(sqlite3_column_double(stmt, c));
                             break;
-                        default:
-                            row->entries[Value(name)] = Value(std::string(
-                                reinterpret_cast<const char*>(sqlite3_column_text(stmt, c))));
+                        case SQLITE_BLOB: {
+                            const void* blob = sqlite3_column_blob(stmt, c);
+                            int n = sqlite3_column_bytes(stmt, c);
+                            row->entries[Value(name)] = Value(blob
+                                ? std::string(static_cast<const char*>(blob), static_cast<size_t>(n))
+                                : std::string());
                             break;
+                        }
+                        default: {
+                            // Text, by its byte length: it can contain NUL bytes
+                            const unsigned char* text = sqlite3_column_text(stmt, c);
+                            int n = sqlite3_column_bytes(stmt, c);
+                            row->entries[Value(name)] = Value(text
+                                ? std::string(reinterpret_cast<const char*>(text), static_cast<size_t>(n))
+                                : std::string());
+                            break;
+                        }
                     }
                 }
                 rows->elements.push_back(Value(row));
@@ -4588,7 +4638,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
         }));
 
     sqliteMap->entries[Value("run")] = Value(makeNative("sqlite.run", -1,
-        [sqliteBind](const std::vector<Value>& args) -> Value {
+        [sqliteBind, sqlitePrepareOne](const std::vector<Value>& args) -> Value {
             if (args.size() < 2 || args.size() > 3)
                 throw RuntimeError("sqlite.run() expected (conn, sql, params?)", 0);
             auto* w = praia::getExternal<SqliteConn>(args[0], kSqliteTypeTag);
@@ -4597,12 +4647,8 @@ Interpreter::Interpreter(bool installErrorClasses) {
             if (!args[1].isString())
                 throw RuntimeError("sqlite.run() argument 2 must be a string", 0);
 
-            sqlite3_stmt* stmt = nullptr;
-            int rc = sqlite3_prepare_v2(w->conn, args[1].asString().c_str(), -1, &stmt, nullptr);
-            if (rc != SQLITE_OK) {
-                std::string err = sqlite3_errmsg(w->conn);
-                throw RuntimeError("SQL error: " + err, 0);
-            }
+            sqlite3_stmt* stmt = sqlitePrepareOne(w->conn, args[1].asString(), "sqlite.run");
+            int rc = SQLITE_OK;
 
             if (args.size() == 3) {
                 sqliteBind(stmt, args[2], "sqlite.run");

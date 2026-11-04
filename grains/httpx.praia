@@ -22,7 +22,7 @@
 //
 // Options map mirrors http.session's shape (timeout, connectTimeout,
 // readTimeout, totalTimeout, followRedirects, maxRedirects, insecure,
-// caBundle, redirectHeaders, headers). The extra `jar` key, if present, is used as the
+// caBundle, redirectHeaders, maxResponseSize, headers). The extra `jar` key, if present, is used as the
 // session's cookie jar — pass a pre-populated cookie.Jar() to resume
 // state across runs, or omit and the session creates an empty one.
 

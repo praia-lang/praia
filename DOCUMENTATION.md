@@ -3476,9 +3476,10 @@ Header names are lowercased for consistent access.
 | `timeout` | — | Shorthand: same value applied to connect, read, AND total. Seconds (float ok) |
 | `connectTimeout` | 30 | TCP/TLS handshake budget, in seconds |
 | `readTimeout` | 30 | Per recv() / SSL_read() budget, in seconds — a slow peer can't stall half-indefinitely |
-| `totalTimeout` | none | Overall request budget INCLUDING redirects, in seconds. -1 / omitted = no overall cap |
+| `totalTimeout` | 300 | Overall request budget in seconds: connect, every redirect hop, and reading the whole response. `0` or less = no overall cap |
 | `followRedirects` | `true` | Follow 3xx responses with Location headers |
 | `maxRedirects` | 10 | Throw if a chain exceeds this |
+| `maxResponseSize` | 100 MiB | Largest response body a buffered request reads, in bytes; a bigger one throws instead of filling memory. A declared `Content-Length` over it fails before the body is read. `0` or less = no limit. Streams (`http.openStream`) aren't limited — they hand the body over incrementally. |
 | `redirectHeaders` | `"safe"` | Headers sent after a redirect to another origin (scheme, host or port). `"safe"` forwards only these standard non-credential headers: `Accept`, `Accept-Encoding`, `Accept-Language`, `User-Agent`, `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Language`, `Cache-Control`, `Pragma`, `Range`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `If-Range`; `Authorization`, `Cookie` and custom headers such as `X-API-Key` are dropped. `"all"` forwards every header, and lets a 307/308 resend the request body to the new origin (which `"safe"` refuses) — only for redirects you trust (like `curl --location-trusted`). |
 | `insecure` | `false` | **Skip TLS certificate verification.** Testing/dev only; equivalent to `curl -k` |
 | `caBundle` | system trust store | Path to a custom CA PEM bundle for trust-store override |
@@ -3527,7 +3528,7 @@ When `followRedirects` is `false`, the 3xx response is returned as-is with `Loca
 
 - **`connectTimeout`** is enforced via non-blocking connect + poll, so we don't block the calling task during a slow handshake.
 - **`readTimeout`** is enforced via `SO_RCVTIMEO`/`SO_SNDTIMEO` on the socket; each individual recv/send can wait at most this long.
-- **`totalTimeout`** bounds the entire request including all redirect hops. Once exceeded, the per-request timeouts are capped at the remaining budget so a mid-redirect server can't outlast the deadline.
+- **`totalTimeout`** bounds the entire request: every redirect hop and every read of the response, so a server that trickles its body a byte at a time can't outlast it. Exceeding it throws "HTTP total timeout exceeded". For `http.openStream` it only caps connecting and each individual read (at the time left when each redirect hop starts); it isn't an overall limit on getting the headers, and reading the stream afterwards uses `readTimeout` per read.
 
 Connect against an unroutable IP throws "connect timed out after Nms" with an exact elapsed budget; read timeouts throw "HTTP read timed out".
 
@@ -3576,7 +3577,7 @@ http.request(s, {
 })
 ```
 
-The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `redirectHeaders` — minus `method`/`url`/`body`, which only make sense per-call.
+The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `redirectHeaders`, `maxResponseSize` — minus `method`/`url`/`body`, which only make sense per-call.
 
 ##### Connection reuse and stale-conn recovery
 
@@ -3984,7 +3985,7 @@ s.close()
 | `s.jar()` | The underlying `cookie.Jar` (mutable; call `.clear()` to drop all cookies) |
 | `s.close()` | Closes the underlying `http.session`. Idempotent. |
 
-The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `redirectHeaders`, `headers`) plus one extra key:
+The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `redirectHeaders`, `maxResponseSize`, `headers`) plus one extra key:
 
 - **`jar`** — if provided, the session uses this `cookie.Jar` instance instead of creating an empty one. Useful for resuming cookie state across runs (save with `jar.cookies()`, restore by constructing a jar with the saved entries) or for sharing one jar across multiple sessions.
 
@@ -4616,11 +4617,11 @@ for (user in users) {
 }
 ```
 
-INTEGER columns are returned as Praia ints, preserving the full 64-bit range; REAL columns come back as floats; TEXT as strings; NULL as `nil`.
+INTEGER columns are returned as Praia ints, preserving the full 64-bit range; REAL columns come back as floats; TEXT as strings; NULL as `nil`. TEXT and BLOB values come back as strings of their full byte length, so binary data and text containing NUL bytes round-trip (and bound string parameters are stored whole, NUL bytes included).
 
 ### Executing statements
 
-`sqlite.run(db, sql, params?)` executes INSERT/UPDATE/DELETE/DDL and returns `{changes, lastId}`:
+`sqlite.run(db, sql, params?)` executes INSERT/UPDATE/DELETE/DDL and returns `{changes, lastId}`. Like `sqlite.query`, it runs exactly one statement: SQL with another statement after the first (`"SELECT 1; DROP TABLE t"`) is an error rather than having the rest silently ignored, so make one call per statement. A trailing `;` or comment is fine.
 
 ```
 let result = sqlite.run(db, "INSERT INTO users (name, age) VALUES (?, ?)", ["Ada", 36])
@@ -5016,6 +5017,8 @@ Returns the total byte size of a struct format string:
 bytes.calcsize(">BHI")    // 7
 bytes.calcsize(">3B2Hd")  // 15
 ```
+
+A format can describe at most 16 MiB per field and 64 MiB in total; larger formats throw before anything is allocated. `unpack` checks the format's size against the data first, and `pack` refuses non-integer values outside the 64-bit range for integer fields.
 
 ### Practical: DNS query header
 

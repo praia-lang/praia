@@ -2,6 +2,7 @@
 
 #include "interpreter.h"
 #include "value.h"
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -77,7 +78,10 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
 struct HttpOptions {
     int connectTimeoutMs = 30000;   // TCP/TLS handshake budget
     int readTimeoutMs    = 30000;   // single recv() / SSL_read() budget
-    int totalTimeoutMs   = -1;      // overall request budget (incl. redirects)
+    // Overall budget for a buffered request: connect, redirects, and
+    // reading the whole response. <= 0 = no limit. Streams
+    // (http.openStream) only use it until the handle is returned.
+    int totalTimeoutMs   = 300000;
     bool followRedirects = true;
     int maxRedirects     = 10;
     bool insecure        = false;   // skip TLS cert verification (testing only!)
@@ -95,6 +99,15 @@ struct HttpOptions {
     // (`redirectHeaders: "all"`): forward everything, for redirects the
     // caller trusts (curl's --location-trusted).
     bool redirectForwardAllHeaders = false;
+    // Largest response body a buffered request will read; a bigger one
+    // fails instead of filling memory. <= 0 = no limit. Not applied to
+    // streams, which hand the body over incrementally.
+    int64_t maxResponseSize = 100ll * 1024 * 1024;
+    // Internal, not a user option: the absolute deadline for the current
+    // request from totalTimeoutMs, set by the redirect loops so reads
+    // inside a response can be held to it.
+    std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::time_point::max();
 };
 
 Value doHttpRequest(const std::string& method, const std::string& url,

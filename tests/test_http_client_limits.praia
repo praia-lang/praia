@@ -1,0 +1,169 @@
+use "testing"
+
+// HTTP client limits for buffered requests: maxResponseSize (default
+// 100 MiB) and totalTimeout (default 300 s), which now holds for the whole
+// response read rather than only the start of each redirect hop.
+
+func freePort() {
+    let l = net.listen(0)
+    let port = net.localAddr(l).port
+    net.close(l)
+    return port
+}
+
+let PORT = freePort()
+let body2000 = "a" * 2000
+
+let _server = async lam{ in
+    let s = net.listen(PORT)
+    while (true) {
+        let c = net.accept(s)
+        let req = ""
+        while (!req.contains("\r\n\r\n")) {
+            let chunk = net.recv(c, 4096)
+            if (len(chunk) == 0) { break }
+            req = req + chunk
+        }
+        let after = req.slice(req.indexOf(" ") + 1, len(req))
+        let path = after.slice(0, after.indexOf(" "))
+        try {
+            if (path == "/big") {
+                net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 2000\r\nConnection: close\r\n\r\n" + body2000)
+            } elif (path == "/huge-declared") {
+                // Declares 200 MB and sends nothing
+                net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 200000000\r\nConnection: close\r\n\r\n")
+                time.sleep(500)
+            } elif (path == "/chunked") {
+                net.send(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+                for (i in 0..3) { net.send(c, "3e8\r\n" + ("b" * 1000) + "\r\n") }
+                net.send(c, "0\r\n\r\n")
+            } elif (path == "/trickle") {
+                net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
+                for (i in 0..15) {
+                    time.sleep(200)
+                    net.send(c, "x")
+                }
+            } else {
+                net.send(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            }
+        } catch (e) {}
+        try { net.close(c) } catch (e) {}
+    }
+}()
+time.sleep(150)
+
+let base = "http://127.0.0.1:" + str(PORT)
+
+// Message of the error `fn` throws, or nil
+func errorOf(fn) {
+    try { fn() } catch (e) { return str(e) }
+    return nil
+}
+
+testing.test("a response within maxResponseSize is returned", lam{ in
+    let r = http.get(base + "/big", {blockPrivateHosts: false, maxResponseSize: 2000})
+    testing.expectEqual(len(r.body), 2000, nil)
+})
+
+testing.test("a Content-Length over maxResponseSize fails", lam{ in
+    let msg = errorOf(lam{ in http.get(base + "/big", {blockPrivateHosts: false, maxResponseSize: 1000}) })
+    testing.expectContains(msg, "exceeds maxResponseSize (1000 bytes)", nil)
+})
+
+testing.test("a chunked body over maxResponseSize fails", lam{ in
+    let msg = errorOf(lam{ in http.get(base + "/chunked", {blockPrivateHosts: false, maxResponseSize: 1500}) })
+    testing.expectContains(msg, "exceeds maxResponseSize", nil)
+    let ok = http.get(base + "/chunked", {blockPrivateHosts: false, maxResponseSize: 3000})
+    testing.expectEqual(len(ok.body), 3000, nil)
+})
+
+testing.test("the default limit refuses a huge declared body at once", lam{ in
+    let start = time.now()
+    let msg = errorOf(lam{ in http.get(base + "/huge-declared", {blockPrivateHosts: false}) })
+    testing.expectContains(msg, "exceeds maxResponseSize", nil)
+    testing.expect(time.now() - start < 2000, "should fail before reading")
+})
+
+testing.test("maxResponseSize applies through a session", lam{ in
+    let s = http.session({blockPrivateHosts: false, maxResponseSize: 1000})
+    let msg = errorOf(lam{ in http.get(s, base + "/big") })
+    testing.expectContains(msg, "exceeds maxResponseSize", nil)
+    http.close(s)
+})
+
+testing.test("streams aren't capped by maxResponseSize", lam{ in
+    let st = http.openStream({url: base + "/big", blockPrivateHosts: false, maxResponseSize: 1000})
+    testing.expectEqual(len(st.readAll()), 2000, nil)
+    st.close()
+})
+
+testing.test("totalTimeout bounds a server that trickles its body", lam{ in
+    // Each byte arrives well within readTimeout, so only the overall
+    // deadline can stop this
+    let start = time.now()
+    let msg = errorOf(lam{ in http.get(base + "/trickle", {blockPrivateHosts: false, totalTimeout: 0.8}) })
+    let elapsed = time.now() - start
+    testing.expectContains(msg, "total timeout", nil)
+    testing.expect(elapsed < 2500, "took %{elapsed}ms")
+})
+
+// A pooled (reused) socket that hits the overall deadline must not be
+// retried on a fresh one — that would send the request again with no
+// time left to read the reply.
+let KA_PORT = freePort()
+let _kaServer = async lam{ in
+    let s = net.listen(KA_PORT)
+    let slowHits = 0
+    while (true) {
+        let c = net.accept(s)
+        let open = true
+        while (open) {
+            let req = ""
+            while (!req.contains("\r\n\r\n")) {
+                let chunk = nil
+                try { chunk = net.recv(c, 4096) } catch (e) { chunk = "" }
+                if (len(chunk) == 0) { break }
+                req = req + chunk
+            }
+            if (!req.contains("\r\n\r\n")) { break }
+            let after = req.slice(req.indexOf(" ") + 1, len(req))
+            let path = after.slice(0, after.indexOf(" "))
+            try {
+                if (path == "/ka") {
+                    net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+                } elif (path == "/slow-ka") {
+                    slowHits = slowHits + 1
+                    net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
+                    for (i in 0..10) {
+                        time.sleep(200)
+                        net.send(c, "x")
+                    }
+                    open = false
+                } else {
+                    let body = str(slowHits)
+                    net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+                    open = false
+                }
+            } catch (e) { open = false }
+        }
+        try { net.close(c) } catch (e) {}
+    }
+}()
+time.sleep(150)
+
+testing.test("a deadline hit on a pooled socket isn't retried", lam{ in
+    let kaBase = "http://127.0.0.1:" + str(KA_PORT)
+    let s = http.session({blockPrivateHosts: false})
+    testing.expectEqual(http.get(s, kaBase + "/ka").body, "ok", "warms the pool")
+    let msg = errorOf(lam{ in http.get(s, kaBase + "/slow-ka", {totalTimeout: 0.6}) })
+    testing.expectContains(msg, "total timeout", nil)
+    http.close(s)
+    let hits = http.get(kaBase + "/hits", {blockPrivateHosts: false}).body
+    testing.expectEqual(hits, "1", "the request was sent once")
+})
+
+testing.test("maxResponseSize must be an integer", lam{ in
+    testing.expectThrows(lam{ in http.get(base + "/big", {blockPrivateHosts: false, maxResponseSize: "big"}) }, nil)
+})
+
+testing.done()
