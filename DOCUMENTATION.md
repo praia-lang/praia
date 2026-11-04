@@ -3057,6 +3057,7 @@ url.build({
     fragment: "section-1"
 })
 // "https://api.example.com:8443/v1/items?limit=50&tag=blue#section-1"
+// (parameters from a map can come out in either order)
 
 // IPv6 hosts get auto-bracketed
 url.build({scheme: "http", host: "::1", port: 8080, path: "/"})
@@ -3477,6 +3478,7 @@ Header names are lowercased for consistent access.
 | `totalTimeout` | none | Overall request budget INCLUDING redirects, in seconds. -1 / omitted = no overall cap |
 | `followRedirects` | `true` | Follow 3xx responses with Location headers |
 | `maxRedirects` | 10 | Throw if a chain exceeds this |
+| `redirectHeaders` | `"safe"` | Headers sent after a redirect to another origin (scheme, host or port). `"safe"` forwards only standard non-credential headers (`Accept*`, `User-Agent`, `Content-*`, `Cache-Control`, `Pragma`, `Range`, `If-*`); `Authorization`, `Cookie` and custom headers such as `X-API-Key` are dropped. `"all"` forwards every header — only for redirects you trust (like `curl --location-trusted`). |
 | `insecure` | `false` | **Skip TLS certificate verification.** Testing/dev only; equivalent to `curl -k` |
 | `caBundle` | system trust store | Path to a custom CA PEM bundle for trust-store override |
 | `blockPrivateHosts` | `true` | **SSRF protection.** Refuse to connect to loopback, RFC1918, link-local (incl. cloud metadata `169.254.169.254`), IPv4-mapped, multicast, and reserved address ranges. Re-applied per redirect hop. Set to `false` only when deliberately targeting internal hosts. |
@@ -3515,6 +3517,8 @@ The client follows 3xx responses with a Location header by default, up to `maxRe
 - **307 Temporary Redirect / 308 Permanent Redirect**: preserves both method AND body. These codes exist precisely to disambiguate from the 301/302 method-switch convention.
 
 **Security**: an `https://` → `http://` Location is refused outright. Open-redirect attacks that try to leak cookies or auth headers over plaintext don't get to. (Matches `curl --proto-redir` behavior.) All Location forms permitted by RFC 3986 §5.2 are followed: absolute URLs (`https://other/path`), protocol-relative (`//host/foo`), absolute paths (`/foo`), relative paths (`final`, `../login`, `./sibling`), and query-only references (`?q=1`, which inherits the base path).
+
+Redirects to a different origin (scheme, host or port) only carry standard non-credential headers, so an open redirect can't collect `Authorization`, `Cookie`, or a custom header like `X-API-Key`. Same-origin redirects keep every header. Pass `redirectHeaders: "all"` to forward everything when you trust the redirect target.
 
 When `followRedirects` is `false`, the 3xx response is returned as-is with `Location` in `headers.location`.
 
@@ -3571,7 +3575,7 @@ http.request(s, {
 })
 ```
 
-The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts` — minus `method`/`url`/`body`, which only make sense per-call.
+The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `redirectHeaders` — minus `method`/`url`/`body`, which only make sense per-call.
 
 ##### Connection reuse and stale-conn recovery
 
@@ -3954,7 +3958,7 @@ s.close()
 | `s.jar()` | The underlying `cookie.Jar` (mutable; call `.clear()` to drop all cookies) |
 | `s.close()` | Closes the underlying `http.session`. Idempotent. |
 
-The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `headers`) plus one extra key:
+The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `redirectHeaders`, `headers`) plus one extra key:
 
 - **`jar`** — if provided, the session uses this `cookie.Jar` instance instead of creating an empty one. Useful for resuming cookie state across runs (save with `jar.cookies()`, restore by constructing a jar with the saved entries) or for sharing one jar across multiple sessions.
 
@@ -5993,11 +5997,14 @@ When you write `use "geometry"`, Praia looks for the grain in this order:
 2. **`grains/`** — project-bundled grains, walks up from the current file
 3. **`~/.praia/ext_grains/`** — user-global grains (sand --global)
 4. **`<libdir>/ext_grains/`** — system-global grains (sudo sand --global)
+5. **`<libdir>/grains/`** — the standard library grains
+
+Steps 1 and 2 walk up from the directory of the file doing the import, not from the directory you ran `praia` in, so a script never picks up grains from wherever it happens to be started. Only when there is no file (the REPL, `praia -c`) does the search start in the current directory.
 
 At each location, Praia checks for:
 - `<name>.praia` (single-file grain)
 - `<name>/` directory with `grain.yaml` → reads `main` field for the entry file
-- `<name>/main.praia` (fallback if no `grain.yaml`)
+- `<name>/main.praia` (fallback if no `grain.yaml`), then `<name>/index.praia`
 
 ### Grains importing other grains
 

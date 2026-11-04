@@ -1,3 +1,4 @@
+#include <cctype>
 #include "../builtins.h"
 #include "../interpreter.h"
 #include "../praia_plugin.h"
@@ -1038,6 +1039,61 @@ static std::string mergePaths(const praia::url::ParsedUrl& base,
     return base.path.substr(0, slash + 1) + refPath;
 }
 
+// Erases every header whose name matches `name` case-insensitively —
+// callers' header maps keep whatever casing the user wrote.
+static void eraseHeaderCI(std::unordered_map<std::string, std::string>& headers,
+                          const std::string& name) {
+    for (auto it = headers.begin(); it != headers.end();) {
+        bool match = it->first.size() == name.size() &&
+            std::equal(it->first.begin(), it->first.end(), name.begin(),
+                       [](char a, char b) {
+                           return std::tolower(static_cast<unsigned char>(a)) ==
+                                  std::tolower(static_cast<unsigned char>(b));
+                       });
+        it = match ? headers.erase(it) : std::next(it);
+    }
+}
+
+// Headers forwarded on a redirect to another origin unless the caller
+// opts into `redirectHeaders: "all"`: standard ones that describe the
+// request or the client, never credentials. Anything else — including
+// custom headers such as X-API-Key that may carry a secret — was meant
+// for the original host only.
+static bool isSafeCrossOriginHeader(const std::string& name) {
+    static const char* const kSafe[] = {
+        "accept", "accept-encoding", "accept-language", "user-agent",
+        "content-type", "content-length", "content-encoding", "content-language",
+        "cache-control", "pragma", "range", "if-match", "if-none-match",
+        "if-modified-since", "if-unmodified-since", "if-range",
+    };
+    std::string lower = name;
+    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* safe : kSafe)
+        if (lower == safe) return true;
+    return false;
+}
+
+// Called on every redirect hop. Same-origin (scheme, host and port all
+// equal) keeps every header; otherwise only isSafeCrossOriginHeader ones
+// survive, so an open redirect — or any server the user talks to —
+// can't collect credentials meant for the original host.
+static void filterHeadersForRedirect(std::unordered_map<std::string, std::string>& headers,
+                                     const std::string& fromUrl,
+                                     const std::string& toUrl,
+                                     const HttpOptions& opts) {
+    if (opts.redirectForwardAllHeaders) return;
+    ParsedUrl from = parseUrl(fromUrl);
+    ParsedUrl to = parseUrl(toUrl);
+    auto lower = [](std::string h) {
+        for (auto& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return h;
+    };
+    if (from.tls == to.tls && from.port == to.port && lower(from.host) == lower(to.host))
+        return;
+    for (auto it = headers.begin(); it != headers.end();)
+        it = isSafeCrossOriginHeader(it->first) ? std::next(it) : headers.erase(it);
+}
+
 // Resolve a redirect Location header against the base URL.
 //   - absolute URL (has scheme)            → use as-is
 //   - protocol-relative (//host/path)      → prepend base scheme
@@ -1716,9 +1772,10 @@ Value httpSessionRequest(const Value& session,
               currentMethod != "GET" && currentMethod != "HEAD")) {
             currentMethod = "GET";
             currentBody.clear();
-            currentHeaders.erase("Content-Length");
-            currentHeaders.erase("Content-Type");
+            eraseHeaderCI(currentHeaders, "Content-Length");
+            eraseHeaderCI(currentHeaders, "Content-Type");
         }
+        filterHeadersForRedirect(currentHeaders, currentUrl, newUrl, opts);
         currentUrl = newUrl;
         ++redirectCount;
     }
@@ -1802,11 +1859,12 @@ Value doHttpRequest(const std::string& method, const std::string& url,
               currentMethod != "GET" && currentMethod != "HEAD")) {
             currentMethod = "GET";
             currentBody.clear();
-            currentHeaders.erase("Content-Length");
-            currentHeaders.erase("Content-Type");
+            eraseHeaderCI(currentHeaders, "Content-Length");
+            eraseHeaderCI(currentHeaders, "Content-Type");
             // (Transfer-Encoding would also need clearing for chunked
             //  bodies, but we don't currently emit chunked.)
         }
+        filterHeadersForRedirect(currentHeaders, currentUrl, newUrl, opts);
         currentUrl = newUrl;
         ++redirectCount;
     }
@@ -2401,9 +2459,10 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                           currentMethod != "GET" && currentMethod != "HEAD")) {
                         currentMethod = "GET";
                         currentBody.clear();
-                        currentHeaders.erase("Content-Length");
-                        currentHeaders.erase("Content-Type");
+                        eraseHeaderCI(currentHeaders, "Content-Length");
+                        eraseHeaderCI(currentHeaders, "Content-Type");
                     }
+                    filterHeadersForRedirect(currentHeaders, currentUrl, newUrl, opts);
                     currentUrl = newUrl;
                     ++redirectCount;
                     continue;

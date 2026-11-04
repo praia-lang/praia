@@ -109,6 +109,12 @@ inline std::string tryResolveGrain(const fs::path& base, const std::string& name
 // Resolve a grain import path to an absolute file path.
 // Searches (in order): relative paths, ext_grains/, grains/,
 // ~/.praia/ext_grains/, LIBDIR/ext_grains/, LIBDIR/grains/.
+// ext_grains/ and grains/ are found by walking up from the importing
+// file. The current directory is searched instead only when there is
+// no importing file (REPL, `praia -c`): for a script, the directory it
+// was started from is not part of its project — otherwise running an
+// installed tool (sand, say) inside an untrusted checkout would load
+// that checkout's ext_grains/<name>.praia in place of the real grain.
 // Throws std::runtime_error if the grain cannot be found.
 inline std::string resolveGrainPath(const std::string& importPath,
                                      const std::string& currentFile) {
@@ -137,7 +143,12 @@ inline std::string resolveGrainPath(const std::string& importPath,
 
     // 2. ext_grains/ (local dependencies installed by sand)
     if (!currentFile.empty()) {
-        fs::path dir = fs::path(currentFile).parent_path();
+        // Canonical, so a relative script path (`praia scripts/tool.praia`)
+        // still walks up to the project root, and `../tools/t.praia`
+        // doesn't walk up through the directory it was started from
+        std::error_code canonEc;
+        fs::path dir = fs::weakly_canonical(fs::absolute(fs::path(currentFile)), canonEc).parent_path();
+        if (canonEc) dir = fs::path(currentFile).parent_path();
         for (int i = 0; i < 10; i++) {
             auto r = tryResolveGrain(dir / "ext_grains", importPath);
             if (!r.empty()) return r;
@@ -145,14 +156,19 @@ inline std::string resolveGrainPath(const std::string& importPath,
             dir = dir.parent_path();
         }
     }
-    {
+    if (currentFile.empty()) {
         auto r = tryResolveGrain(fs::current_path() / "ext_grains", importPath);
         if (!r.empty()) return r;
     }
 
     // 3. grains/ directory (project-level, bundled grains)
     if (!currentFile.empty()) {
-        fs::path dir = fs::path(currentFile).parent_path();
+        // Canonical, so a relative script path (`praia scripts/tool.praia`)
+        // still walks up to the project root, and `../tools/t.praia`
+        // doesn't walk up through the directory it was started from
+        std::error_code canonEc;
+        fs::path dir = fs::weakly_canonical(fs::absolute(fs::path(currentFile)), canonEc).parent_path();
+        if (canonEc) dir = fs::path(currentFile).parent_path();
         for (int i = 0; i < 10; i++) {
             auto r = tryResolveGrain(dir / "grains", importPath);
             if (!r.empty()) return r;
@@ -160,7 +176,7 @@ inline std::string resolveGrainPath(const std::string& importPath,
             dir = dir.parent_path();
         }
     }
-    {
+    if (currentFile.empty()) {
         auto r = tryResolveGrain(fs::current_path() / "grains", importPath);
         if (!r.empty()) return r;
     }

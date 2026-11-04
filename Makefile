@@ -189,8 +189,16 @@ LIBDIR  ?= $(PREFIX)/lib/praia
 BINDIR   = $(PREFIX)/bin
 SAND_DIR = sand
 
+# The install build gets its own objects (they're compiled with
+# PRAIA_LIBDIR) in a fresh private directory from mktemp: a fixed path
+# under /tmp could be created ahead of time by another local user, and
+# the build would then load their .d files (make -include runs them) and
+# link their .o files during `sudo make install`.
 install:
-	$(MAKE) BUILD_DIR=/tmp/praia-install-build CXXFLAGS='$(CXXFLAGS) -DPRAIA_LIBDIR="\"$(LIBDIR)\""'
+	@dir=$$(mktemp -d "$${TMPDIR:-/tmp}/praia-install.XXXXXX") || exit 1; \
+	mkdir -p "$$dir/vm" "$$dir/builtins"; \
+	$(MAKE) BUILD_DIR="$$dir" CXXFLAGS='$(CXXFLAGS) -DPRAIA_LIBDIR="\"$(LIBDIR)\""'; \
+	status=$$?; rm -rf "$$dir"; exit $$status
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
 	install -d $(DESTDIR)$(LIBDIR)/include
@@ -218,7 +226,6 @@ install:
 	cp -R $(SAND_DIR)/grain.yaml $(DESTDIR)$(LIBDIR)/ext_grains/sand/
 	@printf "#!/bin/sh\n# sand-managed wrapper for sand\nexec '$(BINDIR)/praia' '$(LIBDIR)/ext_grains/sand/main.praia' \"\$$@\"\n" > $(DESTDIR)$(BINDIR)/sand
 	chmod 755 $(DESTDIR)$(BINDIR)/sand
-	rm -rf /tmp/praia-install-build
 	@echo "Installed praia -> $(DESTDIR)$(BINDIR)/praia"
 	@echo "Installed sand  -> $(DESTDIR)$(BINDIR)/sand"
 	@echo "Installed grains -> $(DESTDIR)$(LIBDIR)/grains/"

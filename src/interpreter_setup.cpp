@@ -2012,6 +2012,15 @@ Interpreter::Interpreter(bool installErrorClasses) {
             opts.caBundle = m.at("caBundle").asString();
         if (m.count("blockPrivateHosts") && m.at("blockPrivateHosts").isBool())
             opts.blockPrivateHosts = m.at("blockPrivateHosts").asBool();
+        if (m.count("redirectHeaders")) {
+            const Value& v = m.at("redirectHeaders");
+            if (v.isString() && v.asString() == "safe")
+                opts.redirectForwardAllHeaders = false;
+            else if (v.isString() && v.asString() == "all")
+                opts.redirectForwardAllHeaders = true;
+            else
+                throw RuntimeError("redirectHeaders must be \"safe\" or \"all\"", 0);
+        }
     };
 
     // Layer per-call headers on top of session defaults (or {} for

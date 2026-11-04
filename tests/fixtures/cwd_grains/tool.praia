@@ -1,0 +1,3 @@
+// A script outside the untrusted directory that imports a stdlib grain
+use "strings"
+print("tool ran")

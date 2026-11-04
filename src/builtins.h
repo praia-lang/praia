@@ -88,6 +88,13 @@ struct HttpOptions {
     // false only when you are deliberately targeting internal hosts
     // (local development, internal microservices, etc.).
     bool blockPrivateHosts = true;
+    // Headers on a redirect to another origin (scheme, host or port).
+    // false (`redirectHeaders: "safe"`, the default): only a fixed set of
+    // standard non-credential headers is forwarded — Authorization,
+    // Cookie and custom ones like X-API-Key are dropped. true
+    // (`redirectHeaders: "all"`): forward everything, for redirects the
+    // caller trusts (curl's --location-trusted).
+    bool redirectForwardAllHeaders = false;
 };
 
 Value doHttpRequest(const std::string& method, const std::string& url,
