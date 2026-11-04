@@ -6217,7 +6217,8 @@ The collector runs automatically in the background. It tracks container objects 
 
 - GC is automatic — no manual intervention needed
 - It only targets **cycles**. Non-cyclic objects are freed immediately by refcounting
-- Each thread has its own collector (async tasks are isolated)
+- Each thread has its own collector, and it only looks inside objects its own thread owns. The copies an async task is given belong to the task until it finishes; after that, what the task leaves behind (its result included) moves to the collector of the thread that started it. Values put in a `Queue` or `SharedMap` belong to no collector: they're freed by reference counting, but a cycle running through one isn't collected
+- Known gap: a closure that a native runs on another thread (the handler of `async server.listen`, say) still shares what it captured with the thread that made it, and that thread's collector reads those values while the handler may be changing them
 - The collector auto-tunes its frequency based on how much garbage it finds
 - `PRAIA_GC_STRESS=1` makes it collect after every allocation (`PRAIA_GC_STRESS=N`: every N allocations). Very slow; meant for testing the runtime and native plugins (`make test-gc-stress` runs the suite this way)
 

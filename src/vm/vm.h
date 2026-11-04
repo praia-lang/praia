@@ -19,8 +19,13 @@ struct ObjUpvalue {
     Value* location;      // points into the stack while variable is live
     Value closed;          // holds the value after the variable goes out of scope
     ObjUpvalue* next;      // linked list for open upvalues
+    // The heap of the thread that made it, which writes it without
+    // GcHeap::upvalueMutex; any other thread takes the lock. Null once
+    // its task has ended and the upvalue is in the task's bag.
+    std::atomic<const GcHeap*> owner;
 
-    ObjUpvalue(Value* slot) : location(slot), next(nullptr) {}
+    ObjUpvalue(Value* slot, const GcHeap* ownerHeap)
+        : location(slot), next(nullptr), owner(ownerHeap) {}
 };
 
 // Closure: a compiled function + its captured upvalues
@@ -98,6 +103,11 @@ struct VMCallFrame {
 
 class VM {
     friend struct VMScope;
+    // Heap of the thread running execute(), set by VMScope
+    const GcHeap* execHeap_ = nullptr;
+    // Writes `v` to an upvalue, under GcHeap::upvalueMutex unless this
+    // thread owns it. The old value is released after the lock.
+    void writeUpvalue(ObjUpvalue* uv, Value v);
 public:
     VM();
     ~VM();

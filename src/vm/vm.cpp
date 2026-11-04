@@ -178,6 +178,16 @@ static Value deepCopyForTask(const Value& v,
             copy->elements.push_back(deepCopyForTask(el, visited));
         return result;
     }
+    if (v.isSet()) {
+        void* key = static_cast<void*>(v.asSet().get());
+        auto it = visited.find(key);
+        if (it != visited.end()) return it->second;
+        auto copy = gcNew<PraiaSet>();
+        copy->elements = v.asSet()->elements; // hashable values: nothing to copy deeper
+        Value result(copy);
+        visited[key] = result;
+        return result;
+    }
     if (v.isInstance()) {
         void* key = static_cast<void*>(v.asInstance().get());
         auto it = visited.find(key);
@@ -354,6 +364,7 @@ struct VMScope {
     int savedFloor;
     VMScope(VM* v) : vm(v), prevVM(VM::currentVM_), savedFloor(v->executeFloor_) {
         VM::currentVM_ = v;
+        v->execHeap_ = &GcHeap::current();
         v->executeFloor_ = static_cast<int>(v->exceptionHandlers.size());
         v->executeDepth_++;
     }
@@ -418,7 +429,10 @@ VM::~VM() {
     {
         std::lock_guard<std::mutex> lk(taskBag_->mu);
         for (auto& c : allClosures) taskBag_->closures.push_back(std::move(c));
-        for (auto& u : allUpvalues) taskBag_->upvalues.push_back(std::move(u));
+        for (auto& u : allUpvalues) {
+            u->owner.store(nullptr, std::memory_order_release); // any thread now
+            taskBag_->upvalues.push_back(std::move(u));
+        }
         allClosures.clear();
         allUpvalues.clear();
         taskBag_->vmGone.store(true);
@@ -623,7 +637,7 @@ ObjUpvalue* VM::captureUpvalue(Value* local) {
 
     if (upvalue && upvalue->location == local) return upvalue;
 
-    allUpvalues.push_back(std::make_unique<ObjUpvalue>(local));
+    allUpvalues.push_back(std::make_unique<ObjUpvalue>(local, execHeap_));
     auto* created = allUpvalues.back().get();
     created->next = upvalue;
 
@@ -640,6 +654,18 @@ void VM::closeUpvalues(Value* last) {
         upvalue->location = &upvalue->closed;
         openUpvalues = upvalue->next;
     }
+}
+
+void VM::writeUpvalue(ObjUpvalue* uv, Value v) {
+    if (uv->owner.load(std::memory_order_relaxed) == execHeap_) {
+        *uv->location = std::move(v);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
+        std::swap(*uv->location, v);
+    }
+    // `v` now holds the old value, released here
 }
 
 // ── Function calls ──────────────────────────────────────────
@@ -1668,7 +1694,8 @@ VM::Result VM::execute(int baseFrameCount_) {
         case OpCode::OP_POST_INC_UPVALUE:
         case OpCode::OP_POST_DEC_UPVALUE: {
             uint16_t slot = READ_U16();
-            Value& val = *FRAME.closure->upvalues[slot]->location;
+            auto* uv = FRAME.closure->upvalues[slot];
+            Value val = *uv->location;
             if (!val.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
             push(val);
             bool inc = static_cast<OpCode>(instruction) == OpCode::OP_POST_INC_UPVALUE;
@@ -1677,8 +1704,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                 bool ov = inc ? __builtin_add_overflow(val.asInt(), (int64_t)1, &r)
                               : __builtin_sub_overflow(val.asInt(), (int64_t)1, &r);
                 if (ov) { RUNTIME_ERR(inc ? "integer overflow in '++'" : "integer overflow in '--'"); }
-                val = Value(r);
-            } else val = Value(val.asNumber() + (inc ? 1 : -1));
+                writeUpvalue(uv, Value(r));
+            } else writeUpvalue(uv, Value(val.asNumber() + (inc ? 1 : -1)));
             break;
         }
 
@@ -1923,7 +1950,7 @@ VM::Result VM::execute(int baseFrameCount_) {
 
         case OpCode::OP_SET_UPVALUE: {
             uint16_t slot = READ_U16();
-            *FRAME.closure->upvalues[slot]->location = peek();
+            writeUpvalue(FRAME.closure->upvalues[slot], peek());
             break;
         }
 
@@ -2806,6 +2833,11 @@ VM::Result VM::execute(int baseFrameCount_) {
             via multiple paths is cloned once. */
             std::unordered_map<void*, Value> visited;
 
+            // The copies are the task's while it runs: this heap keeps
+            // them without looking inside (see GcHeap::beginLending)
+            GcLendScope lendScope;
+            auto parentInbox = GcHeap::current().inbox();
+
             // Deep-copy args so async task can't mutate caller's objects
             for (auto& arg : args)
                 arg = deepCopyForTask(arg, visited);
@@ -2917,7 +2949,10 @@ VM::Result VM::execute(int baseFrameCount_) {
                      defClass = std::move(defClass),
                      rootsHolder, // pinned roots — keep alive while lambda lives
                      isConstructor, klass,
-                     namedArgsMissingMask]() mutable -> Value {
+                     namedArgsMissingMask,
+                     lent = lendScope.lent, parentInbox]() mutable -> Value {
+                        // Destroyed last, after taskVm
+                        GcTaskEnd taskEnd(lent, parentInbox);
                         VM taskVm;
                         taskVm.initAsTaskVm(std::move(seed));
 
@@ -2942,7 +2977,8 @@ VM::Result VM::execute(int baseFrameCount_) {
 
                         // Restore upvalues as closed (self-contained) values
                         for (int i = 0; i < closure->upvalueCount && i < static_cast<int>(upvalueSnapshot.size()); i++) {
-                            taskVm.allUpvalues.push_back(std::make_unique<ObjUpvalue>(nullptr));
+                            taskVm.allUpvalues.push_back(
+                                std::make_unique<ObjUpvalue>(nullptr, &GcHeap::current()));
                             auto* uv = taskVm.allUpvalues.back().get();
                             uv->closed = upvalueSnapshot[i];
                             uv->location = &uv->closed;
@@ -3000,6 +3036,7 @@ VM::Result VM::execute(int baseFrameCount_) {
 
                         return retVal;
                     }).share();
+                lendScope.started = true;
             } else if (klass && !initVmcc) {
                 // Class with no init method — just create the instance
                 if (!args.empty()) {
@@ -3029,8 +3066,11 @@ VM::Result VM::execute(int baseFrameCount_) {
                 // never on this VM from another thread.
                 auto seed = captureTaskSeed(this);
                 sharedFuture = std::async(std::launch::async,
-                    [native, args, rootsHolder, seed = std::move(seed)]() mutable -> Value {
+                    [native, args, rootsHolder, seed = std::move(seed),
+                     lent = lendScope.lent, parentInbox]() mutable -> Value {
                         (void)rootsHolder; // capture-only: keeps roots alive
+                        // Destroyed last, after taskVm
+                        GcTaskEnd taskEnd(lent, parentInbox);
                         VM taskVm;
                         // A native task can run for the life of the program
                         // (async server.listen), so unlike a closure task it
@@ -3063,6 +3103,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                         adoptTaskResult(taskVm, result);
                         return result;
                     }).share();
+                lendScope.started = true;
             } else {
                 // Bound methods, etc. — run synchronously
                 Interpreter dummy{Interpreter::NoErrorBootstrap{}};
@@ -3198,7 +3239,7 @@ void VM::gcMarkRoots(GcHeap& heap) {
 
     // All upvalue closed values
     for (auto& uv : allUpvalues)
-        heap.markValue(uv->closed);
+        heap.markUpvalue(uv.get());
 
     // Function constant pools (may contain callable/container literals)
     for (auto& c : allClosures) {

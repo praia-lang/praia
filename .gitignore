@@ -1,4 +1,5 @@
 build/
+build_install/
 build_fuzz/
 fuzz/corpus/
 fuzz/crashes/

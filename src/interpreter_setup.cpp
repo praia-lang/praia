@@ -134,9 +134,13 @@ void installDefaultSignalHandlers() {
 
 Interpreter& callbackInterp() {
     if (g_currentInterp) return *g_currentInterp;
-    // Built on first use, once per thread; NoErrorBootstrap skips the
-    // Error-class setup a throwaway interpreter doesn't need
-    static thread_local Interpreter placeholder{Interpreter::NoErrorBootstrap{}};
+    // Built on first use, once per thread — and every async task runs on
+    // a fresh thread, so skip native registration: reached only with no
+    // tree-walker native on the stack (VM mode, a task thread), where
+    // callbacks are VM closures that never consult it. The empty
+    // globals are made (and the GcHeap with them) before the
+    // placeholder, so thread exit destroys the placeholder first.
+    static thread_local Interpreter placeholder{gcNew<Environment>()};
     return placeholder;
 }
 

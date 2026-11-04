@@ -113,4 +113,50 @@ testing.test("closure passed through a later task keeps its own task's captures"
     testing.expectEqual(d(), [4, [5, 6]], nil)
 })
 
+testing.test("values sent through a Queue survive GC on both sides", lam{ in
+    let q = Queue()
+    let consumer = async lam{ in
+        let total = 0
+        for (i in 0..50) {
+            let v = q.recv()
+            v.items.push(i)
+            total = total + len(v.items)
+        }
+        return total
+    }()
+    for (i in 0..50) {
+        let msg = {items: [i]}
+        msg.self = msg   // a cycle the sender's collector no longer owns
+        q.send(msg)
+        churn()
+    }
+    testing.expectEqual(await consumer, 100, nil)
+})
+
+testing.test("SharedMap values survive GC while tasks update them", lam{ in
+    let jobs = SharedMap()
+    jobs.set("j", {log: []})
+    func work(n) {
+        for (i in 0..n) { jobs.update("j", lam{ s in s.log.push(i); return s }) }
+        return n
+    }
+    let fs = [async work(50), async work(50)]
+    churn()
+    for (f in fs) { await f }
+    testing.expectEqual(len(jobs.get("j").log), 100, nil)
+})
+
+testing.test("task result moves to the caller's collector", lam{ in
+    func build() {
+        let a = {name: "a"}
+        let b = {name: "b", peer: a}
+        a.peer = b
+        return [a, b]
+    }
+    let r = await async build()
+    churn()
+    testing.expectEqual(r[0].peer.name, "b", nil)
+    testing.expectEqual(r[1].peer.peer.name, "b", nil)
+})
+
 testing.done()

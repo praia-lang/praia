@@ -231,4 +231,11 @@ testing.test("nested async sees parent globals through chain", lam{ in
     testing.expectEqual(await g, 7, nil)
 })
 
+testing.test("async task gets its own copy of a set", lam{ in
+    let s = #{1, 2}
+    func addTo(set) { set.add(3); return len(set) }
+    testing.expectEqual(await async addTo(s), 3, "task saw its copy grow")
+    testing.expectEqual(len(s), 2, "caller's set unchanged")
+})
+
 testing.done()

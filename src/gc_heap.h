@@ -1,14 +1,24 @@
 #pragma once
 
 #include "value.h"
+#include <atomic>
 #include <functional>
+#include <mutex>
 #include <unordered_set>
 #include <vector>
 
 class Environment; // forward declaration
 struct TaskOwnership;
+struct ObjUpvalue;
 
 enum class GcType { Array, Tagged, Map, Set, Instance, Class, Generator, Environment, External };
+
+// Each thread has its own heap, and a collection only looks inside what
+// its own thread owns: the objects it tracks, minus any lent to a running
+// task (see beginLending), and the upvalues it owns. Everything else is
+// opaque — another thread may be changing it — and since the scan never
+// subtracts an opaque object's references, whatever it points at counts
+// as externally held and survives.
 
 // Node kinds in the object graph the collector walks. Superset of
 // GcType: Callables (functions, lambdas, bound methods), VM upvalues and
@@ -38,6 +48,7 @@ public:
     // Mark API (called during root marking by VM/Interpreter)
     void markValue(const Value& v);
     void markEnvironment(Environment* env);
+    void markUpvalue(ObjUpvalue* uv);
 
     // GC root pinning for plugin-held Values. A native plugin that
     // stashes a Value in C++ static / global storage between calls
@@ -63,6 +74,36 @@ public:
     // find these bags through a process-wide registry instead.
     static void registerTaskBag(const std::shared_ptr<TaskOwnership>& bag);
 
+    // Held while writing an upvalue another thread owns, or one whose
+    // task has ended (its owner is then null), and by a collector while
+    // it reads an upvalue's value. An upvalue's own thread writes it
+    // without the lock: no other collector reads it.
+    static std::mutex& upvalueMutex();
+
+    // Objects copied for an async task on this thread stay tracked here
+    // but are the task's until it ends: from beginLending() to
+    // endLending(), every object this heap tracks is lent, and the
+    // collector keeps them without looking inside. The task sets
+    // `returned` when it's done with them.
+    struct LentObjects {
+        std::vector<std::weak_ptr<void>> objects;
+        std::atomic<bool> returned{false};
+    };
+    std::shared_ptr<LentObjects> beginLending();
+    void endLending();
+
+    // `v` now lives somewhere every thread can reach (a Queue, a
+    // SharedMap): this heap stops tracking the objects in it, so it never
+    // reads them while another thread changes them.
+    void disown(const Value& v);
+
+    // Objects a finished task leaves behind (its result, and garbage)
+    // move to the heap of the thread that started it, which collects
+    // them from then on.
+    struct Inbox;
+    std::shared_ptr<Inbox> inbox() const { return inbox_; }
+    void handOverTo(const std::shared_ptr<Inbox>& to);
+
     // Collection control
     using RootMarker = std::function<void(GcHeap&)>;
     void setRootMarker(RootMarker marker);
@@ -86,6 +127,13 @@ private:
         void* rawPtr;
         GcType type;
     };
+public:
+    struct Inbox {
+        std::mutex mu;
+        std::vector<GcEntry> entries;
+        std::vector<std::shared_ptr<LentObjects>> lent;
+    };
+private:
 
     // Per-collection bookkeeping keyed by object pointer: the external
     // reference count from findExternallyHeld() and the mark bit.
@@ -98,6 +146,7 @@ private:
             long refs = 0;
             GcNodeKind kind = GcNodeKind::External;
             bool marked = false;
+            bool traverse = true;  // false: opaque, see the top of this file
         };
         // Empties the table, sized for about `expected` entries.
         void reset(size_t expected);
@@ -125,6 +174,11 @@ private:
     // whether this heap holds the registry's collection lock.
     std::vector<std::shared_ptr<TaskOwnership>> bags_;
     bool holdsBagLock_ = false;
+    // See beginLending/disown/handOverTo
+    std::shared_ptr<LentObjects> lending_;
+    std::vector<std::shared_ptr<LentObjects>> lent_;
+    std::vector<std::weak_ptr<void>> disowned_;
+    std::shared_ptr<Inbox> inbox_ = std::make_shared<Inbox>();
     // Plugin-pinned values — see pinValue/unpinValue. Marked alongside
     // the interpreter's own roots on every collection.
     std::vector<Value> pinned_;
@@ -140,6 +194,7 @@ private:
     struct MarkItem {
         void* obj;
         GcNodeKind kind;
+        bool traverse = true;
     };
     // Explicit worklist so marking deep structures (long linked lists)
     // doesn't recurse on the C++ stack.
@@ -163,6 +218,45 @@ private:
 
     void markNode(void* obj, GcNodeKind kind);
     void drainMarkStack();
+
+    // Whether a node this heap doesn't track itself may be looked inside
+    bool canTraverse(void* obj, GcNodeKind kind) const;
+    void addEntry(GcEntry e);
+    // Moves the inbox into entries_, and drops disowned objects from it
+    void settleEntries();
+};
+
+// The parent-thread side of an async task's copies: from construction
+// to destruction (the case's end, after the task is started) every
+// object this heap tracks is lent to the task. If no task was started
+// — an error, or a call that ran synchronously — they're returned
+// straight away.
+struct GcLendScope {
+    std::shared_ptr<GcHeap::LentObjects> lent = GcHeap::current().beginLending();
+    bool started = false;
+    GcLendScope() = default;
+    GcLendScope(const GcLendScope&) = delete;
+    GcLendScope& operator=(const GcLendScope&) = delete;
+    ~GcLendScope() {
+        GcHeap::current().endLending();
+        if (!started) lent->returned.store(true, std::memory_order_release);
+    }
+};
+
+// The task-thread side: lives for the whole task. When it ends, the
+// task's objects move to the starting thread's heap and the copies it
+// was lent go back.
+struct GcTaskEnd {
+    std::shared_ptr<GcHeap::LentObjects> lent;
+    std::shared_ptr<GcHeap::Inbox> inbox;
+    GcTaskEnd(std::shared_ptr<GcHeap::LentObjects> l, std::shared_ptr<GcHeap::Inbox> i)
+        : lent(std::move(l)), inbox(std::move(i)) {}
+    GcTaskEnd(const GcTaskEnd&) = delete;
+    GcTaskEnd& operator=(const GcTaskEnd&) = delete;
+    ~GcTaskEnd() {
+        GcHeap::current().handOverTo(inbox);
+        lent->returned.store(true, std::memory_order_release);
+    }
 };
 
 // Factory: creates a shared_ptr and registers it with the thread-local GcHeap.
