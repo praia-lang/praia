@@ -156,9 +156,29 @@ testing.test("project grains are found from a relative script path", lam{ in
     for (e in engines) {
         let args = []
         for (a in e) { args.push(a) }
-        args.push("scripts/tool.praia")
+        args.push("tools/tool.praia")
         let r = runIn(cwdFixtures + "/project", args)
         testing.expectEqual(r.stdout, "project lib", r.stderr)
+    }
+})
+
+testing.test("grain lookup stops before a directory anyone can write to", lam{ in
+    // A shared (world-writable) directory like /tmp: a project inside it
+    // must not pick up ext_grains/ that another user planted there.
+    let root = testing.tempDir("praia-shared-")
+    let shared = root + "/shared"
+    fs.mkdir(shared + "/ext_grains")
+    fs.mkdir(shared + "/project")
+    fs.write(shared + "/ext_grains/strings.praia", "print(\"HIJACKED\")\nexport { }\n")
+    fs.write(shared + "/project/run.praia", "use \"strings\"\nprint(\"run ok\")\n")
+    sys.exec(["chmod", "777", shared])
+    for (e in engines) {
+        let args = []
+        for (a in e) { args.push(a) }
+        args.push(shared + "/project/run.praia")
+        let r = runIn(root, args)
+        testing.expect(!r.stdout.contains("HIJACKED"), "loaded the planted grain (%{e})")
+        testing.expectContains(r.stdout, "run ok", r.stderr)
     }
 })
 

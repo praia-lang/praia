@@ -106,11 +106,42 @@ inline std::string tryResolveGrain(const fs::path& base, const std::string& name
     return resolveGrainDir(grainDir, base);
 }
 
+// True for a directory every local user can write to (/tmp, /var/tmp,
+// /dev/shm): anyone could create ext_grains/ or grains/ in it.
+inline bool isWritableByOthers(const fs::path& dir) {
+    std::error_code ec;
+    auto st = fs::status(dir, ec);
+    if (ec) return false;
+    return (st.permissions() & fs::perms::others_write) != fs::perms::none;
+}
+
+// The directories searched for ext_grains/ and grains/: the importing
+// file's own directory, then its ancestors (at most 10 in all). The walk
+// stops before the first directory other users can write to, so a script
+// under /tmp/project doesn't pick up a /tmp/ext_grains someone else made.
+inline std::vector<fs::path> projectSearchDirs(const std::string& currentFile) {
+    // Canonical, so a relative script path (`praia tools/run.praia`) still
+    // walks up to the project root, and `../tools/t.praia` doesn't walk
+    // up through the directory it was started from
+    std::error_code ec;
+    fs::path dir = fs::weakly_canonical(fs::absolute(fs::path(currentFile)), ec).parent_path();
+    if (ec) dir = fs::path(currentFile).parent_path();
+    std::vector<fs::path> dirs;
+    for (int i = 0; i < 10; i++) {
+        if (isWritableByOthers(dir)) break;
+        dirs.push_back(dir);
+        if (!dir.has_parent_path() || dir == dir.parent_path()) break;
+        dir = dir.parent_path();
+    }
+    return dirs;
+}
+
 // Resolve a grain import path to an absolute file path.
 // Searches (in order): relative paths, ext_grains/, grains/,
 // ~/.praia/ext_grains/, LIBDIR/ext_grains/, LIBDIR/grains/.
 // ext_grains/ and grains/ are found by walking up from the importing
-// file. The current directory is searched instead only when there is
+// file (see projectSearchDirs). The current directory is searched
+// instead only when there is
 // no importing file (REPL, `praia -c`): for a script, the directory it
 // was started from is not part of its project — otherwise running an
 // installed tool (sand, say) inside an untrusted checkout would load
@@ -142,19 +173,11 @@ inline std::string resolveGrainPath(const std::string& importPath,
     }
 
     // 2. ext_grains/ (local dependencies installed by sand)
-    if (!currentFile.empty()) {
-        // Canonical, so a relative script path (`praia scripts/tool.praia`)
-        // still walks up to the project root, and `../tools/t.praia`
-        // doesn't walk up through the directory it was started from
-        std::error_code canonEc;
-        fs::path dir = fs::weakly_canonical(fs::absolute(fs::path(currentFile)), canonEc).parent_path();
-        if (canonEc) dir = fs::path(currentFile).parent_path();
-        for (int i = 0; i < 10; i++) {
-            auto r = tryResolveGrain(dir / "ext_grains", importPath);
-            if (!r.empty()) return r;
-            if (!dir.has_parent_path() || dir == dir.parent_path()) break;
-            dir = dir.parent_path();
-        }
+    std::vector<fs::path> searchDirs;
+    if (!currentFile.empty()) searchDirs = projectSearchDirs(currentFile);
+    for (const auto& dir : searchDirs) {
+        auto r = tryResolveGrain(dir / "ext_grains", importPath);
+        if (!r.empty()) return r;
     }
     if (currentFile.empty()) {
         auto r = tryResolveGrain(fs::current_path() / "ext_grains", importPath);
@@ -162,19 +185,9 @@ inline std::string resolveGrainPath(const std::string& importPath,
     }
 
     // 3. grains/ directory (project-level, bundled grains)
-    if (!currentFile.empty()) {
-        // Canonical, so a relative script path (`praia scripts/tool.praia`)
-        // still walks up to the project root, and `../tools/t.praia`
-        // doesn't walk up through the directory it was started from
-        std::error_code canonEc;
-        fs::path dir = fs::weakly_canonical(fs::absolute(fs::path(currentFile)), canonEc).parent_path();
-        if (canonEc) dir = fs::path(currentFile).parent_path();
-        for (int i = 0; i < 10; i++) {
-            auto r = tryResolveGrain(dir / "grains", importPath);
-            if (!r.empty()) return r;
-            if (!dir.has_parent_path() || dir == dir.parent_path()) break;
-            dir = dir.parent_path();
-        }
+    for (const auto& dir : searchDirs) {
+        auto r = tryResolveGrain(dir / "grains", importPath);
+        if (!r.empty()) return r;
     }
     if (currentFile.empty()) {
         auto r = tryResolveGrain(fs::current_path() / "grains", importPath);

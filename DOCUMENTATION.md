@@ -3478,7 +3478,7 @@ Header names are lowercased for consistent access.
 | `totalTimeout` | none | Overall request budget INCLUDING redirects, in seconds. -1 / omitted = no overall cap |
 | `followRedirects` | `true` | Follow 3xx responses with Location headers |
 | `maxRedirects` | 10 | Throw if a chain exceeds this |
-| `redirectHeaders` | `"safe"` | Headers sent after a redirect to another origin (scheme, host or port). `"safe"` forwards only standard non-credential headers (`Accept*`, `User-Agent`, `Content-*`, `Cache-Control`, `Pragma`, `Range`, `If-*`); `Authorization`, `Cookie` and custom headers such as `X-API-Key` are dropped. `"all"` forwards every header — only for redirects you trust (like `curl --location-trusted`). |
+| `redirectHeaders` | `"safe"` | Headers sent after a redirect to another origin (scheme, host or port). `"safe"` forwards only standard non-credential headers (`Accept*`, `User-Agent`, `Content-*`, `Cache-Control`, `Pragma`, `Range`, `If-*`); `Authorization`, `Cookie` and custom headers such as `X-API-Key` are dropped. `"all"` forwards every header, and lets a 307/308 resend the request body to the new origin (which `"safe"` refuses) — only for redirects you trust (like `curl --location-trusted`). |
 | `insecure` | `false` | **Skip TLS certificate verification.** Testing/dev only; equivalent to `curl -k` |
 | `caBundle` | system trust store | Path to a custom CA PEM bundle for trust-store override |
 | `blockPrivateHosts` | `true` | **SSRF protection.** Refuse to connect to loopback, RFC1918, link-local (incl. cloud metadata `169.254.169.254`), IPv4-mapped, multicast, and reserved address ranges. Re-applied per redirect hop. Set to `false` only when deliberately targeting internal hosts. |
@@ -3506,7 +3506,7 @@ let r = http.request({url: "https://internal.corp/", caBundle: "/etc/ssl/corp-ro
 let r = http.get("http://127.0.0.1:8080/health", {blockPrivateHosts: false})
 ```
 
-`http.get` and `http.post` also accept an optional trailing options map — `http.get(url, opts)`, `http.get(session, url, opts)`, and the equivalent shapes for `http.post`. The map fields are the same as `http.request`'s.
+`http.get` also accepts an optional trailing options map — `http.get(url, opts)` and `http.get(session, url, opts)` — with the same fields as `http.request`'s. `http.post(url, body|map)` and `http.post(session, url, body|map)` take either a body string or a map of `body`, `headers` and `redirectHeaders`; use `http.request` for the other options.
 
 #### Redirects
 
@@ -3518,7 +3518,7 @@ The client follows 3xx responses with a Location header by default, up to `maxRe
 
 **Security**: an `https://` → `http://` Location is refused outright. Open-redirect attacks that try to leak cookies or auth headers over plaintext don't get to. (Matches `curl --proto-redir` behavior.) All Location forms permitted by RFC 3986 §5.2 are followed: absolute URLs (`https://other/path`), protocol-relative (`//host/foo`), absolute paths (`/foo`), relative paths (`final`, `../login`, `./sibling`), and query-only references (`?q=1`, which inherits the base path).
 
-Redirects to a different origin (scheme, host or port) only carry standard non-credential headers, so an open redirect can't collect `Authorization`, `Cookie`, or a custom header like `X-API-Key`. Same-origin redirects keep every header. Pass `redirectHeaders: "all"` to forward everything when you trust the redirect target.
+Redirects to a different origin (scheme, host or port) only carry standard non-credential headers, so an open redirect can't collect `Authorization`, `Cookie`, or a custom header like `X-API-Key`. Same-origin redirects keep every header. A 307 or 308 to a different origin, which would resend the request body, is refused with an error. Pass `redirectHeaders: "all"` to forward every header and the body when you trust the redirect target.
 
 When `followRedirects` is `false`, the 3xx response is returned as-is with `Location` in `headers.location`.
 
@@ -5999,7 +5999,7 @@ When you write `use "geometry"`, Praia looks for the grain in this order:
 4. **`<libdir>/ext_grains/`** — system-global grains (sudo sand --global)
 5. **`<libdir>/grains/`** — the standard library grains
 
-Steps 1 and 2 walk up from the directory of the file doing the import, not from the directory you ran `praia` in, so a script never picks up grains from wherever it happens to be started. Only when there is no file (the REPL, `praia -c`) does the search start in the current directory.
+Steps 1 and 2 walk up from the directory of the file doing the import, not from the directory you ran `praia` in, so a script never picks up grains from wherever it happens to be started. The walk stops before the first directory every user can write to (such as `/tmp`), so a project inside one doesn't pick up an `ext_grains/` someone else created there. Only when there is no file (the REPL, `praia -c`) does the search start in the current directory.
 
 At each location, Praia checks for:
 - `<name>.praia` (single-file grain)

@@ -190,15 +190,19 @@ BINDIR   = $(PREFIX)/bin
 SAND_DIR = sand
 
 # The install build gets its own objects (they're compiled with
-# PRAIA_LIBDIR) in a fresh private directory from mktemp: a fixed path
-# under /tmp could be created ahead of time by another local user, and
-# the build would then load their .d files (make -include runs them) and
-# link their .o files during `sudo make install`.
+# PRAIA_LIBDIR) in build/install, inside the source tree, cleared before
+# and after. Not under /tmp or $TMPDIR: another local user could create
+# or swap a directory there, and the build would load their .d files
+# (make -include runs them) and link their .o files during
+# `sudo make install`. The source tree is already trusted — anyone who
+# can write to it can change the code being built — and the path is
+# relative, so it never contains spaces Make can't handle.
+INSTALL_BUILD_DIR = $(BUILD_DIR)/install
+
 install:
-	@dir=$$(mktemp -d "$${TMPDIR:-/tmp}/praia-install.XXXXXX") || exit 1; \
-	mkdir -p "$$dir/vm" "$$dir/builtins"; \
-	$(MAKE) BUILD_DIR="$$dir" CXXFLAGS='$(CXXFLAGS) -DPRAIA_LIBDIR="\"$(LIBDIR)\""'; \
-	status=$$?; rm -rf "$$dir"; exit $$status
+	rm -rf $(INSTALL_BUILD_DIR)
+	$(MAKE) BUILD_DIR=$(INSTALL_BUILD_DIR) CXXFLAGS='$(CXXFLAGS) -DPRAIA_LIBDIR="\"$(LIBDIR)\""' || { rm -rf $(INSTALL_BUILD_DIR); exit 1; }
+	rm -rf $(INSTALL_BUILD_DIR)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
 	install -d $(DESTDIR)$(LIBDIR)/include

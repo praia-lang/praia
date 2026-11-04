@@ -1073,23 +1073,35 @@ static bool isSafeCrossOriginHeader(const std::string& name) {
     return false;
 }
 
-// Called on every redirect hop. Same-origin (scheme, host and port all
-// equal) keeps every header; otherwise only isSafeCrossOriginHeader ones
-// survive, so an open redirect — or any server the user talks to —
-// can't collect credentials meant for the original host.
-static void filterHeadersForRedirect(std::unordered_map<std::string, std::string>& headers,
-                                     const std::string& fromUrl,
-                                     const std::string& toUrl,
-                                     const HttpOptions& opts) {
-    if (opts.redirectForwardAllHeaders) return;
-    ParsedUrl from = parseUrl(fromUrl);
-    ParsedUrl to = parseUrl(toUrl);
+// Same origin = same scheme, host (case-insensitive) and port.
+static bool isSameOrigin(const std::string& aUrl, const std::string& bUrl) {
+    ParsedUrl a = parseUrl(aUrl);
+    ParsedUrl b = parseUrl(bUrl);
     auto lower = [](std::string h) {
         for (auto& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         return h;
     };
-    if (from.tls == to.tls && from.port == to.port && lower(from.host) == lower(to.host))
-        return;
+    return a.tls == b.tls && a.port == b.port && lower(a.host) == lower(b.host);
+}
+
+// Called on every redirect hop, after the 301/302/303 method switch has
+// dropped the body where it applies. Same-origin keeps every header and
+// the body. Cross-origin, unless the caller trusts redirects
+// (`redirectHeaders: "all"`): only isSafeCrossOriginHeader headers
+// survive, and a 307/308 that would resend a request body is refused —
+// the body (a login form, an API payload) was meant for the original
+// host just as much as its credential headers were.
+static void prepareRedirectHop(std::unordered_map<std::string, std::string>& headers,
+                               const std::string& body,
+                               const std::string& fromUrl,
+                               const std::string& toUrl,
+                               int status,
+                               const HttpOptions& opts) {
+    if (opts.redirectForwardAllHeaders || isSameOrigin(fromUrl, toUrl)) return;
+    if (!body.empty())
+        throw RuntimeError("HTTP redirect: refusing to resend the request body to another origin (" +
+                           std::to_string(status) + " to " + toUrl +
+                           "); pass redirectHeaders: \"all\" to allow it", 0);
     for (auto it = headers.begin(); it != headers.end();)
         it = isSafeCrossOriginHeader(it->first) ? std::next(it) : headers.erase(it);
 }
@@ -1775,7 +1787,7 @@ Value httpSessionRequest(const Value& session,
             eraseHeaderCI(currentHeaders, "Content-Length");
             eraseHeaderCI(currentHeaders, "Content-Type");
         }
-        filterHeadersForRedirect(currentHeaders, currentUrl, newUrl, opts);
+        prepareRedirectHop(currentHeaders, currentBody, currentUrl, newUrl, status, opts);
         currentUrl = newUrl;
         ++redirectCount;
     }
@@ -1864,7 +1876,7 @@ Value doHttpRequest(const std::string& method, const std::string& url,
             // (Transfer-Encoding would also need clearing for chunked
             //  bodies, but we don't currently emit chunked.)
         }
-        filterHeadersForRedirect(currentHeaders, currentUrl, newUrl, opts);
+        prepareRedirectHop(currentHeaders, currentBody, currentUrl, newUrl, status, opts);
         currentUrl = newUrl;
         ++redirectCount;
     }
@@ -2462,7 +2474,7 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                         eraseHeaderCI(currentHeaders, "Content-Length");
                         eraseHeaderCI(currentHeaders, "Content-Type");
                     }
-                    filterHeadersForRedirect(currentHeaders, currentUrl, newUrl, opts);
+                    prepareRedirectHop(currentHeaders, currentBody, currentUrl, newUrl, status, opts);
                     currentUrl = newUrl;
                     ++redirectCount;
                     continue;

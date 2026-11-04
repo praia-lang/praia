@@ -2093,11 +2093,25 @@ Interpreter::Interpreter(bool installErrorClasses) {
                     }
                 }
             };
+            // Of the request options, the body-or-opts map honours only
+            // redirectHeaders (per-call timeouts etc. go through
+            // http.request) — so a per-call "safe" can still tighten a
+            // session that defaults to "all".
+            auto applyRedirectHeaders = [&applyHttpOpts](const Value& v, HttpOptions& opts) {
+                if (!v.isMap()) return;
+                auto& e = v.asMap()->entries;
+                auto it = e.find(Value("redirectHeaders"));
+                if (it == e.end()) return;
+                std::unordered_map<std::string, Value> only{{"redirectHeaders", it->second}};
+                applyHttpOpts(opts, only);
+            };
             if (args.size() == 2 && args[0].isString()) {
                 std::string body;
                 std::unordered_map<std::string, std::string> headers;
                 parseBodyAndHeaders(args[1], body, headers);
-                return doHttpRequest("POST", args[0].asString(), body, headers);
+                HttpOptions opts;
+                applyRedirectHeaders(args[1], opts);
+                return doHttpRequest("POST", args[0].asString(), body, headers, opts);
             }
             if (args.size() == 3 && httpIsSession(args[0]) && args[1].isString()) {
                 std::string body;
@@ -2107,10 +2121,8 @@ Interpreter::Interpreter(bool installErrorClasses) {
                 auto opts = httpSessionGetDefaultOpts(args[0]);
                 auto hdrs = httpSessionGetDefaultHeaders(args[0]);
                 for (auto& [k, v] : headers) hdrs[k] = v;
-                // body is fully user-specified; opts inherited from session
-                // (per-call timeout overrides aren't passed via the body-or-opts
-                // shorthand — use http.request for that).
-                (void)applyHttpOpts; (void)layerHeaders;   // not used here
+                applyRedirectHeaders(args[2], opts);
+                (void)layerHeaders;   // not used here
                 return httpSessionRequest(args[0], "POST", args[1].asString(),
                                           body, hdrs, opts);
             }
