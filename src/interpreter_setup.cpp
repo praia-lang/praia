@@ -132,6 +132,14 @@ void installDefaultSignalHandlers() {
     sigaction(SIGINT, &sa, nullptr);
 }
 
+Interpreter& callbackInterp() {
+    if (g_currentInterp) return *g_currentInterp;
+    // Built on first use, once per thread; NoErrorBootstrap skips the
+    // Error-class setup a throwaway interpreter doesn't need
+    static thread_local Interpreter placeholder{Interpreter::NoErrorBootstrap{}};
+    return placeholder;
+}
+
 Interpreter::Interpreter(bool installErrorClasses) {
     globals = gcNew<Environment>();
     env = globals;
@@ -423,7 +431,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
                 auto cmp = args[1].asCallable();
                 std::sort(elems.begin(), elems.end(),
                     [&cmp](const Value& a, const Value& b) -> bool {
-                        Value result = callSafe(*g_currentInterp, cmp, {a, b});
+                        Value result = callSafe(callbackInterp(), cmp, {a, b});
                         if (result.isNumber()) return result.asNumber() < 0;
                         return result.isTruthy();
                     });
@@ -446,7 +454,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto result = gcNew<PraiaArray>();
             auto pred = args[1].asCallable();
             for (auto& elem : src) {
-                Value test = callSafe(*g_currentInterp, pred, {elem});
+                Value test = callSafe(callbackInterp(), pred, {elem});
                 if (test.isTruthy()) result->elements.push_back(elem);
             }
             return Value(result);
@@ -462,7 +470,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto result = gcNew<PraiaArray>();
             auto transform = args[1].asCallable();
             for (auto& elem : src)
-                result->elements.push_back(callSafe(*g_currentInterp, transform, {elem}));
+                result->elements.push_back(callSafe(callbackInterp(), transform, {elem}));
             return Value(result);
         })));
 
@@ -475,7 +483,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto& src = args[0].asArray()->elements;
             auto fn = args[1].asCallable();
             for (auto& elem : src)
-                callSafe(*g_currentInterp, fn, {elem});
+                callSafe(callbackInterp(), fn, {elem});
             return args[0]; // return the array for chaining
         })));
 
@@ -498,7 +506,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
                 start = 1;
             }
             for (size_t i = start; i < src.size(); i++)
-                acc = callSafe(*g_currentInterp, fn, {acc, src[i]});
+                acc = callSafe(callbackInterp(), fn, {acc, src[i]});
             return acc;
         })));
 
@@ -511,7 +519,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (auto& elem : src)
-                if (callSafe(*g_currentInterp, pred, {elem}).isTruthy()) return Value(true);
+                if (callSafe(callbackInterp(), pred, {elem}).isTruthy()) return Value(true);
             return Value(false);
         })));
 
@@ -524,7 +532,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (auto& elem : src)
-                if (!callSafe(*g_currentInterp, pred, {elem}).isTruthy()) return Value(false);
+                if (!callSafe(callbackInterp(), pred, {elem}).isTruthy()) return Value(false);
             return Value(true);
         })));
 
@@ -538,7 +546,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto fn = args[1].asCallable();
             auto result = gcNew<PraiaArray>();
             for (auto& elem : src) {
-                Value mapped = callSafe(*g_currentInterp, fn, {elem});
+                Value mapped = callSafe(callbackInterp(), fn, {elem});
                 if (mapped.isArray()) {
                     for (auto& inner : mapped.asArray()->elements)
                         result->elements.push_back(inner);
@@ -607,7 +615,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto fn = args[1].asCallable();
             auto result = gcNew<PraiaMap>();
             for (auto& elem : src) {
-                Value key = callSafe(*g_currentInterp, fn, {elem});
+                Value key = callSafe(callbackInterp(), fn, {elem});
                 auto it = result->entries.find(key);
                 if (it == result->entries.end()) {
                     auto group = gcNew<PraiaArray>();
@@ -629,7 +637,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (size_t i = 0; i < src.size(); i++)
-                if (callSafe(*g_currentInterp, pred, {src[i]}).isTruthy())
+                if (callSafe(callbackInterp(), pred, {src[i]}).isTruthy())
                     return Value(static_cast<int64_t>(i));
             return Value(static_cast<int64_t>(-1));
         })));
@@ -2324,7 +2332,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
                             opts.requestTimeoutMs = std::max(1, static_cast<int>(v.asNumber() * 1000.0));
                         }
                     }
-                    httpServerListen(static_cast<int>(args[0].asNumber()), handler, *g_currentInterp, opts);
+                    httpServerListen(static_cast<int>(args[0].asNumber()), handler, callbackInterp(), opts);
                     return Value();
                 }));
             return Value(server);
@@ -2427,7 +2435,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             // (calling) Interpreter — see http.createServer comment.
             try {
                 std::vector<Value> cbArgs = {Value(std::static_pointer_cast<Callable>(sendFn))};
-                callSafe(*g_currentInterp, callback, cbArgs);
+                callSafe(callbackInterp(), callback, cbArgs);
             } catch (const RuntimeError&) {
                 // Client likely disconnected — not an error
             }
@@ -4342,7 +4350,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             }
             for (auto& [sig, handler] : toCall) {
                 std::string name = signalNumToName(sig);
-                callSafe(*g_currentInterp, handler, {Value(name)});
+                callSafe(callbackInterp(), handler, {Value(name)});
             }
             return Value(true);
         }));

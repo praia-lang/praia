@@ -1,0 +1,26 @@
+// Run by test_async_native_callbacks.praia under the VM: a handler run by
+// `async server.listen` writes a global; the main script's value must not
+// change (the task has its own copy, as with `async f()`).
+let l = net.listen(0)
+let PORT = net.localAddr(l).port
+net.close(l)
+
+let counter = 0
+let server = http.createServer(lam{ req in
+    counter = counter + 100
+    return {status: 200, body: "counter=" + str(counter)}
+})
+async server.listen(PORT)
+time.sleep(100)
+
+let sock = net.connect("127.0.0.1", PORT)
+net.send(sock, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+let resp = ""
+while (true) {
+    let chunk = net.recv(sock, 4096)
+    if (chunk == nil || len(chunk) == 0) { break }
+    resp = resp + chunk
+}
+net.close(sock)
+print(resp.contains("counter=100"), counter)
+sys.exit(0)

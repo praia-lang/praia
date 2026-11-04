@@ -46,7 +46,7 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
                     if (!args[0].isCallable())
                         throw RuntimeError("withLock() requires a function", 0);
                     std::lock_guard<std::recursive_mutex> guard(*mtx);
-                    return callSafe(*g_currentInterp, args[0].asCallable(), {});
+                    return callSafe(callbackInterp(), args[0].asCallable(), {});
                 }));
 
             return Value(lock);
@@ -285,7 +285,7 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
 
             // RAII: restores previous scope even if fn throws.
             praia::detail::CancelScope scope(state);
-            return callSafe(*g_currentInterp, args[1].asCallable(), callArgs);
+            return callSafe(callbackInterp(), args[1].asCallable(), callArgs);
         })));
 
     // ── SharedMap() — cross-VM key-value store ──
@@ -360,7 +360,7 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
                     Value current;
                     auto it = state->entries.find(args[0]);
                     if (it != state->entries.end()) current = it->second;
-                    Value next = callSafe(*g_currentInterp, args[1].asCallable(), {current});
+                    Value next = callSafe(callbackInterp(), args[1].asCallable(), {current});
                     state->entries[args[0]] = next;
                     return next;
                 }));

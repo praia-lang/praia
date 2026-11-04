@@ -128,6 +128,9 @@ public:
     Value pop();
     Value& peek(int distance = 0);
     int getStackTop() const { return stackTop; }
+    // Drop everything above `top` (a value from getStackTop()) — used to
+    // rebalance the stack after a callback fails partway through.
+    void setStackTop(int top) { stackTop = top; }
     Value resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal);
 private:
     void resetStack();
@@ -216,6 +219,26 @@ public:
     // mark it loaded. Called by opcode handlers when isTaskVm_ &&
     // !loadedMask_[slot].
     void lazyLoadGlobal(int slot);
+
+    // Async tasks (OP_ASYNC) run on their own thread in their own VM,
+    // seeded on the parent thread with a shallow snapshot of the globals
+    // that the task then deep-copies lazily (lazyLoadGlobal).
+    struct TaskSeed {
+        std::vector<Value> globals;
+        std::unordered_map<std::string, int> globalIndices;
+        std::set<std::string> builtinNames;
+    };
+    // On the parent thread: snapshot `snapVm`'s globals (the VM the task's
+    // code resolves globals against) and this VM's builtin names.
+    TaskSeed captureTaskSeed(VM* snapVm) const;
+    // On the worker thread, on a fresh VM: become that task's VM. With
+    // collectGarbage, the thread's heap collects with this VM as its root
+    // set (the caller must detach the root marker before this VM goes
+    // away); otherwise collection is off for the thread.
+    void initAsTaskVm(TaskSeed&& seed, bool collectGarbage = false);
+    // Give closures/upvalues created in `taskVm` to every VM closure
+    // reachable from `result`, so they outlive the task VM.
+    static void adoptTaskResult(VM& taskVm, Value& result);
 private:
 
     // Open upvalues (linked list, ordered by stack slot desc)

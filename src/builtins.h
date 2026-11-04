@@ -118,8 +118,9 @@ bool httpHeaderFieldSafe(const std::string& name, const std::string& value);
 
 // Options for server.listen(port, opts?)
 struct HttpServerOptions {
-    // Address to bind. Empty = every IPv4 interface (0.0.0.0); pass
-    // "127.0.0.1" (or "localhost") for a server only this machine reaches.
+    // Address to bind. Empty = every IPv4 interface (0.0.0.0). A host name
+    // binds only the first of its addresses that works, so for a server
+    // only this machine reaches pass "127.0.0.1" or "::1", not "localhost".
     std::string host;
     // Largest request body accepted, for both Content-Length and chunked
     // framing; larger requests get 413. A Content-Length over the limit is

@@ -3226,6 +3226,7 @@ try {
 - `await future` blocks until the background thread finishes
 - Each async Praia function gets its own VM with a **deep copy** of globals, captured upvalues, and arguments. Tasks are fully isolated — no shared mutable state, no data races
 - Native functions (http.get, sys.exec, etc.) also run in true parallel
+- When an async native calls back into Praia — the request handler of `async server.listen(port)`, an `http.sse` callback — those calls run inside the task as well, against the task's copy of the globals, so they never touch the caller's state mid-flight. A handler the native was given earlier still shares the variables it captured with the code that created it
 - A bare `async fn()` (no `let f =`) is fire-and-forget — it returns immediately and the task runs to completion in the background
 
 ### Sharing state across async tasks
@@ -3727,7 +3728,7 @@ server.listen(8080)     // blocks, prints "Server listening on port 8080"
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `host` | all IPv4 interfaces (`0.0.0.0`) | Address or host name to bind. Use `"127.0.0.1"` for a server only this machine can reach. |
+| `host` | all IPv4 interfaces (`0.0.0.0`) | Address or host name to bind. A host name binds only the first of its addresses that works, so `"localhost"` may end up IPv6-only (`::1`) or IPv4-only. For a server only this machine can reach, use `"127.0.0.1"` or `"::1"`. |
 | `maxBodySize` | 64 MiB | Largest request body accepted, in bytes, for both `Content-Length` and chunked bodies; larger requests get `413 Payload Too Large`. A `Content-Length` over the limit is refused before any of the body is read; a chunked body is read and decoded until its decoded size passes the limit. |
 | `requestTimeout` | 30 | Seconds allowed for receiving one request, headers and body together. A client that's slower than this is disconnected. |
 

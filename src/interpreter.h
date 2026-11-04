@@ -28,6 +28,13 @@ class Interpreter;
 // bytecode engine.
 extern thread_local Interpreter* g_currentInterp;
 
+// The Interpreter to pass to Callable::call from a native. Natives called
+// by the tree-walker get the calling Interpreter (g_currentInterp); under
+// the VM there is none — natives are invoked directly — so this returns a
+// per-thread placeholder instead of a null reference. VM callables ignore
+// the Interpreter they're given. Defined in interpreter_setup.cpp.
+Interpreter& callbackInterp();
+
 // Thrown by return statements to unwind back to the enclosing function call
 struct ReturnSignal {
     Value value;

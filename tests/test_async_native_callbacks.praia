@@ -1,0 +1,103 @@
+use "testing"
+
+// `async` on a native that calls back into Praia — here server.listen,
+// which calls the request handler — must run those callbacks inside the
+// task. The VM used to run them on the main VM from the server's thread,
+// so after a handler threw, the main script's own values came back
+// wrong (a function where a string was expected).
+
+func freePort() {
+    let l = net.listen(0)
+    let port = net.localAddr(l).port
+    net.close(l)
+    return port
+}
+
+func rawRequest(port, payload) {
+    let sock = net.connect("127.0.0.1", port)
+    net.send(sock, payload)
+    let resp = ""
+    while (true) {
+        let chunk = net.recv(sock, 4096)
+        if (chunk == nil || len(chunk) == 0) { break }
+        resp = resp + chunk
+    }
+    net.close(sock)
+    return resp
+}
+
+func statusOf(resp) {
+    if (type(resp) != "string" || len(resp) < 12) { return 0 }
+    return int(resp.slice(9, 12))
+}
+
+let label = "main"
+
+let port = freePort()
+let server = http.createServer(lam{ req in
+    if (req.path == "/boom") { throw "handler failed" }
+    if (req.path == "/sse") {
+        return http.sse(req, lam{ send in
+            send("one")
+            send("two")
+        })
+    }
+    return {status: 200, body: "label=" + label}
+})
+async server.listen(port)
+time.sleep(100)
+
+testing.test("a throwing handler doesn't corrupt the main script", lam{ in
+    for (i in 0..20) {
+        let local = "value-" + str(i)
+        let bad = rawRequest(port, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n")
+        testing.expectEqual(type(bad), "string", "response %{i}")
+        testing.expectEqual(statusOf(bad), 500, nil)
+        let good = rawRequest(port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        testing.expectEqual(statusOf(good), 200, nil)
+        // Main-thread work between requests keeps its values
+        let total = 0
+        for (j in 0..200) { total = total + j }
+        testing.expectEqual(total, 19900, nil)
+        testing.expectEqual(local, "value-" + str(i), nil)
+    }
+})
+
+testing.test("the handler sees globals as they were when the task started", lam{ in
+    let r = rawRequest(port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    testing.expectContains(r, "label=main", nil)
+})
+
+testing.test("a handler's writes to globals stay in the task (VM)", lam{ in
+    // Same isolation as `async f()`. VM only: the tree-walker shares the
+    // handler's environment with the main script instead.
+    let r = sys.exec(["./praia", "tests/fixtures/async_native/global_writes.praia"], 20000)
+    // Last line; the server prints its "listening" banner first
+    let lines = r.stdout.split("\n")
+    testing.expectEqual(lines[len(lines) - 1], "true 0", r.stderr)
+})
+
+testing.test("SSE works through an async listen", lam{ in
+    for (i in 0..5) {
+        let r = rawRequest(port, "GET /sse HTTP/1.1\r\nHost: x\r\n\r\n")
+        testing.expectContains(r, "text/event-stream", nil)
+        testing.expectContains(r, "data: one\n\ndata: two\n\n", nil)
+    }
+})
+
+testing.test("callback natives work when called directly", lam{ in
+    // Under the VM these used to dereference a null interpreter
+    let lock = Lock()
+    testing.expectEqual(lock.withLock(lam{ in 41 + 1 }), 42, nil)
+    let sm = SharedMap()
+    sm.set("n", 1)
+    sm.update("n", lam{ v in v + 1 })
+    testing.expectEqual(sm.get("n"), 2, nil)
+})
+
+testing.test("an async native that doesn't call back still returns its result", lam{ in
+    let f = async sys.exec(["echo", "hi"])
+    testing.expectEqual((await f).stdout, "hi", nil)
+})
+
+testing.done()

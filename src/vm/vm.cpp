@@ -243,6 +243,102 @@ void VM::lazyLoadGlobal(int slot) {
     globalsSnapshot_[slot] = Value(); // release stale shared_ptr
 }
 
+VM::TaskSeed VM::captureTaskSeed(VM* snapVm) const {
+    // If snapVm is itself a task VM, slots it hasn't loaded yet fall
+    // through to ITS snapshot so the child sees the value the
+    // grand-parent had, not nil. The indices map is copied verbatim so
+    // slot numbering matches — the chunk's shared globalSlotCache is
+    // correct in both VMs.
+    TaskSeed seed;
+    seed.globals.reserve(snapVm->globals.size());
+    for (size_t s = 0; s < snapVm->globals.size(); s++) {
+        if (snapVm->isTaskVm_ && !snapVm->loadedMask_[s])
+            seed.globals.push_back(snapVm->globalsSnapshot_[s]);
+        else
+            seed.globals.push_back(snapVm->globals[s]);
+    }
+    seed.globalIndices = snapVm->globalIndices;
+    seed.builtinNames = builtinNames_;
+    return seed;
+}
+
+void VM::initAsTaskVm(TaskSeed&& seed, bool collectGarbage) {
+    if (collectGarbage)
+        GcHeap::current().setRootMarker([this](GcHeap& h) { gcMarkRoots(h); });
+    else
+        GcHeap::current().disable(); // short-lived task: nothing to reclaim
+    // Lazy/COW globals: the snapshot holds the parent's shared_ptrs; the
+    // task's own `globals` start as nil and lazyLoadGlobal fills each
+    // slot on first touch.
+    isTaskVm_ = true;
+    globalIndices = std::move(seed.globalIndices);
+    globalsSnapshot_ = std::move(seed.globals);
+    globals.assign(globalsSnapshot_.size(), Value());
+    loadedMask_.assign(globalsSnapshot_.size(), 0);
+    builtinNames_ = std::move(seed.builtinNames);
+    suppressErrors_ = true; // errors propagate to await, not stderr
+}
+
+void VM::adoptTaskResult(VM& taskVm, Value& result) {
+    // Transfer closure/upvalue ownership from taskVm into a shared bag
+    // attached to any VMClosureCallable in the result. This keeps the raw
+    // pointers alive after taskVm is destroyed.
+    auto ownership = std::make_shared<TaskOwnership>();
+    ownership->closures = std::move(taskVm.allClosures);
+    ownership->upvalues = std::move(taskVm.allUpvalues);
+    taskVm.allClosures.clear();
+    taskVm.allUpvalues.clear();
+
+    // Helper to walk a PraiaClass chain's vmMethods.
+    // Track visited objects to handle cycles.
+    std::unordered_set<void*> attachVisited;
+    std::function<void(Value&)> attachOwnership;
+    auto walkClassChain = [&attachOwnership, &attachVisited](std::shared_ptr<PraiaClass> klass) {
+        while (klass) {
+            void* p = static_cast<void*>(klass.get());
+            if (!attachVisited.insert(p).second) break;
+            for (auto& [k, mv] : klass->vmMethods)
+                attachOwnership(mv);
+            klass = klass->superclass;
+        }
+    };
+
+    attachOwnership = [&ownership, &attachOwnership, &walkClassChain, &attachVisited](Value& v) {
+        if (v.isCallable()) {
+            auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
+            if (vc) {
+                vc->taskOwnership = ownership;
+                vc->vm = nullptr; // force VM::current() in call()
+            }
+            auto* bm = dynamic_cast<VMBoundMethod*>(v.asCallable().get());
+            if (bm) {
+                bm->taskOwnership = ownership;
+                attachOwnership(bm->receiver);
+            }
+            auto klass = std::dynamic_pointer_cast<PraiaClass>(v.asCallable());
+            if (klass) walkClassChain(klass);
+        }
+        if (v.isMap()) {
+            void* p = static_cast<void*>(v.asMap().get());
+            if (attachVisited.insert(p).second)
+                for (auto& [k, mv] : v.asMap()->entries) attachOwnership(mv);
+        }
+        if (v.isArray()) {
+            void* p = static_cast<void*>(v.asArray().get());
+            if (attachVisited.insert(p).second)
+                for (auto& el : v.asArray()->elements) attachOwnership(el);
+        }
+        if (v.isInstance()) {
+            void* p = static_cast<void*>(v.asInstance().get());
+            if (attachVisited.insert(p).second) {
+                for (auto& [k, fv] : v.asInstance()->fields) attachOwnership(fv);
+                walkClassChain(v.asInstance()->klass);
+            }
+        }
+    };
+    attachOwnership(result);
+}
+
 // Thread-local pointer to the currently executing VM
 thread_local VM* VM::currentVM_ = nullptr;
 
@@ -278,6 +374,7 @@ Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
     if (!currentVm) return Value();
 
     int savedFrameCount = currentVm->frameCount;
+    int savedStackTop = currentVm->getStackTop();
 
     // Slot 0 = the callable itself (functions reference slot 0 for recursion).
     // Build a lightweight wrapper pointing to the same ObjClosure.
@@ -288,12 +385,22 @@ Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
     currentVm->push(Value(std::static_pointer_cast<Callable>(self)));
     for (auto& arg : args) currentVm->push(arg);
 
-    currentVm->callClosure(closure, static_cast<int>(args.size()), 0); // throws on failure
+    try {
+        currentVm->callClosure(closure, static_cast<int>(args.size()), 0); // throws on failure
+    } catch (...) {
+        currentVm->setStackTop(savedStackTop);
+        throw;
+    }
 
     auto result = currentVm->execute(savedFrameCount);
-    if (result != VM::Result::OK)
+    if (result != VM::Result::OK) {
+        // Drop what the failed call left behind (the callee, its args),
+        // so a VM that keeps calling back — a server's handler — doesn't
+        // creep toward stack overflow one failure at a time
+        currentVm->setStackTop(savedStackTop);
         throw RuntimeError(
             currentVm->lastError().empty() ? "Callback failed" : currentVm->lastError(), 0);
+    }
 
     return currentVm->pop();
 }
@@ -2749,15 +2856,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                 // numbering matches between source and task — the chunk's
                 // shared globalSlotCache is correct in both VMs.
                 VM* snapVm = fn->chunk.homeVm ? fn->chunk.homeVm : this;
-                std::vector<Value> globalsCopy;
-                globalsCopy.reserve(snapVm->globals.size());
-                for (size_t s = 0; s < snapVm->globals.size(); s++) {
-                    if (snapVm->isTaskVm_ && !snapVm->loadedMask_[s])
-                        globalsCopy.push_back(snapVm->globalsSnapshot_[s]);
-                    else
-                        globalsCopy.push_back(snapVm->globals[s]);
-                }
-                auto indicesCopy = snapVm->globalIndices;
+                auto seed = captureTaskSeed(snapVm);
 
                 // Snapshot upvalues and deep-copy so captured arrays/maps/instances
                 // are isolated from the caller
@@ -2792,29 +2891,15 @@ VM::Result VM::execute(int baseFrameCount_) {
                 }
 
                 sharedFuture = std::async(std::launch::async,
-                    [fn, args, globalsCopy = std::move(globalsCopy),
-                     indicesCopy = std::move(indicesCopy), arity,
+                    [fn, args, seed = std::move(seed), arity,
                      upvalueSnapshot = std::move(upvalueSnapshot),
-                     builtinNames = builtinNames_,
                      receiverCopy = std::move(receiverCopy),
                      defClass = std::move(defClass),
                      rootsHolder, // pinned roots — keep alive while lambda lives
                      isConstructor, klass,
                      namedArgsMissingMask]() mutable -> Value {
                         VM taskVm;
-                        GcHeap::current().disable(); // task VMs are short-lived
-                        // Lazy/COW globals setup. globalsCopy here is the
-                        // shallow snapshot (parent's shared_ptrs). The
-                        // task's own `globals` vector starts as all-nil
-                        // and is filled in by lazyLoadGlobal as each slot
-                        // is first touched.
-                        taskVm.isTaskVm_ = true;
-                        taskVm.globalIndices = std::move(indicesCopy);
-                        taskVm.globalsSnapshot_ = std::move(globalsCopy);
-                        taskVm.globals.assign(taskVm.globalsSnapshot_.size(), Value());
-                        taskVm.loadedMask_.assign(taskVm.globalsSnapshot_.size(), 0);
-                        taskVm.builtinNames_ = std::move(builtinNames);
-                        taskVm.suppressErrors_ = true; // errors propagate to await, not stderr
+                        taskVm.initAsTaskVm(std::move(seed));
 
                         // Rewire VMClosureCallable vm pointers in the
                         // eagerly deep-copied args / upvalues / receiver
@@ -2890,63 +2975,7 @@ VM::Result VM::execute(int baseFrameCount_) {
                         // return value from the stack.
                         Value retVal = isConstructor ? instanceVal : taskVm.pop();
 
-                        // Transfer closure/upvalue ownership from taskVm into a
-                        // shared bag attached to any VMClosureCallable in the result.
-                        // This keeps the raw pointers alive after taskVm is destroyed.
-                        auto ownership = std::make_shared<TaskOwnership>();
-                        ownership->closures = std::move(taskVm.allClosures);
-                        ownership->upvalues = std::move(taskVm.allUpvalues);
-                        taskVm.allClosures.clear();
-                        taskVm.allUpvalues.clear();
-
-                        // Helper to walk a PraiaClass chain's vmMethods.
-                        // Track visited objects to handle cycles.
-                        std::unordered_set<void*> attachVisited;
-                        std::function<void(Value&)> attachOwnership;
-                        auto walkClassChain = [&attachOwnership, &attachVisited](std::shared_ptr<PraiaClass> klass) {
-                            while (klass) {
-                                void* p = static_cast<void*>(klass.get());
-                                if (!attachVisited.insert(p).second) break;
-                                for (auto& [k, mv] : klass->vmMethods)
-                                    attachOwnership(mv);
-                                klass = klass->superclass;
-                            }
-                        };
-
-                        attachOwnership = [&ownership, &attachOwnership, &walkClassChain, &attachVisited](Value& v) {
-                            if (v.isCallable()) {
-                                auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
-                                if (vc) {
-                                    vc->taskOwnership = ownership;
-                                    vc->vm = nullptr; // force VM::current() in call()
-                                }
-                                auto* bm = dynamic_cast<VMBoundMethod*>(v.asCallable().get());
-                                if (bm) {
-                                    bm->taskOwnership = ownership;
-                                    attachOwnership(bm->receiver);
-                                }
-                                auto klass = std::dynamic_pointer_cast<PraiaClass>(v.asCallable());
-                                if (klass) walkClassChain(klass);
-                            }
-                            if (v.isMap()) {
-                                void* p = static_cast<void*>(v.asMap().get());
-                                if (attachVisited.insert(p).second)
-                                    for (auto& [k, mv] : v.asMap()->entries) attachOwnership(mv);
-                            }
-                            if (v.isArray()) {
-                                void* p = static_cast<void*>(v.asArray().get());
-                                if (attachVisited.insert(p).second)
-                                    for (auto& el : v.asArray()->elements) attachOwnership(el);
-                            }
-                            if (v.isInstance()) {
-                                void* p = static_cast<void*>(v.asInstance().get());
-                                if (attachVisited.insert(p).second) {
-                                    for (auto& [k, fv] : v.asInstance()->fields) attachOwnership(fv);
-                                    walkClassChain(v.asInstance()->klass);
-                                }
-                            }
-                        };
-                        attachOwnership(retVal);
+                        adoptTaskResult(taskVm, retVal);
 
                         return retVal;
                     }).share();
@@ -2973,10 +3002,33 @@ VM::Result VM::execute(int baseFrameCount_) {
                     std::lock_guard<std::mutex> lk(inflightRootsMtx_);
                     inflightTaskRoots_.push_back(rootsHolder);
                 }
+                // The native runs in a task VM owned by its thread, like an
+                // async closure: Praia callbacks it makes (an HTTP handler, an
+                // SSE callback) then execute there through VM::current(),
+                // never on this VM from another thread.
+                auto seed = captureTaskSeed(this);
                 sharedFuture = std::async(std::launch::async,
-                    [native, args, rootsHolder]() -> Value {
+                    [native, args, rootsHolder, seed = std::move(seed)]() mutable -> Value {
                         (void)rootsHolder; // capture-only: keeps roots alive
-                        return native->fn(args);
+                        VM taskVm;
+                        // A native task can run for the life of the program
+                        // (async server.listen), so unlike a closure task it
+                        // collects the garbage its callbacks make. The root
+                        // marker points at taskVm; detach it before taskVm
+                        // is destroyed, even if the native throws.
+                        taskVm.initAsTaskVm(std::move(seed), /*collectGarbage=*/true);
+                        struct DetachRootMarker {
+                            ~DetachRootMarker() { GcHeap::current().setRootMarker(nullptr); }
+                        } detachRootMarker;
+                        std::unordered_set<void*> rewireVisited;
+                        for (auto& a : args) rewireForTaskVm(a, &taskVm, rewireVisited);
+                        Value result;
+                        {
+                            VMScope scope(&taskVm);
+                            result = native->fn(args);
+                        }
+                        adoptTaskResult(taskVm, result);
+                        return result;
                     }).share();
             } else {
                 // Bound methods, etc. — run synchronously
