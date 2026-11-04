@@ -1,17 +1,11 @@
 use "testing"
+use "./fixtures/ports"
 
 // `async` on a native that calls back into Praia — here server.listen,
 // which calls the request handler — must run those callbacks inside the
 // task. The VM used to run them on the main VM from the server's thread,
 // so after a handler threw, the main script's own values came back
 // wrong (a function where a string was expected).
-
-func freePort() {
-    let l = net.listen(0)
-    let port = net.localAddr(l).port
-    net.close(l)
-    return port
-}
 
 // Waits (up to 5 s) until something accepts connections on `port`
 func waitForServer(port) {
@@ -57,7 +51,7 @@ func statusOf(resp) {
     return int(resp.slice(9, 12))
 }
 
-let port = freePort()
+let port = ports.freePort()
 let server = http.createServer(lam{ req in
     if (req.path == "/boom") { throw "handler failed" }
     if (req.path == "/sse") {
@@ -132,7 +126,7 @@ func makeCapturingServer() {
         return {status: 200, body: words[state.hits % 2] + ":" + str(len(junk)) + ":" + made.label}
     })
 }
-let capPort = freePort()
+let capPort = ports.freePort()
 let capServer = makeCapturingServer()
 async capServer.listen(capPort)
 waitForServer(capPort)

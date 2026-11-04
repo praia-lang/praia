@@ -86,4 +86,31 @@ testing.test("closure returned from async task keeps its captures", lam{ in
     testing.expectEqual(len(arr), 3, nil)
 })
 
+testing.test("async task closure that captures itself survives GC", lam{ in
+    // The closure sits in its own task-owned upvalue: bag -> upvalue ->
+    // closure -> bag. Reachable, so the collector must keep it.
+    func mk(arr) {
+        let f = nil
+        func h(n) {
+            if (n <= 0) { return arr }
+            return f(n - 1)
+        }
+        f = h
+        return f
+    }
+    let c = await async mk([1, [2, 3]])
+    churn()
+    testing.expectEqual(c(5), [1, [2, 3]], nil)
+})
+
+testing.test("closure passed through a later task keeps its own task's captures", lam{ in
+    func mk(arr) { return lam{ in arr } }
+    func pass(f) { return f }
+    let c = await async mk([4, [5, 6]])
+    let d = await async pass(c)
+    c = nil   // d is all that holds the first task's bag now
+    churn()
+    testing.expectEqual(d(), [4, [5, 6]], nil)
+})
+
 testing.done()

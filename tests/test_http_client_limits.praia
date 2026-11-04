@@ -1,17 +1,11 @@
 use "testing"
+use "./fixtures/ports"
 
 // HTTP client limits for buffered requests: maxResponseSize (default
 // 100 MiB) and totalTimeout (default 300 s), which now holds for the whole
 // response read rather than only the start of each redirect hop.
 
-func freePort() {
-    let l = net.listen(0)
-    let port = net.localAddr(l).port
-    net.close(l)
-    return port
-}
-
-let PORT = freePort()
+let PORT = ports.freePort()
 let body2000 = "a" * 2000
 
 let _server = async lam{ in
@@ -110,7 +104,7 @@ testing.test("totalTimeout bounds a server that trickles its body", lam{ in
 // A pooled (reused) socket that hits the overall deadline must not be
 // retried on a fresh one — that would send the request again with no
 // time left to read the reply.
-let KA_PORT = freePort()
+let KA_PORT = ports.freePort()
 let _kaServer = async lam{ in
     let s = net.listen(KA_PORT)
     let slowHits = 0
@@ -183,7 +177,7 @@ testing.test("a response over maxResponseSize on a pooled socket isn't resent", 
 
 // A server that accepts and then goes silent: never answers the TLS
 // ClientHello and never reads what's sent
-let STALL_PORT = freePort()
+let STALL_PORT = ports.freePort()
 let _stallServer = async lam{ in
     let s = net.listen(STALL_PORT)
     let held = []

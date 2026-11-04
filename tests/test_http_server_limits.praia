@@ -1,16 +1,10 @@
 use "testing"
+use "./fixtures/ports"
 
 // HTTP server hardening: listen() options (host, maxBodySize,
 // requestTimeout), a deadline for receiving a whole request, generic 500
 // responses, malformed header lines, and SSE without a default CORS
 // header.
-
-func freePort() {
-    let l = net.listen(0)
-    let port = net.localAddr(l).port
-    net.close(l)
-    return port
-}
 
 // Each server runs as its own praia process (fixtures/http_server/
 // limits_server.praia), so the handler never runs on another thread
@@ -19,7 +13,7 @@ let praiaBin = sys.cwd() + "/praia"
 let serverScript = sys.cwd() + "/tests/fixtures/http_server/limits_server.praia"
 
 func startServer(mode) {
-    let port = freePort()
+    let port = ports.freePort()
     let proc = async sys.exec([praiaBin, serverScript, str(port), mode], 60000)
     // Wait until it accepts connections
     for (i in 0..100) {
@@ -170,7 +164,7 @@ testing.test("listen binds to the host option", lam{ in
 
 testing.test("listen rejects invalid options", lam{ in
     let s = http.createServer(lam{ req in "unused" })
-    let p = freePort()
+    let p = ports.freePort()
     testing.expectThrows(lam{ in s.listen(p, {host: 5}) }, nil)
     testing.expectThrows(lam{ in s.listen(p, {maxBodySize: 0}) }, nil)
     testing.expectThrows(lam{ in s.listen(p, {maxBodySize: 1.5}) }, nil)

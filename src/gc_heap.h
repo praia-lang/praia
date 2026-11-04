@@ -6,6 +6,7 @@
 #include <vector>
 
 class Environment; // forward declaration
+struct TaskOwnership;
 
 enum class GcType { Array, Tagged, Map, Set, Instance, Class, Generator, Environment, External };
 
@@ -55,6 +56,12 @@ public:
     // is a harmless no-op as far as the sweep is concerned.
     void pinValue(const Value& v);
     void unpinValue(const Value& v);
+
+    // A finished async task's ownership bag. Its closures can capture
+    // each other through the bag's own upvalues (bag -> upvalue ->
+    // closure -> bag), a cycle with no tracked object on it, so heaps
+    // find these bags through a process-wide registry instead.
+    static void registerTaskBag(const std::shared_ptr<TaskOwnership>& bag);
 
     // Collection control
     using RootMarker = std::function<void(GcHeap&)>;
@@ -114,6 +121,10 @@ private:
     // Strong references to every tracked object, taken for the duration
     // of a collection (see findExternallyHeld).
     std::vector<std::shared_ptr<void>> held_;
+    // Registered task bags taken for the duration of a collection, and
+    // whether this heap holds the registry's collection lock.
+    std::vector<std::shared_ptr<TaskOwnership>> bags_;
+    bool holdsBagLock_ = false;
     // Plugin-pinned values — see pinValue/unpinValue. Marked alongside
     // the interpreter's own roots on every collection.
     std::vector<Value> pinned_;

@@ -151,6 +151,7 @@ static Value deepCopyForTask(const Value& v,
             Value recvCopy = deepCopyForTask(bm->receiver, visited);
             auto clone = std::make_shared<VMBoundMethod>(
                 std::move(recvCopy), bm->method, bm->definingClass);
+            clone->taskOwnership = bm->taskOwnership; // made by an earlier task
             return Value(std::static_pointer_cast<Callable>(clone));
         }
         return v; // NativeFunction etc — safe to share
@@ -282,12 +283,13 @@ void VM::initAsTaskVm(TaskSeed&& seed, bool collectGarbage) {
 }
 
 void VM::adoptTaskResult(VM& taskVm, Value& result) {
-    // Transfer closure/upvalue ownership from taskVm into a shared bag
-    // attached to any VMClosureCallable in the result. This keeps the raw
-    // pointers alive after taskVm is destroyed.
-    // The task's own bag, which the closures it created already hold;
-    // ~VM moves the closures and upvalues into it
+    // Attach taskVm's ownership bag to the closures and bound methods in
+    // the result that taskVm created, keeping their raw pointers alive
+    // after taskVm is destroyed (~VM moves its closures and upvalues into
+    // the bag). One made by an earlier task keeps the bag it already has.
     auto ownership = taskVm.taskBag_ ? taskVm.taskBag_ : std::make_shared<TaskOwnership>();
+    std::unordered_set<const ObjClosure*> taskClosures;
+    for (auto& c : taskVm.allClosures) taskClosures.insert(c.get());
 
     // Helper to walk a PraiaClass chain's vmMethods.
     // Track visited objects to handle cycles.
@@ -303,16 +305,17 @@ void VM::adoptTaskResult(VM& taskVm, Value& result) {
         }
     };
 
-    attachOwnership = [&ownership, &attachOwnership, &walkClassChain, &attachVisited](Value& v) {
+    attachOwnership = [&ownership, &taskClosures, &attachOwnership, &walkClassChain,
+                       &attachVisited](Value& v) {
         if (v.isCallable()) {
             auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
             if (vc) {
-                vc->taskOwnership = ownership;
+                if (taskClosures.count(vc->closure)) vc->taskOwnership = ownership;
                 vc->vm = nullptr; // force VM::current() in call()
             }
             auto* bm = dynamic_cast<VMBoundMethod*>(v.asCallable().get());
             if (bm) {
-                bm->taskOwnership = ownership;
+                if (taskClosures.count(bm->method)) bm->taskOwnership = ownership;
                 attachOwnership(bm->receiver);
             }
             auto klass = std::dynamic_pointer_cast<PraiaClass>(v.asCallable());
@@ -412,12 +415,17 @@ VM::~VM() {
     if (!taskBag_) return;
     // Hand the task's closures and upvalues to the bag its closure
     // wrappers hold, so any that escaped stay valid (see TaskOwnership)
-    std::lock_guard<std::mutex> lk(taskBag_->mu);
-    for (auto& c : allClosures) taskBag_->closures.push_back(std::move(c));
-    for (auto& u : allUpvalues) taskBag_->upvalues.push_back(std::move(u));
-    allClosures.clear();
-    allUpvalues.clear();
-    taskBag_->vmGone.store(true);
+    {
+        std::lock_guard<std::mutex> lk(taskBag_->mu);
+        for (auto& c : allClosures) taskBag_->closures.push_back(std::move(c));
+        for (auto& u : allUpvalues) taskBag_->upvalues.push_back(std::move(u));
+        allClosures.clear();
+        allUpvalues.clear();
+        taskBag_->vmGone.store(true);
+    }
+    // Its closures can capture each other through the bag's upvalues,
+    // a cycle only the collector can break
+    GcHeap::registerTaskBag(taskBag_);
 }
 
 void VM::defineNative(const std::string& name, Value value) {
@@ -3035,6 +3043,18 @@ VM::Result VM::execute(int baseFrameCount_) {
                         } detachRootMarker;
                         std::unordered_set<void*> rewireVisited;
                         for (auto& a : args) rewireForTaskVm(a, &taskVm, rewireVisited);
+                        // The native may keep arg closures past its return
+                        // (a queue, a shared map); unwire them before taskVm
+                        // is destroyed, even if the native throws, so they
+                        // fall back to VM::current() instead of a dead VM.
+                        // The args are deep copies, never the parent's.
+                        struct UnwireArgs {
+                            std::vector<Value>& args;
+                            ~UnwireArgs() {
+                                std::unordered_set<void*> visited;
+                                for (auto& a : args) rewireForTaskVm(a, nullptr, visited);
+                            }
+                        } unwireArgs{args};
                         Value result;
                         {
                             VMScope scope(&taskVm);

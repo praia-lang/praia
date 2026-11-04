@@ -6030,7 +6030,7 @@ When you write `use "geometry"`, Praia looks for the grain in this order:
 4. **`<libdir>/ext_grains/`** — system-global grains (sudo sand --global)
 5. **`<libdir>/grains/`** — the standard library grains
 
-Steps 1 and 2 walk up from the directory of the file doing the import, not from the directory you ran `praia` in, so a script never picks up grains from wherever it happens to be started. The walk stops before the first directory every user can write to (such as `/tmp`), so a project inside one doesn't pick up an `ext_grains/` someone else created there. Only when there is no file (the REPL, `praia -c`) does the search start in the current directory.
+Steps 1 and 2 walk up from the directory of the file doing the import, not from the directory you ran `praia` in, so a script never picks up grains from wherever it happens to be started. The walk covers at most 10 directories: the importing file's directory and up to 9 of its ancestors. It also stops before the first directory every user can write to (such as `/tmp`), so a project inside one doesn't pick up an `ext_grains/` someone else created there. Only when there is no file (the REPL, `praia -c`) does the search start in the current directory.
 
 At each location, Praia checks for:
 - `<name>.praia` (single-file grain)

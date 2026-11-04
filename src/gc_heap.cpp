@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
+#include <utility>
 #include <variant>
 
 // ── Thread-local singleton ──
@@ -14,6 +16,32 @@
 GcHeap& GcHeap::current() {
     static thread_local GcHeap instance;
     return instance;
+}
+
+// ── Task bag registry ──
+//
+// Process-wide: a bag outlives the task thread that made it and becomes
+// garbage on whichever thread drops its last reference. `collecting`
+// lets one heap at a time scan and clear bags, so no other collector is
+// walking a bag's upvalues while they're cleared.
+
+namespace {
+struct TaskBagRegistry {
+    std::mutex mu;          // guards bags
+    std::mutex collecting;
+    std::vector<std::weak_ptr<TaskOwnership>> bags;
+};
+
+TaskBagRegistry& bagRegistry() {
+    static auto* reg = new TaskBagRegistry; // never destroyed: task threads may outlive statics
+    return *reg;
+}
+} // namespace
+
+void GcHeap::registerTaskBag(const std::shared_ptr<TaskOwnership>& bag) {
+    auto& reg = bagRegistry();
+    std::lock_guard<std::mutex> lk(reg.mu);
+    reg.bags.push_back(bag);
 }
 
 // ── Tracking ──
@@ -441,6 +469,24 @@ std::vector<GcHeap::MarkItem> GcHeap::findExternallyHeld() {
         }
     }
 
+    // Finished task bags, held like tracked objects above. Skipped this
+    // round if another heap is already collecting them.
+    auto& reg = bagRegistry();
+    if (reg.collecting.try_lock()) {
+        holdsBagLock_ = true;
+        std::lock_guard<std::mutex> lk(reg.mu);
+        std::erase_if(reg.bags, [](const std::weak_ptr<TaskOwnership>& w) { return w.expired(); });
+        for (auto& weak : reg.bags) {
+            auto strong = weak.lock();
+            if (!strong) continue;
+            long uc = static_cast<long>(strong.use_count()) - 1;
+            if (nodes_.insert(strong.get(), GcNodeKind::TaskOwnership, uc).second) {
+                work.push_back(strong.get());
+                bags_.push_back(std::move(strong));
+            }
+        }
+    }
+
     auto visit = [&](void* obj, GcNodeKind kind, long uc, bool owning) {
         auto [slot, inserted] = nodes_.insert(obj, kind, uc);
         if (owning) slot->refs--;
@@ -563,6 +609,19 @@ void GcHeap::sweep() {
         }
     }
 
+    // Unreachable task bags: drop their upvalues' captured values, which
+    // breaks bag -> upvalue -> closure -> bag. Released after the bag
+    // locks, since dropping a closure releases its bag reference.
+    std::vector<Value> dropped;
+    for (auto& bag : bags_) {
+        auto* slot = nodes_.find(bag.get());
+        if (slot && slot->marked) continue;
+        std::lock_guard<std::mutex> lk(bag->mu);
+        for (auto& uv : bag->upvalues)
+            if (uv) dropped.push_back(std::exchange(uv->closed, Value()));
+    }
+    dropped.clear();
+
     lastCollected_ = static_cast<int>(toCollect.size());
 
     // Phase 3: Release locked shared_ptrs — objects whose cycles are broken
@@ -571,6 +630,11 @@ void GcHeap::sweep() {
     // Drop the references findExternallyHeld() took, so collected
     // objects die now and their entries are pruned below.
     held_.clear();
+    bags_.clear();
+    if (holdsBagLock_) {
+        holdsBagLock_ = false;
+        bagRegistry().collecting.unlock();
+    }
 
     // Phase 4: Remove expired entries (dead via refcounting or just cleared)
     std::erase_if(entries_, [](const GcEntry& e) { return e.weak.expired(); });
