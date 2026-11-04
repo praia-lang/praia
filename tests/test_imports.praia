@@ -172,6 +172,7 @@ testing.test("grain lookup stops before a directory anyone can write to", lam{ i
     fs.write(shared + "/ext_grains/strings.praia", "print(\"HIJACKED\")\nexport { }\n")
     fs.write(shared + "/project/run.praia", "use \"strings\"\nprint(\"run ok\")\n")
     sys.exec(["chmod", "777", shared])
+    fs.write(shared + "/project/missing.praia", "use \"no_such_grain_xyz\"\n")
     for (e in engines) {
         let args = []
         for (a in e) { args.push(a) }
@@ -179,6 +180,25 @@ testing.test("grain lookup stops before a directory anyone can write to", lam{ i
         let r = runIn(root, args)
         testing.expect(!r.stdout.contains("HIJACKED"), "loaded the planted grain (%{e})")
         testing.expectContains(r.stdout, "run ok", r.stderr)
+
+        // A grain that isn't found says where the search stopped, and why
+        let margs = []
+        for (a in e) { margs.push(a) }
+        margs.push(shared + "/project/missing.praia")
+        let m = runIn(root, margs)
+        testing.expectContains(m.stderr, "Grain not found: no_such_grain_xyz (the search for ext_grains/ and grains/ stopped at ", nil)
+        testing.expectContains(m.stderr, "which any user can write to)", nil)
+    }
+})
+
+testing.test("an ordinary missing grain gets no stopped-search hint", lam{ in
+    for (e in engines) {
+        let args = [praiaBin]
+        for (a in e) { args.push(a) }
+        args.push(sys.cwd() + "/tests/fixtures/grain_errors/usesmissing.praia")
+        let r = sys.exec(args, 10000)
+        testing.expectContains(r.stderr, "Grain not found: no_such_grain_xyz", nil)
+        testing.expect(!r.stderr.contains("stopped at"), "unexpected hint (%{e}): %{r.stderr}")
     }
 })
 

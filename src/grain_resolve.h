@@ -118,8 +118,11 @@ inline bool isWritableByOthers(const fs::path& dir) {
 // The directories searched for ext_grains/ and grains/: the importing
 // file's own directory, then its ancestors (at most 10 in all). The walk
 // stops before the first directory other users can write to, so a script
-// under /tmp/project doesn't pick up a /tmp/ext_grains someone else made.
-inline std::vector<fs::path> projectSearchDirs(const std::string& currentFile) {
+// under /tmp/project doesn't pick up a /tmp/ext_grains someone else made;
+// that directory is stored in `stoppedAt` (left empty otherwise) so a
+// "Grain not found" error can say why the search ended there.
+inline std::vector<fs::path> projectSearchDirs(const std::string& currentFile,
+                                               fs::path& stoppedAt) {
     // Canonical, so a relative script path (`praia tools/run.praia`) still
     // walks up to the project root, and `../tools/t.praia` doesn't walk
     // up through the directory it was started from
@@ -128,7 +131,10 @@ inline std::vector<fs::path> projectSearchDirs(const std::string& currentFile) {
     if (ec) dir = fs::path(currentFile).parent_path();
     std::vector<fs::path> dirs;
     for (int i = 0; i < 10; i++) {
-        if (isWritableByOthers(dir)) break;
+        if (isWritableByOthers(dir)) {
+            stoppedAt = dir;
+            break;
+        }
         dirs.push_back(dir);
         if (!dir.has_parent_path() || dir == dir.parent_path()) break;
         dir = dir.parent_path();
@@ -174,7 +180,8 @@ inline std::string resolveGrainPath(const std::string& importPath,
 
     // 2. ext_grains/ (local dependencies installed by sand)
     std::vector<fs::path> searchDirs;
-    if (!currentFile.empty()) searchDirs = projectSearchDirs(currentFile);
+    fs::path walkStoppedAt;
+    if (!currentFile.empty()) searchDirs = projectSearchDirs(currentFile, walkStoppedAt);
     for (const auto& dir : searchDirs) {
         auto r = tryResolveGrain(dir / "ext_grains", importPath);
         if (!r.empty()) return r;
@@ -214,7 +221,11 @@ inline std::string resolveGrainPath(const std::string& importPath,
         if (!r.empty()) return r;
     }
 
-    throw std::runtime_error("Grain not found: " + importPath);
+    std::string msg = "Grain not found: " + importPath;
+    if (!walkStoppedAt.empty())
+        msg += " (the search for ext_grains/ and grains/ stopped at " + walkStoppedAt.string() +
+               ", which any user can write to)";
+    throw std::runtime_error(msg);
 }
 
 // Error for importing a grain that is still being loaded further up the
