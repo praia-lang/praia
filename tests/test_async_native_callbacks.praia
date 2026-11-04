@@ -116,6 +116,32 @@ testing.test("callback natives work when called directly", lam{ in
     testing.expectEqual(sm.get("n"), 2, nil)
 })
 
+// The native task collects garbage while it runs (each allocation under
+// PRAIA_GC_STRESS). What the handler reaches only through its upvalues —
+// a map and an array made by the main script — must survive that.
+func makeCapturingServer() {
+    let state = {hits: 0}
+    let words = ["even", "odd"]
+    return http.createServer(lam{ req in
+        state.hits = state.hits + 1
+        let junk = []
+        for (i in 0..50) { junk.push({i: i, s: "x" + str(i)}) }
+        return {status: 200, body: words[state.hits % 2] + ":" + str(len(junk))}
+    })
+}
+let capPort = freePort()
+let capServer = makeCapturingServer()
+async capServer.listen(capPort)
+waitForServer(capPort)
+
+testing.test("a native task's GC keeps what its callbacks capture", lam{ in
+    for (i in 1..13) {
+        let r = rawRequest(capPort, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        let want = (i % 2 == 0 ? "even" : "odd") + ":50"
+        testing.expectContains(r, want, "request %{i}")
+    }
+})
+
 testing.test("an async native that doesn't call back still returns its result", lam{ in
     let f = async sys.exec(["echo", "hi"])
     testing.expectEqual((await f).stdout, "hi", nil)

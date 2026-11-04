@@ -108,6 +108,29 @@ testing.test("a client trickling bytes can't hold the server past requestTimeout
     net.close(slow)
 })
 
+testing.test("a client that stops reading can't hold the server past requestTimeout", lam{ in
+    // A 50 MB response to a client that never reads fills the socket
+    // buffers; the blocked send has to give up so the next client is served
+    let stuck = net.connect("127.0.0.1", port)
+    net.send(stuck, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+    time.sleep(100)
+    let start = time.now()
+    let sock = net.connect("127.0.0.1", port)
+    net.setTimeout(sock, 5000)
+    net.send(sock, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    let r = ""
+    while (true) {
+        let chunk = net.recv(sock, 4096)
+        if (chunk == nil || len(chunk) == 0) { break }
+        r = r + chunk
+    }
+    net.close(sock)
+    let elapsed = time.now() - start
+    testing.expectEqual(statusOf(r), 200, r)
+    testing.expect(elapsed < 3000, "second request waited %{elapsed}ms")
+    net.close(stuck)
+})
+
 testing.test("handler errors give a generic 500 without the error text", lam{ in
     let r = rawRequest(port, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n")
     testing.expectEqual(statusOf(r), 500, r)

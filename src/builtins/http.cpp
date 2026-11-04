@@ -2847,6 +2847,15 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
             continue;
         }
         praia::setCloexec(client);
+        // Bound each blocked write of the response: a client that stops
+        // reading would otherwise hold the (one-at-a-time) server forever.
+        // A send that times out returns -1 and the send loops give up.
+        {
+            struct timeval stv;
+            stv.tv_sec = opts.requestTimeoutMs / 1000;
+            stv.tv_usec = (opts.requestTimeoutMs % 1000) * 1000;
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
+        }
 
         auto req = readAndParseRequest(client, opts);
         if (!req) { close(client); continue; }

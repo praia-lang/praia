@@ -3731,7 +3731,7 @@ server.listen(8080)     // blocks, prints "Server listening on port 8080"
 |--------|---------|--------|
 | `host` | all IPv4 interfaces (`0.0.0.0`) | Address or host name to bind. A host name binds only the first of its addresses that works, so `"localhost"` may end up IPv6-only (`::1`) or IPv4-only. For a server only this machine can reach, use `"127.0.0.1"` or `"::1"`. |
 | `maxBodySize` | 64 MiB | Largest request body accepted, in bytes, for both `Content-Length` and chunked bodies; larger requests get `413 Payload Too Large`. A `Content-Length` over the limit is refused before any of the body is read; a chunked body is read and decoded until its decoded size passes the limit. |
-| `requestTimeout` | 30 | Seconds allowed for receiving one request, headers and body together. A client that's slower than this is disconnected. |
+| `requestTimeout` | 30 | Seconds allowed for receiving one request, headers and body together. A client that's slower than this is disconnected. It also caps how long a single blocked write of the response waits for a client that has stopped reading. |
 
 ```praia
 server.listen(8080, {host: "127.0.0.1", maxBodySize: 1_000_000, requestTimeout: 10})
