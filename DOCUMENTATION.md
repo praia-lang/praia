@@ -3528,7 +3528,7 @@ When `followRedirects` is `false`, the 3xx response is returned as-is with `Loca
 
 - **`connectTimeout`** is enforced via non-blocking connect + poll, so we don't block the calling task during a slow handshake.
 - **`readTimeout`** is enforced via `SO_RCVTIMEO`/`SO_SNDTIMEO` on the socket; each individual recv/send can wait at most this long.
-- **`totalTimeout`** bounds the entire request: every redirect hop, each address tried while connecting, the TLS handshake, sending the request and every read of the response, so a server that trickles its body a byte at a time can't outlast it. (DNS lookup isn't covered.) Exceeding it throws "HTTP total timeout exceeded". For `http.openStream` it only caps connecting and each individual read (at the time left when each redirect hop starts); it isn't an overall limit on getting the headers, and reading the stream afterwards uses `readTimeout` per read.
+- **`totalTimeout`** bounds the entire request: every redirect hop, each address tried while connecting, the TLS handshake, sending the request and every read of the response, so a server that trickles its body a byte at a time can't outlast it. (DNS lookup isn't covered.) Exceeding it throws "HTTP total timeout exceeded". For `http.openStream` it only caps connecting, the TLS handshake and each individual read (at the time left when each redirect hop starts); it isn't an overall limit on getting the headers, and reading the stream afterwards uses `readTimeout` per read.
 
 Connect against an unroutable IP throws "connect timed out after Nms" with an exact elapsed budget; read timeouts throw "HTTP read timed out".
 

@@ -1497,6 +1497,13 @@ static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
 // stateless wrapper never sees it (always passes isFreshSocket=true).
 struct HttpRetryOnFresh {};
 
+// The response is bigger than maxResponseSize. Still a RuntimeError for
+// the script, but a deterministic one: the retry path must not resend
+// the request on a fresh socket only to get the same answer.
+struct HttpResponseTooLarge : RuntimeError {
+    using RuntimeError::RuntimeError;
+};
+
 // RFC 7231 §4.2.2 — request methods whose intended effect is the same
 // whether the request fires once or many times. The retry path uses
 // this to decide whether replaying a request on a fresh socket is safe
@@ -1571,6 +1578,8 @@ static OneRequestResult doOneHttpRequestImpl(
         auto pair = readFramedResponse(conn, connPtr, method, opts.maxResponseSize);
         fields   = std::move(pair.first);
         respBody = std::move(pair.second);
+    } catch (const HttpResponseTooLarge&) {
+        throw;   // the server answered; a resend would get the same answer
     } catch (...) {
         // Retry on a reused socket only for idempotent methods. Even a
         // confirmed peer-side EOF before any response bytes is ambiguous
@@ -2420,7 +2429,7 @@ readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
     // before any of the body is read; otherwise the read stops as soon as
     // the body passes it
     auto tooLarge = [maxBody]() {
-        return RuntimeError("HTTP response body exceeds maxResponseSize (" +
+        return HttpResponseTooLarge("HTTP response body exceeds maxResponseSize (" +
                             std::to_string(maxBody) + " bytes); raise maxResponseSize "
                             "or use http.openStream for large responses", 0);
     };
@@ -2562,7 +2571,11 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                     X509_VERIFY_PARAM_set_hostflags(vp, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
                 }
             }
-            if (SSL_connect(conn->ssl) <= 0) {
+            // The handshake shares the overall deadline. Only the
+            // handshake: the stream's reads keep per-read readTimeout
+            // (conn->readDeadline stays unset).
+            perReq.deadline = deadline;
+            if (sslConnectBefore(*conn, perReq) <= 0) {
                 long vr = SSL_get_verify_result(conn->ssl);
                 conn->shutdown_close();
                 if (!perReq.insecure && vr != X509_V_OK) {

@@ -114,6 +114,7 @@ let KA_PORT = freePort()
 let _kaServer = async lam{ in
     let s = net.listen(KA_PORT)
     let slowHits = 0
+    let bigHits = 0
     while (true) {
         let c = net.accept(s)
         let open = true
@@ -131,6 +132,13 @@ let _kaServer = async lam{ in
             try {
                 if (path == "/ka") {
                     net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+                } elif (path == "/big-ka") {
+                    bigHits = bigHits + 1
+                    net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 2000\r\nConnection: keep-alive\r\n\r\n" + body2000)
+                } elif (path == "/bighits") {
+                    let body = str(bigHits)
+                    net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+                    open = false
                 } elif (path == "/slow-ka") {
                     slowHits = slowHits + 1
                     net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
@@ -162,6 +170,17 @@ testing.test("a deadline hit on a pooled socket isn't retried", lam{ in
     testing.expectEqual(hits, "1", "the request was sent once")
 })
 
+testing.test("a response over maxResponseSize on a pooled socket isn't resent", lam{ in
+    let kaBase = "http://127.0.0.1:" + str(KA_PORT)
+    let s = http.session({blockPrivateHosts: false})
+    testing.expectEqual(http.get(s, kaBase + "/ka").body, "ok", "warms the pool")
+    let msg = errorOf(lam{ in http.get(s, kaBase + "/big-ka", {maxResponseSize: 1000}) })
+    testing.expectContains(msg, "exceeds maxResponseSize", nil)
+    http.close(s)
+    let hits = http.get(kaBase + "/bighits", {blockPrivateHosts: false}).body
+    testing.expectEqual(hits, "1", "the request was sent once")
+})
+
 // A server that accepts and then goes silent: never answers the TLS
 // ClientHello and never reads what's sent
 let STALL_PORT = freePort()
@@ -180,6 +199,15 @@ tlsTest("totalTimeout bounds a stalled TLS handshake", lam{ in
     let start = time.now()
     let msg = errorOf(lam{ in http.get("https://127.0.0.1:" + str(STALL_PORT) + "/",
         {blockPrivateHosts: false, totalTimeout: 0.6, readTimeout: 30}) })
+    let elapsed = time.now() - start
+    testing.expectContains(msg, "total timeout", nil)
+    testing.expect(elapsed < 2500, "took %{elapsed}ms")
+})
+
+tlsTest("totalTimeout bounds a stalled TLS handshake in openStream", lam{ in
+    let start = time.now()
+    let msg = errorOf(lam{ in http.openStream({url: "https://127.0.0.1:" + str(STALL_PORT) + "/",
+        blockPrivateHosts: false, totalTimeout: 0.6, readTimeout: 30}) })
     let elapsed = time.now() - start
     testing.expectContains(msg, "total timeout", nil)
     testing.expect(elapsed < 2500, "took %{elapsed}ms")
