@@ -142,6 +142,7 @@ static Value deepCopyForTask(const Value& v,
         if (vmcc) {
             auto clone = std::make_shared<VMClosureCallable>(vmcc->closure);
             clone->ownedPrototype = vmcc->ownedPrototype;
+            clone->taskOwnership = vmcc->taskOwnership; // made by an earlier task
             clone->vm = nullptr; // rewireForTaskVm sets this to &taskVm
             return Value(std::static_pointer_cast<Callable>(clone));
         }
@@ -271,6 +272,7 @@ void VM::initAsTaskVm(TaskSeed&& seed, bool collectGarbage) {
     // task's own `globals` start as nil and lazyLoadGlobal fills each
     // slot on first touch.
     isTaskVm_ = true;
+    taskBag_ = std::make_shared<TaskOwnership>();
     globalIndices = std::move(seed.globalIndices);
     globalsSnapshot_ = std::move(seed.globals);
     globals.assign(globalsSnapshot_.size(), Value());
@@ -283,11 +285,9 @@ void VM::adoptTaskResult(VM& taskVm, Value& result) {
     // Transfer closure/upvalue ownership from taskVm into a shared bag
     // attached to any VMClosureCallable in the result. This keeps the raw
     // pointers alive after taskVm is destroyed.
-    auto ownership = std::make_shared<TaskOwnership>();
-    ownership->closures = std::move(taskVm.allClosures);
-    ownership->upvalues = std::move(taskVm.allUpvalues);
-    taskVm.allClosures.clear();
-    taskVm.allUpvalues.clear();
+    // The task's own bag, which the closures it created already hold;
+    // ~VM moves the closures and upvalues into it
+    auto ownership = taskVm.taskBag_ ? taskVm.taskBag_ : std::make_shared<TaskOwnership>();
 
     // Helper to walk a PraiaClass chain's vmMethods.
     // Track visited objects to handle cycles.
@@ -370,7 +370,8 @@ Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
     // when there's no active execute() (tree-walker compatibility path).
     // Async-returned closures have vm=nullptr, so this always does the right thing.
     VM* currentVm = VM::current();
-    if (!currentVm) currentVm = vm;
+    // Not the stored vm once the task that made this closure is gone
+    if (!currentVm && !(taskOwnership && taskOwnership->vmGone.load())) currentVm = vm;
     if (!currentVm) return Value();
 
     int savedFrameCount = currentVm->frameCount;
@@ -407,7 +408,17 @@ Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
 
 VM::VM() : stack(std::make_unique<Value[]>(STACK_MAX)) {}
 
-VM::~VM() = default;
+VM::~VM() {
+    if (!taskBag_) return;
+    // Hand the task's closures and upvalues to the bag its closure
+    // wrappers hold, so any that escaped stay valid (see TaskOwnership)
+    std::lock_guard<std::mutex> lk(taskBag_->mu);
+    for (auto& c : allClosures) taskBag_->closures.push_back(std::move(c));
+    for (auto& u : allUpvalues) taskBag_->upvalues.push_back(std::move(u));
+    allClosures.clear();
+    allUpvalues.clear();
+    taskBag_->vmGone.store(true);
+}
 
 void VM::defineNative(const std::string& name, Value value) {
     int slot = ensureGlobalSlot(name);
@@ -1891,6 +1902,7 @@ VM::Result VM::execute(int baseFrameCount_) {
             auto* closure = allClosures.back().get();
             auto wrapper = std::make_shared<VMClosureCallable>(closure);
             wrapper->vm = this;
+            wrapper->taskOwnership = taskBag_;   // null outside task VMs
             push(Value(std::static_pointer_cast<Callable>(wrapper)));
             break;
         }
@@ -2931,6 +2943,7 @@ VM::Result VM::execute(int baseFrameCount_) {
 
                         auto wrapper = std::make_shared<VMClosureCallable>(closure);
                         wrapper->vm = &taskVm;
+                        wrapper->taskOwnership = taskVm.taskBag_;
 
                         // For constructors, create a fresh instance as the receiver
                         Value instanceVal;

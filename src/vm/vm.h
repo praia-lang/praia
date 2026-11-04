@@ -36,12 +36,18 @@ struct ObjClosure {
     }
 };
 
-// Shared ownership bag for closures/upvalues returned from async tasks.
-// Attached to VMClosureCallable wrappers in the result so the raw pointers
-// survive after the task VM is destroyed.
+// Shared ownership bag for the closures/upvalues an async task creates.
+// Every closure wrapper the task VM makes holds it, so a closure that
+// leaves the task — returned, or stored somewhere the caller can reach
+// (a shared upvalue, a channel) — keeps its raw pointers valid after the
+// task VM is destroyed. The task VM moves its closures and upvalues in
+// when it's destroyed; `mu` guards that hand-off against a collector on
+// another thread walking the bag.
 struct TaskOwnership {
+    std::mutex mu;
     std::vector<std::unique_ptr<ObjClosure>> closures;
     std::vector<std::unique_ptr<ObjUpvalue>> upvalues;
+    std::atomic<bool> vmGone{false};   // the task VM no longer exists
 };
 
 // Wrapper to store ObjClosure as a Callable in Value
@@ -199,6 +205,9 @@ private:
     std::vector<Value> globalsSnapshot_;
     std::vector<uint8_t> loadedMask_;
     bool isTaskVm_ = false;
+    // Task VMs: the bag every closure wrapper this VM creates holds (see
+    // TaskOwnership); filled from allClosures/allUpvalues in ~VM
+    std::shared_ptr<TaskOwnership> taskBag_;
 
     // Helpers. Inline because they're on the global-access hot path.
     int ensureGlobalSlot(const std::string& name) {

@@ -368,12 +368,16 @@ void GcHeap::forEachChild(void* obj, GcNodeKind kind, F& f) {
             if (uv->location == &uv->closed) visitValue(uv->closed, true, f);
             break;
         }
-        case GcNodeKind::TaskOwnership:
-            // Closures returned from an async task keep their upvalues
-            // here (unique_ptr) instead of in a VM's allUpvalues.
-            for (auto& uv : static_cast<TaskOwnership*>(obj)->upvalues)
+        case GcNodeKind::TaskOwnership: {
+            // A finished async task's closures keep their upvalues here
+            // (unique_ptr) instead of in a VM's allUpvalues. Locked: the
+            // task's thread fills the bag when its VM is destroyed.
+            auto* bag = static_cast<TaskOwnership*>(obj);
+            std::lock_guard<std::mutex> lk(bag->mu);
+            for (auto& uv : bag->upvalues)
                 if (uv) f(static_cast<void*>(uv.get()), GcNodeKind::Upvalue, 1, true);
             break;
+        }
     }
 }
 

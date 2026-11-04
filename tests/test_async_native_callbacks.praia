@@ -145,6 +145,26 @@ testing.test("a native task's GC keeps what its callbacks capture", lam{ in
     }
 })
 
+testing.test("closures a native task's callbacks store outlive the task (VM)", lam{ in
+    // A closure created inside the task and stored in a shared upvalue
+    // used to point into the destroyed task VM (wrong results or a crash)
+    let r = sys.exec(["./praia", "tests/fixtures/async_native/escaped_closures.praia"], 20000)
+    testing.expectEqual(r.stdout, "40 42", r.stderr)
+})
+
+testing.test("a closure an async task sends through a queue outlives the task", lam{ in
+    let q = Queue()
+    func producer(q) {
+        let base = 10
+        q.send(lam{ x in x + base })
+        return nil
+    }
+    await async producer(q)
+    let junk = []
+    for (i in 0..2000) { let n = i; junk.push(lam{ y in y * n }) }
+    testing.expectEqual(q.recv()(32), 42, nil)
+})
+
 testing.test("an async native that doesn't call back still returns its result", lam{ in
     let f = async sys.exec(["echo", "hi"])
     testing.expectEqual((await f).stdout, "hi", nil)
