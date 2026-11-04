@@ -172,7 +172,11 @@ let _stallServer = async lam{ in
 }()
 time.sleep(150)
 
-testing.test("totalTimeout bounds a stalled TLS handshake", lam{ in
+// Without OpenSSL an https URL is refused before anything connects
+let hasTls = !str(errorOf(lam{ in http.get("https://127.0.0.1:1/", {blockPrivateHosts: false, totalTimeout: 0.2}) })).contains("HTTPS not supported")
+let tlsTest = hasTls ? testing.test : testing.skip
+
+tlsTest("totalTimeout bounds a stalled TLS handshake", lam{ in
     let start = time.now()
     let msg = errorOf(lam{ in http.get("https://127.0.0.1:" + str(STALL_PORT) + "/",
         {blockPrivateHosts: false, totalTimeout: 0.6, readTimeout: 30}) })

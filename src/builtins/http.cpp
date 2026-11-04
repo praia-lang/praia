@@ -2526,7 +2526,7 @@ Value httpOpenStream(const std::string& method, const std::string& url,
         }
 
         auto conn = std::make_shared<SocketConn>();
-        conn->fd = connectToHost(p.host, p.port, perReq.connectTimeoutMs, perReq.blockPrivateHosts);
+        conn->fd = connectToHost(p.host, p.port, perReq.connectTimeoutMs, perReq.blockPrivateHosts, deadline);
         setSocketTimeouts(conn->fd, perReq.readTimeoutMs);
 
 #ifdef HAVE_OPENSSL

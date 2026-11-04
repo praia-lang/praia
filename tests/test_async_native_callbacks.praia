@@ -117,16 +117,19 @@ testing.test("callback natives work when called directly", lam{ in
 })
 
 // The native task collects garbage while it runs (each allocation under
-// PRAIA_GC_STRESS). What the handler reaches only through its upvalues —
-// a map and an array made by the main script — must survive that.
+// PRAIA_GC_STRESS). What the handler reaches only through its upvalues
+// must survive that: a map and an array made by the main script, and a
+// value the first callback creates inside the task and stores in one.
 func makeCapturingServer() {
     let state = {hits: 0}
     let words = ["even", "odd"]
+    let made = nil
     return http.createServer(lam{ req in
         state.hits = state.hits + 1
+        if (made == nil) { made = {label: "first-" + str(state.hits * 7)} }
         let junk = []
         for (i in 0..50) { junk.push({i: i, s: "x" + str(i)}) }
-        return {status: 200, body: words[state.hits % 2] + ":" + str(len(junk))}
+        return {status: 200, body: words[state.hits % 2] + ":" + str(len(junk)) + ":" + made.label}
     })
 }
 let capPort = freePort()
@@ -137,7 +140,7 @@ waitForServer(capPort)
 testing.test("a native task's GC keeps what its callbacks capture", lam{ in
     for (i in 1..13) {
         let r = rawRequest(capPort, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-        let want = (i % 2 == 0 ? "even" : "odd") + ":50"
+        let want = (i % 2 == 0 ? "even" : "odd") + ":50:first-7"
         testing.expectContains(r, want, "request %{i}")
     }
 })
