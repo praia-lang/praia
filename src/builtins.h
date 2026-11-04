@@ -122,7 +122,9 @@ struct HttpServerOptions {
     // "127.0.0.1" (or "localhost") for a server only this machine reaches.
     std::string host;
     // Largest request body accepted, for both Content-Length and chunked
-    // framing; larger requests get 413 before the body is read.
+    // framing; larger requests get 413. A Content-Length over the limit is
+    // refused before any of the body is read; a chunked body is read and
+    // decoded until its decoded size passes the limit.
     size_t maxBodySize = 64ull * 1024 * 1024;
     // Budget for receiving one request — headers and body together. The
     // server handles one connection at a time, so this is what bounds how

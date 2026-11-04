@@ -3478,7 +3478,7 @@ Header names are lowercased for consistent access.
 | `totalTimeout` | none | Overall request budget INCLUDING redirects, in seconds. -1 / omitted = no overall cap |
 | `followRedirects` | `true` | Follow 3xx responses with Location headers |
 | `maxRedirects` | 10 | Throw if a chain exceeds this |
-| `redirectHeaders` | `"safe"` | Headers sent after a redirect to another origin (scheme, host or port). `"safe"` forwards only standard non-credential headers (`Accept*`, `User-Agent`, `Content-*`, `Cache-Control`, `Pragma`, `Range`, `If-*`); `Authorization`, `Cookie` and custom headers such as `X-API-Key` are dropped. `"all"` forwards every header, and lets a 307/308 resend the request body to the new origin (which `"safe"` refuses) — only for redirects you trust (like `curl --location-trusted`). |
+| `redirectHeaders` | `"safe"` | Headers sent after a redirect to another origin (scheme, host or port). `"safe"` forwards only these standard non-credential headers: `Accept`, `Accept-Encoding`, `Accept-Language`, `User-Agent`, `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Language`, `Cache-Control`, `Pragma`, `Range`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `If-Range`; `Authorization`, `Cookie` and custom headers such as `X-API-Key` are dropped. `"all"` forwards every header, and lets a 307/308 resend the request body to the new origin (which `"safe"` refuses) — only for redirects you trust (like `curl --location-trusted`). |
 | `insecure` | `false` | **Skip TLS certificate verification.** Testing/dev only; equivalent to `curl -k` |
 | `caBundle` | system trust store | Path to a custom CA PEM bundle for trust-store override |
 | `blockPrivateHosts` | `true` | **SSRF protection.** Refuse to connect to loopback, RFC1918, link-local (incl. cloud metadata `169.254.169.254`), IPv4-mapped, multicast, and reserved address ranges. Re-applied per redirect hop. Set to `false` only when deliberately targeting internal hosts. |
@@ -3728,7 +3728,7 @@ server.listen(8080)     // blocks, prints "Server listening on port 8080"
 | Option | Default | Effect |
 |--------|---------|--------|
 | `host` | all IPv4 interfaces (`0.0.0.0`) | Address or host name to bind. Use `"127.0.0.1"` for a server only this machine can reach. |
-| `maxBodySize` | 64 MiB | Largest request body accepted, in bytes, for both `Content-Length` and chunked bodies. Larger requests get `413 Payload Too Large` before the body is read. |
+| `maxBodySize` | 64 MiB | Largest request body accepted, in bytes, for both `Content-Length` and chunked bodies; larger requests get `413 Payload Too Large`. A `Content-Length` over the limit is refused before any of the body is read; a chunked body is read and decoded until its decoded size passes the limit. |
 | `requestTimeout` | 30 | Seconds allowed for receiving one request, headers and body together. A client that's slower than this is disconnected. |
 
 ```praia
