@@ -171,6 +171,9 @@ testing.test("grain lookup stops before a directory anyone can write to", lam{ i
     fs.mkdir(shared + "/project")
     fs.write(shared + "/ext_grains/strings.praia", "print(\"HIJACKED\")\nexport { }\n")
     fs.write(shared + "/project/run.praia", "use \"strings\"\nprint(\"run ok\")\n")
+    // Explicit modes, whatever the umask: only `shared` is writable by
+    // everyone, so that's where the walk has to stop
+    sys.exec(["chmod", "755", shared + "/project"])
     sys.exec(["chmod", "777", shared])
     fs.write(shared + "/project/missing.praia", "use \"no_such_grain_xyz\"\n")
     for (e in engines) {
@@ -186,16 +189,34 @@ testing.test("grain lookup stops before a directory anyone can write to", lam{ i
         for (a in e) { margs.push(a) }
         margs.push(shared + "/project/missing.praia")
         let m = runIn(root, margs)
+        // The resolver reports the canonical path (/private/var/... on
+        // macOS), so match its tail: the temp dir's name and "shared"
+        let rootName = root.split("/")[len(root.split("/")) - 1]
         testing.expectContains(m.stderr, "Grain not found: no_such_grain_xyz (the search for ext_grains/ and grains/ stopped at ", nil)
-        testing.expectContains(m.stderr, "which any user can write to)", nil)
+        testing.expectContains(m.stderr, "/" + rootName + "/shared, which any user can write to)", nil)
     }
 })
 
 testing.test("an ordinary missing grain gets no stopped-search hint", lam{ in
+    // Ten nested directories, none writable by others: the walk uses up
+    // its ten-directory limit inside them, so where the temp dir (or the
+    // checkout) lives can't put a shared directory in its path
+    let root = testing.tempDir("praia-nohint-")
+    let dir = root
+    let dirs = []
+    for (i in 0..10) {
+        dir = dir + "/d" + str(i)
+        dirs.push(dir)
+    }
+    fs.mkdir(dir)
+    let chmod = ["chmod", "755"]
+    for (d in dirs) { chmod.push(d) }
+    sys.exec(chmod)
+    fs.write(dir + "/missing.praia", "use \"no_such_grain_xyz\"\n")
     for (e in engines) {
         let args = [praiaBin]
         for (a in e) { args.push(a) }
-        args.push(sys.cwd() + "/tests/fixtures/grain_errors/usesmissing.praia")
+        args.push(dir + "/missing.praia")
         let r = sys.exec(args, 10000)
         testing.expectContains(r.stderr, "Grain not found: no_such_grain_xyz", nil)
         testing.expect(!r.stderr.contains("stopped at"), "unexpected hint (%{e}): %{r.stderr}")

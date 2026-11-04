@@ -1,2 +1,0 @@
-// Imports a grain that exists nowhere — see test_imports.praia
-use "no_such_grain_xyz"
