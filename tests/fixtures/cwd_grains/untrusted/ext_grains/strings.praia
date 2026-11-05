@@ -1,0 +1,4 @@
+// Stands in for a grain planted in an untrusted directory — see
+// test_imports.praia. Must never load for a script that lives elsewhere.
+print("HIJACKED")
+export { }

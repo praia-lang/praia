@@ -80,4 +80,30 @@ testing.test("bytes.calcsize", lam{ in
     testing.expectEqual(bytes.calcsize("4x"), 4, nil)
 })
 
+testing.test("format size is capped before anything is allocated", lam{ in
+    // "16000000x" eight times describes 128 MB; refused up front instead
+    // of expanding into millions of fields
+    testing.expectThrows(lam{ in bytes.unpack("16000000x" * 8, "") }, nil)
+    testing.expectThrows(lam{ in bytes.pack("16000000x" * 8, []) }, nil)
+    // A format bigger than the data fails before decoding any of it
+    testing.expectThrows(lam{ in bytes.unpack("16000000x", "") }, nil)
+    testing.expectEqual(bytes.calcsize("16000000x"), 16000000, nil)
+})
+
+testing.test("repeat counts still pack and unpack element by element", lam{ in
+    let p = bytes.pack(">3BHI2xq", [1, 2, 3, 500, 70000, -5])
+    testing.expectEqual(bytes.len(p), 19, nil)   // 3 + 2 + 4 + 2 + 8
+    testing.expectEqual(bytes.unpack(">3BHI2xq", p), [1, 2, 3, 500, 70000, -5], nil)
+    testing.expectEqual(bytes.unpack(">2fd", bytes.pack(">2fd", [1.5, -2.25, 3.125])), [1.5, -2.25, 3.125], nil)
+})
+
+testing.test("pack rejects numbers outside the integer range", lam{ in
+    let inf = 1e308 * 10
+    testing.expectThrows(lam{ in bytes.pack(">q", [1e30]) }, nil)
+    testing.expectThrows(lam{ in bytes.pack(">q", [inf]) }, nil)
+    testing.expectEqual(bytes.unpack(">q", bytes.pack(">q", [2.9])), [2], "truncated toward zero")
+    // Integers above 2^53 keep every bit (no detour through a double)
+    testing.expectEqual(bytes.unpack(">q", bytes.pack(">q", [9007199254740993])), [9007199254740993], nil)
+})
+
 testing.done()

@@ -1,0 +1,32 @@
+// For test_async_native_callbacks.praia, run under the VM: closures an
+// async native's callbacks create and store in a shared upvalue must
+// still work after the task (and its VM) has finished.
+func viaUpdate() {
+    let saved = nil
+    let sm = SharedMap()
+    sm.set("n", 1)
+    await async sm.update("n", lam{ v in
+        let m = 5
+        saved = lam{ x in x * m }
+        return v + 1
+    })
+    // Allocate closures that would reuse a freed one's memory
+    let junk = []
+    for (i in 0..2000) { let n = i; junk.push(lam{ y in y - n }) }
+    return saved(8)
+}
+
+func viaLock() {
+    let saved = nil
+    let lock = Lock()
+    await async lock.withLock(lam{ in
+        let k = 3
+        saved = lam{ x in x * k }
+        return 1
+    })
+    let junk = []
+    for (i in 0..2000) { let q = i; junk.push(lam{ y in y + q }) }
+    return saved(14)
+}
+
+print("%{viaUpdate()} %{viaLock()}")

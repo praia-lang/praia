@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
+#include <utility>
 #include <variant>
 
 // ── Thread-local singleton ──
@@ -16,43 +18,223 @@ GcHeap& GcHeap::current() {
     return instance;
 }
 
+// ── Task bag registry ──
+//
+// Process-wide: a bag outlives the task thread that made it and becomes
+// garbage on whichever thread drops its last reference. `collecting`
+// lets one heap at a time scan and clear bags, so no other collector is
+// walking a bag's upvalues while they're cleared.
+
+namespace {
+struct TaskBagRegistry {
+    std::mutex mu;          // guards bags
+    std::mutex collecting;
+    std::vector<std::weak_ptr<TaskOwnership>> bags;
+};
+
+TaskBagRegistry& bagRegistry() {
+    static auto* reg = new TaskBagRegistry; // never destroyed: task threads may outlive statics
+    return *reg;
+}
+} // namespace
+
+void GcHeap::registerTaskBag(const std::shared_ptr<TaskOwnership>& bag) {
+    auto& reg = bagRegistry();
+    std::lock_guard<std::mutex> lk(reg.mu);
+    reg.bags.push_back(bag);
+}
+
+std::mutex& GcHeap::upvalueMutex() {
+    static auto* mu = new std::mutex; // never destroyed, like the registry
+    return *mu;
+}
+
 // ── Tracking ──
 
-void GcHeap::track(const std::shared_ptr<PraiaArray>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Array});
+void GcHeap::addEntry(GcEntry e) {
+    if (lending_) lending_->objects.push_back(e.weak);
+    entries_.push_back(std::move(e));
     allocsSinceGc_++;
+}
+
+void GcHeap::track(const std::shared_ptr<PraiaArray>& p) {
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Array});
 }
 void GcHeap::track(const std::shared_ptr<PraiaMap>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Map});
-    allocsSinceGc_++;
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Map});
 }
 void GcHeap::track(const std::shared_ptr<PraiaSet>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Set});
-    allocsSinceGc_++;
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Set});
 }
 void GcHeap::track(const std::shared_ptr<PraiaInstance>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Instance});
-    allocsSinceGc_++;
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Instance});
 }
 void GcHeap::track(const std::shared_ptr<PraiaClass>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Class});
-    allocsSinceGc_++;
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Class});
 }
 void GcHeap::track(const std::shared_ptr<PraiaGenerator>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Generator});
-    allocsSinceGc_++;
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Generator});
 }
 void GcHeap::track(const std::shared_ptr<PraiaTagged>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Tagged});
-    allocsSinceGc_++;
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Tagged});
 }
 void GcHeap::track(const std::shared_ptr<PraiaExternal>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::External});
-    allocsSinceGc_++;
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::External});
 }
 void GcHeap::track(const std::shared_ptr<Environment>& p) {
-    entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Environment});
-    allocsSinceGc_++;
+    addEntry({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Environment});
+}
+
+// ── Ownership hand-offs ──
+
+std::shared_ptr<GcHeap::LentObjects> GcHeap::beginLending() {
+    lending_ = std::make_shared<LentObjects>();
+    lent_.push_back(lending_);
+    return lending_;
+}
+
+void GcHeap::endLending() { lending_.reset(); }
+
+// The containers reachable from `root`, without going into callables
+static void collectContainers(const Value& root, std::unordered_set<void*>& seen,
+                              std::vector<std::weak_ptr<void>>& out) {
+    std::vector<Value> work{root};
+    auto add = [&](const auto& p) {
+        if (!p || !seen.insert(static_cast<void*>(p.get())).second) return false;
+        out.push_back(std::weak_ptr<void>(p));
+        return true;
+    };
+    while (!work.empty()) {
+        Value v = std::move(work.back());
+        work.pop_back();
+        if (v.isArray()) {
+            auto a = v.asArray();
+            if (add(a)) for (auto& e : a->elements) work.push_back(e);
+        } else if (v.isMap()) {
+            auto m = v.asMap();
+            if (add(m)) for (auto& [k, e] : m->entries) { work.push_back(k); work.push_back(e); }
+        } else if (v.isSet()) {
+            auto st = v.asSet();
+            if (add(st)) for (auto& e : st->elements) work.push_back(e);
+        } else if (v.isInstance()) {
+            auto inst = v.asInstance();
+            if (add(inst)) for (auto& [k, e] : inst->fields) work.push_back(e);
+        } else if (v.isTagged()) {
+            auto t = v.asTagged();
+            if (add(t)) for (auto& e : t->values) work.push_back(e);
+        } else if (v.isGenerator()) {
+            add(v.asGenerator());
+        }
+    }
+}
+
+void GcHeap::disown(const Value& v) {
+    // Only the containers: a callable's captured state stays with the
+    // heap that made it (see "Shared handler state" in TODO.md)
+    std::unordered_set<void*> seen;
+    collectContainers(v, seen, disowned_);
+    // Only a collection or a hand-over empties the list, and a task's
+    // heap doesn't collect: compact it here, keeping each live object once
+    if (disowned_.size() < compactDisownedAt_) return;
+    std::unordered_set<void*> live;
+    std::erase_if(disowned_, [&](const std::weak_ptr<void>& w) {
+        auto p = w.lock();
+        return !p || !live.insert(p.get()).second;
+    });
+    compactDisownedAt_ = std::max<size_t>(1024, disowned_.size() * 2);
+}
+
+void GcHeap::settleEntries() {
+    {
+        std::lock_guard<std::mutex> lk(inbox_->mu);
+        allocsSinceGc_ += static_cast<int>(inbox_->entries.size());
+        for (auto& e : inbox_->entries) entries_.push_back(std::move(e));
+        inbox_->entries.clear();
+        for (auto& l : inbox_->lent) {
+            l->seenReturned = false; // looked at from the next collection on
+            lent_.push_back(std::move(l));
+        }
+        inbox_->lent.clear();
+        for (auto& w : inbox_->disowned) disowned_.push_back(std::move(w));
+        inbox_->disowned.clear();
+    }
+    std::erase_if(foreignDisowns_, [](const std::weak_ptr<void>& w) { return w.expired(); });
+    if (disowned_.empty()) return;
+    // A disowned object that's still alive is the one at that address
+    std::unordered_set<void*> gone, found;
+    for (auto& w : disowned_)
+        if (auto p = w.lock()) gone.insert(p.get());
+    std::erase_if(entries_, [&](const GcEntry& e) {
+        if (!gone.count(e.rawPtr) || e.weak.expired()) return false;
+        found.insert(e.rawPtr);
+        return true;
+    });
+    // The rest another heap tracks — or none does, once its heap is gone.
+    // Each once: the same value can be disowned again and again (a
+    // SharedMap entry updated in a loop).
+    std::unordered_set<void*> recorded;
+    for (auto& w : foreignDisowns_)
+        if (auto p = w.lock()) recorded.insert(p.get());
+    for (auto& w : disowned_) {
+        auto p = w.lock();
+        if (p && !found.count(p.get()) && recorded.insert(p.get()).second)
+            foreignDisowns_.push_back(std::move(w));
+    }
+    disowned_.clear();
+}
+
+// Appends to the inbox that's still taking deliveries
+static void deliver(std::shared_ptr<GcHeap::Inbox> to, GcHeap::Inbox& from) {
+    while (true) {
+        std::unique_lock<std::mutex> lk(to->mu);
+        if (to->forward) {
+            auto next = to->forward;
+            lk.unlock();
+            to = std::move(next);
+            continue;
+        }
+        for (auto& e : from.entries) to->entries.push_back(std::move(e));
+        for (auto& l : from.lent) to->lent.push_back(std::move(l));
+        for (auto& w : from.disowned) to->disowned.push_back(std::move(w));
+        break;
+    }
+    from.entries.clear();
+    from.lent.clear();
+    from.disowned.clear();
+}
+
+void GcHeap::handOverTo(const std::shared_ptr<Inbox>& to) {
+    settleEntries();
+    lending_.reset();
+    // Plugin-pinned values stay: the plugin may use them from any thread
+    std::unordered_set<void*> pinned;
+    std::vector<std::weak_ptr<void>> unused;
+    for (const auto& v : pinned_) collectContainers(v, pinned, unused);
+    Inbox out;
+    for (auto& e : entries_)
+        if (!e.weak.expired() && !pinned.count(e.rawPtr)) out.entries.push_back(std::move(e));
+    entries_.clear();
+    // Copies this task lent to tasks of its own that are still running
+    for (auto& l : lent_)
+        if (!l->returned.load(std::memory_order_acquire)) out.lent.push_back(std::move(l));
+    lent_.clear();
+    // Copies it was lent and then disowned: the lender stops tracking
+    // them before it sees this task's copies returned
+    out.disowned = std::move(foreignDisowns_);
+    foreignDisowns_.clear();
+    deliver(to, out);
+    // Anything a task of this one hands over later goes on to `to`
+    {
+        std::lock_guard<std::mutex> lk(inbox_->mu);
+        inbox_->forward = to;
+        out.entries = std::move(inbox_->entries);
+        out.lent = std::move(inbox_->lent);
+        out.disowned = std::move(inbox_->disowned);
+        inbox_->entries.clear();
+        inbox_->lent.clear();
+        inbox_->disowned.clear();
+    }
+    deliver(to, out);
 }
 
 // ── Control ──
@@ -84,6 +266,11 @@ void GcHeap::collectIfNeeded() {
 void GcHeap::collect() {
     if (collecting_ || !rootMarker_) return;
     collecting_ = true;
+    // Read before the inbox: a task delivers what it disowned before it
+    // marks its lent copies returned, so a copy seen returned here has
+    // its disown waiting in the inbox
+    for (auto& l : lent_) l->seenReturned = l->returned.load(std::memory_order_acquire);
+    settleEntries();
     allocsSinceGc_ = 0;
     nodes_.reset(entries_.size());
 
@@ -365,27 +552,48 @@ void GcHeap::forEachChild(void* obj, GcNodeKind kind, F& f) {
             // through the bag's edge below. Open upvalues point into the
             // VM stack, which the VM's root marker covers.
             auto* uv = static_cast<ObjUpvalue*>(obj);
+            std::lock_guard<std::mutex> lk(upvalueMutex());
             if (uv->location == &uv->closed) visitValue(uv->closed, true, f);
             break;
         }
-        case GcNodeKind::TaskOwnership:
-            // Closures returned from an async task keep their upvalues
-            // here (unique_ptr) instead of in a VM's allUpvalues.
-            for (auto& uv : static_cast<TaskOwnership*>(obj)->upvalues)
+        case GcNodeKind::TaskOwnership: {
+            // A finished async task's closures keep their upvalues here
+            // (unique_ptr) instead of in a VM's allUpvalues. Locked: the
+            // task's thread fills the bag when its VM is destroyed.
+            auto* bag = static_cast<TaskOwnership*>(obj);
+            std::lock_guard<std::mutex> lk(bag->mu);
+            for (auto& uv : bag->upvalues)
                 if (uv) f(static_cast<void*>(uv.get()), GcNodeKind::Upvalue, 1, true);
             break;
+        }
     }
 }
 
 // ── Mark phase ──
 
+bool GcHeap::canTraverse(void* obj, GcNodeKind kind) const {
+    switch (kind) {
+        case GcNodeKind::Callable:
+        case GcNodeKind::TaskOwnership:
+            return true;  // fixed once made; a bag's contents are locked
+        case GcNodeKind::Upvalue: {
+            // Ours, or a finished task's (read under upvalueMutex). Another
+            // live thread's upvalue it writes without the lock.
+            auto* owner = static_cast<ObjUpvalue*>(obj)->owner.load(std::memory_order_acquire);
+            return owner == this || owner == nullptr;
+        }
+        default:
+            return false; // a container another heap tracks, or none does
+    }
+}
+
 void GcHeap::markNode(void* obj, GcNodeKind kind) {
     if (!obj) return;
     auto [slot, inserted] = nodes_.insert(obj, kind, 0);
-    (void)inserted;
+    if (inserted) slot->traverse = canTraverse(obj, kind);
     if (!slot->marked) {
         slot->marked = true;
-        markStack_.push_back({obj, kind});
+        markStack_.push_back({obj, kind, slot->traverse});
     }
 }
 
@@ -394,7 +602,7 @@ void GcHeap::drainMarkStack() {
     while (!markStack_.empty()) {
         MarkItem item = markStack_.back();
         markStack_.pop_back();
-        forEachChild(item.obj, item.kind, push);
+        if (item.traverse) forEachChild(item.obj, item.kind, push);
     }
 }
 
@@ -406,6 +614,11 @@ void GcHeap::markValue(const Value& v) {
 
 void GcHeap::markEnvironment(Environment* env) {
     markNode(static_cast<void*>(env), GcNodeKind::Environment);
+    drainMarkStack();
+}
+
+void GcHeap::markUpvalue(ObjUpvalue* uv) {
+    markNode(static_cast<void*>(uv), GcNodeKind::Upvalue);
     drainMarkStack();
 }
 
@@ -426,21 +639,59 @@ std::vector<GcHeap::MarkItem> GcHeap::findExternallyHeld() {
     // captures); without our reference that thread could free it while
     // we're still marking through it. Our own reference is subtracted
     // from the count.
+    //
+    // Objects lent to a running task are kept without being looked inside.
+    std::unordered_set<void*> lent;
+    std::erase_if(lent_, [&](const std::shared_ptr<LentObjects>& l) {
+        if (l != lending_ && l->seenReturned) return true;
+        for (auto& w : l->objects)
+            if (auto p = w.lock()) lent.insert(p.get());
+        return false;
+    });
+    std::vector<MarkItem> lentRoots;
     held_.reserve(entries_.size());
     for (auto& entry : entries_) {
         auto strong = entry.weak.lock();
         if (!strong) continue;
         long uc = static_cast<long>(strong.use_count()) - 1;
-        if (nodes_.insert(entry.rawPtr, nodeKindOf(entry.type), uc).second) {
-            work.push_back(entry.rawPtr);
+        GcNodeKind kind = nodeKindOf(entry.type);
+        auto [slot, inserted] = nodes_.insert(entry.rawPtr, kind, uc);
+        if (inserted) {
+            if (lent.count(entry.rawPtr)) {
+                slot->traverse = false;
+                lentRoots.push_back({entry.rawPtr, kind, false});
+            } else {
+                work.push_back(entry.rawPtr);
+            }
             held_.push_back(std::move(strong));
+        }
+    }
+
+    // Finished task bags, held like tracked objects above. Skipped this
+    // round if another heap is already collecting them.
+    auto& reg = bagRegistry();
+    if (reg.collecting.try_lock()) {
+        holdsBagLock_ = true;
+        std::lock_guard<std::mutex> lk(reg.mu);
+        std::erase_if(reg.bags, [](const std::weak_ptr<TaskOwnership>& w) { return w.expired(); });
+        for (auto& weak : reg.bags) {
+            auto strong = weak.lock();
+            if (!strong) continue;
+            long uc = static_cast<long>(strong.use_count()) - 1;
+            if (nodes_.insert(strong.get(), GcNodeKind::TaskOwnership, uc).second) {
+                work.push_back(strong.get());
+                bags_.push_back(std::move(strong));
+            }
         }
     }
 
     auto visit = [&](void* obj, GcNodeKind kind, long uc, bool owning) {
         auto [slot, inserted] = nodes_.insert(obj, kind, uc);
         if (owning) slot->refs--;
-        if (inserted) work.push_back(obj);
+        if (inserted) {
+            slot->traverse = canTraverse(obj, kind);
+            if (slot->traverse) work.push_back(obj);
+        }
     };
     while (!work.empty()) {
         void* obj = work.back();
@@ -449,7 +700,7 @@ std::vector<GcHeap::MarkItem> GcHeap::findExternallyHeld() {
         forEachChild(obj, kind, visit);
     }
 
-    std::vector<MarkItem> roots;
+    std::vector<MarkItem> roots = std::move(lentRoots);
     nodes_.forEach([&](NodeTable::Slot& slot) {
         if (slot.refs == 0) return;
         if (stress_ && slot.refs < 0) {
@@ -460,7 +711,7 @@ std::vector<GcHeap::MarkItem> GcHeap::findExternallyHeld() {
                       << " — an edge is counted that isn't a shared_ptr reference\n";
             std::abort();
         }
-        roots.push_back({slot.key, slot.kind});
+        roots.push_back({slot.key, slot.kind, slot.traverse});
     });
     return roots;
 }
@@ -559,6 +810,20 @@ void GcHeap::sweep() {
         }
     }
 
+    // Unreachable task bags: drop their upvalues' captured values, which
+    // breaks bag -> upvalue -> closure -> bag. Released after the bag
+    // locks, since dropping a closure releases its bag reference.
+    std::vector<Value> dropped;
+    for (auto& bag : bags_) {
+        auto* slot = nodes_.find(bag.get());
+        if (slot && slot->marked) continue;
+        std::lock_guard<std::mutex> lk(bag->mu);
+        std::lock_guard<std::mutex> uvLk(upvalueMutex());
+        for (auto& uv : bag->upvalues)
+            if (uv) dropped.push_back(std::exchange(uv->closed, Value()));
+    }
+    dropped.clear();
+
     lastCollected_ = static_cast<int>(toCollect.size());
 
     // Phase 3: Release locked shared_ptrs — objects whose cycles are broken
@@ -567,6 +832,11 @@ void GcHeap::sweep() {
     // Drop the references findExternallyHeld() took, so collected
     // objects die now and their entries are pruned below.
     held_.clear();
+    bags_.clear();
+    if (holdsBagLock_) {
+        holdsBagLock_ = false;
+        bagRegistry().collecting.unlock();
+    }
 
     // Phase 4: Remove expired entries (dead via refcounting or just cleared)
     std::erase_if(entries_, [](const GcEntry& e) { return e.weak.expired(); });

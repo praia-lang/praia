@@ -557,4 +557,24 @@ testing.test("} ends a statement — same-line follow-up is legal", lam{ in
     testing.expectEqual(r.stdout.strip(), "1", nil)
 })
 
+testing.test("sys.exit() from a native callback or a defer exits with its code", lam{ in
+    // Not turned into an error by the native in between; top-level
+    // defers still run on the way out
+    let cases = [
+        ["defer print(\"cleanup\"); map([1], lam{ x in sys.exit(3) }); print(\"after\")", 3],
+        ["Lock().withLock(lam{ in sys.exit(4) }); print(\"after\")", 4],
+        ["func f() { defer sys.exit(5); return 1 }; f(); print(\"after\")", 5],
+        ["[2, 1].sorted(lam{ a, b in sys.exit(6) }); print(\"after\")", 6],
+    ]
+    for (engine in [[], ["--tree"]]) {
+        for (c in cases) {
+            let r = sys.exec(["./praia", ...engine, "-c", c[0]])
+            testing.expectEqual(r.exitCode, c[1], "%{engine} %{c[0]}: %{r.stderr}")
+            testing.expect(!r.stdout.contains("after"), "stopped at the exit")
+        }
+    }
+    let r = sys.exec(["./praia", "-c", cases[0][0]])
+    testing.expectEqual(r.stdout, "cleanup", "top-level defer ran")
+})
+
 testing.done()

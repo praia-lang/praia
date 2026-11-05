@@ -47,5 +47,5 @@ try { m.boom() } catch (e) { print("caught:", e) }
 ## Notes
 
 - The `extern "C"` declarations at the top of `src/lib.rs` are hand-rolled for clarity - a real-world plugin would generate them with [`bindgen`](https://docs.rs/bindgen/) from `praia_plugin_c.h`, which gives you the full surface in one shot and stays in sync as the facade evolves.
-- `praia_abi_version()` returns `5` to match `PRAIA_PLUGIN_ABI_VERSION` in the facade header. When that number bumps, every plugin (C, C++, Rust, …) needs a rebuild against the new headers.
+- `praia_abi_version()` returns `7` to match `PRAIA_PLUGIN_ABI_VERSION` in the facade header. When that number bumps, every plugin (C, C++, Rust, …) needs a rebuild against the new headers.
 - See `examples/plugins/cmod.c` for additional patterns covered there but not duplicated here: external handles with deleters, map construction.

@@ -231,4 +231,66 @@ testing.test("nested async sees parent globals through chain", lam{ in
     testing.expectEqual(await g, 7, nil)
 })
 
+testing.test("async task gets its own copy of a set", lam{ in
+    let s = #{1, 2}
+    func addTo(set) { set.add(3); return len(set) }
+    testing.expectEqual(await async addTo(s), 3, "task saw its copy grow")
+    testing.expectEqual(len(s), 2, "caller's set unchanged")
+})
+
+// The parent copies the globals a task can reach when it starts (VM).
+// These reach a global only indirectly, so the walk has to follow them.
+let reachCfg = {limit: 7}
+let reachUtil = {get: lam{ in reachCfg.limit }}
+func viaMap() { return reachUtil.get() }
+testing.test("async task reaches a global through a function in a map", lam{ in
+    testing.expectEqual(await async viaMap(), 7, nil)
+})
+
+let reachTable = [1, 2, 3]
+func makeReader() { return lam{ in len(reachTable) } }
+let reachReader = makeReader()
+func viaGlobalClosure() { return reachReader() }
+testing.test("async task reaches a global through a closure held in a global", lam{ in
+    testing.expectEqual(await async viaGlobalClosure(), 3, nil)
+})
+
+let reachUnits = {cm: 100}
+class Meters {
+    func init(m) { this.m = m }
+    func cm() { return this.m * reachUnits.cm }
+}
+func viaMethod(x) { return x.cm() }
+testing.test("async task reaches a global through a class method", lam{ in
+    testing.expectEqual(await async viaMethod(Meters(2)), 200, nil)
+})
+
+let reachQueue = Queue()
+let reachSeen = {n: 5}
+func viaNative() {
+    reachQueue.send(1)
+    return reachSeen.n
+}
+testing.test("async task using a runtime-made native still gets its globals", lam{ in
+    testing.expectEqual(await async viaNative(), 5, nil)
+    testing.expectEqual(reachQueue.recv(), 1, nil)
+})
+
+let snapState = {v: "before"}
+func readLater() {
+    time.sleep(50)
+    return snapState.v
+}
+testing.test("async task sees globals as they were when it started", lam{ in
+    let f = async readLater()
+    snapState.v = "after"
+    testing.expectEqual(await f, "before", nil)
+})
+
+let reachFactor = 3
+testing.test("async builtin gets the globals its callback arguments reach", lam{ in
+    // A registered native copies only what its arguments reach
+    testing.expectEqual(await async map([1, 2], lam{ x in x * reachFactor }), [3, 6], nil)
+})
+
 testing.done()

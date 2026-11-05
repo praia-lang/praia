@@ -46,7 +46,7 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
                     if (!args[0].isCallable())
                         throw RuntimeError("withLock() requires a function", 0);
                     std::lock_guard<std::recursive_mutex> guard(*mtx);
-                    return callSafe(*g_currentInterp, args[0].asCallable(), {});
+                    return callSafe(callbackInterp(), args[0].asCallable(), {});
                 }));
 
             return Value(lock);
@@ -90,6 +90,8 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
                     if (state->closed)
                         throw RuntimeError("Cannot send on a closed queue", 0);
                 }
+                // Whichever thread receives it may change it
+                GcHeap::current().disown(args[0]);
                 state->buffer.push(args[0]);
                 state->cv.notify_all();
                 return Value();
@@ -285,7 +287,7 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
 
             // RAII: restores previous scope even if fn throws.
             praia::detail::CancelScope scope(state);
-            return callSafe(*g_currentInterp, args[1].asCallable(), callArgs);
+            return callSafe(callbackInterp(), args[1].asCallable(), callArgs);
         })));
 
     // ── SharedMap() — cross-VM key-value store ──
@@ -307,6 +309,9 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
             m->entries[Value("set")] = Value(makeNative("set", 2,
                 [state](const std::vector<Value>& args) -> Value {
                     std::lock_guard<std::recursive_mutex> g(state->mtx);
+                    // Every thread with the map can change it from here on
+                    GcHeap::current().disown(args[0]);
+                    GcHeap::current().disown(args[1]);
                     state->entries[args[0]] = args[1];
                     return Value();
                 }));
@@ -360,7 +365,9 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
                     Value current;
                     auto it = state->entries.find(args[0]);
                     if (it != state->entries.end()) current = it->second;
-                    Value next = callSafe(*g_currentInterp, args[1].asCallable(), {current});
+                    Value next = callSafe(callbackInterp(), args[1].asCallable(), {current});
+                    GcHeap::current().disown(args[0]);
+                    GcHeap::current().disown(next);
                     state->entries[args[0]] = next;
                     return next;
                 }));

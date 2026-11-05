@@ -1,0 +1,11 @@
+// Shared by the HTTP and async tests that run a local server
+
+// A TCP port nothing is listening on right now, picked by the OS
+func freePort() {
+    let l = net.listen(0)
+    let port = net.localAddr(l).port
+    net.close(l)
+    return port
+}
+
+export { freePort }

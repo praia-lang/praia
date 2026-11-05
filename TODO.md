@@ -22,6 +22,11 @@ let result = b.build()  // one allocation
 
 Practical for template engines, code generation, large output assembly.
 
+### Shared handler state and the cycle collector
+Each thread's collector only reads objects its own thread owns (see Memory Management in DOCUMENTATION.md). One case slips through: a closure that a native runs on another thread — the request handler of `async server.listen`, an `http.sse` callback — shares the variables it captured with the thread that made it, and the maps and arrays behind them stay owned by that thread. Its collector reads them while the handler may be changing them. Closing this needs either stop-the-world collection (every thread parks at a safepoint, and every blocking native marks itself safe) or per-object ownership that moves when a closure starts running on another thread.
+
+Related, outside the collector: closures passed as arguments to an async task get a new wrapper but still share their captured variables with the caller, although the async docs promise tasks a deep copy of captured state.
+
 ## Low priority
 
 Reasonable workarounds exist. Would improve the language but aren't blocking:

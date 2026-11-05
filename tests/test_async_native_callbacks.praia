@@ -1,0 +1,167 @@
+use "testing"
+use "./fixtures/ports"
+
+// `async` on a native that calls back into Praia — here server.listen,
+// which calls the request handler — must run those callbacks inside the
+// task. The VM used to run them on the main VM from the server's thread,
+// so after a handler threw, the main script's own values came back
+// wrong (a function where a string was expected).
+
+// Waits (up to 5 s) until something accepts connections on `port`
+func waitForServer(port) {
+    for (i in 0..100) {
+        try {
+            let probe = net.connect("127.0.0.1", port)
+            net.close(probe)
+            return nil
+        } catch (e) {
+            time.sleep(50)
+        }
+    }
+    throw "server on port %{port} didn't start"
+}
+
+// One request on a fresh connection; the response ends when the server
+// closes. net.recv returns "" on close and on timeout alike, so a read
+// that comes back empty only after the timeout means the response never
+// finished — an error, not a short response.
+func rawRequest(port, payload) {
+    let sock = net.connect("127.0.0.1", port)
+    net.setTimeout(sock, 5000)
+    net.send(sock, payload)
+    let resp = ""
+    while (true) {
+        let started = time.now()
+        let chunk = net.recv(sock, 4096)
+        if (chunk == nil || len(chunk) == 0) {
+            if (time.now() - started >= 4900) {
+                net.close(sock)
+                throw "rawRequest: timed out waiting for the response"
+            }
+            break
+        }
+        resp = resp + chunk
+    }
+    net.close(sock)
+    return resp
+}
+
+func statusOf(resp) {
+    if (type(resp) != "string" || len(resp) < 12) { return 0 }
+    return int(resp.slice(9, 12))
+}
+
+let port = ports.freePort()
+let server = http.createServer(lam{ req in
+    if (req.path == "/boom") { throw "handler failed" }
+    if (req.path == "/sse") {
+        return http.sse(req, lam{ send in
+            send("one")
+            send("two")
+        })
+    }
+    return {status: 200, body: "ok"}
+})
+async server.listen(port)
+waitForServer(port)
+
+testing.test("a throwing handler doesn't corrupt the main script", lam{ in
+    for (i in 0..20) {
+        let local = "value-" + str(i)
+        let bad = rawRequest(port, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n")
+        testing.expectEqual(type(bad), "string", "response %{i}")
+        testing.expectEqual(statusOf(bad), 500, nil)
+        let good = rawRequest(port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        testing.expectEqual(statusOf(good), 200, nil)
+        // Main-thread work between requests keeps its values
+        let total = 0
+        for (j in 0..200) { total = total + j }
+        testing.expectEqual(total, 19900, nil)
+        testing.expectEqual(local, "value-" + str(i), nil)
+    }
+})
+
+testing.test("the handler works on its own snapshot of the globals (VM)", lam{ in
+    // Same isolation as `async f()`: a global changed after the task
+    // started isn't seen by the handler, and the handler's own writes
+    // don't reach the main script. VM only: the tree-walker shares the
+    // handler's environment with the main script instead.
+    let r = sys.exec(["./praia", "tests/fixtures/async_native/global_writes.praia"], 20000)
+    // Last line; the server prints its "listening" banner first
+    let lines = r.stdout.split("\n")
+    testing.expectEqual(lines[len(lines) - 1], "label=before counter=100 main: counter=0 label=after", r.stderr)
+})
+
+testing.test("SSE works through an async listen", lam{ in
+    for (i in 0..5) {
+        let r = rawRequest(port, "GET /sse HTTP/1.1\r\nHost: x\r\n\r\n")
+        testing.expectContains(r, "text/event-stream", nil)
+        testing.expectContains(r, "data: one\n\ndata: two\n\n", nil)
+    }
+})
+
+testing.test("callback natives work when called directly", lam{ in
+    // Under the VM these used to dereference a null interpreter
+    let lock = Lock()
+    testing.expectEqual(lock.withLock(lam{ in 41 + 1 }), 42, nil)
+    let sm = SharedMap()
+    sm.set("n", 1)
+    sm.update("n", lam{ v in v + 1 })
+    testing.expectEqual(sm.get("n"), 2, nil)
+})
+
+// The native task collects garbage while it runs (each allocation under
+// PRAIA_GC_STRESS). What the handler reaches only through its upvalues
+// must survive that: a map and an array made by the main script, and a
+// value the first callback creates inside the task and stores in one.
+func makeCapturingServer() {
+    let state = {hits: 0}
+    let words = ["even", "odd"]
+    let made = nil
+    return http.createServer(lam{ req in
+        state.hits = state.hits + 1
+        if (made == nil) { made = {label: "first-" + str(state.hits * 7)} }
+        let junk = []
+        for (i in 0..50) { junk.push({i: i, s: "x" + str(i)}) }
+        return {status: 200, body: words[state.hits % 2] + ":" + str(len(junk)) + ":" + made.label}
+    })
+}
+let capPort = ports.freePort()
+let capServer = makeCapturingServer()
+async capServer.listen(capPort)
+waitForServer(capPort)
+
+testing.test("a native task's GC keeps what its callbacks capture", lam{ in
+    for (i in 1..13) {
+        let r = rawRequest(capPort, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        let want = (i % 2 == 0 ? "even" : "odd") + ":50:first-7"
+        testing.expectContains(r, want, "request %{i}")
+    }
+})
+
+testing.test("closures a native task's callbacks store outlive the task (VM)", lam{ in
+    // A closure created inside the task and stored in a shared upvalue
+    // used to point into the destroyed task VM (wrong results or a crash)
+    let r = sys.exec(["./praia", "tests/fixtures/async_native/escaped_closures.praia"], 20000)
+    testing.expectEqual(r.stdout, "40 42", r.stderr)
+})
+
+testing.test("a closure an async task sends through a queue outlives the task", lam{ in
+    let q = Queue()
+    func producer(q) {
+        let base = 10
+        q.send(lam{ x in x + base })
+        return nil
+    }
+    await async producer(q)
+    let junk = []
+    for (i in 0..2000) { let n = i; junk.push(lam{ y in y * n }) }
+    testing.expectEqual(q.recv()(32), 42, nil)
+})
+
+testing.test("an async native that doesn't call back still returns its result", lam{ in
+    let f = async sys.exec(["echo", "hi"])
+    testing.expectEqual((await f).stdout, "hi", nil)
+})
+
+testing.done()

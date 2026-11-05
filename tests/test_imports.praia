@@ -126,4 +126,106 @@ testing.test("uncaught grain runtime error reports its location in the grain", l
     }
 })
 
+// ext_grains/ and grains/ are found by walking up from the script, not
+// from the directory it was started in — otherwise a grain planted in
+// an untrusted checkout would replace a stdlib grain for any tool run
+// there.
+
+let praiaBin = sys.cwd() + "/praia"
+let cwdFixtures = sys.cwd() + "/tests/fixtures/cwd_grains"
+
+// Runs `praia <args...>` from inside `dir`
+func runIn(dir, args) {
+    let cmd = ["sh", "-c", "cd \"$1\" && shift && exec \"$@\"", "sh", dir, praiaBin]
+    for (a in args) { cmd.push(a) }
+    return sys.exec(cmd, 10000)
+}
+
+testing.test("a grain in the current directory doesn't replace a stdlib grain", lam{ in
+    for (e in engines) {
+        let args = []
+        for (a in e) { args.push(a) }
+        args.push("../tool.praia")
+        let r = runIn(cwdFixtures + "/untrusted", args)
+        testing.expect(!r.stdout.contains("HIJACKED"), "loaded the planted grain (%{e})")
+        testing.expectContains(r.stdout, "tool ran", r.stderr)
+    }
+})
+
+testing.test("project grains are found from a relative script path", lam{ in
+    for (e in engines) {
+        let args = []
+        for (a in e) { args.push(a) }
+        args.push("tools/tool.praia")
+        let r = runIn(cwdFixtures + "/project", args)
+        testing.expectEqual(r.stdout, "project lib", r.stderr)
+    }
+})
+
+testing.test("grain lookup stops before a directory anyone can write to", lam{ in
+    // A shared (world-writable) directory like /tmp: a project inside it
+    // must not pick up ext_grains/ that another user planted there.
+    let root = testing.tempDir("praia-shared-")
+    let shared = root + "/shared"
+    fs.mkdir(shared + "/ext_grains")
+    fs.mkdir(shared + "/project")
+    fs.write(shared + "/ext_grains/strings.praia", "print(\"HIJACKED\")\nexport { }\n")
+    fs.write(shared + "/project/run.praia", "use \"strings\"\nprint(\"run ok\")\n")
+    // Explicit modes, whatever the umask: only `shared` is writable by
+    // everyone, so that's where the walk has to stop
+    sys.exec(["chmod", "755", shared + "/project"])
+    sys.exec(["chmod", "777", shared])
+    fs.write(shared + "/project/missing.praia", "use \"no_such_grain_xyz\"\n")
+    for (e in engines) {
+        let args = []
+        for (a in e) { args.push(a) }
+        args.push(shared + "/project/run.praia")
+        let r = runIn(root, args)
+        testing.expect(!r.stdout.contains("HIJACKED"), "loaded the planted grain (%{e})")
+        testing.expectContains(r.stdout, "run ok", r.stderr)
+
+        // A grain that isn't found says where the search stopped, and why
+        let margs = []
+        for (a in e) { margs.push(a) }
+        margs.push(shared + "/project/missing.praia")
+        let m = runIn(root, margs)
+        // The resolver reports the canonical path (/private/var/... on
+        // macOS), so match its tail: the temp dir's name and "shared"
+        let rootName = root.split("/")[len(root.split("/")) - 1]
+        testing.expectContains(m.stderr, "Grain not found: no_such_grain_xyz (the search for ext_grains/ and grains/ stopped at ", nil)
+        testing.expectContains(m.stderr, "/" + rootName + "/shared, which any user can write to)", nil)
+    }
+})
+
+testing.test("an ordinary missing grain gets no stopped-search hint", lam{ in
+    // Ten nested directories, none writable by others: the walk uses up
+    // its ten-directory limit inside them, so where the temp dir (or the
+    // checkout) lives can't put a shared directory in its path
+    let root = testing.tempDir("praia-nohint-")
+    let dir = root
+    let dirs = []
+    for (i in 0..10) {
+        dir = dir + "/d" + str(i)
+        dirs.push(dir)
+    }
+    fs.mkdir(dir)
+    let chmod = ["chmod", "755"]
+    for (d in dirs) { chmod.push(d) }
+    sys.exec(chmod)
+    fs.write(dir + "/missing.praia", "use \"no_such_grain_xyz\"\n")
+    for (e in engines) {
+        let args = [praiaBin]
+        for (a in e) { args.push(a) }
+        args.push(dir + "/missing.praia")
+        let r = sys.exec(args, 10000)
+        testing.expectContains(r.stderr, "Grain not found: no_such_grain_xyz", nil)
+        testing.expect(!r.stderr.contains("stopped at"), "unexpected hint (%{e}): %{r.stderr}")
+    }
+})
+
+testing.test("praia -c still uses the current directory's grains", lam{ in
+    let r = runIn(cwdFixtures + "/project", ["-c", "use \"lib\"\nprint(lib.who)"])
+    testing.expectEqual(r.stdout, "project lib", r.stderr)
+})
+
 testing.done()

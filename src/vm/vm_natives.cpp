@@ -489,4 +489,8 @@ void vmRegisterNatives(VM& vm) {
     // etc. via normal name resolution. Mirrors the tree-walker's
     // call in Interpreter::Interpreter().
     praia::bootstrapErrorClasses(vm);
+
+    // Before any user code: async decides from this which natives can
+    // only call back into what they're given
+    vm.recordBuiltinNatives();
 }
