@@ -205,15 +205,17 @@ private:
     std::unordered_map<std::string, int> globalIndices;
     std::set<std::string> builtinNames_; // names registered via defineNative (for grain isolation)
 
-    // Lazy/COW globals for async task VMs. On OP_ASYNC the parent hands the
-    // task a shallow-copied `globalsSnapshot_` vector (shared_ptr increments,
-    // no deep-copy) plus a verbatim copy of `globalIndices` so slot numbering
-    // matches. `loadedMask_[slot]==1` means the task has materialized its
-    // own deep-copy into `globals[slot]` and the snapshot entry is no longer
-    // authoritative. `isTaskVm_` gates the lazy-check on the hot path — for
-    // the main VM both fields stay empty and the branch predicts away.
+    // Globals for async task VMs. On OP_ASYNC the parent copies the
+    // globals the task's code can reach into `globalsSnapshot_` (see
+    // captureTaskSeed) plus a verbatim copy of `globalIndices` so slot
+    // numbering matches. `loadedMask_[slot]==1` means the task has moved
+    // its copy into `globals[slot]` and the snapshot entry is no longer
+    // authoritative; `capturedMask_[slot]==0` means the parent copied
+    // nothing for that slot. `isTaskVm_` gates the lazy-check on the hot
+    // path — for the main VM these stay empty and the branch predicts away.
     std::vector<Value> globalsSnapshot_;
     std::vector<uint8_t> loadedMask_;
+    std::vector<uint8_t> capturedMask_;
     bool isTaskVm_ = false;
     // Task VMs: the bag every closure wrapper this VM creates holds (see
     // TaskOwnership); filled from allClosures/allUpvalues in ~VM
@@ -234,22 +236,25 @@ private:
         return (it != globalIndices.end()) ? it->second : -1;
     }
 public:
-    // Slow path: deep-copy globalsSnapshot_[slot] into globals[slot] and
-    // mark it loaded. Called by opcode handlers when isTaskVm_ &&
-    // !loadedMask_[slot].
+    // Slow path: move the parent's copy in globalsSnapshot_[slot] into
+    // globals[slot] and mark it loaded. Called by opcode handlers when
+    // isTaskVm_ && !loadedMask_[slot].
     void lazyLoadGlobal(int slot);
 
     // Async tasks (OP_ASYNC) run on their own thread in their own VM,
-    // seeded on the parent thread with a shallow snapshot of the globals
-    // that the task then deep-copies lazily (lazyLoadGlobal).
+    // seeded on the parent thread with copies of the globals they can
+    // reach. The task never reads the parent's own objects.
     struct TaskSeed {
         std::vector<Value> globals;
+        std::vector<uint8_t> captured;
         std::unordered_map<std::string, int> globalIndices;
         std::set<std::string> builtinNames;
     };
-    // On the parent thread: snapshot `snapVm`'s globals (the VM the task's
-    // code resolves globals against) and this VM's builtin names.
-    TaskSeed captureTaskSeed(VM* snapVm) const;
+    // On the parent thread: copy `snapVm`'s globals (the VM the task's code
+    // resolves globals against) that code reachable from `roots` can name,
+    // plus this VM's builtin names. Null roots: every global (an async
+    // native, whose callbacks the walk can't see).
+    TaskSeed captureTaskSeed(VM* snapVm, const std::vector<Value>* roots) const;
     // On the worker thread, on a fresh VM: become that task's VM. With
     // collectGarbage, the thread's heap collects with this VM as its root
     // set (the caller must detach the root marker before this VM goes

@@ -88,13 +88,17 @@ public:
     struct LentObjects {
         std::vector<std::weak_ptr<void>> objects;
         std::atomic<bool> returned{false};
+        // `returned` as the lending heap read it at the start of its
+        // current collection (see collect); only that heap touches it
+        bool seenReturned = false;
     };
     std::shared_ptr<LentObjects> beginLending();
     void endLending();
 
     // `v` now lives somewhere every thread can reach (a Queue, a
     // SharedMap): this heap stops tracking the objects in it, so it never
-    // reads them while another thread changes them.
+    // reads them while another thread changes them. Objects another heap
+    // tracks (copies a task was lent) go to that heap when the task ends.
     void disown(const Value& v);
 
     // Objects a finished task leaves behind (its result, and garbage)
@@ -132,6 +136,9 @@ public:
         std::mutex mu;
         std::vector<GcEntry> entries;
         std::vector<std::shared_ptr<LentObjects>> lent;
+        std::vector<std::weak_ptr<void>> disowned;
+        // Set once this inbox's heap has handed over: deliveries go on there
+        std::shared_ptr<Inbox> forward;
     };
 private:
 
@@ -178,6 +185,9 @@ private:
     std::shared_ptr<LentObjects> lending_;
     std::vector<std::shared_ptr<LentObjects>> lent_;
     std::vector<std::weak_ptr<void>> disowned_;
+    size_t compactDisownedAt_ = 1024;
+    // Disowned objects this heap doesn't track, passed on at hand-over
+    std::vector<std::weak_ptr<void>> foreignDisowns_;
     std::shared_ptr<Inbox> inbox_ = std::make_shared<Inbox>();
     // Plugin-pinned values — see pinValue/unpinValue. Marked alongside
     // the interpreter's own roots on every collection.

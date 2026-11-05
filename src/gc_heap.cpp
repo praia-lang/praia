@@ -133,6 +133,15 @@ void GcHeap::disown(const Value& v) {
     // heap that made it (see "Shared handler state" in TODO.md)
     std::unordered_set<void*> seen;
     collectContainers(v, seen, disowned_);
+    // Only a collection or a hand-over empties the list, and a task's
+    // heap doesn't collect: compact it here, keeping each live object once
+    if (disowned_.size() < compactDisownedAt_) return;
+    std::unordered_set<void*> live;
+    std::erase_if(disowned_, [&](const std::weak_ptr<void>& w) {
+        auto p = w.lock();
+        return !p || !live.insert(p.get()).second;
+    });
+    compactDisownedAt_ = std::max<size_t>(1024, disowned_.size() * 2);
 }
 
 void GcHeap::settleEntries() {
@@ -141,18 +150,57 @@ void GcHeap::settleEntries() {
         allocsSinceGc_ += static_cast<int>(inbox_->entries.size());
         for (auto& e : inbox_->entries) entries_.push_back(std::move(e));
         inbox_->entries.clear();
-        for (auto& l : inbox_->lent) lent_.push_back(std::move(l));
+        for (auto& l : inbox_->lent) {
+            l->seenReturned = false; // looked at from the next collection on
+            lent_.push_back(std::move(l));
+        }
         inbox_->lent.clear();
+        for (auto& w : inbox_->disowned) disowned_.push_back(std::move(w));
+        inbox_->disowned.clear();
     }
+    std::erase_if(foreignDisowns_, [](const std::weak_ptr<void>& w) { return w.expired(); });
     if (disowned_.empty()) return;
     // A disowned object that's still alive is the one at that address
-    std::unordered_set<void*> gone;
+    std::unordered_set<void*> gone, found;
     for (auto& w : disowned_)
         if (auto p = w.lock()) gone.insert(p.get());
-    disowned_.clear();
     std::erase_if(entries_, [&](const GcEntry& e) {
-        return gone.count(e.rawPtr) && !e.weak.expired();
+        if (!gone.count(e.rawPtr) || e.weak.expired()) return false;
+        found.insert(e.rawPtr);
+        return true;
     });
+    // The rest another heap tracks — or none does, once its heap is gone.
+    // Each once: the same value can be disowned again and again (a
+    // SharedMap entry updated in a loop).
+    std::unordered_set<void*> recorded;
+    for (auto& w : foreignDisowns_)
+        if (auto p = w.lock()) recorded.insert(p.get());
+    for (auto& w : disowned_) {
+        auto p = w.lock();
+        if (p && !found.count(p.get()) && recorded.insert(p.get()).second)
+            foreignDisowns_.push_back(std::move(w));
+    }
+    disowned_.clear();
+}
+
+// Appends to the inbox that's still taking deliveries
+static void deliver(std::shared_ptr<GcHeap::Inbox> to, GcHeap::Inbox& from) {
+    while (true) {
+        std::unique_lock<std::mutex> lk(to->mu);
+        if (to->forward) {
+            auto next = to->forward;
+            lk.unlock();
+            to = std::move(next);
+            continue;
+        }
+        for (auto& e : from.entries) to->entries.push_back(std::move(e));
+        for (auto& l : from.lent) to->lent.push_back(std::move(l));
+        for (auto& w : from.disowned) to->disowned.push_back(std::move(w));
+        break;
+    }
+    from.entries.clear();
+    from.lent.clear();
+    from.disowned.clear();
 }
 
 void GcHeap::handOverTo(const std::shared_ptr<Inbox>& to) {
@@ -162,14 +210,31 @@ void GcHeap::handOverTo(const std::shared_ptr<Inbox>& to) {
     std::unordered_set<void*> pinned;
     std::vector<std::weak_ptr<void>> unused;
     for (const auto& v : pinned_) collectContainers(v, pinned, unused);
-    std::lock_guard<std::mutex> lk(to->mu);
+    Inbox out;
     for (auto& e : entries_)
-        if (!e.weak.expired() && !pinned.count(e.rawPtr)) to->entries.push_back(std::move(e));
+        if (!e.weak.expired() && !pinned.count(e.rawPtr)) out.entries.push_back(std::move(e));
     entries_.clear();
     // Copies this task lent to tasks of its own that are still running
     for (auto& l : lent_)
-        if (!l->returned.load(std::memory_order_acquire)) to->lent.push_back(std::move(l));
+        if (!l->returned.load(std::memory_order_acquire)) out.lent.push_back(std::move(l));
     lent_.clear();
+    // Copies it was lent and then disowned: the lender stops tracking
+    // them before it sees this task's copies returned
+    out.disowned = std::move(foreignDisowns_);
+    foreignDisowns_.clear();
+    deliver(to, out);
+    // Anything a task of this one hands over later goes on to `to`
+    {
+        std::lock_guard<std::mutex> lk(inbox_->mu);
+        inbox_->forward = to;
+        out.entries = std::move(inbox_->entries);
+        out.lent = std::move(inbox_->lent);
+        out.disowned = std::move(inbox_->disowned);
+        inbox_->entries.clear();
+        inbox_->lent.clear();
+        inbox_->disowned.clear();
+    }
+    deliver(to, out);
 }
 
 // ── Control ──
@@ -201,6 +266,10 @@ void GcHeap::collectIfNeeded() {
 void GcHeap::collect() {
     if (collecting_ || !rootMarker_) return;
     collecting_ = true;
+    // Read before the inbox: a task delivers what it disowned before it
+    // marks its lent copies returned, so a copy seen returned here has
+    // its disown waiting in the inbox
+    for (auto& l : lent_) l->seenReturned = l->returned.load(std::memory_order_acquire);
     settleEntries();
     allocsSinceGc_ = 0;
     nodes_.reset(entries_.size());
@@ -574,7 +643,7 @@ std::vector<GcHeap::MarkItem> GcHeap::findExternallyHeld() {
     // Objects lent to a running task are kept without being looked inside.
     std::unordered_set<void*> lent;
     std::erase_if(lent_, [&](const std::shared_ptr<LentObjects>& l) {
-        if (l != lending_ && l->returned.load(std::memory_order_acquire)) return true;
+        if (l != lending_ && l->seenReturned) return true;
         for (auto& w : l->objects)
             if (auto p = w.lock()) lent.insert(p.get());
         return false;

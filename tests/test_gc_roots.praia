@@ -159,4 +159,32 @@ testing.test("task result moves to the caller's collector", lam{ in
     testing.expectEqual(r[1].peer.peer.name, "b", nil)
 })
 
+testing.test("a task's copies it forwards through a Queue survive GC", lam{ in
+    // The copies are tracked by this thread's heap; the forwarding task
+    // disowns them, and that has to reach this heap when the task ends
+    let q = Queue()
+    let consumer = async lam{ in
+        let kept = []
+        for (i in 0..10) {
+            let m = q.recv()
+            m.self = m
+            kept.push(m)
+            for (r in 0..50) { for (k in kept) { k.items.push(r) } }
+        }
+        let total = 0
+        for (k in kept) { total = total + len(k.items) }
+        return total
+    }()
+    func forward(msgs) {
+        for (m in msgs) { q.send(m) }
+        return len(msgs)
+    }
+    let batch = []
+    for (i in 0..10) { batch.push({items: [i]}) }
+    testing.expectEqual(await async forward(batch), 10, nil)
+    churn()
+    // item k is pushed 50 * (10 - k) times after its first element
+    testing.expectEqual(await consumer, 10 + 50 * 55, nil)
+})
+
 testing.done()

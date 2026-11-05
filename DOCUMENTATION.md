@@ -3226,7 +3226,7 @@ try {
 - `await future` blocks until the background thread finishes
 - Each async Praia function gets its own VM with a **deep copy** of globals, captured upvalues, and arguments. Tasks are fully isolated — no shared mutable state, no data races
 - Native functions (http.get, sys.exec, etc.) also run in true parallel
-- When an async native calls back into Praia — the request handler of `async server.listen(port)`, an `http.sse` callback — those calls run inside the task as well, against the task's copy of the globals, so they never touch the caller's state mid-flight. A handler the native was given earlier still shares the variables it captured with the code that created it
+- When an async native calls back into Praia — the request handler of `async server.listen(port)`, an `http.sse` callback — those calls run inside the task as well. On the bytecode VM they run against the task's copy of the globals, so they never touch the caller's state mid-flight; in tree-walker mode (`--tree`) they resolve globals through the caller's environment instead. On both engines, a handler the native was given earlier still shares the variables it captured with the code that created it
 - A bare `async fn()` (no `let f =`) is fire-and-forget — it returns immediately and the task runs to completion in the background
 
 ### Sharing state across async tasks

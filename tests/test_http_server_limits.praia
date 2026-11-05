@@ -35,6 +35,9 @@ func stopServer(srv) {
 
 func rawRequest(port, payload) {
     let sock = net.connect("127.0.0.1", port)
+    // A stalled response ends the read (and fails the test) instead of
+    // hanging the suite
+    net.setTimeout(sock, 15000)
     net.send(sock, payload)
     let resp = ""
     while (true) {

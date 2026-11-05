@@ -235,19 +235,19 @@ static void rewireForTaskVm(Value& v, VM* taskVm,
 }
 
 // Slow path for OP_GET_GLOBAL / POST_INC/DEC_GLOBAL in a task VM whose
-// snapshot entry hasn't been materialized yet. Deep-copies one slot's
-// value from the parent's snapshot, rewires VMClosureCallable vm pointers
-// in the cloned subtree, and marks the slot loaded.
-//
-// Per-slot visited map: identity within one global subtree is preserved,
-// but two globals that share a parent sub-object clone it independently
-// here — accepted minor behavior change from the eager design's one
-// shared visited map. Cross-global identity divergence is only visible if
-// user code asserts `id(A.x) == id(B.x)` after the boundary, which is
-// extremely rare.
+// snapshot entry hasn't been materialized yet. Takes the copy the parent
+// made of the slot (captureTaskSeed), rewires VMClosureCallable vm
+// pointers in it, and marks the slot loaded.
 void VM::lazyLoadGlobal(int slot) {
-    std::unordered_map<void*, Value> visited;
-    Value cloned = deepCopyForTask(globalsSnapshot_[slot], visited);
+    if (slot < static_cast<int>(capturedMask_.size()) && !capturedMask_[slot]) {
+        // captureTaskSeed found no code in the task naming this global, so
+        // copied nothing; a name it missed is a bug, not a nil
+        std::string name = "?";
+        for (auto& [n, sl] : globalIndices) if (sl == slot) { name = n; break; }
+        throw RuntimeError("Internal error: global '" + name +
+                           "' wasn't copied into this async task", 0);
+    }
+    Value cloned = std::move(globalsSnapshot_[slot]);
     std::unordered_set<void*> rewireVisited;
     rewireForTaskVm(cloned, this, rewireVisited);
     globals[slot] = std::move(cloned);
@@ -255,19 +255,118 @@ void VM::lazyLoadGlobal(int slot) {
     globalsSnapshot_[slot] = Value(); // release stale shared_ptr
 }
 
-VM::TaskSeed VM::captureTaskSeed(VM* snapVm) const {
+VM::TaskSeed VM::captureTaskSeed(VM* snapVm, const std::vector<Value>* roots) const {
     // If snapVm is itself a task VM, slots it hasn't loaded yet fall
-    // through to ITS snapshot so the child sees the value the
-    // grand-parent had, not nil. The indices map is copied verbatim so
+    // through to ITS snapshot (its own copies) so the child sees the value
+    // the grand-parent had, not nil. The indices map is copied verbatim so
     // slot numbering matches — the chunk's shared globalSlotCache is
     // correct in both VMs.
+    size_t n = snapVm->globals.size();
+    auto source = [&](size_t s) -> const Value& {
+        return (snapVm->isTaskVm_ && !snapVm->loadedMask_[s]) ? snapVm->globalsSnapshot_[s]
+                                                              : snapVm->globals[s];
+    };
+
+    // Copying a global the task never touches costs as much as one it
+    // does — every global would make each async call pay for all of them
+    // — so find the ones its code can name. Code names a global through a
+    // string constant in its chunk, and reaches more code through the
+    // functions in its constants, the values of the globals it names,
+    // what its closures captured, and classes' methods. A native made at
+    // run time (http.createServer's server) can hold closures the walk
+    // can't see, so meeting one outside a builtin means every global.
+    std::vector<uint8_t> reach(n, roots ? 0 : 1);
+    if (roots) {
+        bool all = false;
+        std::unordered_set<const void*> seen;
+        std::vector<std::pair<Value, bool>> work; // value, part of a builtin
+        for (auto& r : *roots) work.push_back({r, false});
+        auto scanFunction = [&](const CompiledFunction* fn) {
+            if (!fn || !seen.insert(fn).second) return;
+            for (auto& c : fn->chunk.constants) {
+                if (c.isString()) {
+                    int slot = snapVm->findGlobalSlot(c.asString());
+                    if (slot >= 0 && slot < static_cast<int>(n) && !reach[slot]) {
+                        reach[slot] = 1;
+                        work.push_back({source(slot), snapVm->builtinNames_.count(c.asString()) > 0});
+                    }
+                } else {
+                    work.push_back({c, false});
+                }
+            }
+        };
+        while (!work.empty() && !all) {
+            auto [v, builtin] = std::move(work.back());
+            work.pop_back();
+            if (v.isMap()) {
+                auto m = v.asMap();
+                if (seen.insert(m.get()).second)
+                    for (auto& [k, e] : m->entries) { work.push_back({k, builtin}); work.push_back({e, builtin}); }
+            } else if (v.isArray()) {
+                auto a = v.asArray();
+                if (seen.insert(a.get()).second)
+                    for (auto& e : a->elements) work.push_back({e, builtin});
+            } else if (v.isInstance()) {
+                auto inst = v.asInstance();
+                if (seen.insert(inst.get()).second) {
+                    for (auto& [k, e] : inst->fields) work.push_back({e, builtin});
+                    if (inst->klass) work.push_back({Value(std::static_pointer_cast<Callable>(inst->klass)), builtin});
+                }
+            } else if (v.isTagged()) {
+                auto t = v.asTagged();
+                if (seen.insert(t.get()).second)
+                    for (auto& e : t->values) work.push_back({e, builtin});
+            } else if (v.isGenerator()) {
+                all = !builtin; // suspended code the walk can't read
+            } else if (v.isCallable()) {
+                auto c = v.asCallable();
+                if (!seen.insert(c.get()).second) continue;
+                if (auto* vc = dynamic_cast<VMClosureCallable*>(c.get())) {
+                    if (!vc->closure) continue;
+                    scanFunction(vc->closure->function.get());
+                    for (auto* uv : vc->closure->upvalues) {
+                        if (!uv) continue;
+                        std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
+                        work.push_back({*uv->location, builtin});
+                    }
+                } else if (auto* bm = dynamic_cast<VMBoundMethod*>(c.get())) {
+                    if (bm->method) scanFunction(bm->method->function.get());
+                    work.push_back({bm->receiver, builtin});
+                    if (bm->definingClass)
+                        work.push_back({Value(std::static_pointer_cast<Callable>(bm->definingClass)), builtin});
+                } else if (auto* cls = dynamic_cast<PraiaClass*>(c.get())) {
+                    for (auto& [k, m] : cls->vmMethods) work.push_back({m, builtin});
+                    for (auto& [k, m] : cls->vmStaticMethods) work.push_back({m, builtin});
+                    for (auto& [k, ds] : cls->methodDecorators)
+                        for (auto& d : ds) work.push_back({d, builtin});
+                    if (cls->superclass)
+                        work.push_back({Value(std::static_pointer_cast<Callable>(cls->superclass)), builtin});
+                } else if (dynamic_cast<NativeFunction*>(c.get())) {
+                    all = !builtin;
+                }
+            }
+        }
+        if (all) std::fill(reach.begin(), reach.end(), 1);
+    }
+
+    // Copied here, on the parent thread, while the caller's GcLendScope
+    // lends the copies to the task. One visited map, so two globals
+    // sharing an object still share its copy. A global the task can't
+    // reach gets no copy — except a callable: a class or native is shared
+    // as is and a closure only gets a new wrapper, so they cost nothing
+    // and keep name lookups by natives (error classes) working.
     TaskSeed seed;
-    seed.globals.reserve(snapVm->globals.size());
-    for (size_t s = 0; s < snapVm->globals.size(); s++) {
-        if (snapVm->isTaskVm_ && !snapVm->loadedMask_[s])
-            seed.globals.push_back(snapVm->globalsSnapshot_[s]);
-        else
-            seed.globals.push_back(snapVm->globals[s]);
+    seed.globals.reserve(n);
+    seed.captured.reserve(n);
+    std::unordered_map<void*, Value> visited;
+    for (size_t s = 0; s < n; s++) {
+        const Value& v = source(s);
+        bool cheap = v.isCallable() && !dynamic_cast<VMBoundMethod*>(v.asCallable().get());
+        // Nothing to pass on if snapVm, itself a task, never got a copy
+        bool missing = snapVm->isTaskVm_ && !snapVm->loadedMask_[s] && !snapVm->capturedMask_[s];
+        bool captured = !missing && (reach[s] || cheap);
+        seed.globals.push_back(captured ? deepCopyForTask(v, visited) : Value());
+        seed.captured.push_back(captured ? 1 : 0);
     }
     seed.globalIndices = snapVm->globalIndices;
     seed.builtinNames = builtinNames_;
@@ -286,6 +385,7 @@ void VM::initAsTaskVm(TaskSeed&& seed, bool collectGarbage) {
     taskBag_ = std::make_shared<TaskOwnership>();
     globalIndices = std::move(seed.globalIndices);
     globalsSnapshot_ = std::move(seed.globals);
+    capturedMask_ = std::move(seed.captured);
     globals.assign(globalsSnapshot_.size(), Value());
     loadedMask_.assign(globalsSnapshot_.size(), 0);
     builtinNames_ = std::move(seed.builtinNames);
@@ -2908,7 +3008,9 @@ VM::Result VM::execute(int baseFrameCount_) {
                 // numbering matches between source and task — the chunk's
                 // shared globalSlotCache is correct in both VMs.
                 VM* snapVm = fn->chunk.homeVm ? fn->chunk.homeVm : this;
-                auto seed = captureTaskSeed(snapVm);
+                std::vector<Value> reachRoots = args;
+                reachRoots.push_back(Value(callable));
+                auto seed = captureTaskSeed(snapVm, &reachRoots);
 
                 // Snapshot upvalues and deep-copy so captured arrays/maps/instances
                 // are isolated from the caller
@@ -3064,7 +3166,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                 // async closure: Praia callbacks it makes (an HTTP handler, an
                 // SSE callback) then execute there through VM::current(),
                 // never on this VM from another thread.
-                auto seed = captureTaskSeed(this);
+                // Every global: the native's callbacks are hidden in it
+                auto seed = captureTaskSeed(this, nullptr);
                 sharedFuture = std::async(std::launch::async,
                     [native, args, rootsHolder, seed = std::move(seed),
                      lent = lendScope.lent, parentInbox]() mutable -> Value {

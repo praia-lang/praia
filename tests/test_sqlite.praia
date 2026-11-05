@@ -258,7 +258,9 @@ testing.test("SQL with more than one statement is an error", lam{ in
     testing.expectEqual(len(sqlite.query(db, "SELECT * FROM t")), 0, "nothing ran")
     // A trailing semicolon or comment is still one statement
     testing.expectEqual(len(sqlite.query(db, "SELECT 1 AS a;  -- done\n")), 1, nil)
-    testing.expectThrows(lam{ in sqlite.run(db, "SELECT 1\0; DROP TABLE t") }, "NUL byte in the SQL")
+    let nulErr = nil
+    try { sqlite.run(db, "SELECT 1\0; DROP TABLE t") } catch (e) { nulErr = str(e) }
+    testing.expect(nulErr != nil && nulErr.contains("SQL contains a NUL byte"), str(nulErr))
     // Leading semicolons are empty statements, not a second statement
     testing.expectEqual(sqlite.query(db, "  ; -- x\n ; SELECT 1 AS a")[0].a, 1, nil)
     testing.expectThrows(lam{ in sqlite.query(db, "; SELECT 1; SELECT 2") }, nil)

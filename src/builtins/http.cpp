@@ -50,18 +50,20 @@ struct SocketConn {
     SocketConn(SocketConn&&) = delete;
     SocketConn& operator=(SocketConn&&) = delete;
 
+    // Sends all of buf, or returns -1. A send can take only part of it.
     ssize_t write(const void* buf, size_t len) {
-        if (readDeadline == std::chrono::steady_clock::time_point::max()) return writeOnce(buf, len);
         // Under a deadline: send in pieces, each allowed only the time
         // left, so a peer that stops reading can't stall the request
         // past it
+        bool deadline = readDeadline != std::chrono::steady_clock::time_point::max();
         const char* p = static_cast<const char*>(buf);
         size_t done = 0;
         while (done < len) {
-            setSendTimeout(timeLeftUs(), readTimeoutMs);
-            ssize_t n = writeOnce(p + done, std::min<size_t>(len - done, 16384));
+            if (deadline) setSendTimeout(timeLeftUs(), readTimeoutMs);
+            size_t piece = deadline ? std::min<size_t>(len - done, 16384) : len - done;
+            ssize_t n = writeOnce(p + done, piece);
             if (n <= 0) {
-                if (std::chrono::steady_clock::now() >= readDeadline)
+                if (deadline && std::chrono::steady_clock::now() >= readDeadline)
                     throw RuntimeError("HTTP total timeout exceeded", 0);
                 return -1;
             }
