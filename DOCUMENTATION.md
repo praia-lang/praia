@@ -3224,14 +3224,14 @@ try {
 - `async funcCall(args)` evaluates the function and arguments on the current thread, then spawns the actual call in a new OS thread
 - Returns a **future** value immediately
 - `await future` blocks until the background thread finishes
-- Each async Praia function gets its own VM with a **deep copy** of globals, captured upvalues, and arguments. Tasks are fully isolated — no shared mutable state, no data races
+- Each async Praia function gets its own VM with a **deep copy** of its arguments, the variables it captured, and the globals it can reach (the bytecode VM copies only the globals the task's code can reach; `--tree` copies them all). One exception: a closure passed *into* the task still shares the variables it captured with the code that created it on the bytecode VM, so don't change that captured state from both sides — pass the data as an argument or use `SharedMap`/`Queue` instead
 - Native functions (http.get, sys.exec, etc.) also run in true parallel
 - When an async native calls back into Praia — the request handler of `async server.listen(port)`, an `http.sse` callback — those calls run inside the task as well. On the bytecode VM they run against the task's copy of the globals, so they never touch the caller's state mid-flight; in tree-walker mode (`--tree`) they resolve globals through the caller's environment instead. On both engines, a handler the native was given earlier still shares the variables it captured with the code that created it
 - A bare `async fn()` (no `let f =`) is fire-and-forget — it returns immediately and the task runs to completion in the background
 
 ### Sharing state across async tasks
 
-Because globals/upvalues/arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. This is the price of "no data races" in user code.
+Because globals, captured variables and arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. The exceptions are the closures noted above, which keep sharing what they captured.
 
 ```
 let m = {}

@@ -287,4 +287,10 @@ testing.test("async task sees globals as they were when it started", lam{ in
     testing.expectEqual(await f, "before", nil)
 })
 
+let reachFactor = 3
+testing.test("async builtin gets the globals its callback arguments reach", lam{ in
+    // A registered native copies only what its arguments reach
+    testing.expectEqual(await async map([1, 2], lam{ x in x * reachFactor }), [3, 6], nil)
+})
+
 testing.done()

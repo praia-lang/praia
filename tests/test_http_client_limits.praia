@@ -31,6 +31,11 @@ let _server = async lam{ in
                 net.send(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
                 for (i in 0..3) { net.send(c, "3e8\r\n" + ("b" * 1000) + "\r\n") }
                 net.send(c, "0\r\n\r\n")
+            } elif (path == "/slowbody") {
+                // Headers at once, the body only after a pause
+                net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                time.sleep(800)
+                net.send(c, "done")
             } elif (path == "/trickle") {
                 net.send(c, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
                 for (i in 0..15) {
@@ -88,6 +93,15 @@ testing.test("maxResponseSize applies through a session", lam{ in
 testing.test("streams aren't capped by maxResponseSize", lam{ in
     let st = http.openStream({url: base + "/big", blockPrivateHosts: false, maxResponseSize: 1000})
     testing.expectEqual(len(st.readAll()), 2000, nil)
+    st.close()
+})
+
+testing.test("a stream's body reads use readTimeout, not what totalTimeout left", lam{ in
+    // totalTimeout covers getting the handle; the 800 ms pause before the
+    // body is within readTimeout, so the read waits for it
+    let st = http.openStream({url: base + "/slowbody", blockPrivateHosts: false,
+                              totalTimeout: 0.3, readTimeout: 3})
+    testing.expectEqual(st.readAll(), "done", nil)
     st.close()
 })
 

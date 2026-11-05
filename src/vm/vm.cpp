@@ -370,7 +370,30 @@ VM::TaskSeed VM::captureTaskSeed(VM* snapVm, const std::vector<Value>* roots) co
     }
     seed.globalIndices = snapVm->globalIndices;
     seed.builtinNames = builtinNames_;
+    seed.builtinNatives = builtinNatives_;
     return seed;
+}
+
+void VM::recordBuiltinNatives() {
+    auto natives = std::make_shared<std::unordered_set<const Callable*>>();
+    std::unordered_set<const void*> seen;
+    std::vector<Value> work;
+    for (auto& name : builtinNames_) {
+        int slot = findGlobalSlot(name);
+        if (slot >= 0) work.push_back(globals[slot]);
+    }
+    while (!work.empty()) {
+        Value v = std::move(work.back());
+        work.pop_back();
+        if (v.isMap()) {
+            auto m = v.asMap();
+            if (seen.insert(m.get()).second)
+                for (auto& [k, e] : m->entries) work.push_back(e);
+        } else if (v.isCallable() && dynamic_cast<NativeFunction*>(v.asCallable().get())) {
+            natives->insert(v.asCallable().get());
+        }
+    }
+    builtinNatives_ = std::move(natives);
 }
 
 void VM::initAsTaskVm(TaskSeed&& seed, bool collectGarbage) {
@@ -389,6 +412,7 @@ void VM::initAsTaskVm(TaskSeed&& seed, bool collectGarbage) {
     globals.assign(globalsSnapshot_.size(), Value());
     loadedMask_.assign(globalsSnapshot_.size(), 0);
     builtinNames_ = std::move(seed.builtinNames);
+    builtinNatives_ = std::move(seed.builtinNatives);
     suppressErrors_ = true; // errors propagate to await, not stderr
 }
 
@@ -1215,6 +1239,7 @@ Value VM::loadGrain(const std::string& importPath, int line) {
         }
     }
     grainVm.builtinNames_ = builtinNames_;
+    grainVm.builtinNatives_ = builtinNatives_;
     grainVm.currentFile = resolved;
     // Errors the grain doesn't catch are raised again at the importer's
     // `use` (or printed there if nothing catches them), not here.
@@ -3166,8 +3191,12 @@ VM::Result VM::execute(int baseFrameCount_) {
                 // async closure: Praia callbacks it makes (an HTTP handler, an
                 // SSE callback) then execute there through VM::current(),
                 // never on this VM from another thread.
-                // Every global: the native's callbacks are hidden in it
-                auto seed = captureTaskSeed(this, nullptr);
+                // A native the engine registered calls back only into what
+                // it's given, so the globals its arguments reach will do.
+                // One made at run time (a server's listen, a plugin's) can
+                // hold callbacks the walk can't see: every global.
+                bool builtinNative = builtinNatives_ && builtinNatives_->count(callable.get());
+                auto seed = captureTaskSeed(this, builtinNative ? &args : nullptr);
                 sharedFuture = std::async(std::launch::async,
                     [native, args, rootsHolder, seed = std::move(seed),
                      lent = lendScope.lent, parentInbox]() mutable -> Value {

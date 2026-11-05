@@ -2705,6 +2705,11 @@ Value httpOpenStream(const std::string& method, const std::string& url,
         // method (or the state going out of scope) is responsible for
         // shutdown_close from here on. Release the guard so its
         // destructor doesn't double-close before the handle is even used.
+        //
+        // totalTimeoutMs only covered getting here: body reads get the
+        // caller's own readTimeoutMs (<= 0 = no limit), not what was
+        // left of the total
+        setSocketTimeouts(conn->fd, opts.readTimeoutMs);
         auto state = std::make_shared<HttpStreamState>();
         state->conn       = conn;
         state->status     = status;

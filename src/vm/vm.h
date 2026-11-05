@@ -204,6 +204,10 @@ private:
     std::vector<Value> globals;
     std::unordered_map<std::string, int> globalIndices;
     std::set<std::string> builtinNames_; // names registered via defineNative (for grain isolation)
+    // The natives the engine registered, as they stood before any user
+    // code ran (see recordBuiltinNatives). Shared by every VM made from
+    // this one: grain VMs and task VMs.
+    std::shared_ptr<const std::unordered_set<const Callable*>> builtinNatives_;
 
     // Globals for async task VMs. On OP_ASYNC the parent copies the
     // globals the task's code can reach into `globalsSnapshot_` (see
@@ -249,6 +253,7 @@ public:
         std::vector<uint8_t> captured;
         std::unordered_map<std::string, int> globalIndices;
         std::set<std::string> builtinNames;
+        std::shared_ptr<const std::unordered_set<const Callable*>> builtinNatives;
     };
     // On the parent thread: copy `snapVm`'s globals (the VM the task's code
     // resolves globals against) that code reachable from `roots` can name,
@@ -260,6 +265,10 @@ public:
     // set (the caller must detach the root marker before this VM goes
     // away); otherwise collection is off for the thread.
     void initAsTaskVm(TaskSeed&& seed, bool collectGarbage = false);
+    // Records every native reachable from the builtin globals. Called once
+    // native registration is done, before user code can put its own
+    // natives (a server's listen, a Queue's methods) into them.
+    void recordBuiltinNatives();
     // Give closures/upvalues created in `taskVm` to every VM closure
     // reachable from `result`, so they outlive the task VM.
     static void adoptTaskResult(VM& taskVm, Value& result);
