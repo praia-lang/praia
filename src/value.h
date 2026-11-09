@@ -146,6 +146,12 @@ inline int64_t rangeBoundToInt(const Value& v, int line = 0, int column = 0) {
 
 struct PraiaArray {
     std::vector<Value> elements;
+    PraiaArray() = default;
+    PraiaArray(const PraiaArray&) = default;
+    PraiaArray(PraiaArray&&) = default;
+    PraiaArray& operator=(const PraiaArray&) = default;
+    PraiaArray& operator=(PraiaArray&&) = default;
+    ~PraiaArray();   // frees deep contents without recursing; see releaseChildren
 };
 
 inline bool isHashable(const Value& v) {
@@ -288,6 +294,12 @@ struct ValueKeyEqual {
 
 struct PraiaMap {
     std::unordered_map<Value, Value, ValueHash, ValueKeyEqual> entries;
+    PraiaMap() = default;
+    PraiaMap(const PraiaMap&) = default;
+    PraiaMap(PraiaMap&&) = default;
+    PraiaMap& operator=(const PraiaMap&) = default;
+    PraiaMap& operator=(PraiaMap&&) = default;
+    ~PraiaMap();   // frees deep contents without recursing; see releaseChildren
 };
 
 // Hash set of Praia values. Storage uses the same ValueHash +
@@ -343,12 +355,71 @@ struct PraiaClass;  // defined in interpreter.h (it's a Callable)
 struct PraiaInstance {
     std::shared_ptr<PraiaClass> klass;
     std::unordered_map<std::string, Value> fields;
+    PraiaInstance() = default;
+    PraiaInstance(const PraiaInstance&) = default;
+    PraiaInstance(PraiaInstance&&) = default;
+    PraiaInstance& operator=(const PraiaInstance&) = default;
+    PraiaInstance& operator=(PraiaInstance&&) = default;
+    ~PraiaInstance();   // frees deep contents without recursing; see releaseChildren
 };
 
 struct PraiaTagged {
     std::string tag;
     std::vector<Value> values;
+    PraiaTagged() = default;
+    PraiaTagged(const PraiaTagged&) = default;
+    PraiaTagged(PraiaTagged&&) = default;
+    PraiaTagged& operator=(const PraiaTagged&) = default;
+    PraiaTagged& operator=(PraiaTagged&&) = default;
+    ~PraiaTagged();   // frees deep contents without recursing; see releaseChildren
 };
+
+// Freeing a container frees its children inline, so freeing a long chain
+// ([[[...]]], a 150k-node linked list) would recurse once per link and
+// overflow the stack. Instead a dying container moves each child it
+// holds the last reference to onto a per-thread list, and the outermost
+// one frees that list in a loop: its children add theirs to the same
+// list rather than recursing.
+namespace praia::detail {
+inline thread_local std::vector<Value>* releasing = nullptr;
+
+inline bool holdsLastRef(const Value& v) {
+    if (auto* a = std::get_if<std::shared_ptr<PraiaArray>>(&v.data)) return a->use_count() == 1;
+    if (auto* m = std::get_if<std::shared_ptr<PraiaMap>>(&v.data)) return m->use_count() == 1;
+    if (auto* i = std::get_if<std::shared_ptr<PraiaInstance>>(&v.data)) return i->use_count() == 1;
+    if (auto* t = std::get_if<std::shared_ptr<PraiaTagged>>(&v.data)) return t->use_count() == 1;
+    return false;   // anything else: dropping it doesn't free a container
+}
+
+// `each(take)` calls take(child) for every child Value it can move from
+template <class Each>
+inline void releaseChildren(Each&& each) {
+    auto take = [](Value& v) { if (holdsLastRef(v)) releasing->push_back(std::move(v)); };
+    if (releasing) { each(take); return; }
+    std::vector<Value> pending;
+    releasing = &pending;
+    each(take);
+    while (!pending.empty()) {
+        Value v = std::move(pending.back());
+        pending.pop_back();
+    }   // each `v` freed here adds its own children to `pending`
+    releasing = nullptr;
+}
+} // namespace praia::detail
+
+inline PraiaArray::~PraiaArray() {
+    praia::detail::releaseChildren([&](auto take) { for (auto& e : elements) take(e); });
+}
+inline PraiaMap::~PraiaMap() {
+    // Keys are const, and hashable ones aren't containers
+    praia::detail::releaseChildren([&](auto take) { for (auto& [k, v] : entries) take(v); });
+}
+inline PraiaInstance::~PraiaInstance() {
+    praia::detail::releaseChildren([&](auto take) { for (auto& [k, v] : fields) take(v); });
+}
+inline PraiaTagged::~PraiaTagged() {
+    praia::detail::releaseChildren([&](auto take) { for (auto& e : values) take(e); });
+}
 
 // Opaque handle wrapping a C/C++ pointer plus a destructor.
 //
@@ -493,36 +564,62 @@ inline std::string valueToStringRec(const Value& v, std::unordered_set<const voi
     return "<unknown>";
 }
 
+namespace praia::detail {
+// == on arrays, maps and tagged values, comparing with a worklist instead
+// of recursion, so deep values can't overflow the stack. A pair already
+// being compared counts as equal when it comes round again: that ends
+// cycles (two self-containing arrays are equal) and skips shared parts.
+inline bool deepEqual(const Value& a, const Value& b) {
+    struct PairHash {
+        size_t operator()(const std::pair<const void*, const void*>& p) const {
+            return std::hash<const void*>{}(p.first) * 31 + std::hash<const void*>{}(p.second);
+        }
+    };
+    std::vector<std::pair<const Value*, const Value*>> todo{{&a, &b}};
+    std::unordered_set<std::pair<const void*, const void*>, PairHash> seen;
+    while (!todo.empty()) {
+        auto [x, y] = todo.back();
+        todo.pop_back();
+        if (x->isArray() && y->isArray()) {
+            auto* p = std::get<std::shared_ptr<PraiaArray>>(x->data).get();
+            auto* q = std::get<std::shared_ptr<PraiaArray>>(y->data).get();
+            if (p == q || !seen.insert({p, q}).second) continue;
+            if (p->elements.size() != q->elements.size()) return false;
+            for (size_t i = 0; i < p->elements.size(); i++)
+                todo.push_back({&p->elements[i], &q->elements[i]});
+        } else if (x->isMap() && y->isMap()) {
+            auto* p = std::get<std::shared_ptr<PraiaMap>>(x->data).get();
+            auto* q = std::get<std::shared_ptr<PraiaMap>>(y->data).get();
+            if (p == q || !seen.insert({p, q}).second) continue;
+            if (p->entries.size() != q->entries.size()) return false;
+            for (auto& [k, v] : p->entries) {
+                auto it = q->entries.find(k);
+                if (it == q->entries.end()) return false;
+                todo.push_back({&v, &it->second});
+            }
+        } else if (x->isTagged() && y->isTagged()) {
+            auto* p = std::get<std::shared_ptr<PraiaTagged>>(x->data).get();
+            auto* q = std::get<std::shared_ptr<PraiaTagged>>(y->data).get();
+            if (p == q || !seen.insert({p, q}).second) continue;
+            if (p->tag != q->tag || p->values.size() != q->values.size()) return false;
+            for (size_t i = 0; i < p->values.size(); i++)
+                todo.push_back({&p->values[i], &q->values[i]});
+        } else if (*x != *y) {
+            return false;   // not both containers of one kind, so == doesn't come back here
+        }
+    }
+    return true;
+}
+} // namespace praia::detail
+
 inline bool Value::operator==(const Value& o) const {
+    if ((isArray() && o.isArray()) || (isMap() && o.isMap()) || (isTagged() && o.isTagged()))
+        return praia::detail::deepEqual(*this, o);
     if (isNil()    && o.isNil())    return true;
     if (isNil()    || o.isNil())    return false;
     if (isBool()   && o.isBool())   return asBool()   == o.asBool();
     if (isNumber() && o.isNumber()) return numbersEqual(*this, o);
     if (isString() && o.isString()) return asString()  == o.asString();
-    if (isArray()  && o.isArray()) {
-        // Identity short-circuit — covers `a == a` for cyclic `a`. Two
-        // distinct cyclic structures that happen to share shape still
-        // recurse and may stack-overflow; for the practical case
-        // (comparing a value with itself) this terminates.
-        if (asArray().get() == o.asArray().get()) return true;
-        auto& a = asArray()->elements;
-        auto& b = o.asArray()->elements;
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); i++)
-            if (a[i] != b[i]) return false;
-        return true;
-    }
-    if (isMap() && o.isMap()) {
-        if (asMap().get() == o.asMap().get()) return true;
-        auto& a = asMap()->entries;
-        auto& b = o.asMap()->entries;
-        if (a.size() != b.size()) return false;
-        for (auto& [k, v] : a) {
-            auto it = b.find(k);
-            if (it == b.end() || it->second != v) return false;
-        }
-        return true;
-    }
     if (isSet() && o.isSet()) {
         if (asSet().get() == o.asSet().get()) return true;
         auto& a = asSet()->elements;
@@ -535,15 +632,6 @@ inline bool Value::operator==(const Value& o) const {
     // Instances: reference equality
     if (isInstance() && o.isInstance())
         return asInstance() == o.asInstance();
-    if (isTagged() && o.isTagged()) {
-        const auto& a = asTagged();
-        const auto& b = o.asTagged();
-        if (a.get() == b.get()) return true;
-        if (a->tag != b->tag || a->values.size() != b->values.size()) return false;
-        for (size_t i = 0; i < a->values.size(); i++)
-            if (a->values[i] != b->values[i]) return false;
-        return true;
-    }
     // Externals: pointer identity only. The wrapped data is opaque
     // from Praia's perspective, so there's no meaningful deep
     // comparison — two handles are equal iff they're the same handle.
