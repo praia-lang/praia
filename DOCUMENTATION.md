@@ -3231,7 +3231,7 @@ try {
 
 ### Sharing state across async tasks
 
-Because globals, captured variables and arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. The exceptions are the closures noted above, which keep sharing what they captured, and — in `--tree` mode — async-native callbacks, which resolve globals through the caller's environment and so can share its mutable globals even without a shared closure.
+Because globals, captured variables and arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. The exceptions: a `Queue` (or `SharedMap`) hands the receiver the same map or array the sender put in, not a copy; the closures noted above keep sharing what they captured; and in `--tree` mode, async-native callbacks resolve globals through the caller's environment and so can share its mutable globals even without a shared closure.
 
 ```
 let m = {}

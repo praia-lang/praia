@@ -89,16 +89,35 @@ static bool g_pluginShutdown = false;
 // Writes all of `data` to an SSE client. The server set a send timeout
 // on the socket (requestTimeout), so a client that stops reading makes a
 // send fail instead of holding the one-at-a-time server; that, or any
-// other error, returns false and the stream ends.
+// other error, returns false and the stream ends. That timeout restarts
+// with every send, so it's one deadline for the whole message: each send
+// gets only what's left, and a client taking a few bytes at a time can't
+// stretch it.
 static bool sseSendAll(int fd, const std::string& data) {
+    timeval limit{};
+    socklen_t len = sizeof(limit);
+    bool timed = getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &limit, &len) == 0 &&
+                 (limit.tv_sec > 0 || limit.tv_usec > 0);
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(limit.tv_sec) + std::chrono::microseconds(limit.tv_usec);
+    bool ok = true;
     size_t done = 0;
     while (done < data.size()) {
+        if (timed) {
+            auto left = std::chrono::duration_cast<std::chrono::microseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (left <= 0) { ok = false; break; }
+            timeval tv{static_cast<time_t>(left / 1000000), static_cast<suseconds_t>(left % 1000000)};
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        }
         ssize_t n = ::send(fd, data.data() + done, data.size() - done, 0);
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return false;
+        if (n <= 0) { ok = false; break; }
         done += static_cast<size_t>(n);
     }
-    return true;
+    // The next message gets the full timeout again
+    if (timed) setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &limit, sizeof(limit));
+    return ok;
 }
 
 static int signalNameToNum(const std::string& name) {
