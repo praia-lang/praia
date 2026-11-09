@@ -103,7 +103,7 @@
 //       gains redirectForwardAllHeaders, maxResponseSize and a
 //       deadline; httpServerListen takes an HttpServerOptions; GcHeap
 //       gains members that inline code compiled into plugins (gcNew,
-//       trackedCount) depends on.
+//       trackedCount) depends on; NativeFunction gains holdsNoValues.
 #define PRAIA_PLUGIN_ABI_VERSION 7
 
 #define PRAIA_DECLARE_ABI()                                             \

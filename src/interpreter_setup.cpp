@@ -86,6 +86,21 @@ static std::vector<PluginAtExitEntry> g_pluginAtExitHooks;
 // already passed.
 static bool g_pluginShutdown = false;
 
+// Writes all of `data` to an SSE client. The server set a send timeout
+// on the socket (requestTimeout), so a client that stops reading makes a
+// send fail instead of holding the one-at-a-time server; that, or any
+// other error, returns false and the stream ends.
+static bool sseSendAll(int fd, const std::string& data) {
+    size_t done = 0;
+    while (done < data.size()) {
+        ssize_t n = ::send(fd, data.data() + done, data.size() - done, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        done += static_cast<size_t>(n);
+    }
+    return true;
+}
+
 static int signalNameToNum(const std::string& name) {
     if (name == "SIGINT"  || name == "INT")  return SIGINT;
     if (name == "SIGTERM" || name == "TERM") return SIGTERM;
@@ -2405,7 +2420,8 @@ Interpreter::Interpreter(bool installErrorClasses) {
                                   "Cache-Control: no-cache\r\n"
                                   "Connection: keep-alive\r\n" +
                                   extraHeaders + "\r\n";
-            send(clientFd, headers.c_str(), headers.size(), 0);
+            // A client that can't take the headers is gone: skip the callback
+            bool connected = sseSendAll(clientFd, headers);
 
             // Create a send function for the callback
             auto sendFn = makeNative("send", -1,
@@ -2446,8 +2462,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
                     }
                     emit(); // trailing/final line (even if empty for "")
                     msg += "\n"; // blank line terminator
-                    ssize_t sent = ::send(clientFd, msg.c_str(), msg.size(), 0);
-                    if (sent < 0)
+                    if (!sseSendAll(clientFd, msg))
                         throw RuntimeError("SSE client disconnected", 0);
                     return Value();
                 });
@@ -2456,7 +2471,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             // (calling) Interpreter — see http.createServer comment.
             try {
                 std::vector<Value> cbArgs = {Value(std::static_pointer_cast<Callable>(sendFn))};
-                callSafe(callbackInterp(), callback, cbArgs);
+                if (connected) callSafe(callbackInterp(), callback, cbArgs);
             } catch (const RuntimeError&) {
                 // Client likely disconnected — not an error
             }
@@ -4610,6 +4625,9 @@ Interpreter::Interpreter(bool installErrorClasses) {
             if (stmt) sqlite3_finalize(stmt);
             throw moreThanOne();
         }
+        // Empty, or only comments and semicolons: SQLite prepares nothing
+        if (!stmt)
+            throw RuntimeError(std::string(fn) + "() was given no SQL statement to run", 0);
         return stmt;
     };
 

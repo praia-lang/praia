@@ -293,4 +293,38 @@ testing.test("async builtin gets the globals its callback arguments reach", lam{
     testing.expectEqual(await async map([1, 2], lam{ x in x * reachFactor }), [3, 6], nil)
 })
 
+// A future's result is made by code the task's globals walk never saw
+let futSecret = 42
+class FutHolder {
+    func reveal() { return futSecret }
+}
+func makeFutHolder() { return FutHolder() }
+func revealLater(f) {
+    let h = await f
+    return h.reveal()
+}
+testing.test("async task awaiting a future gets the globals its result needs", lam{ in
+    let fut = async makeFutHolder()
+    testing.expectEqual(await async revealLater(fut), 42, nil)
+})
+
+// A value a script stores in a builtin namespace is still a script's
+// value: its generator's code reads a global the task never names
+let nsGenSecret = 7
+func nsCounter() { while (true) { yield nsGenSecret } }
+sys.nsGen = nsCounter()
+func pullNsGen() { return sys.nsGen.next().value }
+testing.test("async task resuming a generator kept in a builtin namespace gets its globals", lam{ in
+    testing.expectEqual(await async pullNsGen(), 7, nil)
+})
+
+testing.test("async task gets its own copy of a tagged value's contents", lam{ in
+    let t = Ok([1, 2])
+    func grow(x) {
+        match (x) { Ok(arr) { arr.push(3); return len(arr) } }
+    }
+    testing.expectEqual(await async grow(t), 3, "task saw its copy grow")
+    match (t) { Ok(arr) { testing.expectEqual(len(arr), 2, "caller's array unchanged") } }
+})
+
 testing.done()

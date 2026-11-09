@@ -1693,6 +1693,19 @@ Value Interpreter::evaluate(const Expr* expr) {
                     copy->elements.push_back(deepCopy(el));
                 return result;
             }
+            if (v.isTagged()) {
+                // Its values can be containers (Ok([1, 2])), so it's copied too
+                void* key = static_cast<void*>(v.asTagged().get());
+                auto it = valueVisited.find(key);
+                if (it != valueVisited.end()) return it->second;
+                auto copy = gcNew<PraiaTagged>();
+                copy->tag = v.asTagged()->tag;
+                Value result(copy);
+                valueVisited[key] = result; // register before recursing
+                for (auto& e : v.asTagged()->values)
+                    copy->values.push_back(deepCopy(e));
+                return result;
+            }
             if (v.isSet()) {
                 void* key = static_cast<void*>(v.asSet().get());
                 auto it = valueVisited.find(key);

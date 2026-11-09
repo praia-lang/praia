@@ -305,4 +305,18 @@ testing.test("triggers with CASE ... END in the body are one statement", lam{ in
     sqlite.close(db)
 })
 
+testing.test("SQL with no statement is an error", lam{ in
+    // Used to fail with SQLite's own "not an error"
+    let db = sqlite.open(":memory:")
+    for (sql in ["", "  ", "-- just a comment", " ; ;"]) {
+        let err = nil
+        try { sqlite.query(db, sql) } catch (e) { err = str(e) }
+        testing.expect(err != nil && err.contains("no SQL statement"), str(err))
+        err = nil
+        try { sqlite.run(db, sql) } catch (e) { err = str(e) }
+        testing.expect(err != nil && err.contains("no SQL statement"), str(err))
+    }
+    sqlite.close(db)
+})
+
 testing.done()

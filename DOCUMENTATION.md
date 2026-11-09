@@ -3231,7 +3231,7 @@ try {
 
 ### Sharing state across async tasks
 
-Because globals, captured variables and arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. The exceptions are the closures noted above, which keep sharing what they captured.
+Because globals, captured variables and arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. The exceptions are the closures noted above, which keep sharing what they captured, and — in `--tree` mode — async-native callbacks, which resolve globals through the caller's environment and so can share its mutable globals even without a shared closure.
 
 ```
 let m = {}
@@ -3244,7 +3244,7 @@ print(m)              // {} — the task mutated its own copy
 To communicate, use:
 
 - **`SharedMap`** — cross-task key-value store. Use this when async tasks need shared state by key (progress trackers, job state, caches).
-- **`Queue`** — built for cross-task messaging; the queue itself isn't deep-copied.
+- **`Queue`** — built for cross-task messaging. Neither the queue nor the values you send through it are deep-copied: the receiver gets the same map or array the sender sent, so hand it over and stop changing it on the sending side.
 - **`CancellationToken`** — cooperative cancel signal. The caller flips the flag; long-running tasks poll and bail.
 - **External resources** — files, SQLite, sockets, native plugin state. These live outside the Praia heap, so all tasks see the same underlying resource. Use `Lock()` to coordinate concurrent access.
 - **`await`** — collect results back from the task. The future's return value is moved across the boundary.

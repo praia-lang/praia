@@ -9,6 +9,13 @@
 #include <vector>
 #include "../gc_heap.h"
 
+// A native whose captured state holds no Praia Values (a mutex, a flag);
+// see NativeFunction::holdsNoValues
+static Value valueFree(std::shared_ptr<NativeFunction> f) {
+    f->holdsNoValues = true;
+    return Value(f);
+}
+
 void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environment> globals) {
     // self is no longer needed: native callbacks resolve the calling
     // Interpreter at invocation time via g_currentInterp (set by
@@ -18,13 +25,13 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
             auto mtx = std::make_shared<std::recursive_mutex>();
             auto lock = gcNew<PraiaMap>();
 
-            lock->entries[Value("acquire")] = Value(makeNative("acquire", 0,
+            lock->entries[Value("acquire")] = valueFree(makeNative("acquire", 0,
                 [mtx](const std::vector<Value>&) -> Value {
                     mtx->lock();
                     return Value();
                 }));
 
-            lock->entries[Value("release")] = Value(makeNative("release", 0,
+            lock->entries[Value("release")] = valueFree(makeNative("release", 0,
                 [mtx](const std::vector<Value>&) -> Value {
                     mtx->unlock();
                     return Value();
@@ -41,7 +48,7 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
             // the registration-time captured `self`. An async task's user
             // callback would otherwise run on the parent Interpreter and
             // race with its env field — see the comment on g_currentInterp.
-            lock->entries[Value("withLock")] = Value(makeNative("withLock", 1,
+            lock->entries[Value("withLock")] = valueFree(makeNative("withLock", 1,
                 [mtx](const std::vector<Value>& args) -> Value {
                     if (!args[0].isCallable())
                         throw RuntimeError("withLock() requires a function", 0);
@@ -191,13 +198,13 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
             auto state = std::make_shared<CancellationState>();
             auto tok = gcNew<PraiaMap>();
 
-            tok->entries[Value("cancel")] = Value(makeNative("cancel", 0,
+            tok->entries[Value("cancel")] = valueFree(makeNative("cancel", 0,
                 [state](const std::vector<Value>&) -> Value {
                     state->cancelled.store(true, std::memory_order_release);
                     return Value();
                 }));
 
-            tok->entries[Value("cancelled")] = Value(makeNative("cancelled", 0,
+            tok->entries[Value("cancelled")] = valueFree(makeNative("cancelled", 0,
                 [state](const std::vector<Value>&) -> Value {
                     return Value(state->cancelled.load(std::memory_order_acquire));
                 }));
@@ -205,7 +212,7 @@ void registerConcurrencyBuiltins(Interpreter* /*self*/, std::shared_ptr<Environm
             // throwIfCancelled() — convenience for "fail fast" loops.
             // Tasks doing `while (...) { token.throwIfCancelled(); ... }`
             // can let the surrounding try/catch handle the bail-out.
-            tok->entries[Value("throwIfCancelled")] = Value(makeNative("throwIfCancelled", 0,
+            tok->entries[Value("throwIfCancelled")] = valueFree(makeNative("throwIfCancelled", 0,
                 [state](const std::vector<Value>&) -> Value {
                     if (state->cancelled.load(std::memory_order_acquire))
                         throw RuntimeError("cancelled", 0);

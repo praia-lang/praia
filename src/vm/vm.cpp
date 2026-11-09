@@ -125,7 +125,7 @@ static std::pair<bool, Value> vmCallDunder(VM& vm, const Value& instance,
 //
 // Used by OP_ASYNC to clone heap-allocated values across the task boundary
 // so the task VM doesn't share mutable state with the caller. Handles
-// PraiaMap, PraiaArray, PraiaInstance (clone-fields), VMClosureCallable
+// PraiaMap, PraiaArray, PraiaSet, PraiaTagged, PraiaInstance (clone-fields), VMClosureCallable
 // (clone wrapper with vm=nullptr; rewireForTaskVm fixes it up later), and
 // VMBoundMethod (clone with deep-copied receiver). NativeFunction,
 // PraiaClass, primitives, strings, futures are shared as-is.
@@ -178,6 +178,19 @@ static Value deepCopyForTask(const Value& v,
             copy->elements.push_back(deepCopyForTask(el, visited));
         return result;
     }
+    if (v.isTagged()) {
+        // Its values can be containers (Ok([1, 2])), so it's copied too
+        void* key = static_cast<void*>(v.asTagged().get());
+        auto it = visited.find(key);
+        if (it != visited.end()) return it->second;
+        auto copy = gcNew<PraiaTagged>();
+        copy->tag = v.asTagged()->tag;
+        Value result(copy);
+        visited[key] = result; // register before recursing
+        for (auto& e : v.asTagged()->values)
+            copy->values.push_back(deepCopyForTask(e, visited));
+        return result;
+    }
     if (v.isSet()) {
         void* key = static_cast<void*>(v.asSet().get());
         auto it = visited.find(key);
@@ -224,6 +237,12 @@ static void rewireForTaskVm(Value& v, VM* taskVm,
         void* p = static_cast<void*>(v.asArray().get());
         if (visited.insert(p).second)
             for (auto& el : v.asArray()->elements)
+                rewireForTaskVm(el, taskVm, visited);
+    }
+    if (v.isTagged()) {
+        void* p = static_cast<void*>(v.asTagged().get());
+        if (visited.insert(p).second)
+            for (auto& el : v.asTagged()->values)
                 rewireForTaskVm(el, taskVm, visited);
     }
     if (v.isInstance()) {
@@ -274,13 +293,20 @@ VM::TaskSeed VM::captureTaskSeed(VM* snapVm, const std::vector<Value>* roots) co
     // functions in its constants, the values of the globals it names,
     // what its closures captured, and classes' methods. A native made at
     // run time (http.createServer's server) can hold closures the walk
-    // can't see, so meeting one outside a builtin means every global.
+    // can't see, so meeting one the engine didn't register means every
+    // global —
+    // unless it's marked as holding no Values (a Lock's acquire). So does
+    // a future: its result comes from code the walk never saw.
     std::vector<uint8_t> reach(n, roots ? 0 : 1);
     if (roots) {
         bool all = false;
         std::unordered_set<const void*> seen;
-        std::vector<std::pair<Value, bool>> work; // value, part of a builtin
-        for (auto& r : *roots) work.push_back({r, false});
+        std::vector<Value> work(roots->begin(), roots->end());
+        // Registered by the engine before any user code ran — by identity,
+        // so a server a script stored in a builtin namespace isn't one
+        auto registered = [&](const Callable* c) {
+            return builtinNatives_ && builtinNatives_->count(c) > 0;
+        };
         auto scanFunction = [&](const CompiledFunction* fn) {
             if (!fn || !seen.insert(fn).second) return;
             for (auto& c : fn->chunk.constants) {
@@ -288,36 +314,38 @@ VM::TaskSeed VM::captureTaskSeed(VM* snapVm, const std::vector<Value>* roots) co
                     int slot = snapVm->findGlobalSlot(c.asString());
                     if (slot >= 0 && slot < static_cast<int>(n) && !reach[slot]) {
                         reach[slot] = 1;
-                        work.push_back({source(slot), snapVm->builtinNames_.count(c.asString()) > 0});
+                        work.push_back(source(slot));
                     }
                 } else {
-                    work.push_back({c, false});
+                    work.push_back(c);
                 }
             }
         };
         while (!work.empty() && !all) {
-            auto [v, builtin] = std::move(work.back());
+            Value v = std::move(work.back());
             work.pop_back();
             if (v.isMap()) {
                 auto m = v.asMap();
                 if (seen.insert(m.get()).second)
-                    for (auto& [k, e] : m->entries) { work.push_back({k, builtin}); work.push_back({e, builtin}); }
+                    for (auto& [k, e] : m->entries) { work.push_back(k); work.push_back(e); }
             } else if (v.isArray()) {
                 auto a = v.asArray();
                 if (seen.insert(a.get()).second)
-                    for (auto& e : a->elements) work.push_back({e, builtin});
+                    for (auto& e : a->elements) work.push_back(e);
             } else if (v.isInstance()) {
                 auto inst = v.asInstance();
                 if (seen.insert(inst.get()).second) {
-                    for (auto& [k, e] : inst->fields) work.push_back({e, builtin});
-                    if (inst->klass) work.push_back({Value(std::static_pointer_cast<Callable>(inst->klass)), builtin});
+                    for (auto& [k, e] : inst->fields) work.push_back(e);
+                    if (inst->klass) work.push_back(Value(std::static_pointer_cast<Callable>(inst->klass)));
                 }
             } else if (v.isTagged()) {
                 auto t = v.asTagged();
                 if (seen.insert(t.get()).second)
-                    for (auto& e : t->values) work.push_back({e, builtin});
+                    for (auto& e : t->values) work.push_back(e);
             } else if (v.isGenerator()) {
-                all = !builtin; // suspended code the walk can't read
+                all = true;     // suspended code the walk can't read; the engine registers none
+            } else if (v.isFuture()) {
+                all = true;     // its result, made elsewhere, isn't here to walk
             } else if (v.isCallable()) {
                 auto c = v.asCallable();
                 if (!seen.insert(c.get()).second) continue;
@@ -326,23 +354,28 @@ VM::TaskSeed VM::captureTaskSeed(VM* snapVm, const std::vector<Value>* roots) co
                     scanFunction(vc->closure->function.get());
                     for (auto* uv : vc->closure->upvalues) {
                         if (!uv) continue;
+                        // Another live thread's upvalue it writes (and
+                        // closes) without the lock, so it can't be read —
+                        // every global instead
+                        auto* owner = uv->owner.load(std::memory_order_acquire);
+                        if (owner != &GcHeap::current() && owner != nullptr) { all = true; break; }
                         std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
-                        work.push_back({*uv->location, builtin});
+                        work.push_back(*uv->location);
                     }
                 } else if (auto* bm = dynamic_cast<VMBoundMethod*>(c.get())) {
                     if (bm->method) scanFunction(bm->method->function.get());
-                    work.push_back({bm->receiver, builtin});
+                    work.push_back(bm->receiver);
                     if (bm->definingClass)
-                        work.push_back({Value(std::static_pointer_cast<Callable>(bm->definingClass)), builtin});
+                        work.push_back(Value(std::static_pointer_cast<Callable>(bm->definingClass)));
                 } else if (auto* cls = dynamic_cast<PraiaClass*>(c.get())) {
-                    for (auto& [k, m] : cls->vmMethods) work.push_back({m, builtin});
-                    for (auto& [k, m] : cls->vmStaticMethods) work.push_back({m, builtin});
+                    for (auto& [k, m] : cls->vmMethods) work.push_back(m);
+                    for (auto& [k, m] : cls->vmStaticMethods) work.push_back(m);
                     for (auto& [k, ds] : cls->methodDecorators)
-                        for (auto& d : ds) work.push_back({d, builtin});
+                        for (auto& d : ds) work.push_back(d);
                     if (cls->superclass)
-                        work.push_back({Value(std::static_pointer_cast<Callable>(cls->superclass)), builtin});
-                } else if (dynamic_cast<NativeFunction*>(c.get())) {
-                    all = !builtin;
+                        work.push_back(Value(std::static_pointer_cast<Callable>(cls->superclass)));
+                } else if (auto* nf = dynamic_cast<NativeFunction*>(c.get())) {
+                    if (!registered(nf) && !nf->holdsNoValues) all = true;
                 }
             }
         }

@@ -50,14 +50,16 @@ struct SocketConn {
     SocketConn(SocketConn&&) = delete;
     SocketConn& operator=(SocketConn&&) = delete;
 
-    // Sends all of buf, or returns -1. A send can take only part of it.
-    ssize_t write(const void* buf, size_t len) {
+    // Sends all of buf, or returns -1. A send can take only part of it;
+    // `sent`, if given, gets how many bytes went out either way.
+    ssize_t write(const void* buf, size_t len, size_t* sent = nullptr) {
         // Under a deadline: send in pieces, each allowed only the time
         // left, so a peer that stops reading can't stall the request
         // past it
         bool deadline = readDeadline != std::chrono::steady_clock::time_point::max();
         const char* p = static_cast<const char*>(buf);
         size_t done = 0;
+        if (sent) *sent = 0;
         while (done < len) {
             if (deadline) setSendTimeout(timeLeftUs(), readTimeoutMs);
             size_t piece = deadline ? std::min<size_t>(len - done, 16384) : len - done;
@@ -68,6 +70,7 @@ struct SocketConn {
                 return -1;
             }
             done += static_cast<size_t>(n);
+            if (sent) *sent = done;
         }
         return static_cast<ssize_t>(done);
     }
@@ -1561,12 +1564,16 @@ static OneRequestResult doOneHttpRequestImpl(
         req += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     req += "\r\n" + body;
 
-    if (conn.write(req.c_str(), req.size()) < 0) {
+    size_t sent = 0;
+    if (conn.write(req.c_str(), req.size(), &sent) < 0) {
         // Reused-socket send failure is the classic stale-conn signature:
         // peer closed between the pool's last probe and our write. Signal
         // the wrapper to retry once on a fresh socket. Fresh-socket writes
-        // always surface as the original error.
-        if (!isFreshSocket) throw HttpRetryOnFresh{};
+        // always surface as the original error. Once part of the request
+        // is out, only a method that's safe to repeat is resent — the
+        // server may already be acting on a POST's first bytes.
+        if (!isFreshSocket && (sent == 0 || isIdempotentMethod(method)))
+            throw HttpRetryOnFresh{};
         throw RuntimeError("Failed to send HTTP request", 0);
     }
 

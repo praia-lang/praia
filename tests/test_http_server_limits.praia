@@ -35,14 +35,23 @@ func stopServer(srv) {
 
 func rawRequest(port, payload) {
     let sock = net.connect("127.0.0.1", port)
-    // A stalled response ends the read (and fails the test) instead of
-    // hanging the suite
+    // A stalled response ends the read instead of hanging the suite.
+    // net.recv returns "" on close and on timeout alike, so an empty read
+    // that only came back after the timeout means the response never
+    // finished — an error, not a short response.
     net.setTimeout(sock, 15000)
     net.send(sock, payload)
     let resp = ""
     while (true) {
+        let started = time.now()
         let chunk = net.recv(sock, 4096)
-        if (chunk == nil || len(chunk) == 0) { break }
+        if (chunk == nil || len(chunk) == 0) {
+            if (time.now() - started >= 14900) {
+                net.close(sock)
+                throw "rawRequest: timed out waiting for the response"
+            }
+            break
+        }
         resp = resp + chunk
     }
     net.close(sock)

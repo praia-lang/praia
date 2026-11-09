@@ -186,7 +186,7 @@ Praia/
 
 Praia is still in active development. The language is generally functional, but some rough edges remain:
 
-* **Async tasks are isolated (VM only)** - the bytecode VM deep-copies the globals a task can reach, its arguments, captured variables, and instances for each `async` call, and tasks run in true parallel. A closure passed into a task still shares its captured variables with the code that created it, so don't change that state from both sides. The tree-walker (`--tree`) runs async tasks in parallel but shares environments, so concurrent mutation of globals/closures can race. Use the VM (default) for correct async isolation.
+* **Async tasks are isolated** - each `async` call runs in true parallel on its own copies: the bytecode VM deep-copies the globals a task can reach, its arguments, captured variables, and instances; the tree-walker (`--tree`) deep-copies the globals, closure environments, arguments, and instances for each task. On the VM, a closure passed into a task still shares its captured variables with the code that created it, so don't change that state from both sides. Under `--tree`, callbacks an async native makes (an `async server.listen` handler) resolve globals through the caller's environment.
 * **No native Windows support** - Praia uses POSIX APIs for sockets, terminal I/O, and environment variables. Works on macOS, Linux, and Windows via WSL. Should work on BSD systems but is untested.
 * **Tree-walker GC is conservative** - the bytecode VM runs cycle collection during execution. The tree-walker (`--tree`) only collects between top-level statements, so long-running single-statement loops (e.g., server `while(true)`) won't trigger collection. Use the VM (default) for best GC behavior.
 

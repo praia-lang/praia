@@ -95,35 +95,41 @@ std::shared_ptr<GcHeap::LentObjects> GcHeap::beginLending() {
 
 void GcHeap::endLending() { lending_.reset(); }
 
-// The containers reachable from `root`, without going into callables
+// The containers reachable from `root`, without going into callables.
+// Called on values the calling thread is handing over (and holds a lock
+// for), so their contents stay put while it reads them: the work stack
+// holds pointers into them, and only containers go on it — a 100k-number
+// array is one push, not 100k Value copies.
 static void collectContainers(const Value& root, std::unordered_set<void*>& seen,
                               std::vector<std::weak_ptr<void>>& out) {
-    std::vector<Value> work{root};
+    auto isContainer = [](const Value& v) {
+        return v.isArray() || v.isMap() || v.isSet() || v.isInstance() ||
+               v.isTagged() || v.isGenerator();
+    };
+    std::vector<const Value*> work;
+    if (isContainer(root)) work.push_back(&root);
+    auto push = [&](const Value& v) { if (isContainer(v)) work.push_back(&v); };
+    // Reads the shared_ptr in place, without copying it
     auto add = [&](const auto& p) {
         if (!p || !seen.insert(static_cast<void*>(p.get())).second) return false;
         out.push_back(std::weak_ptr<void>(p));
         return true;
     };
     while (!work.empty()) {
-        Value v = std::move(work.back());
+        const auto& d = work.back()->data;
         work.pop_back();
-        if (v.isArray()) {
-            auto a = v.asArray();
-            if (add(a)) for (auto& e : a->elements) work.push_back(e);
-        } else if (v.isMap()) {
-            auto m = v.asMap();
-            if (add(m)) for (auto& [k, e] : m->entries) { work.push_back(k); work.push_back(e); }
-        } else if (v.isSet()) {
-            auto st = v.asSet();
-            if (add(st)) for (auto& e : st->elements) work.push_back(e);
-        } else if (v.isInstance()) {
-            auto inst = v.asInstance();
-            if (add(inst)) for (auto& [k, e] : inst->fields) work.push_back(e);
-        } else if (v.isTagged()) {
-            auto t = v.asTagged();
-            if (add(t)) for (auto& e : t->values) work.push_back(e);
-        } else if (v.isGenerator()) {
-            add(v.asGenerator());
+        if (auto* a = std::get_if<std::shared_ptr<PraiaArray>>(&d)) {
+            if (add(*a)) for (auto& e : (*a)->elements) push(e);
+        } else if (auto* m = std::get_if<std::shared_ptr<PraiaMap>>(&d)) {
+            if (add(*m)) for (auto& [k, e] : (*m)->entries) { push(k); push(e); }
+        } else if (auto* st = std::get_if<std::shared_ptr<PraiaSet>>(&d)) {
+            if (add(*st)) for (auto& e : (*st)->elements) push(e);
+        } else if (auto* inst = std::get_if<std::shared_ptr<PraiaInstance>>(&d)) {
+            if (add(*inst)) for (auto& [k, e] : (*inst)->fields) push(e);
+        } else if (auto* t = std::get_if<std::shared_ptr<PraiaTagged>>(&d)) {
+            if (add(*t)) for (auto& e : (*t)->values) push(e);
+        } else if (auto* g = std::get_if<std::shared_ptr<PraiaGenerator>>(&d)) {
+            add(*g);
         }
     }
 }
