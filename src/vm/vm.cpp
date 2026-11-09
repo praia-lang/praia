@@ -575,8 +575,7 @@ Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
         // so a VM that keeps calling back — a server's handler — doesn't
         // creep toward stack overflow one failure at a time
         currentVm->setStackTop(savedStackTop);
-        throw RuntimeError(
-            currentVm->lastError().empty() ? "Callback failed" : currentVm->lastError(), 0);
+        currentVm->rethrowLastError("Callback failed");
     }
 
     return currentVm->pop();
@@ -1049,6 +1048,11 @@ Value VM::lookupGlobal(const std::string& name) const {
     return globals[slot];
 }
 
+void VM::rethrowLastError(const char* fallback) const {
+    if (lastErrorWasThrow_) throw ThrowSignal{lastThrown_, lastErrorLine_, lastErrorColumn_};
+    throw RuntimeError(lastError_.empty() ? fallback : lastError_, 0);
+}
+
 void VM::unwindFramesAndRunDefers(int targetFrameCount) {
     // Mirrors the unwind loop in tryHandleError, but with no
     // handler to stop at — used on uncaught-error / sys.exit
@@ -1063,6 +1067,10 @@ void VM::unwindFramesAndRunDefers(int targetFrameCount) {
         }
         frameCount--;
     }
+    // The try blocks of the frames just removed go with them: left
+    // behind, a later error could jump into a frame that's gone
+    while (!exceptionHandlers.empty() && exceptionHandlers.back().frameIndex >= frameCount)
+        exceptionHandlers.pop_back();
 }
 
 void VM::runDefers(int frameIdx) {
@@ -3358,6 +3366,23 @@ VM::Result VM::execute(int baseFrameCount_) {
         // Interpreter::interpret).
         unwindFramesAndRunDefers(baseFrameCount_);
         throw; // propagate sys.exit() to main
+    } catch (const ThrowSignal& sig) {
+        // A Praia `throw` from Praia code an instruction ran (an operator
+        // overload's body, see rethrowLastError): the same value goes to
+        // the script's try, or is reported as uncaught like OP_THROW does
+        if (frameCount > 0 && tryHandleError(sig.value)) continue;
+        int line = frameCount > 0 ? CURRENT_LINE() : sig.line;
+        int column = frameCount > 0 ? CURRENT_COLUMN() : sig.column;
+        lastError_ = sig.value.toString();
+        lastThrown_ = sig.value;
+        lastErrorWasThrow_ = true;
+        recordUncaught(line, column);
+        if (!suppressErrors_ && executeDepth_ <= 1) {
+            std::cerr << formatLocation(line, column) << " Uncaught error: " << lastError_ << std::endl;
+            std::cerr << formatStackTrace();
+        }
+        unwindFramesAndRunDefers(baseFrameCount_);
+        return Result::RUNTIME_ERROR;
     } catch (const RuntimeError& err) {
         // Thrown out of an instruction instead of raised with RUNTIME_ERR:
         // an error in an operator overload's body (__add, __eq, ...), the

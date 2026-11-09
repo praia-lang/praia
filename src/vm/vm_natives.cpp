@@ -25,8 +25,7 @@ Value callWithVM(VM& vm, std::shared_ptr<Callable> callable, const std::vector<V
         if (!vm.callClosure(vmcc->closure, static_cast<int>(args.size()), 0))
             throw RuntimeError(vm.lastError().empty() ? "Call failed" : vm.lastError(), 0);
         auto result = vm.execute(savedFrameCount);
-        if (result != VM::Result::OK)
-            throw RuntimeError(vm.lastError().empty() ? "Callback failed" : vm.lastError(), 0);
+        if (result != VM::Result::OK) vm.rethrowLastError("Callback failed");
         return vm.pop();
     }
 
@@ -40,8 +39,7 @@ Value callWithVM(VM& vm, std::shared_ptr<Callable> callable, const std::vector<V
             throw RuntimeError(vm.lastError().empty() ? "Call failed" : vm.lastError(), 0);
         vm.frames[vm.frameCount - 1].definingClass = bound->definingClass;
         auto result = vm.execute(savedFrameCount);
-        if (result != VM::Result::OK)
-            throw RuntimeError(vm.lastError().empty() ? "Callback failed" : vm.lastError(), 0);
+        if (result != VM::Result::OK) vm.rethrowLastError("Callback failed");
         return vm.pop();
     }
 

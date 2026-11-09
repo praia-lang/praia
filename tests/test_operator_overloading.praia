@@ -116,6 +116,20 @@ testing.test("an error inside an operator overload can be caught", lam{ in
     testing.expectContains(caught[2], "no indexing", nil)
 })
 
+testing.test("a value thrown inside an overload arrives unchanged", lam{ in
+    class Thrower {
+        func __add(o) { throw {code: 7} }
+        func __eq(o) { throw Err("nope") }
+    }
+    let a = nil
+    try { Thrower() + 1 } catch (e) { a = e }
+    testing.expectEqual(type(a), "map", nil)
+    testing.expectEqual(a.code, 7, nil)
+    let b = nil
+    try { Thrower() == 1 } catch (e) { b = e }
+    testing.expectEqual(b, Err("nope"), nil)
+})
+
 testing.test("endless recursion through an operator overload can be caught", lam{ in
     let msg = nil
     try { Endless() + 1 } catch (e) { msg = str(e) }
