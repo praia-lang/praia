@@ -581,6 +581,8 @@ namespace praia::detail {
 // of recursion, so deep values can't overflow the stack. A pair already
 // being compared counts as equal when it comes round again: that ends
 // cycles (two self-containing arrays are equal) and skips shared parts.
+// Pairs are only recorded once a comparison has gone on for a while, so
+// small comparisons skip the bookkeeping; a cycle always gets that far.
 inline bool deepEqual(const Value& a, const Value& b) {
     struct PairHash {
         size_t operator()(const std::pair<const void*, const void*>& p) const {
@@ -589,20 +591,24 @@ inline bool deepEqual(const Value& a, const Value& b) {
     };
     std::vector<std::pair<const Value*, const Value*>> todo{{&a, &b}};
     std::unordered_set<std::pair<const void*, const void*>, PairHash> seen;
+    size_t steps = 0;
+    auto revisit = [&](const void* p, const void* q) {
+        return ++steps > 1024 && !seen.insert({p, q}).second;
+    };
     while (!todo.empty()) {
         auto [x, y] = todo.back();
         todo.pop_back();
         if (x->isArray() && y->isArray()) {
             auto* p = std::get<std::shared_ptr<PraiaArray>>(x->data).get();
             auto* q = std::get<std::shared_ptr<PraiaArray>>(y->data).get();
-            if (p == q || !seen.insert({p, q}).second) continue;
+            if (p == q || revisit(p, q)) continue;
             if (p->elements.size() != q->elements.size()) return false;
             for (size_t i = 0; i < p->elements.size(); i++)
                 todo.push_back({&p->elements[i], &q->elements[i]});
         } else if (x->isMap() && y->isMap()) {
             auto* p = std::get<std::shared_ptr<PraiaMap>>(x->data).get();
             auto* q = std::get<std::shared_ptr<PraiaMap>>(y->data).get();
-            if (p == q || !seen.insert({p, q}).second) continue;
+            if (p == q || revisit(p, q)) continue;
             if (p->entries.size() != q->entries.size()) return false;
             for (auto& [k, v] : p->entries) {
                 auto it = q->entries.find(k);
@@ -612,7 +618,7 @@ inline bool deepEqual(const Value& a, const Value& b) {
         } else if (x->isTagged() && y->isTagged()) {
             auto* p = std::get<std::shared_ptr<PraiaTagged>>(x->data).get();
             auto* q = std::get<std::shared_ptr<PraiaTagged>>(y->data).get();
-            if (p == q || !seen.insert({p, q}).second) continue;
+            if (p == q || revisit(p, q)) continue;
             if (p->tag != q->tag || p->values.size() != q->values.size()) return false;
             for (size_t i = 0; i < p->values.size(); i++)
                 todo.push_back({&p->values[i], &q->values[i]});

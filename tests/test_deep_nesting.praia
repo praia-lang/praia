@@ -84,10 +84,35 @@ testing.test("code nested too deeply is an error, not a crash", lam{ in
     fs.write(parens, "print(" + "(" * 20000 + "1" + ")" * 20000 + ")\n")
     let chain = path.join(dir, "chain.praia")
     fs.write(chain, "let a = 1\nprint(a" + " + a" * 300000 + ")\n")
+    // Each reported once, not again by every enclosing level
+    // Deep enough not to fit even in the 64 MB stack GNU make gives the
+    // commands it runs (make test-gc-stress)
+    let sources = {
+        blocks: "let x = 0\n" + "if (true) { " * 100000 + "x = 1" + " }" * 100000 + "\n",
+        assignments: "let a = 0\n" + "a = " * 100000 + "1\n",
+        awaits: "print(" + "await " * 100000 + "1)\n",
+    }
+    let unreadable = [parens]
+    for ({key, value} in sources) {
+        let file = path.join(dir, key + ".praia")
+        fs.write(file, value)
+        unreadable.push(file)
+    }
     for (engine in [[], ["--tree"]]) {
-        let r = sys.exec(["./praia", ...engine, parens])
-        testing.expectEqual(r.exitCode, 2, "%{engine} parens: a parse error")
-        testing.expectContains(r.stderr, "nested too deeply", nil)
+        for (file in unreadable) {
+            // How deep the parser gets depends on the stack it's given, so
+            // a big enough one may read it all: then running it is what
+            // stops (or it just runs). Never a crash, never an error per level.
+            let r = sys.exec(["./praia", ...engine, file])
+            testing.expect(r.exitCode == 0 || r.exitCode == 2 || r.exitCode == 3,
+                "%{engine} %{file}: an error, not a crash (exit %{r.exitCode})")
+            if (r.exitCode != 0) {
+                testing.expect(r.stderr.contains("nested too deeply") || r.stderr.contains("Stack overflow"),
+                    "%{engine} %{file}: " + r.stderr.slice(0, 200))
+                let errors = filter(r.stderr.split("\n"), lam{ l in l.contains("rror") })
+                testing.expectEqual(len(errors), 1, "%{engine} %{file}: one error")
+            }
+        }
         // A chain is read in a loop, so it parses; compiling it (VM) or
         // running it (tree-walker) is what goes too deep
         let c = sys.exec(["./praia", ...engine, chain])

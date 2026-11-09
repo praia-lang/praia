@@ -42,6 +42,7 @@ std::vector<StmtPtr> Parser::parse() {
             }
             consumeStatementSeparator();
         } catch (const ParseError&) {
+            if (nestedTooDeeply) break;   // see checkDepth
             synchronize();
         }
     }
@@ -51,7 +52,7 @@ std::vector<StmtPtr> Parser::parse() {
 // ── Statements ───────────────────────────────────────────────
 
 StmtPtr Parser::statement() {
-    if (praia::stackNearlyFull()) throw error(peek(), "Code nested too deeply");
+    checkDepth("Code nested too deeply");
     // Decorator: @expr func name(...) { ... }
     // Desugars to: func name(...){...}; name = expr(name)
     if (check(TokenType::AT)) {
@@ -814,6 +815,7 @@ StmtPtr Parser::block() {
             }
             consumeStatementSeparator();
         } catch (const ParseError&) {
+            if (nestedTooDeeply) throw;   // see checkDepth
             synchronize();
         }
     }
@@ -825,11 +827,12 @@ StmtPtr Parser::block() {
 // ── Expressions (precedence climbing) ────────────────────────
 
 ExprPtr Parser::expression() {
-    if (praia::stackNearlyFull()) throw error(peek(), "Expression nested too deeply");
+    checkDepth("Expression nested too deeply");
     return assignment();
 }
 
 ExprPtr Parser::assignment() {
+    checkDepth("Expression nested too deeply");
     auto expr = pipe();
 
     // Check for compound assignment: +=, -=, *=, /=, %=
@@ -939,6 +942,7 @@ ExprPtr Parser::pipe() {
 }
 
 ExprPtr Parser::ternary() {
+    checkDepth("Expression nested too deeply");
     auto expr = nilCoalesce();
     if (match(TokenType::QUESTION)) {
         int ln = previous().line;
@@ -1139,9 +1143,10 @@ ExprPtr Parser::multiplication() {
 }
 
 ExprPtr Parser::unary() {
+    // Also reached recursively through `await`
+    checkDepth("Expression nested too deeply");
     if (match(TokenType::NOT) || match(TokenType::MINUS) || match(TokenType::BIT_NOT)) {
         Token op = previous();
-        if (praia::stackNearlyFull()) throw error(op, "Expression nested too deeply");
         auto operand = unary(); // right-recursive for chaining: !!x, --x
         auto expr = std::make_unique<UnaryExpr>();
         expr->line = op.line;
@@ -1732,6 +1737,12 @@ Token Parser::consume(TokenType type, const std::string& message) {
 
 bool Parser::isAtEnd() const {
     return tokens[current].type == TokenType::EOF_TOKEN;
+}
+
+void Parser::checkDepth(const char* message) {
+    if (!praia::stackNearlyFull()) return;
+    nestedTooDeeply = true;
+    throw error(peek(), message);
 }
 
 Parser::ParseError Parser::error(const Token& token, const std::string& message) {
