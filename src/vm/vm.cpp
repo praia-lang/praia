@@ -1457,6 +1457,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         return Result::RUNTIME_ERROR; \
     }
 
+    for (;;) {   // dispatch picks up here after a handler catches an error thrown below
     try {
     for (;;) {
         // Cross-thread post fast-path: a single acquire load per
@@ -3358,10 +3359,14 @@ VM::Result VM::execute(int baseFrameCount_) {
         unwindFramesAndRunDefers(baseFrameCount_);
         throw; // propagate sys.exit() to main
     } catch (const RuntimeError& err) {
-        // Fatal error (e.g. stack overflow from push())
-        lastError_ = err.what();
-        lastErrorWasThrow_ = false;
-        recordUncaught(err.line, err.column);
+        // Thrown out of an instruction instead of raised with RUNTIME_ERR:
+        // an error in an operator overload's body (__add, __eq, ...), the
+        // stack guard, the value stack overflowing in push(). It goes to
+        // the script's try like any other error, or is reported.
+        if (frameCount > 0 && tryHandleError(praia::wrapRuntimeErrorForVm(*this, err))) continue;
+        if (err.line > 0) runtimeError(err.what(), err.line, err.column);
+        else if (frameCount > 0) runtimeError(err.what(), CURRENT_LINE(), CURRENT_COLUMN());
+        else runtimeError(err.what(), 0);
         unwindFramesAndRunDefers(baseFrameCount_);
         return Result::RUNTIME_ERROR;
     } catch (const std::exception& err) {
@@ -3381,6 +3386,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         else runtimeError("unknown native error", 0);
         unwindFramesAndRunDefers(baseFrameCount_);
         return Result::RUNTIME_ERROR;
+    }
     }
 
     #undef FRAME
