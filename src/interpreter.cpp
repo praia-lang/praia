@@ -549,6 +549,7 @@ void Interpreter::checkInterrupt(int line, int column) {
 
 void Interpreter::execute(const Stmt* stmt) {
     checkInterrupt(stmt->line, stmt->column);
+    praia::checkStack(stmt->line, stmt->column);
 
     switch (stmt->type) {
     case StmtType::Expr: {
@@ -941,6 +942,7 @@ void Interpreter::execute(const Stmt* stmt) {
 
 Value Interpreter::evaluate(const Expr* expr) {
     checkInterrupt(expr->line, expr->column);
+    praia::checkStack(expr->line, expr->column);
 
     switch (expr->type) {
     // ── Literals ──
@@ -1673,6 +1675,7 @@ Value Interpreter::evaluate(const Expr* expr) {
         };
 
         deepCopy = [&](const Value& v) -> Value {
+            praia::checkStack();   // a value too deep to copy fails the async call
             if (v.isMap()) {
                 void* key = static_cast<void*>(v.asMap().get());
                 auto it = valueVisited.find(key);

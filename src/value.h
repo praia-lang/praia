@@ -35,6 +35,15 @@ struct RuntimeError : std::runtime_error {
         : std::runtime_error(msg), line(line), column(column) {}
 };
 
+namespace praia {
+// Stops deep recursion with an error before the stack runs out (see
+// stack_guard.h). Same message as the call-depth limits.
+inline void checkStack(int line = 0, int column = 0) {
+    if (stackNearlyFull())
+        throw RuntimeError("Stack overflow (too many nested calls)", line, column);
+}
+}
+
 inline std::string formatLocation(int line, int column = 0) {
     if (column > 0)
         return "[line " + std::to_string(line) + ":col " + std::to_string(column) + "]";
@@ -483,6 +492,9 @@ inline std::string Value::toString() const {
 }
 
 inline std::string valueToStringRec(const Value& v, std::unordered_set<const void*>& visited) {
+    // Too deep to print the rest: printing is used from many places that
+    // don't expect an error, so this part is left out instead
+    if (praia::stackNearlyFull()) return "...";
     if (v.isNil())    return "nil";
     if (v.isBool())   return v.asBool() ? "true" : "false";
     if (v.isInt())    return std::to_string(v.asInt());

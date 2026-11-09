@@ -13,6 +13,7 @@
 // On error, throws RuntimeError so the calling native (filter/map/sort) propagates
 // the error back to OP_CALL's catch, which feeds it into the VM's exception system.
 Value callWithVM(VM& vm, std::shared_ptr<Callable> callable, const std::vector<Value>& args) {
+    praia::checkStack();   // each call from a native nests another VM::execute
     // VM closure — dispatch based on type, not vm pointer (closures from
     // async tasks may have a stale vm but are still valid VMClosureCallable)
     auto* vmcc = dynamic_cast<VMClosureCallable*>(callable.get());

@@ -4,6 +4,7 @@
 #include "../gc_heap.h"
 
 void Compiler::compileExpr(const Expr* expr) {
+    if (tooDeep(expr->line)) return;
     switch (expr->type) {
     case ExprType::Number:    compileNumberExpr(static_cast<const NumberExpr*>(expr)); break;
     case ExprType::String:    compileStringExpr(static_cast<const StringExpr*>(expr)); break;

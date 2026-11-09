@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "stack_guard.h"
 #include <array>
 #include <iostream>
 
@@ -50,6 +51,7 @@ std::vector<StmtPtr> Parser::parse() {
 // ── Statements ───────────────────────────────────────────────
 
 StmtPtr Parser::statement() {
+    if (praia::stackNearlyFull()) throw error(peek(), "Code nested too deeply");
     // Decorator: @expr func name(...) { ... }
     // Desugars to: func name(...){...}; name = expr(name)
     if (check(TokenType::AT)) {
@@ -823,6 +825,7 @@ StmtPtr Parser::block() {
 // ── Expressions (precedence climbing) ────────────────────────
 
 ExprPtr Parser::expression() {
+    if (praia::stackNearlyFull()) throw error(peek(), "Expression nested too deeply");
     return assignment();
 }
 
@@ -1138,6 +1141,7 @@ ExprPtr Parser::multiplication() {
 ExprPtr Parser::unary() {
     if (match(TokenType::NOT) || match(TokenType::MINUS) || match(TokenType::BIT_NOT)) {
         Token op = previous();
+        if (praia::stackNearlyFull()) throw error(op, "Expression nested too deeply");
         auto operand = unary(); // right-recursive for chaining: !!x, --x
         auto expr = std::make_unique<UnaryExpr>();
         expr->line = op.line;

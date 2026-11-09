@@ -137,6 +137,7 @@ static std::pair<bool, Value> vmCallDunder(VM& vm, const Value& instance,
 // but lets different subtrees clone shared sub-objects independently.
 static Value deepCopyForTask(const Value& v,
                              std::unordered_map<void*, Value>& visited) {
+    praia::checkStack();   // a value too deep to copy fails the async call
     if (v.isCallable()) {
         auto* vmcc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
         if (vmcc) {
@@ -221,35 +222,38 @@ static Value deepCopyForTask(const Value& v,
 // deepCopyForTask. Necessary so closures *returned* from the task that get
 // invoked on the parent thread post-await can fall back to the right VM
 // (VM::current() is null on a non-executing thread).
-static void rewireForTaskVm(Value& v, VM* taskVm,
+static void rewireForTaskVm(Value& root, VM* taskVm,
                             std::unordered_set<void*>& visited) {
-    if (v.isCallable()) {
-        auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
-        if (vc) vc->vm = taskVm;
-    }
-    if (v.isMap()) {
-        void* p = static_cast<void*>(v.asMap().get());
-        if (visited.insert(p).second)
-            for (auto& [k, mv] : v.asMap()->entries)
-                rewireForTaskVm(mv, taskVm, visited);
-    }
-    if (v.isArray()) {
-        void* p = static_cast<void*>(v.asArray().get());
-        if (visited.insert(p).second)
-            for (auto& el : v.asArray()->elements)
-                rewireForTaskVm(el, taskVm, visited);
-    }
-    if (v.isTagged()) {
-        void* p = static_cast<void*>(v.asTagged().get());
-        if (visited.insert(p).second)
-            for (auto& el : v.asTagged()->values)
-                rewireForTaskVm(el, taskVm, visited);
-    }
-    if (v.isInstance()) {
-        void* p = static_cast<void*>(v.asInstance().get());
-        if (visited.insert(p).second)
-            for (auto& [k, fv] : v.asInstance()->fields)
-                rewireForTaskVm(fv, taskVm, visited);
+    // A work list, not recursion: it runs on the task's thread, whose
+    // stack (512 KB on macOS) may be far smaller than the one that copied
+    std::vector<Value*> work{&root};
+    while (!work.empty()) {
+        Value& v = *work.back();
+        work.pop_back();
+        if (v.isCallable()) {
+            auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
+            if (vc) vc->vm = taskVm;
+        }
+        if (v.isMap()) {
+            void* p = static_cast<void*>(v.asMap().get());
+            if (visited.insert(p).second)
+                for (auto& [k, mv] : v.asMap()->entries) work.push_back(&mv);
+        }
+        if (v.isArray()) {
+            void* p = static_cast<void*>(v.asArray().get());
+            if (visited.insert(p).second)
+                for (auto& el : v.asArray()->elements) work.push_back(&el);
+        }
+        if (v.isTagged()) {
+            void* p = static_cast<void*>(v.asTagged().get());
+            if (visited.insert(p).second)
+                for (auto& el : v.asTagged()->values) work.push_back(&el);
+        }
+        if (v.isInstance()) {
+            void* p = static_cast<void*>(v.asInstance().get());
+            if (visited.insert(p).second)
+                for (auto& [k, fv] : v.asInstance()->fields) work.push_back(&fv);
+        }
     }
 }
 
@@ -537,6 +541,7 @@ to call VM closures through the tree-walker's Callable interface.
 Uses VM::current() so closures returned from async tasks work correctly
 even after the task VM is destroyed. */
 Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
+    praia::checkStack();   // nests another VM::execute
     // Prefer VM::current() (always the live VM). Fall back to stored vm only
     // when there's no active execute() (tree-walker compatibility path).
     // Async-returned closures have vm=nullptr, so this always does the right thing.
@@ -2860,6 +2865,9 @@ VM::Result VM::execute(int baseFrameCount_) {
 
         case OpCode::OP_ASYNC_NAMED:
         case OpCode::OP_ASYNC: {
+            // Errors setting the task up (copying its arguments, captures
+            // and globals) are the script's to catch, like a native's
+            try {
             uint8_t argc = READ_BYTE();
 
             // For OP_ASYNC_NAMED, read the names constant and reorder args
@@ -3290,6 +3298,10 @@ VM::Result VM::execute(int baseFrameCount_) {
             // so the tracker only ever holds in-flight tasks.
             retainInflightFuture(sharedFuture);
             push(Value(fut));
+            break;
+            } catch (const RuntimeError& err) {
+                RUNTIME_ERR(err.what());   // a value too deep to copy, say
+            }
             break;
         }
 

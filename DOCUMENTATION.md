@@ -1501,6 +1501,8 @@ func fib(n) {
 print(fib(10))      // 55
 ```
 
+Calls can nest about 256 deep. Inside an async task or a generator, the tree-walker (`--tree`) runs on a smaller stack, so the limit there is lower. Going past it throws a `Stack overflow (too many nested calls)` error, which `try`/`catch` can catch like any other error.
+
 ### Functions as Values
 
 ```praia
