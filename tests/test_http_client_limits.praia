@@ -222,9 +222,12 @@ tlsTest("totalTimeout bounds a stalled TLS handshake in openStream", lam{ in
 })
 
 testing.test("totalTimeout bounds writing a body the server never reads", lam{ in
+    // Far more than the socket buffers hold. Built before the clock
+    // starts: on a slow runner that alone takes a second or more.
+    let body = "z" * 32000000
     let start = time.now()
     let msg = errorOf(lam{ in http.request({method: "POST", url: "http://127.0.0.1:" + str(STALL_PORT) + "/",
-        body: "z" * 64000000, blockPrivateHosts: false, totalTimeout: 0.8, readTimeout: 30}) })
+        body: body, blockPrivateHosts: false, totalTimeout: 0.8, readTimeout: 30}) })
     let elapsed = time.now() - start
     testing.expectContains(msg, "total timeout", nil)
     testing.expect(elapsed < 3000, "took %{elapsed}ms")
