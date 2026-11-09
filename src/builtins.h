@@ -235,6 +235,25 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr, const std::string& name, i
 Value getMapMethod(std::shared_ptr<PraiaMap> map, const std::string& name, int line);
 Value getSetMethod(std::shared_ptr<PraiaSet> set, const std::string& name, int line);
 
+// `s` repeated `n` times (n >= 0; callers word their own negative-count
+// error). A result too big to make is a RuntimeError, not a C++
+// exception the script can't catch.
+inline std::string repeatString(const std::string& s, int64_t n) {
+    if (s.empty() || n <= 0) return "";   // a huge count of nothing is still nothing
+    size_t total;
+    if (__builtin_mul_overflow(s.size(), static_cast<uint64_t>(n), &total) ||
+        total > std::string().max_size())
+        throw RuntimeError("String repeat result too large", 0);
+    std::string result;
+    try {
+        result.reserve(total);
+    } catch (const std::exception&) {   // bad_alloc, length_error
+        throw RuntimeError("String repeat result too large", 0);
+    }
+    for (int64_t i = 0; i < n; i++) result += s;
+    return result;
+}
+
 // Stable merge sort. Safe with any `less`, even one that isn't a
 // consistent order (std::sort isn't). If `less` throws, what's left in
 // `elems` is unspecified, so sort a copy when the original must survive.

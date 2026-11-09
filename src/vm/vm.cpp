@@ -1562,8 +1562,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                 int64_t n = a.isInt() ? a.asInt() : b.asInt();
                 if (n < 0) { RUNTIME_ERR("String repeat count cannot be negative"); }
                 std::string result;
-                result.reserve(str.size() * n);
-                for (int64_t i = 0; i < n; i++) result += str;
+                try { result = repeatString(str, n); }
+                catch (const RuntimeError& err) { RUNTIME_ERR(err.what()); }
                 push(Value(std::move(result)));
                 break;
             }

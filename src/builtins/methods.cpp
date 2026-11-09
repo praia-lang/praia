@@ -432,12 +432,11 @@ Value getStringMethod(const std::string& strRef,
         return Value(makeNative("repeat", 1, [s=str](const std::vector<Value>& args) -> Value { const auto& str = *s;
             if (!args[0].isNumber())
                 throw RuntimeError("repeat() requires a number", 0);
-            int count = static_cast<int>(args[0].asNumber());
-            if (count < 0) throw RuntimeError("repeat() count cannot be negative", 0);
-            std::string result;
-            result.reserve(str.size() * count);
-            for (int i = 0; i < count; i++) result += str;
-            return Value(std::move(result));
+            double d = args[0].asNumber();
+            if (d < 0) throw RuntimeError("repeat() count cannot be negative", 0);
+            if (!(d < 9223372036854775808.0))   // also NaN
+                throw RuntimeError("String repeat result too large", 0);
+            return Value(repeatString(str, static_cast<int64_t>(d)));
         }));
     }
     if (name == "padStart") {

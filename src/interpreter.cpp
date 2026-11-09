@@ -1183,18 +1183,20 @@ Value Interpreter::evaluate(const Expr* expr) {
             if (left.isString() && right.isInt()) {
                 int64_t n = right.asInt();
                 if (n < 0) throw RuntimeError("String repeat count cannot be negative", e->line, e->column);
-                std::string result;
-                result.reserve(left.asString().size() * n);
-                for (int64_t i = 0; i < n; i++) result += left.asString();
-                return Value(std::move(result));
+                try {
+                    return Value(repeatString(left.asString(), n));
+                } catch (RuntimeError& err) {
+                    throw RuntimeError(err.what(), e->line, e->column);
+                }
             }
             if (left.isInt() && right.isString()) {
                 int64_t n = left.asInt();
                 if (n < 0) throw RuntimeError("String repeat count cannot be negative", e->line, e->column);
-                std::string result;
-                result.reserve(right.asString().size() * n);
-                for (int64_t i = 0; i < n; i++) result += right.asString();
-                return Value(std::move(result));
+                try {
+                    return Value(repeatString(right.asString(), n));
+                } catch (RuntimeError& err) {
+                    throw RuntimeError(err.what(), e->line, e->column);
+                }
             }
             throw RuntimeError("Operands of '*' must be numbers, or string * int", e->line, e->column);
         case TokenType::SLASH:
