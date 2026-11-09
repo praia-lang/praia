@@ -467,17 +467,14 @@ Interpreter::Interpreter(bool installErrorClasses) {
 
             if (args.size() > 1 && args[1].isCallable()) {
                 auto cmp = args[1].asCallable();
-                std::sort(elems.begin(), elems.end(),
+                sortValues(elems,
                     [&cmp](const Value& a, const Value& b) -> bool {
                         Value result = callSafe(callbackInterp(), cmp, {a, b});
                         if (result.isNumber()) return result.asNumber() < 0;
                         return result.isTruthy();
                     });
             } else {
-                std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
-                    if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
-                    return a.toString() < b.toString();
-                });
+                sortValues(elems);
             }
             return Value(sorted);
         })));

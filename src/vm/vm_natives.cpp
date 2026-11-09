@@ -1,4 +1,5 @@
 #include "vm.h"
+#include "../builtins.h"
 #include "../errors.h"
 #include "../gc_heap.h"
 #include "../interpreter.h"
@@ -238,18 +239,14 @@ void vmRegisterNatives(VM& vm) {
             auto& elems = sorted->elements;
             if (args.size() > 1 && args[1].isCallable()) {
                 auto cmp = args[1].asCallable();
-                std::sort(elems.begin(), elems.end(),
+                sortValues(elems,
                     [vm, &cmp](const Value& a, const Value& b) -> bool {
                         Value result = callWithVM(*vm, cmp, {a, b});
                         if (result.isNumber()) return result.asNumber() < 0;
                         return result.isTruthy();
                     });
             } else {
-                std::sort(elems.begin(), elems.end(),
-                    [](const Value& a, const Value& b) {
-                        if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
-                        return a.toString() < b.toString();
-                    });
+                sortValues(elems);
             }
             return Value(sorted);
         }));

@@ -700,6 +700,37 @@ Value getStringMethod(const std::string& strRef,
     throw RuntimeError("String has no method '" + name + "'", line);
 }
 
+void sortValues(std::vector<Value>& elems,
+                const std::function<bool(const Value&, const Value&)>& less) {
+    auto byDefault = [](const Value& a, const Value& b) {
+        if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
+        return a.toString() < b.toString();
+    };
+    // Bottom-up: merge runs of width 1, 2, 4, ... between elems and a
+    // scratch buffer. Every index comes from the run bounds, never from
+    // what `less` answered, so no answer can take it out of range.
+    size_t n = elems.size();
+    if (n < 2) return;
+    std::vector<Value> buf(n);
+    std::vector<Value>* from = &elems;
+    std::vector<Value>* to = &buf;
+    for (size_t width = 1; width < n; width *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * width) {
+            size_t mid = std::min(lo + width, n), hi = std::min(lo + 2 * width, n);
+            size_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                // Right only when strictly less: equal elements keep their order
+                bool right = less ? less((*from)[j], (*from)[i]) : byDefault((*from)[j], (*from)[i]);
+                (*to)[k++] = right ? (*from)[j++] : (*from)[i++];
+            }
+            while (i < mid) (*to)[k++] = (*from)[i++];
+            while (j < hi) (*to)[k++] = (*from)[j++];
+        }
+        std::swap(from, to);
+    }
+    if (from != &elems) elems.swap(*from);
+}
+
 // Resolve which engine is driving this call and forward to the
 // shared deprecation helper. Method-dispatch already threads both
 // pointers (one will be null), so picking the right state set is a
@@ -850,7 +881,7 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
             auto& elems = out->elements;
             if (!args.empty() && args[0].isCallable()) {
                 auto cmp = args[0].asCallable();
-                std::sort(elems.begin(), elems.end(),
+                sortValues(elems,
                     [&cmp, interp, vm](const Value& a, const Value& b) -> bool {
                         Value result = vm ? callWithVM(*vm, cmp, {a, b})
                                           : callSafe(*interp, cmp, {a, b});
@@ -858,20 +889,20 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
                         return result.isTruthy();
                     });
             } else {
-                std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
-                    if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
-                    return a.toString() < b.toString();
-                });
+                sortValues(elems);
             }
             return Value(out);
         }, {"comparator"}));
     }
     if (name == "sortInPlace") {
         return Value(makeNative("sortInPlace", -1, [arr, interp, vm](const std::vector<Value>& args) -> Value {
-            auto& elems = arr->elements;
+            // Sorted as a copy: the comparator can change the array while
+            // it runs, and a throw leaves the array as it was. What it
+            // changed is replaced by the result.
+            auto elems = arr->elements;
             if (!args.empty() && args[0].isCallable()) {
                 auto cmp = args[0].asCallable();
-                std::sort(elems.begin(), elems.end(),
+                sortValues(elems,
                     [&cmp, interp, vm](const Value& a, const Value& b) -> bool {
                         Value result = vm ? callWithVM(*vm, cmp, {a, b})
                                           : callSafe(*interp, cmp, {a, b});
@@ -879,11 +910,9 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr,
                         return result.isTruthy();
                     });
             } else {
-                std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
-                    if (a.isNumber() && b.isNumber()) return a.asNumber() < b.asNumber();
-                    return a.toString() < b.toString();
-                });
+                sortValues(elems);
             }
+            arr->elements = std::move(elems);
             return Value();
         }, {"comparator"}));
     }

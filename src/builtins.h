@@ -235,3 +235,10 @@ Value getArrayMethod(std::shared_ptr<PraiaArray> arr, const std::string& name, i
 Value getMapMethod(std::shared_ptr<PraiaMap> map, const std::string& name, int line);
 Value getSetMethod(std::shared_ptr<PraiaSet> set, const std::string& name, int line);
 
+// Stable merge sort. Safe with any `less`, even one that isn't a
+// consistent order (std::sort isn't). If `less` throws, what's left in
+// `elems` is unspecified, so sort a copy when the original must survive.
+// With no `less`: numbers by value, the rest by their string form.
+void sortValues(std::vector<Value>& elems,
+                const std::function<bool(const Value&, const Value&)>& less = nullptr);
+

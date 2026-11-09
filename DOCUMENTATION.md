@@ -2308,6 +2308,8 @@ let s = [3, 1, 2].sorted()        // [1, 2, 3]
 [3, 1, 2].sortInPlace()           // mutates receiver
 ```
 
+Sorting is stable: elements the comparator treats as equal keep their order. `sort()`, `.sorted()` and `.sortInPlace()` all work this way. A comparator that isn't a consistent order (one that always returns `true`, say) gives some order of the same elements rather than an error. If a comparator throws, `.sortInPlace()` leaves the array as it was.
+
 ---
 
 ## The sys Namespace

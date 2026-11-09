@@ -43,4 +43,68 @@ testing.test("sort single element", lam{ in
     testing.expectEqual([42] |> sort(lam{ a, b in a - b }), [42], nil)
 })
 
+// A comparator that isn't a consistent order gives some order of the
+// same elements, never a crash
+func bigArray() {
+    let a = []
+    for (i in 0..300) { a.push(i % 7) }
+    return a
+}
+
+func sameElements(a, b) {
+    return a.sorted() == b.sorted()
+}
+
+testing.test("a comparator that always says true", lam{ in
+    let a = bigArray()
+    let r = sort(a, lam{ x, y in true })
+    testing.expect(sameElements(r, a), "same elements")
+    testing.expect(sameElements(a.sorted(lam{ x, y in true }), a), "sorted: same elements")
+})
+
+testing.test("a comparator that answers at random", lam{ in
+    let a = bigArray()
+    let r = sort(a, lam{ x, y in random.int(0, 1) == 1 })
+    testing.expect(sameElements(r, a), "same elements")
+    let b = bigArray()
+    b.sortInPlace(lam{ x, y in random.int(-1, 1) })
+    testing.expect(sameElements(b, a), "sortInPlace: same elements")
+})
+
+testing.test("sortInPlace with a comparator that changes the array", lam{ in
+    let a = bigArray()
+    a.sortInPlace(lam{ x, y in
+        a.push(99)
+        return x < y
+    })
+    testing.expectEqual(len(a), 300, "the sorted copy replaces the array")
+    testing.expectEqual(a, bigArray().sorted(), nil)
+})
+
+testing.test("a throwing comparator leaves sortInPlace's array as it was", lam{ in
+    let a = [3, 1, 2]
+    testing.expectThrows(lam{ in a.sortInPlace(lam{ x, y in throw "no" }) }, nil)
+    testing.expectEqual(a, [3, 1, 2], nil)
+})
+
+testing.test("default sort of mixed numbers and strings", lam{ in
+    let a = [10, "2", 3, "1", 25, "b", 7, "a"]
+    for (i in 0..5) { a = a + a }
+    testing.expectEqual(len(sort(a)), len(a), nil)
+    testing.expectEqual(len(a.sorted()), len(a), nil)
+})
+
+testing.test("sorting is stable", lam{ in
+    let items = []
+    for (i in 0..50) { items.push({key: i % 3, at: i}) }
+    let r = sort(items, lam{ a, b in a.key - b.key })
+    for (i in 1..len(r)) {
+        if (r[i - 1].key == r[i].key) {
+            testing.expect(r[i - 1].at < r[i].at, "equal keys keep their order")
+        }
+    }
+    testing.expectEqual(r[0].at, 0, nil)
+    testing.expectEqual(r[49].at, 47, nil)
+})
+
 testing.done()
