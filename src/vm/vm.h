@@ -19,8 +19,13 @@ struct ObjUpvalue {
     Value* location;      // points into the stack while variable is live
     Value closed;          // holds the value after the variable goes out of scope
     ObjUpvalue* next;      // linked list for open upvalues
+    // The heap of the thread that made it, which writes it without
+    // GcHeap::upvalueMutex; any other thread takes the lock. Null once
+    // its task has ended and the upvalue is in the task's bag.
+    std::atomic<const GcHeap*> owner;
 
-    ObjUpvalue(Value* slot) : location(slot), next(nullptr) {}
+    ObjUpvalue(Value* slot, const GcHeap* ownerHeap)
+        : location(slot), next(nullptr), owner(ownerHeap) {}
 };
 
 // Closure: a compiled function + its captured upvalues
@@ -36,12 +41,18 @@ struct ObjClosure {
     }
 };
 
-// Shared ownership bag for closures/upvalues returned from async tasks.
-// Attached to VMClosureCallable wrappers in the result so the raw pointers
-// survive after the task VM is destroyed.
+// Shared ownership bag for the closures/upvalues an async task creates.
+// Every closure wrapper the task VM makes holds it, so a closure that
+// leaves the task — returned, or stored somewhere the caller can reach
+// (a shared upvalue, a channel) — keeps its raw pointers valid after the
+// task VM is destroyed. The task VM moves its closures and upvalues in
+// when it's destroyed; `mu` guards that hand-off against a collector on
+// another thread walking the bag.
 struct TaskOwnership {
+    std::mutex mu;
     std::vector<std::unique_ptr<ObjClosure>> closures;
     std::vector<std::unique_ptr<ObjUpvalue>> upvalues;
+    std::atomic<bool> vmGone{false};   // the task VM no longer exists
 };
 
 // Wrapper to store ObjClosure as a Callable in Value
@@ -92,6 +103,11 @@ struct VMCallFrame {
 
 class VM {
     friend struct VMScope;
+    // Heap of the thread running execute(), set by VMScope
+    const GcHeap* execHeap_ = nullptr;
+    // Writes `v` to an upvalue, under GcHeap::upvalueMutex unless this
+    // thread owns it. The old value is released after the lock.
+    void writeUpvalue(ObjUpvalue* uv, Value v);
 public:
     VM();
     ~VM();
@@ -128,6 +144,9 @@ public:
     Value pop();
     Value& peek(int distance = 0);
     int getStackTop() const { return stackTop; }
+    // Drop everything above `top` (a value from getStackTop()) — used to
+    // rebalance the stack after a callback fails partway through.
+    void setStackTop(int top) { stackTop = top; }
     Value resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal);
 private:
     void resetStack();
@@ -185,17 +204,26 @@ private:
     std::vector<Value> globals;
     std::unordered_map<std::string, int> globalIndices;
     std::set<std::string> builtinNames_; // names registered via defineNative (for grain isolation)
+    // The natives the engine registered, as they stood before any user
+    // code ran (see recordBuiltinNatives). Shared by every VM made from
+    // this one: grain VMs and task VMs.
+    std::shared_ptr<const std::unordered_set<const Callable*>> builtinNatives_;
 
-    // Lazy/COW globals for async task VMs. On OP_ASYNC the parent hands the
-    // task a shallow-copied `globalsSnapshot_` vector (shared_ptr increments,
-    // no deep-copy) plus a verbatim copy of `globalIndices` so slot numbering
-    // matches. `loadedMask_[slot]==1` means the task has materialized its
-    // own deep-copy into `globals[slot]` and the snapshot entry is no longer
-    // authoritative. `isTaskVm_` gates the lazy-check on the hot path — for
-    // the main VM both fields stay empty and the branch predicts away.
+    // Globals for async task VMs. On OP_ASYNC the parent copies the
+    // globals the task's code can reach into `globalsSnapshot_` (see
+    // captureTaskSeed) plus a verbatim copy of `globalIndices` so slot
+    // numbering matches. `loadedMask_[slot]==1` means the task has moved
+    // its copy into `globals[slot]` and the snapshot entry is no longer
+    // authoritative; `capturedMask_[slot]==0` means the parent copied
+    // nothing for that slot. `isTaskVm_` gates the lazy-check on the hot
+    // path — for the main VM these stay empty and the branch predicts away.
     std::vector<Value> globalsSnapshot_;
     std::vector<uint8_t> loadedMask_;
+    std::vector<uint8_t> capturedMask_;
     bool isTaskVm_ = false;
+    // Task VMs: the bag every closure wrapper this VM creates holds (see
+    // TaskOwnership); filled from allClosures/allUpvalues in ~VM
+    std::shared_ptr<TaskOwnership> taskBag_;
 
     // Helpers. Inline because they're on the global-access hot path.
     int ensureGlobalSlot(const std::string& name) {
@@ -212,10 +240,38 @@ private:
         return (it != globalIndices.end()) ? it->second : -1;
     }
 public:
-    // Slow path: deep-copy globalsSnapshot_[slot] into globals[slot] and
-    // mark it loaded. Called by opcode handlers when isTaskVm_ &&
-    // !loadedMask_[slot].
+    // Slow path: move the parent's copy in globalsSnapshot_[slot] into
+    // globals[slot] and mark it loaded. Called by opcode handlers when
+    // isTaskVm_ && !loadedMask_[slot].
     void lazyLoadGlobal(int slot);
+
+    // Async tasks (OP_ASYNC) run on their own thread in their own VM,
+    // seeded on the parent thread with copies of the globals they can
+    // reach. The task never reads the parent's own objects.
+    struct TaskSeed {
+        std::vector<Value> globals;
+        std::vector<uint8_t> captured;
+        std::unordered_map<std::string, int> globalIndices;
+        std::set<std::string> builtinNames;
+        std::shared_ptr<const std::unordered_set<const Callable*>> builtinNatives;
+    };
+    // On the parent thread: copy `snapVm`'s globals (the VM the task's code
+    // resolves globals against) that code reachable from `roots` can name,
+    // plus this VM's builtin names. Null roots: every global (an async
+    // native, whose callbacks the walk can't see).
+    TaskSeed captureTaskSeed(VM* snapVm, const std::vector<Value>* roots) const;
+    // On the worker thread, on a fresh VM: become that task's VM. With
+    // collectGarbage, the thread's heap collects with this VM as its root
+    // set (the caller must detach the root marker before this VM goes
+    // away); otherwise collection is off for the thread.
+    void initAsTaskVm(TaskSeed&& seed, bool collectGarbage = false);
+    // Records every native reachable from the builtin globals. Called once
+    // native registration is done, before user code can put its own
+    // natives (a server's listen, a Queue's methods) into them.
+    void recordBuiltinNatives();
+    // Give closures/upvalues created in `taskVm` to every VM closure
+    // reachable from `result`, so they outlive the task VM.
+    static void adoptTaskResult(VM& taskVm, Value& result);
 private:
 
     // Open upvalues (linked list, ordered by stack slot desc)

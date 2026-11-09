@@ -1,0 +1,2 @@
+let who = "project lib"
+export { who }

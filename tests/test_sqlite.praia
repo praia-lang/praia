@@ -224,4 +224,99 @@ testing.test("GC-driven close: many discarded handles don't leak", lam{ in
     testing.expect(true, nil)
 })
 
+testing.test("strings with NUL bytes round-trip", lam{ in
+    // Bound and read by byte length: a C-string length used to cut the
+    // value at its first NUL, so "admin\0evil" was stored as "admin"
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "CREATE TABLE t (name TEXT)")
+    sqlite.run(db, "INSERT INTO t VALUES (?)", ["admin\0evil"])
+    let rows = sqlite.query(db, "SELECT name FROM t")
+    testing.expectEqual(rows[0].name, "admin\0evil", nil)
+    testing.expectEqual(len(sqlite.query(db, "SELECT * FROM t WHERE name = ?", ["admin"])), 0,
+                        "no longer confused with \"admin\"")
+    sqlite.close(db)
+})
+
+testing.test("BLOB columns come back byte for byte", lam{ in
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "CREATE TABLE b (x BLOB)")
+    sqlite.run(db, "INSERT INTO b VALUES (x'00ff00')")
+    let bin = bytes.from([0, 255, 1, 0, 128])
+    sqlite.run(db, "INSERT INTO b VALUES (?)", [bin])
+    let rows = sqlite.query(db, "SELECT x FROM b")
+    testing.expectEqual(bytes.toArray(rows[0].x), [0, 255, 0], nil)
+    testing.expectEqual(bytes.toArray(rows[1].x), [0, 255, 1, 0, 128], nil)
+    sqlite.close(db)
+})
+
+testing.test("SQL with more than one statement is an error", lam{ in
+    // The text after the first statement used to be ignored silently
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "CREATE TABLE t (x INTEGER)")
+    testing.expectThrows(lam{ in sqlite.query(db, "SELECT 1; DROP TABLE t") }, nil)
+    testing.expectThrows(lam{ in sqlite.run(db, "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)") }, nil)
+    testing.expectEqual(len(sqlite.query(db, "SELECT * FROM t")), 0, "nothing ran")
+    // A trailing semicolon or comment is still one statement
+    testing.expectEqual(len(sqlite.query(db, "SELECT 1 AS a;  -- done\n")), 1, nil)
+    let nulErr = nil
+    try { sqlite.run(db, "SELECT 1\0; DROP TABLE t") } catch (e) { nulErr = str(e) }
+    testing.expect(nulErr != nil && nulErr.contains("SQL contains a NUL byte"), str(nulErr))
+    // Leading semicolons are empty statements, not a second statement
+    testing.expectEqual(sqlite.query(db, "  ; -- x\n ; SELECT 1 AS a")[0].a, 1, nil)
+    testing.expectThrows(lam{ in sqlite.query(db, "; SELECT 1; SELECT 2") }, nil)
+    sqlite.close(db)
+})
+
+testing.test("a rejected multi-statement string has no effect", lam{ in
+    // Neither the extra statement nor the first one runs, wherever the
+    // PRAGMA sits — foreign-key enforcement stays on
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "PRAGMA foreign_keys=ON")
+    testing.expectThrows(lam{ in sqlite.run(db, "SELECT 1; PRAGMA foreign_keys=OFF") }, nil)
+    testing.expectThrows(lam{ in sqlite.run(db, "PRAGMA foreign_keys=OFF; SELECT 1") }, nil)
+    testing.expectEqual(sqlite.query(db, "PRAGMA foreign_keys")[0].foreign_keys, 1, "still enforced")
+    sqlite.close(db)
+})
+
+testing.test("semicolons inside a trigger body or a string are still one statement", lam{ in
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "CREATE TABLE x (a TEXT)")
+    sqlite.run(db, "CREATE TABLE log (m TEXT)")
+    sqlite.run(db, "CREATE TRIGGER tr AFTER INSERT ON x BEGIN INSERT INTO log VALUES (new.a); INSERT INTO log VALUES (new.a); END;")
+    sqlite.run(db, "INSERT INTO x VALUES (?)", ["a;b"])
+    testing.expectEqual(len(sqlite.query(db, "SELECT * FROM log")), 2, "trigger ran both inserts")
+    testing.expectEqual(sqlite.query(db, "SELECT 'x;y' AS v;")[0].v, "x;y", nil)
+    sqlite.close(db)
+})
+
+testing.test("triggers with CASE ... END in the body are one statement", lam{ in
+    let db = sqlite.open(":memory:")
+    sqlite.run(db, "CREATE TABLE x (a INTEGER)")
+    sqlite.run(db, "CREATE TABLE log (m TEXT)")
+    sqlite.run(db, "CREATE TEMP TRIGGER t1 AFTER INSERT ON x BEGIN INSERT INTO log VALUES (CASE WHEN new.a > 0 THEN 'pos' ELSE 'neg' END); UPDATE log SET m = CASE WHEN m IS NULL THEN 'x' ELSE m END; END;")
+    sqlite.run(db, "CREATE TRIGGER t2 AFTER INSERT ON x BEGIN INSERT INTO log VALUES (CASE new.a WHEN 1 THEN 'one' END); END")
+    sqlite.run(db, "INSERT INTO x VALUES (1)")
+    testing.expectEqual(sqlite.query(db, "SELECT m FROM log ORDER BY m"), [{m: "one"}, {m: "pos"}], nil)
+    // Quotes, identifiers and comments hiding ';' don't end the statement;
+    // a real second statement after a trigger is still refused
+    testing.expectEqual(sqlite.query(db, "SELECT 'it''s;' AS \"a;b\" /* ; */ -- ;\n")[0]["a;b"], "it's;", nil)
+    testing.expectThrows(lam{ in sqlite.run(db, "CREATE TRIGGER t3 AFTER INSERT ON x BEGIN SELECT 1; END; DROP TABLE x") }, nil)
+    testing.expectEqual(len(sqlite.query(db, "SELECT name FROM sqlite_master WHERE name = 't3'")), 0, "t3 wasn't created")
+    sqlite.close(db)
+})
+
+testing.test("SQL with no statement is an error", lam{ in
+    // Used to fail with SQLite's own "not an error"
+    let db = sqlite.open(":memory:")
+    for (sql in ["", "  ", "-- just a comment", " ; ;"]) {
+        let err = nil
+        try { sqlite.query(db, sql) } catch (e) { err = str(e) }
+        testing.expect(err != nil && err.contains("no SQL statement"), str(err))
+        err = nil
+        try { sqlite.run(db, sql) } catch (e) { err = str(e) }
+        testing.expect(err != nil && err.contains("no SQL statement"), str(err))
+    }
+    sqlite.close(db)
+})
+
 testing.done()

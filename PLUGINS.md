@@ -649,7 +649,7 @@ See [`examples/plugins/strutil.cpp`](examples/plugins/strutil.cpp) for a full ex
 Plugin code can be called from one of three contexts. Pick the one that matches what your plugin does:
 
 - **Synchronous calls.** Most plugins. Praia invokes your native function on its own thread; `gcNew` works as expected, `praia::call` works for callbacks, the GC sees your containers normally.
-- **Inside an `async` task.** Praia ships your function to a worker thread for the task's lifetime, with the GC disabled while the task runs. You can still use `gcNew` for short-lived intermediate containers, but **don't let a `gcNew`-built object escape the task scope** — it isn't tracked by the parent's GC. Either return primitives, deep-copy outside the plugin, or marshal the work back to the parent. See the [async/Lock guide](https://praia.sh/docs/advanced/async) for the matching pattern on the Praia side.
+- **Inside an `async` task.** Praia ships your function to a worker thread for the task's lifetime. `gcNew` works as usual there: the objects you build are tracked by that thread, and when the task ends they move to the garbage collector of the thread that started it — the value you return included. What you must not do is hand a `gcNew`-built object to another thread while the task is still running, except through `Queue` or `SharedMap`. See the [async/Lock guide](https://praia.sh/docs/advanced/async) for the matching pattern on the Praia side.
 - **Off-engine threads (e.g. libuv callback, your own `std::thread`).** Both `gcNew` and `praia::call` are unsafe. Use [`praia::postToEngine`](#calling-back-from-background-threads--praiaposttoengine) to schedule the work back on the engine thread.
 
 ## Distributing prebuilt binaries

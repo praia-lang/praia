@@ -163,7 +163,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/vm $(BUILD_DIR)/builtins
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(SRC_DIR)/version.h
+	rm -rf $(BUILD_DIR) $(INSTALL_BUILD_DIR) $(TARGET) $(SRC_DIR)/version.h
 
 # ── Install / Uninstall ──
 # Usage: make install PREFIX=/usr/local
@@ -189,8 +189,22 @@ LIBDIR  ?= $(PREFIX)/lib/praia
 BINDIR   = $(PREFIX)/bin
 SAND_DIR = sand
 
+# The install build gets its own objects (they're compiled with
+# PRAIA_LIBDIR) in build_install, inside the source tree, cleared before
+# and after. A sibling of build/, not inside it: under `sudo make
+# install` a fresh checkout would otherwise get a root-owned build/
+# that a later plain `make` can't write to. Not under /tmp or $TMPDIR:
+# another local user could create or swap a directory there, and the
+# build would load their .d files (make -include runs them) and link
+# their .o files during `sudo make install`. The source tree is already trusted — anyone who
+# can write to it can change the code being built — and the path is
+# relative, so it never contains spaces Make can't handle.
+INSTALL_BUILD_DIR = build_install
+
 install:
-	$(MAKE) BUILD_DIR=/tmp/praia-install-build CXXFLAGS='$(CXXFLAGS) -DPRAIA_LIBDIR="\"$(LIBDIR)\""'
+	rm -rf $(INSTALL_BUILD_DIR)
+	$(MAKE) BUILD_DIR=$(INSTALL_BUILD_DIR) CXXFLAGS='$(CXXFLAGS) -DPRAIA_LIBDIR="\"$(LIBDIR)\""' || { rm -rf $(INSTALL_BUILD_DIR); exit 1; }
+	rm -rf $(INSTALL_BUILD_DIR)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
 	install -d $(DESTDIR)$(LIBDIR)/include
@@ -218,7 +232,6 @@ install:
 	cp -R $(SAND_DIR)/grain.yaml $(DESTDIR)$(LIBDIR)/ext_grains/sand/
 	@printf "#!/bin/sh\n# sand-managed wrapper for sand\nexec '$(BINDIR)/praia' '$(LIBDIR)/ext_grains/sand/main.praia' \"\$$@\"\n" > $(DESTDIR)$(BINDIR)/sand
 	chmod 755 $(DESTDIR)$(BINDIR)/sand
-	rm -rf /tmp/praia-install-build
 	@echo "Installed praia -> $(DESTDIR)$(BINDIR)/praia"
 	@echo "Installed sand  -> $(DESTDIR)$(BINDIR)/sand"
 	@echo "Installed grains -> $(DESTDIR)$(LIBDIR)/grains/"

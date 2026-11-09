@@ -2,6 +2,7 @@
 
 #include "interpreter.h"
 #include "value.h"
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -77,7 +78,10 @@ void registerConcurrencyBuiltins(Interpreter* self, std::shared_ptr<Environment>
 struct HttpOptions {
     int connectTimeoutMs = 30000;   // TCP/TLS handshake budget
     int readTimeoutMs    = 30000;   // single recv() / SSL_read() budget
-    int totalTimeoutMs   = -1;      // overall request budget (incl. redirects)
+    // Overall budget for a buffered request: connect, redirects, and
+    // reading the whole response. <= 0 = no limit. Streams
+    // (http.openStream) only use it until the handle is returned.
+    int totalTimeoutMs   = 300000;
     bool followRedirects = true;
     int maxRedirects     = 10;
     bool insecure        = false;   // skip TLS cert verification (testing only!)
@@ -88,6 +92,22 @@ struct HttpOptions {
     // false only when you are deliberately targeting internal hosts
     // (local development, internal microservices, etc.).
     bool blockPrivateHosts = true;
+    // Headers on a redirect to another origin (scheme, host or port).
+    // false (`redirectHeaders: "safe"`, the default): only a fixed set of
+    // standard non-credential headers is forwarded — Authorization,
+    // Cookie and custom ones like X-API-Key are dropped. true
+    // (`redirectHeaders: "all"`): forward everything, for redirects the
+    // caller trusts (curl's --location-trusted).
+    bool redirectForwardAllHeaders = false;
+    // Largest response body a buffered request will read; a bigger one
+    // fails instead of filling memory. <= 0 = no limit. Not applied to
+    // streams, which hand the body over incrementally.
+    int64_t maxResponseSize = 100ll * 1024 * 1024;
+    // Internal, not a user option: the absolute deadline for the current
+    // request from totalTimeoutMs, set by the redirect loops so reads
+    // inside a response can be held to it.
+    std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::time_point::max();
 };
 
 Value doHttpRequest(const std::string& method, const std::string& url,
@@ -105,7 +125,29 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                      const std::unordered_map<std::string, std::string>& extraHeaders,
                      const HttpOptions& opts = {});
 
-void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp);
+// True if a header name/value pair is safe to write into a response
+// (no CR, LF or NUL — header injection). Defined in builtins/http.cpp.
+bool httpHeaderFieldSafe(const std::string& name, const std::string& value);
+
+// Options for server.listen(port, opts?)
+struct HttpServerOptions {
+    // Address to bind. Empty = every IPv4 interface (0.0.0.0). A host name
+    // binds only the first of its addresses that works, so for a server
+    // only this machine reaches pass "127.0.0.1" or "::1", not "localhost".
+    std::string host;
+    // Largest request body accepted, for both Content-Length and chunked
+    // framing; larger requests get 413. A Content-Length over the limit is
+    // refused before any of the body is read; a chunked body is read and
+    // decoded until its decoded size passes the limit.
+    size_t maxBodySize = 64ull * 1024 * 1024;
+    // Budget for receiving one request — headers and body together. The
+    // server handles one connection at a time, so this is what bounds how
+    // long a slow or idle client can hold it.
+    int requestTimeoutMs = 30000;
+};
+
+void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp,
+                      const HttpServerOptions& opts = {});
 
 // ── HTTP client sessions (keepalive + default opts/headers) ──
 //

@@ -3057,6 +3057,7 @@ url.build({
     fragment: "section-1"
 })
 // "https://api.example.com:8443/v1/items?limit=50&tag=blue#section-1"
+// (parameters from a map can come out in either order)
 
 // IPv6 hosts get auto-bracketed
 url.build({scheme: "http", host: "::1", port: 8080, path: "/"})
@@ -3223,13 +3224,14 @@ try {
 - `async funcCall(args)` evaluates the function and arguments on the current thread, then spawns the actual call in a new OS thread
 - Returns a **future** value immediately
 - `await future` blocks until the background thread finishes
-- Each async Praia function gets its own VM with a **deep copy** of globals, captured upvalues, and arguments. Tasks are fully isolated — no shared mutable state, no data races
+- Each async Praia function gets its own VM with a **deep copy** of its arguments, the variables it captured, and the globals it can reach (the bytecode VM copies only the globals the task's code can reach; `--tree` copies them all). One exception: a closure passed *into* the task still shares the variables it captured with the code that created it on the bytecode VM, so don't change that captured state from both sides — pass the data as an argument or use `SharedMap`/`Queue` instead
 - Native functions (http.get, sys.exec, etc.) also run in true parallel
+- When an async native calls back into Praia — the request handler of `async server.listen(port)`, an `http.sse` callback — those calls run inside the task as well. On the bytecode VM they run against the task's copy of the globals, so they never touch the caller's state mid-flight; in tree-walker mode (`--tree`) they resolve globals through the caller's environment instead. On both engines, a handler the native was given earlier still shares the variables it captured with the code that created it
 - A bare `async fn()` (no `let f =`) is fire-and-forget — it returns immediately and the task runs to completion in the background
 
 ### Sharing state across async tasks
 
-Because globals/upvalues/arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. This is the price of "no data races" in user code.
+Because globals, captured variables and arguments are deep-copied, **you cannot share a Praia map, array, or class instance between an async task and its caller** — each side has its own independent copy. The exceptions: a `Queue` (or `SharedMap`) hands the receiver the same map or array the sender put in, not a copy; the closures noted above keep sharing what they captured; and in `--tree` mode, async-native callbacks resolve globals through the caller's environment and so can share its mutable globals even without a shared closure.
 
 ```
 let m = {}
@@ -3242,7 +3244,7 @@ print(m)              // {} — the task mutated its own copy
 To communicate, use:
 
 - **`SharedMap`** — cross-task key-value store. Use this when async tasks need shared state by key (progress trackers, job state, caches).
-- **`Queue`** — built for cross-task messaging; the queue itself isn't deep-copied.
+- **`Queue`** — built for cross-task messaging. Neither the queue nor the values you send through it are deep-copied: the receiver gets the same map or array the sender sent, so hand it over and stop changing it on the sending side.
 - **`CancellationToken`** — cooperative cancel signal. The caller flips the flag; long-running tasks poll and bail.
 - **External resources** — files, SQLite, sockets, native plugin state. These live outside the Praia heap, so all tasks see the same underlying resource. Use `Lock()` to coordinate concurrent access.
 - **`await`** — collect results back from the task. The future's return value is moved across the boundary.
@@ -3474,9 +3476,11 @@ Header names are lowercased for consistent access.
 | `timeout` | — | Shorthand: same value applied to connect, read, AND total. Seconds (float ok) |
 | `connectTimeout` | 30 | TCP/TLS handshake budget, in seconds |
 | `readTimeout` | 30 | Per recv() / SSL_read() budget, in seconds — a slow peer can't stall half-indefinitely |
-| `totalTimeout` | none | Overall request budget INCLUDING redirects, in seconds. -1 / omitted = no overall cap |
+| `totalTimeout` | 300 | Overall request budget in seconds: connect, every redirect hop, and reading the whole response. `0` or less = no overall cap |
 | `followRedirects` | `true` | Follow 3xx responses with Location headers |
 | `maxRedirects` | 10 | Throw if a chain exceeds this |
+| `maxResponseSize` | 100 MiB | Largest response body a buffered request reads, in bytes; a bigger one throws instead of filling memory. A declared `Content-Length` over it fails before the body is read. `0` or less = no limit. Streams (`http.openStream`) aren't limited — they hand the body over incrementally. |
+| `redirectHeaders` | `"safe"` | Headers sent after a redirect to another origin (scheme, host or port). `"safe"` forwards only these standard non-credential headers: `Accept`, `Accept-Encoding`, `Accept-Language`, `User-Agent`, `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Language`, `Cache-Control`, `Pragma`, `Range`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `If-Range`; `Authorization`, `Cookie` and custom headers such as `X-API-Key` are dropped. `"all"` forwards every header, and lets a 307/308 resend the request body to the new origin (which `"safe"` refuses) — only for redirects you trust (like `curl --location-trusted`). |
 | `insecure` | `false` | **Skip TLS certificate verification.** Testing/dev only; equivalent to `curl -k` |
 | `caBundle` | system trust store | Path to a custom CA PEM bundle for trust-store override |
 | `blockPrivateHosts` | `true` | **SSRF protection.** Refuse to connect to loopback, RFC1918, link-local (incl. cloud metadata `169.254.169.254`), IPv4-mapped, multicast, and reserved address ranges. Re-applied per redirect hop. Set to `false` only when deliberately targeting internal hosts. |
@@ -3504,7 +3508,7 @@ let r = http.request({url: "https://internal.corp/", caBundle: "/etc/ssl/corp-ro
 let r = http.get("http://127.0.0.1:8080/health", {blockPrivateHosts: false})
 ```
 
-`http.get` and `http.post` also accept an optional trailing options map — `http.get(url, opts)`, `http.get(session, url, opts)`, and the equivalent shapes for `http.post`. The map fields are the same as `http.request`'s.
+`http.get` also accepts an optional trailing options map — `http.get(url, opts)` and `http.get(session, url, opts)` — with the same fields as `http.request`'s. `http.post(url, body|map)` and `http.post(session, url, body|map)` take either a body string or a map of `body`, `headers` and `redirectHeaders`; use `http.request` for the other options.
 
 #### Redirects
 
@@ -3516,13 +3520,15 @@ The client follows 3xx responses with a Location header by default, up to `maxRe
 
 **Security**: an `https://` → `http://` Location is refused outright. Open-redirect attacks that try to leak cookies or auth headers over plaintext don't get to. (Matches `curl --proto-redir` behavior.) All Location forms permitted by RFC 3986 §5.2 are followed: absolute URLs (`https://other/path`), protocol-relative (`//host/foo`), absolute paths (`/foo`), relative paths (`final`, `../login`, `./sibling`), and query-only references (`?q=1`, which inherits the base path).
 
+Redirects to a different origin (scheme, host or port) only carry standard non-credential headers, so an open redirect can't collect `Authorization`, `Cookie`, or a custom header like `X-API-Key`. Same-origin redirects keep every header. A 307 or 308 to a different origin, which would resend the request body, is refused with an error. Pass `redirectHeaders: "all"` to forward every header and the body when you trust the redirect target.
+
 When `followRedirects` is `false`, the 3xx response is returned as-is with `Location` in `headers.location`.
 
 #### Timeouts
 
 - **`connectTimeout`** is enforced via non-blocking connect + poll, so we don't block the calling task during a slow handshake.
 - **`readTimeout`** is enforced via `SO_RCVTIMEO`/`SO_SNDTIMEO` on the socket; each individual recv/send can wait at most this long.
-- **`totalTimeout`** bounds the entire request including all redirect hops. Once exceeded, the per-request timeouts are capped at the remaining budget so a mid-redirect server can't outlast the deadline.
+- **`totalTimeout`** bounds the entire request: every redirect hop, each address tried while connecting, the TLS handshake, sending the request and every read of the response, so a server that trickles its body a byte at a time can't outlast it. (DNS lookup isn't covered.) Exceeding it throws "HTTP total timeout exceeded". For `http.openStream` it only caps connecting, the TLS handshake and each individual read (at the time left when each redirect hop starts); it isn't an overall limit on getting the headers, and reading the stream afterwards uses `readTimeout` per read.
 
 Connect against an unroutable IP throws "connect timed out after Nms" with an exact elapsed budget; read timeouts throw "HTTP read timed out".
 
@@ -3571,7 +3577,7 @@ http.request(s, {
 })
 ```
 
-The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts` — minus `method`/`url`/`body`, which only make sense per-call.
+The `session(opts?)` options shape mirrors `http.request`'s — `headers`, `timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `redirectHeaders`, `maxResponseSize` — minus `method`/`url`/`body`, which only make sense per-call.
 
 ##### Connection reuse and stale-conn recovery
 
@@ -3717,6 +3723,22 @@ let server = http.createServer(lam{ req in
 server.listen(8080)     // blocks, prints "Server listening on port 8080"
 ```
 
+#### Listen options
+
+`server.listen(port, opts?)` takes an optional map:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `host` | all IPv4 interfaces (`0.0.0.0`) | Address or host name to bind. A host name binds only the first of its addresses that works, so `"localhost"` may end up IPv6-only (`::1`) or IPv4-only. For a server only this machine can reach, use `"127.0.0.1"` or `"::1"`. |
+| `maxBodySize` | 64 MiB | Largest request body accepted, in bytes, for both `Content-Length` and chunked bodies; larger requests get `413 Payload Too Large`. A `Content-Length` over the limit is refused before any of the body is read; a chunked body is read and decoded until its decoded size passes the limit. |
+| `requestTimeout` | 30 | Seconds allowed for receiving one request, headers and body together. A client that's slower than this is disconnected. It also caps how long a single blocked write of the response waits for a client that has stopped reading. |
+
+```praia
+server.listen(8080, {host: "127.0.0.1", maxBodySize: 1_000_000, requestTimeout: 10})
+```
+
+The server handles one connection at a time, so `requestTimeout` is also how long one slow or idle client can hold it up. For a public server, put a reverse proxy (nginx, caddy) in front.
+
 #### Request object
 
 The handler receives a map with:
@@ -3769,14 +3791,16 @@ server.listen(3000)
 
 #### Error handling
 
-If the handler throws an error, the server returns a 500 response and continues running.
+If the handler throws an error, the server returns a generic `500 Internal Server Error` and continues running. The error itself goes to the server's stderr (`[http] handler error: ...`), not to the client, since its text can include file paths, SQL, or other internals.
 
 #### Request body size and framing
 
 The server decodes both RFC 7230 body framings transparently before invoking the handler:
 
-- **`Content-Length: N`** — reads exactly N bytes into `req.body`. No built-in cap; this matches the philosophy of `net/http`, Flask, and Express.
-- **`Transfer-Encoding: chunked`** — decodes chunks (chunk extensions and trailers are accepted but discarded), capped at 64 MiB of decoded body to prevent unbounded chunked-stream DoS.
+- **`Content-Length: N`** — reads exactly N bytes into `req.body`. A request declaring more than `maxBodySize` (default 64 MiB) gets 413 before any of the body is read.
+- **`Transfer-Encoding: chunked`** — decodes chunks (chunk extensions and trailers are accepted but discarded), up to `maxBodySize` of decoded body; past that, 413.
+
+The whole request has to arrive within `requestTimeout` (default 30 seconds).
 
 Headers are capped at 64 KB regardless.
 
@@ -3786,8 +3810,9 @@ Malformed or conflicting framing is rejected with a `400 Bad Request` response b
 - Multiple `Content-Length` headers with different values, or multiple `Transfer-Encoding` headers.
 - `Content-Length` that isn't a non-negative decimal integer (no signs, no garbage suffix, no overflow).
 - `Transfer-Encoding` where `chunked` isn't the final coding.
+- A header line with whitespace before its colon, or with no name (RFC 7230 §3.2.4).
 
-If you need an explicit `Content-Length` cap on top of those checks, opt in:
+For a tighter limit on particular routes, or protection beyond what one process can give:
 
 - **Application-level** — use `middleware.bodyLimit(n)` from the middleware grain to reject requests with `Content-Length` over `n` bytes (returns 413).
 - **DoS-grade** — put a reverse proxy (nginx, caddy) in front. A determined attacker can lie about `Content-Length` or stream forever; only the proxy can short-circuit before the body is buffered.
@@ -3805,7 +3830,7 @@ sqlite.close(db)
 
 #### Server-Sent Events (SSE)
 
-`http.sse(req, callback)` keeps the connection open for real-time streaming. The callback receives a `send` function.
+`http.sse(req, callback, opts?)` keeps the connection open for real-time streaming. The callback receives a `send` function.
 
 ```praia
 server.get("/events", lam{ req, params in
@@ -3817,6 +3842,12 @@ server.get("/events", lam{ req, params in
         send("done", "close")
     })
 })
+```
+
+The response has no CORS header. A stream meant to be read from other origins (with `EventSource`) adds one through the options map, which takes any extra response headers:
+
+```praia
+return http.sse(req, callback, {headers: {"Access-Control-Allow-Origin": "https://app.example"}})
 ```
 
 The client receives standard SSE format:
@@ -3954,7 +3985,7 @@ s.close()
 | `s.jar()` | The underlying `cookie.Jar` (mutable; call `.clear()` to drop all cookies) |
 | `s.close()` | Closes the underlying `http.session`. Idempotent. |
 
-The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `headers`) plus one extra key:
+The options map mirrors `http.session`'s shape (`timeout`, `connectTimeout`, `readTimeout`, `totalTimeout`, `followRedirects`, `maxRedirects`, `insecure`, `caBundle`, `blockPrivateHosts`, `redirectHeaders`, `maxResponseSize`, `headers`) plus one extra key:
 
 - **`jar`** — if provided, the session uses this `cookie.Jar` instance instead of creating an empty one. Useful for resuming cookie state across runs (save with `jar.cookies()`, restore by constructing a jar with the saved entries) or for sharing one jar across multiple sessions.
 
@@ -3990,6 +4021,8 @@ server.get("/", lam{ req, params in
 
 server.listen(8080)
 ```
+
+`server.listen(port, opts?)` takes the same options as `http.createServer`'s listen: `host`, `maxBodySize`, `requestTimeout` (see [Listen options](#listen-options)).
 
 ### Path parameters
 
@@ -4584,11 +4617,11 @@ for (user in users) {
 }
 ```
 
-INTEGER columns are returned as Praia ints, preserving the full 64-bit range; REAL columns come back as floats; TEXT as strings; NULL as `nil`.
+INTEGER columns are returned as Praia ints, preserving the full 64-bit range; REAL columns come back as floats; TEXT as strings; NULL as `nil`. TEXT and BLOB values come back as strings of their full byte length, so binary data and text containing NUL bytes round-trip (and bound string parameters are stored whole, NUL bytes included).
 
 ### Executing statements
 
-`sqlite.run(db, sql, params?)` executes INSERT/UPDATE/DELETE/DDL and returns `{changes, lastId}`:
+`sqlite.run(db, sql, params?)` executes INSERT/UPDATE/DELETE/DDL and returns `{changes, lastId}`. Like `sqlite.query`, it runs exactly one statement: SQL with another statement after the first (`"SELECT 1; DROP TABLE t"`) is an error rather than having the rest silently ignored, so make one call per statement. A trailing `;` or comment is fine.
 
 ```
 let result = sqlite.run(db, "INSERT INTO users (name, age) VALUES (?, ?)", ["Ada", 36])
@@ -4984,6 +5017,8 @@ Returns the total byte size of a struct format string:
 bytes.calcsize(">BHI")    // 7
 bytes.calcsize(">3B2Hd")  // 15
 ```
+
+A format can describe at most 16 MiB per field and 64 MiB in total; larger formats throw before anything is allocated. `unpack` checks the format's size against the data first, and `pack` refuses non-integer values outside the 64-bit range for integer fields.
 
 ### Practical: DNS query header
 
@@ -5993,11 +6028,14 @@ When you write `use "geometry"`, Praia looks for the grain in this order:
 2. **`grains/`** — project-bundled grains, walks up from the current file
 3. **`~/.praia/ext_grains/`** — user-global grains (sand --global)
 4. **`<libdir>/ext_grains/`** — system-global grains (sudo sand --global)
+5. **`<libdir>/grains/`** — the standard library grains
+
+Steps 1 and 2 walk up from the directory of the file doing the import, not from the directory you ran `praia` in, so a script never picks up grains from wherever it happens to be started. The walk covers at most 10 directories: the importing file's directory and up to 9 of its ancestors. It also stops before the first directory every user can write to (such as `/tmp`), so a project inside one doesn't pick up an `ext_grains/` someone else created there. Only when there is no file (the REPL, `praia -c`) does the search start in the current directory.
 
 At each location, Praia checks for:
 - `<name>.praia` (single-file grain)
 - `<name>/` directory with `grain.yaml` → reads `main` field for the entry file
-- `<name>/main.praia` (fallback if no `grain.yaml`)
+- `<name>/main.praia` (fallback if no `grain.yaml`), then `<name>/index.praia`
 
 ### Grains importing other grains
 
@@ -6179,7 +6217,8 @@ The collector runs automatically in the background. It tracks container objects 
 
 - GC is automatic — no manual intervention needed
 - It only targets **cycles**. Non-cyclic objects are freed immediately by refcounting
-- Each thread has its own collector (async tasks are isolated)
+- Each thread has its own collector, and it only looks inside objects its own thread owns. The copies an async task is given belong to the task until it finishes; after that, what the task leaves behind (its result included) moves to the collector of the thread that started it. Values put in a `Queue` or `SharedMap` belong to no collector: they're freed by reference counting, but a cycle running through one isn't collected
+- Known gap: a closure that a native runs on another thread (the handler of `async server.listen`, say) still shares what it captured with the thread that made it, and that thread's collector reads those values while the handler may be changing them
 - The collector auto-tunes its frequency based on how much garbage it finds
 - `PRAIA_GC_STRESS=1` makes it collect after every allocation (`PRAIA_GC_STRESS=N`: every N allocations). Very slow; meant for testing the runtime and native plugins (`make test-gc-stress` runs the suite this way)
 

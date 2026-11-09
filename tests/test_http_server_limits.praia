@@ -1,0 +1,191 @@
+use "testing"
+use "./fixtures/ports"
+
+// HTTP server hardening: listen() options (host, maxBodySize,
+// requestTimeout), a deadline for receiving a whole request, generic 500
+// responses, malformed header lines, and SSE without a default CORS
+// header.
+
+// Each server runs as its own praia process (fixtures/http_server/
+// limits_server.praia), so the handler never runs on another thread
+// than its own VM.
+let praiaBin = sys.cwd() + "/praia"
+let serverScript = sys.cwd() + "/tests/fixtures/http_server/limits_server.praia"
+
+func startServer(mode) {
+    let port = ports.freePort()
+    let proc = async sys.exec([praiaBin, serverScript, str(port), mode], 60000)
+    // Wait until it accepts connections
+    for (i in 0..100) {
+        try {
+            let s = net.connect("127.0.0.1", port)
+            net.close(s)
+            return {port: port, proc: proc}
+        } catch (e) {
+            time.sleep(50)
+        }
+    }
+    throw "server (%{mode}) didn't start"
+}
+
+func stopServer(srv) {
+    try { rawRequest(srv.port, "GET /quit HTTP/1.1\r\nHost: x\r\n\r\n") } catch (e) {}
+    await srv.proc
+}
+
+func rawRequest(port, payload) {
+    let sock = net.connect("127.0.0.1", port)
+    // A stalled response ends the read instead of hanging the suite.
+    // net.recv returns "" on close and on timeout alike, so an empty read
+    // that only came back after the timeout means the response never
+    // finished — an error, not a short response.
+    net.setTimeout(sock, 15000)
+    net.send(sock, payload)
+    let resp = ""
+    while (true) {
+        let started = time.now()
+        let chunk = net.recv(sock, 4096)
+        if (chunk == nil || len(chunk) == 0) {
+            if (time.now() - started >= 14900) {
+                net.close(sock)
+                throw "rawRequest: timed out waiting for the response"
+            }
+            break
+        }
+        resp = resp + chunk
+    }
+    net.close(sock)
+    return resp
+}
+
+func statusOf(resp) {
+    if (len(resp) < 12) { return 0 }
+    return int(resp.slice(9, 12))
+}
+
+let limitsSrv = startServer("limits")
+let defaultSrv = startServer("default")
+let localSrv = startServer("local")
+let port = limitsSrv.port
+let defaultPort = defaultSrv.port
+let localPort = localSrv.port
+
+testing.test("bodies up to maxBodySize are accepted", lam{ in
+    let r = rawRequest(port, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n0123456789")
+    testing.expectEqual(statusOf(r), 200, r)
+    testing.expectContains(r, "len=10", nil)
+})
+
+testing.test("a Content-Length over maxBodySize gets 413", lam{ in
+    let r = rawRequest(port, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\n01234567890")
+    testing.expectEqual(statusOf(r), 413, r)
+})
+
+testing.test("a chunked body over maxBodySize gets 413", lam{ in
+    let r = rawRequest(port, "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n6\r\n012345\r\n6\r\n678901\r\n0\r\n\r\n")
+    testing.expectEqual(statusOf(r), 413, r)
+})
+
+testing.test("the default limit refuses a huge Content-Length before reading it", lam{ in
+    // 70 MB declared, nothing sent: answered at once instead of waiting
+    let r = rawRequest(defaultPort, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 70000000\r\n\r\n")
+    testing.expectEqual(statusOf(r), 413, r)
+})
+
+testing.test("a client trickling bytes can't hold the server past requestTimeout", lam{ in
+    // One byte every 200ms keeps each recv() short, so only an overall
+    // deadline stops it. The server handles one connection at a time;
+    // a second request must still get through soon after the deadline.
+    let slow = net.connect("127.0.0.1", port)
+    net.send(slow, "GET / HTTP/1.1\r\n")
+    let trickle = async lam{ in
+        for (i in 0..15) {
+            time.sleep(200)
+            try { net.send(slow, "X") } catch (e) { return nil }
+        }
+    }()
+    time.sleep(50)
+    let start = time.now()
+    let r = rawRequest(port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    let elapsed = time.now() - start
+    testing.expectEqual(statusOf(r), 200, r)
+    testing.expect(elapsed < 2000, "second request waited %{elapsed}ms")
+    await trickle
+    net.close(slow)
+})
+
+testing.test("a client that stops reading can't hold the server past requestTimeout", lam{ in
+    // A 32 MiB response to a client that never reads fills the socket
+    // buffers; the blocked send has to give up so the next client is served.
+    // requestTimeout (0.5 s here) caps each blocked write, and a stalled
+    // response can take a few of them (on Linux a timed-out send returns
+    // what it managed, and the loop sends again), so the bound is loose:
+    // without the timeout the server is held until the stuck client
+    // disconnects, which here is never.
+    let stuck = net.connect("127.0.0.1", port)
+    net.send(stuck, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+    time.sleep(100)
+    let start = time.now()
+    let sock = net.connect("127.0.0.1", port)
+    net.setTimeout(sock, 15000)
+    net.send(sock, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    let r = ""
+    while (true) {
+        let chunk = net.recv(sock, 4096)
+        if (chunk == nil || len(chunk) == 0) { break }
+        r = r + chunk
+    }
+    net.close(sock)
+    let elapsed = time.now() - start
+    testing.expectEqual(statusOf(r), 200, r)
+    testing.expect(elapsed < 8000, "second request waited %{elapsed}ms")
+    net.close(stuck)
+})
+
+testing.test("handler errors give a generic 500 without the error text", lam{ in
+    let r = rawRequest(port, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n")
+    testing.expectEqual(statusOf(r), 500, r)
+    testing.expectContains(r, "Internal Server Error", nil)
+    testing.expect(!r.contains("hunter2") && !r.contains("secret.conf"), "leaked: %{r}")
+})
+
+testing.test("whitespace before a header colon gets 400", lam{ in
+    let r = rawRequest(port, "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding : chunked\r\n\r\n0\r\n\r\n")
+    testing.expectEqual(statusOf(r), 400, r)
+})
+
+testing.test("SSE sends no CORS header unless asked to", lam{ in
+    let plain = rawRequest(port, "GET /sse HTTP/1.1\r\nHost: x\r\n\r\n")
+    testing.expectContains(plain, "text/event-stream", nil)
+    testing.expect(!plain.lower().contains("access-control-allow-origin"), plain)
+
+    let cors = rawRequest(port, "GET /sse-cors HTTP/1.1\r\nHost: x\r\n\r\n")
+    testing.expectContains(cors, "Access-Control-Allow-Origin: https://app.example\r\n", nil)
+})
+
+testing.test("SSE rejects header injection in opts.headers", lam{ in
+    let r = rawRequest(port, "GET /sse-bad HTTP/1.1\r\nHost: x\r\n\r\n")
+    testing.expect(!r.contains("Injected: 1"), r)
+    testing.expectEqual(statusOf(r), 500, r)
+})
+
+testing.test("listen binds to the host option", lam{ in
+    let r = rawRequest(localPort, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    testing.expectEqual(statusOf(r), 200, r)
+})
+
+testing.test("listen rejects invalid options", lam{ in
+    let s = http.createServer(lam{ req in "unused" })
+    let p = ports.freePort()
+    testing.expectThrows(lam{ in s.listen(p, {host: 5}) }, nil)
+    testing.expectThrows(lam{ in s.listen(p, {maxBodySize: 0}) }, nil)
+    testing.expectThrows(lam{ in s.listen(p, {maxBodySize: 1.5}) }, nil)
+    testing.expectThrows(lam{ in s.listen(p, {requestTimeout: 0}) }, nil)
+    testing.expectThrows(lam{ in s.listen(p, "fast") }, nil)
+})
+
+stopServer(limitsSrv)
+stopServer(defaultSrv)
+stopServer(localSrv)
+
+testing.done()

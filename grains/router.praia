@@ -150,9 +150,10 @@ func create() {
         route: route,
         notFound: lam{ handler in notFoundHandler = handler },
         handle: lam{ req in handleRequest(req) },
-        listen: lam{ port in
+        // opts as for http.createServer's listen: host, maxBodySize, requestTimeout
+        listen: lam{ port, opts in
             let server = http.createServer(lam{ req in handleRequest(req) })
-            server.listen(port)
+            server.listen(port, opts)
         }
     }
 }

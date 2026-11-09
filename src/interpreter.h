@@ -28,6 +28,13 @@ class Interpreter;
 // bytecode engine.
 extern thread_local Interpreter* g_currentInterp;
 
+// The Interpreter to pass to Callable::call from a native. Natives called
+// by the tree-walker get the calling Interpreter (g_currentInterp); under
+// the VM there is none — natives are invoked directly — so this returns a
+// per-thread placeholder instead of a null reference. VM callables ignore
+// the Interpreter they're given. Defined in interpreter_setup.cpp.
+Interpreter& callbackInterp();
+
 // Thrown by return statements to unwind back to the enclosing function call
 struct ReturnSignal {
     Value value;
@@ -118,6 +125,10 @@ struct NativeFunction : Callable {
     // dispatch into plugin and stdlib natives just like it does
     // into Praia-defined functions.
     std::vector<std::string> paramNames_;
+    // Set by natives whose state holds no Praia Values (a Lock's
+    // acquire, a CancellationToken's cancel): an async task's globals
+    // walk can skip them instead of assuming they hide callbacks.
+    bool holdsNoValues = false;
 
     Value call(Interpreter& interp, const std::vector<Value>& args) override {
         // Defense-in-depth: any C++ stdlib exception that escapes the

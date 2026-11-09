@@ -1615,6 +1615,10 @@ Value Interpreter::evaluate(const Expr* expr) {
         // Cycles handled via visited maps keyed on raw pointer identity.
         std::unordered_map<void*, Value> valueVisited;
         std::unordered_map<void*, std::shared_ptr<Environment>> envVisited;
+        // The copies are the task's while it runs: this heap keeps them
+        // without looking inside (see GcHeap::beginLending)
+        GcLendScope lendScope;
+        auto parentInbox = GcHeap::current().inbox();
         auto taskGlobals = gcNew<Environment>();
         envVisited[static_cast<void*>(globals.get())] = taskGlobals;
 
@@ -1689,6 +1693,29 @@ Value Interpreter::evaluate(const Expr* expr) {
                     copy->elements.push_back(deepCopy(el));
                 return result;
             }
+            if (v.isTagged()) {
+                // Its values can be containers (Ok([1, 2])), so it's copied too
+                void* key = static_cast<void*>(v.asTagged().get());
+                auto it = valueVisited.find(key);
+                if (it != valueVisited.end()) return it->second;
+                auto copy = gcNew<PraiaTagged>();
+                copy->tag = v.asTagged()->tag;
+                Value result(copy);
+                valueVisited[key] = result; // register before recursing
+                for (auto& e : v.asTagged()->values)
+                    copy->values.push_back(deepCopy(e));
+                return result;
+            }
+            if (v.isSet()) {
+                void* key = static_cast<void*>(v.asSet().get());
+                auto it = valueVisited.find(key);
+                if (it != valueVisited.end()) return it->second;
+                auto copy = gcNew<PraiaSet>();
+                copy->elements = v.asSet()->elements; // hashable values: nothing deeper
+                Value result(copy);
+                valueVisited[key] = result;
+                return result;
+            }
             if (v.isInstance()) {
                 void* key = static_cast<void*>(v.asInstance().get());
                 auto it = valueVisited.find(key);
@@ -1735,7 +1762,10 @@ Value Interpreter::evaluate(const Expr* expr) {
         bool taskStrictDeprecations = strictDeprecations_;
         auto sharedFuture = std::async(std::launch::async,
             [callable, argsCopy = std::move(argsCopy), taskGlobals, namedArgsMask,
-             taskStrictTags, taskStrictDeprecations]() -> Value {
+             taskStrictTags, taskStrictDeprecations,
+             lent = lendScope.lent, parentInbox]() -> Value {
+                // Destroyed last, after taskInterp
+                GcTaskEnd taskEnd(lent, parentInbox);
                 Interpreter taskInterp(taskGlobals);
                 taskInterp.setStrictTags(taskStrictTags);
                 taskInterp.setStrictDeprecations(taskStrictDeprecations);
@@ -1743,6 +1773,7 @@ Value Interpreter::evaluate(const Expr* expr) {
                 GcHeap::current().disable(); // task interpreters are short-lived
                 return callable->call(taskInterp, argsCopy);
             }).share();
+        lendScope.started = true;
 
         auto fut = std::make_shared<PraiaFuture>();
         fut->future = sharedFuture;

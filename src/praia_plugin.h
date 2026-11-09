@@ -99,7 +99,12 @@
 //       praia_call, praia_capture_executor + praia_post_to_engine,
 //       the praia_promise_* family, external-handle and error
 //       helpers).
-#define PRAIA_PLUGIN_ABI_VERSION 6
+//   7 — layout and signature changes in installed headers: HttpOptions
+//       gains redirectForwardAllHeaders, maxResponseSize and a
+//       deadline; httpServerListen takes an HttpServerOptions; GcHeap
+//       gains members that inline code compiled into plugins (gcNew,
+//       trackedCount) depends on; NativeFunction gains holdsNoValues.
+#define PRAIA_PLUGIN_ABI_VERSION 7
 
 #define PRAIA_DECLARE_ABI()                                             \
     extern "C" int praia_abi_version() {                                \

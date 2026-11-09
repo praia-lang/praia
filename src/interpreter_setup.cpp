@@ -86,6 +86,40 @@ static std::vector<PluginAtExitEntry> g_pluginAtExitHooks;
 // already passed.
 static bool g_pluginShutdown = false;
 
+// Writes all of `data` to an SSE client. The server set a send timeout
+// on the socket (requestTimeout), so a client that stops reading makes a
+// send fail instead of holding the one-at-a-time server; that, or any
+// other error, returns false and the stream ends. That timeout restarts
+// with every send, so it's one deadline for the whole message: each send
+// gets only what's left, and a client taking a few bytes at a time can't
+// stretch it.
+static bool sseSendAll(int fd, const std::string& data) {
+    timeval limit{};
+    socklen_t len = sizeof(limit);
+    bool timed = getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &limit, &len) == 0 &&
+                 (limit.tv_sec > 0 || limit.tv_usec > 0);
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(limit.tv_sec) + std::chrono::microseconds(limit.tv_usec);
+    bool ok = true;
+    size_t done = 0;
+    while (done < data.size()) {
+        if (timed) {
+            auto left = std::chrono::duration_cast<std::chrono::microseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (left <= 0) { ok = false; break; }
+            timeval tv{static_cast<time_t>(left / 1000000), static_cast<suseconds_t>(left % 1000000)};
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        }
+        ssize_t n = ::send(fd, data.data() + done, data.size() - done, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = false; break; }
+        done += static_cast<size_t>(n);
+    }
+    // The next message gets the full timeout again
+    if (timed) setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &limit, sizeof(limit));
+    return ok;
+}
+
 static int signalNameToNum(const std::string& name) {
     if (name == "SIGINT"  || name == "INT")  return SIGINT;
     if (name == "SIGTERM" || name == "TERM") return SIGTERM;
@@ -130,6 +164,18 @@ void installDefaultSignalHandlers() {
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, nullptr);
+}
+
+Interpreter& callbackInterp() {
+    if (g_currentInterp) return *g_currentInterp;
+    // Built on first use, once per thread — and every async task runs on
+    // a fresh thread, so skip native registration: reached only with no
+    // tree-walker native on the stack (VM mode, a task thread), where
+    // callbacks are VM closures that never consult it. The empty
+    // globals are made (and the GcHeap with them) before the
+    // placeholder, so thread exit destroys the placeholder first.
+    static thread_local Interpreter placeholder{gcNew<Environment>()};
+    return placeholder;
 }
 
 Interpreter::Interpreter(bool installErrorClasses) {
@@ -423,7 +469,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
                 auto cmp = args[1].asCallable();
                 std::sort(elems.begin(), elems.end(),
                     [&cmp](const Value& a, const Value& b) -> bool {
-                        Value result = callSafe(*g_currentInterp, cmp, {a, b});
+                        Value result = callSafe(callbackInterp(), cmp, {a, b});
                         if (result.isNumber()) return result.asNumber() < 0;
                         return result.isTruthy();
                     });
@@ -446,7 +492,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto result = gcNew<PraiaArray>();
             auto pred = args[1].asCallable();
             for (auto& elem : src) {
-                Value test = callSafe(*g_currentInterp, pred, {elem});
+                Value test = callSafe(callbackInterp(), pred, {elem});
                 if (test.isTruthy()) result->elements.push_back(elem);
             }
             return Value(result);
@@ -462,7 +508,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto result = gcNew<PraiaArray>();
             auto transform = args[1].asCallable();
             for (auto& elem : src)
-                result->elements.push_back(callSafe(*g_currentInterp, transform, {elem}));
+                result->elements.push_back(callSafe(callbackInterp(), transform, {elem}));
             return Value(result);
         })));
 
@@ -475,7 +521,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto& src = args[0].asArray()->elements;
             auto fn = args[1].asCallable();
             for (auto& elem : src)
-                callSafe(*g_currentInterp, fn, {elem});
+                callSafe(callbackInterp(), fn, {elem});
             return args[0]; // return the array for chaining
         })));
 
@@ -498,7 +544,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
                 start = 1;
             }
             for (size_t i = start; i < src.size(); i++)
-                acc = callSafe(*g_currentInterp, fn, {acc, src[i]});
+                acc = callSafe(callbackInterp(), fn, {acc, src[i]});
             return acc;
         })));
 
@@ -511,7 +557,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (auto& elem : src)
-                if (callSafe(*g_currentInterp, pred, {elem}).isTruthy()) return Value(true);
+                if (callSafe(callbackInterp(), pred, {elem}).isTruthy()) return Value(true);
             return Value(false);
         })));
 
@@ -524,7 +570,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (auto& elem : src)
-                if (!callSafe(*g_currentInterp, pred, {elem}).isTruthy()) return Value(false);
+                if (!callSafe(callbackInterp(), pred, {elem}).isTruthy()) return Value(false);
             return Value(true);
         })));
 
@@ -538,7 +584,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto fn = args[1].asCallable();
             auto result = gcNew<PraiaArray>();
             for (auto& elem : src) {
-                Value mapped = callSafe(*g_currentInterp, fn, {elem});
+                Value mapped = callSafe(callbackInterp(), fn, {elem});
                 if (mapped.isArray()) {
                     for (auto& inner : mapped.asArray()->elements)
                         result->elements.push_back(inner);
@@ -607,7 +653,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto fn = args[1].asCallable();
             auto result = gcNew<PraiaMap>();
             for (auto& elem : src) {
-                Value key = callSafe(*g_currentInterp, fn, {elem});
+                Value key = callSafe(callbackInterp(), fn, {elem});
                 auto it = result->entries.find(key);
                 if (it == result->entries.end()) {
                     auto group = gcNew<PraiaArray>();
@@ -629,7 +675,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto& src = args[0].asArray()->elements;
             auto pred = args[1].asCallable();
             for (size_t i = 0; i < src.size(); i++)
-                if (callSafe(*g_currentInterp, pred, {src[i]}).isTruthy())
+                if (callSafe(callbackInterp(), pred, {src[i]}).isTruthy())
                     return Value(static_cast<int64_t>(i));
             return Value(static_cast<int64_t>(-1));
         })));
@@ -1980,11 +2026,22 @@ Interpreter::Interpreter(bool installErrorClasses) {
     // type including its ValueHash / ValueKeyEqual template params
     // without having to spell them.
     auto applyHttpOpts = [](HttpOptions& opts, const auto& m) {
+        // Seconds → milliseconds. nil or a nonpositive number means no
+        // limit; anything else that isn't a finite number is an error
+        // rather than silently "no limit". Large values are clamped to
+        // the int range instead of overflowing.
         auto secsToMs = [](const Value& v) -> int {
-            if (!v.isNumber()) return -1;
+            if (v.isNil()) return -1;
+            if (!v.isNumber())
+                throw RuntimeError("timeouts must be a number of seconds", 0);
             double secs = v.asNumber();
+            if (!std::isfinite(secs))
+                throw RuntimeError("timeouts must be a finite number of seconds", 0);
             if (secs <= 0) return -1;
-            return static_cast<int>(secs * 1000.0);
+            double ms = secs * 1000.0;
+            if (ms >= static_cast<double>(std::numeric_limits<int>::max()))
+                return std::numeric_limits<int>::max();
+            return std::max(1, static_cast<int>(ms));
         };
         if (m.count("timeout")) {
             // Shorthand: applies to all three axes simultaneously.
@@ -2012,6 +2069,21 @@ Interpreter::Interpreter(bool installErrorClasses) {
             opts.caBundle = m.at("caBundle").asString();
         if (m.count("blockPrivateHosts") && m.at("blockPrivateHosts").isBool())
             opts.blockPrivateHosts = m.at("blockPrivateHosts").asBool();
+        if (m.count("maxResponseSize")) {
+            const Value& v = m.at("maxResponseSize");
+            if (!v.isInt())
+                throw RuntimeError("maxResponseSize must be an integer number of bytes", 0);
+            opts.maxResponseSize = v.asInt() > 0 ? v.asInt() : -1;
+        }
+        if (m.count("redirectHeaders")) {
+            const Value& v = m.at("redirectHeaders");
+            if (v.isString() && v.asString() == "safe")
+                opts.redirectForwardAllHeaders = false;
+            else if (v.isString() && v.asString() == "all")
+                opts.redirectForwardAllHeaders = true;
+            else
+                throw RuntimeError("redirectHeaders must be \"safe\" or \"all\"", 0);
+        }
     };
 
     // Layer per-call headers on top of session defaults (or {} for
@@ -2084,11 +2156,25 @@ Interpreter::Interpreter(bool installErrorClasses) {
                     }
                 }
             };
+            // Of the request options, the body-or-opts map honours only
+            // redirectHeaders (per-call timeouts etc. go through
+            // http.request) — so a per-call "safe" can still tighten a
+            // session that defaults to "all".
+            auto applyRedirectHeaders = [&applyHttpOpts](const Value& v, HttpOptions& opts) {
+                if (!v.isMap()) return;
+                auto& e = v.asMap()->entries;
+                auto it = e.find(Value("redirectHeaders"));
+                if (it == e.end()) return;
+                std::unordered_map<std::string, Value> only{{"redirectHeaders", it->second}};
+                applyHttpOpts(opts, only);
+            };
             if (args.size() == 2 && args[0].isString()) {
                 std::string body;
                 std::unordered_map<std::string, std::string> headers;
                 parseBodyAndHeaders(args[1], body, headers);
-                return doHttpRequest("POST", args[0].asString(), body, headers);
+                HttpOptions opts;
+                applyRedirectHeaders(args[1], opts);
+                return doHttpRequest("POST", args[0].asString(), body, headers, opts);
             }
             if (args.size() == 3 && httpIsSession(args[0]) && args[1].isString()) {
                 std::string body;
@@ -2098,10 +2184,8 @@ Interpreter::Interpreter(bool installErrorClasses) {
                 auto opts = httpSessionGetDefaultOpts(args[0]);
                 auto hdrs = httpSessionGetDefaultHeaders(args[0]);
                 for (auto& [k, v] : headers) hdrs[k] = v;
-                // body is fully user-specified; opts inherited from session
-                // (per-call timeout overrides aren't passed via the body-or-opts
-                // shorthand — use http.request for that).
-                (void)applyHttpOpts; (void)layerHeaders;   // not used here
+                applyRedirectHeaders(args[2], opts);
+                (void)layerHeaders;   // not used here
                 return httpSessionRequest(args[0], "POST", args[1].asString(),
                                           body, hdrs, opts);
             }
@@ -2274,21 +2358,51 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto handler = args[0].asCallable();
 
             auto server = gcNew<PraiaMap>();
-            server->entries[Value("listen")] = Value(makeNative("listen", 1,
+            // listen(port, opts?) — opts: host, maxBodySize (bytes),
+            // requestTimeout (seconds). See HttpServerOptions.
+            server->entries[Value("listen")] = Value(makeNative("listen", -1,
                 [handler](const std::vector<Value>& args) -> Value {
-                    if (!args[0].isNumber())
-                        throw RuntimeError("listen() requires a port number", 0);
-                    httpServerListen(static_cast<int>(args[0].asNumber()), handler, *g_currentInterp);
+                    if (args.empty() || args.size() > 2 || !args[0].isNumber())
+                        throw RuntimeError("listen() requires a port number and an optional options map", 0);
+                    HttpServerOptions opts;
+                    if (args.size() == 2 && !args[1].isNil()) {
+                        if (!args[1].isMap())
+                            throw RuntimeError("listen() options must be a map", 0);
+                        auto& m = args[1].asMap()->entries;
+                        if (m.count("host")) {
+                            if (!m.at("host").isString())
+                                throw RuntimeError("listen(): host must be a string", 0);
+                            opts.host = m.at("host").asString();
+                        }
+                        if (m.count("maxBodySize")) {
+                            const Value& v = m.at("maxBodySize");
+                            if (!v.isInt() || v.asInt() <= 0)
+                                throw RuntimeError("listen(): maxBodySize must be a positive integer (bytes)", 0);
+                            opts.maxBodySize = static_cast<size_t>(v.asInt());
+                        }
+                        if (m.count("requestTimeout")) {
+                            const Value& v = m.at("requestTimeout");
+                            if (!v.isNumber() || !(v.asNumber() > 0) || v.asNumber() > 86400)
+                                throw RuntimeError("listen(): requestTimeout must be a positive number of seconds", 0);
+                            opts.requestTimeoutMs = std::max(1, static_cast<int>(v.asNumber() * 1000.0));
+                        }
+                    }
+                    httpServerListen(static_cast<int>(args[0].asNumber()), handler, callbackInterp(), opts);
                     return Value();
                 }));
             return Value(server);
         }));
 
-    // http.sse(req, callback) — Server-Sent Events
+    // http.sse(req, callback, opts?) — Server-Sent Events
     // callback receives a send function: send(data, event?)
     // The connection stays open until the callback returns.
-    httpMap->entries[Value("sse")] = Value(makeNative("http.sse", 2,
+    // opts.headers adds response headers. There's no CORS header by
+    // default; a stream meant for other origins adds
+    // Access-Control-Allow-Origin itself.
+    httpMap->entries[Value("sse")] = Value(makeNative("http.sse", -1,
         [](const std::vector<Value>& args) -> Value {
+            if (args.size() < 2 || args.size() > 3)
+                throw RuntimeError("http.sse() requires (req, callback) or (req, callback, opts)", 0);
             if (!args[0].isMap())
                 throw RuntimeError("http.sse() requires a request object", 0);
             if (!args[1].isCallable())
@@ -2302,13 +2416,31 @@ Interpreter::Interpreter(bool installErrorClasses) {
             auto callback = args[1].asCallable();
 
             // Send SSE headers
+            std::string extraHeaders;
+            if (args.size() == 3 && !args[2].isNil()) {
+                if (!args[2].isMap())
+                    throw RuntimeError("http.sse() options must be a map", 0);
+                auto& o = args[2].asMap()->entries;
+                auto hIt = o.find(Value("headers"));
+                if (hIt != o.end()) {
+                    if (!hIt->second.isMap())
+                        throw RuntimeError("http.sse(): headers must be a map", 0);
+                    for (auto& [k, v] : hIt->second.asMap()->entries) {
+                        std::string kn = k.toString(), vn = v.toString();
+                        if (!httpHeaderFieldSafe(kn, vn))
+                            throw RuntimeError("Invalid SSE header \"" + kn +
+                                               "\": contains CR/LF/NUL (header injection)", 0);
+                        extraHeaders += kn + ": " + vn + "\r\n";
+                    }
+                }
+            }
             std::string headers = "HTTP/1.1 200 OK\r\n"
                                   "Content-Type: text/event-stream\r\n"
                                   "Cache-Control: no-cache\r\n"
-                                  "Connection: keep-alive\r\n"
-                                  "Access-Control-Allow-Origin: *\r\n"
-                                  "\r\n";
-            send(clientFd, headers.c_str(), headers.size(), 0);
+                                  "Connection: keep-alive\r\n" +
+                                  extraHeaders + "\r\n";
+            // A client that can't take the headers is gone: skip the callback
+            bool connected = sseSendAll(clientFd, headers);
 
             // Create a send function for the callback
             auto sendFn = makeNative("send", -1,
@@ -2349,8 +2481,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
                     }
                     emit(); // trailing/final line (even if empty for "")
                     msg += "\n"; // blank line terminator
-                    ssize_t sent = ::send(clientFd, msg.c_str(), msg.size(), 0);
-                    if (sent < 0)
+                    if (!sseSendAll(clientFd, msg))
                         throw RuntimeError("SSE client disconnected", 0);
                     return Value();
                 });
@@ -2359,12 +2490,15 @@ Interpreter::Interpreter(bool installErrorClasses) {
             // (calling) Interpreter — see http.createServer comment.
             try {
                 std::vector<Value> cbArgs = {Value(std::static_pointer_cast<Callable>(sendFn))};
-                callSafe(*g_currentInterp, callback, cbArgs);
+                if (connected) callSafe(callbackInterp(), callback, cbArgs);
             } catch (const RuntimeError&) {
                 // Client likely disconnected — not an error
             }
 
-            close(clientFd);
+            // The socket is left open: the server loop closes it once the
+            // handler returns. Closing it here too would be a double close,
+            // and by the second one another thread may already own the
+            // number.
 
             // Return a marker so the server loop knows not to send a response
             auto marker = gcNew<PraiaMap>();
@@ -4274,7 +4408,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             }
             for (auto& [sig, handler] : toCall) {
                 std::string name = signalNumToName(sig);
-                callSafe(*g_currentInterp, handler, {Value(name)});
+                callSafe(callbackInterp(), handler, {Value(name)});
             }
             return Value(true);
         }));
@@ -4404,8 +4538,15 @@ Interpreter::Interpreter(bool installErrorClasses) {
             // losing precision on the way in.
             else if (p.isInt()) rc = sqlite3_bind_int64(stmt, idx, p.asInt());
             else if (p.isNumber()) rc = sqlite3_bind_double(stmt, idx, p.asNumber());
-            else if (p.isString()) rc = sqlite3_bind_text(stmt, idx, p.asString().c_str(), -1, SQLITE_TRANSIENT);
-            else rc = sqlite3_bind_text(stmt, idx, p.toString().c_str(), -1, SQLITE_TRANSIENT);
+            // Explicit byte length: a C-string length would cut the
+            // value at its first NUL byte
+            else if (p.isString()) {
+                const std::string& str = p.asString();
+                rc = sqlite3_bind_text(stmt, idx, str.data(), static_cast<int>(str.size()), SQLITE_TRANSIENT);
+            } else {
+                std::string str = p.toString();
+                rc = sqlite3_bind_text(stmt, idx, str.data(), static_cast<int>(str.size()), SQLITE_TRANSIENT);
+            }
             if (rc != SQLITE_OK) {
                 std::string err = sqlite3_errstr(rc);
                 sqlite3_finalize(stmt);
@@ -4414,6 +4555,99 @@ Interpreter::Interpreter(bool installErrorClasses) {
                     ": " + err, 0);
             }
         }
+    };
+
+    // Prepares exactly one statement. SQL text past the first statement
+    // used to be ignored without a word — "SELECT 1; DROP TABLE t" ran
+    // just the SELECT — so a second statement is an error now (trailing
+    // whitespace, semicolons and comments are fine). NUL bytes are
+    // rejected too: SQLite would stop reading the text there.
+    //
+    // The check happens before anything is prepared: SQLite applies some
+    // pragmas (PRAGMA foreign_keys=OFF, ...) while preparing, so even a
+    // rejected string must not reach sqlite3_prepare_v2. The first
+    // statement ends at the shortest prefix ending in ';' that
+    // sqlite3_complete accepts — it knows about string literals and
+    // trigger bodies, so semicolons inside those don't count.
+    auto sqlitePrepareOne = [](sqlite3* conn, const std::string& sql, const char* fn) {
+        if (sql.find('\0') != std::string::npos)
+            throw RuntimeError(std::string(fn) + "(): SQL contains a NUL byte", 0);
+        // Only whitespace, semicolons and comments from `t` on?
+        auto onlyIgnorable = [](const char* t) {
+            while (t && *t) {
+                if (std::isspace(static_cast<unsigned char>(*t)) || *t == ';') {
+                    t++;
+                } else if (t[0] == '-' && t[1] == '-') {
+                    while (*t && *t != '\n') t++;
+                } else if (t[0] == '/' && t[1] == '*') {
+                    const char* end = std::strstr(t + 2, "*/");
+                    t = end ? end + 2 : t + std::strlen(t);   // unterminated: comment to the end
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        };
+        auto moreThanOne = [fn]() {
+            return RuntimeError(std::string(fn) +
+                "() runs one SQL statement; the text has more after the first — call it once per statement", 0);
+        };
+        // Only semicolons outside string literals, quoted identifiers and
+        // comments can end a statement, so only those are offered to
+        // sqlite3_complete — usually just one, a few inside a trigger
+        // body. One copy of the text, cut in place at each candidate.
+        // Semicolons before the first real token are empty statements,
+        // which sqlite3_prepare_v2 skips, so they don't count.
+        std::string buf = sql;
+        bool seenToken = false;
+        for (size_t i = 0; i < buf.size(); i++) {
+            char c = buf[i];
+            if (c == '\'' || c == '"' || c == '`' || c == '[') {
+                seenToken = true;
+                char close = (c == '[') ? ']' : c;
+                for (i++; i < buf.size(); i++) {
+                    if (buf[i] != close) continue;
+                    // A doubled quote is an escaped quote, not the end
+                    if (close != ']' && i + 1 < buf.size() && buf[i + 1] == close) { i++; continue; }
+                    break;
+                }
+            } else if (c == '-' && i + 1 < buf.size() && buf[i + 1] == '-') {
+                while (i < buf.size() && buf[i] != '\n') i++;
+            } else if (c == '/' && i + 1 < buf.size() && buf[i + 1] == '*') {
+                size_t end = buf.find("*/", i + 2);
+                i = (end == std::string::npos) ? buf.size() : end + 1;
+            } else if (c == ';' && seenToken) {
+                // Cut the text just after this ';' (c_str() ends there anyway
+                // when it's the last character)
+                bool last = i + 1 == buf.size();
+                char next = last ? '\0' : buf[i + 1];
+                if (!last) buf[i + 1] = '\0';
+                bool complete = sqlite3_complete(buf.c_str()) != 0;
+                if (!last) buf[i + 1] = next;
+                if (complete) {
+                    if (!onlyIgnorable(sql.c_str() + i + 1)) throw moreThanOne();
+                    break;
+                }
+            } else if (c != ';' && !std::isspace(static_cast<unsigned char>(c))) {
+                seenToken = true;
+            }
+        }
+        sqlite3_stmt* stmt = nullptr;
+        const char* tail = nullptr;
+        int rc = sqlite3_prepare_v2(conn, sql.c_str(), static_cast<int>(sql.size()) + 1, &stmt, &tail);
+        if (rc != SQLITE_OK) {
+            std::string err = sqlite3_errmsg(conn);
+            throw RuntimeError("SQL error: " + err, 0);
+        }
+        // Backstop: SQLite's own idea of where the statement ended
+        if (!onlyIgnorable(tail)) {
+            if (stmt) sqlite3_finalize(stmt);
+            throw moreThanOne();
+        }
+        // Empty, or only comments and semicolons: SQLite prepares nothing
+        if (!stmt)
+            throw RuntimeError(std::string(fn) + "() was given no SQL statement to run", 0);
+        return stmt;
     };
 
     auto sqliteMap = gcNew<PraiaMap>();
@@ -4441,7 +4675,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
         }));
 
     sqliteMap->entries[Value("query")] = Value(makeNative("sqlite.query", -1,
-        [sqliteBind](const std::vector<Value>& args) -> Value {
+        [sqliteBind, sqlitePrepareOne](const std::vector<Value>& args) -> Value {
             if (args.size() < 2 || args.size() > 3)
                 throw RuntimeError("sqlite.query() expected (conn, sql, params?)", 0);
             auto* w = praia::getExternal<SqliteConn>(args[0], kSqliteTypeTag);
@@ -4450,12 +4684,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
             if (!args[1].isString())
                 throw RuntimeError("sqlite.query() argument 2 must be a string", 0);
 
-            sqlite3_stmt* stmt = nullptr;
-            int rc = sqlite3_prepare_v2(w->conn, args[1].asString().c_str(), -1, &stmt, nullptr);
-            if (rc != SQLITE_OK) {
-                std::string err = sqlite3_errmsg(w->conn);
-                throw RuntimeError("SQL error: " + err, 0);
-            }
+            sqlite3_stmt* stmt = sqlitePrepareOne(w->conn, args[1].asString(), "sqlite.query");
 
             if (args.size() == 3) {
                 sqliteBind(stmt, args[2], "sqlite.query");
@@ -4489,10 +4718,23 @@ Interpreter::Interpreter(bool installErrorClasses) {
                         case SQLITE_FLOAT:
                             row->entries[Value(name)] = Value(sqlite3_column_double(stmt, c));
                             break;
-                        default:
-                            row->entries[Value(name)] = Value(std::string(
-                                reinterpret_cast<const char*>(sqlite3_column_text(stmt, c))));
+                        case SQLITE_BLOB: {
+                            const void* blob = sqlite3_column_blob(stmt, c);
+                            int n = sqlite3_column_bytes(stmt, c);
+                            row->entries[Value(name)] = Value(blob
+                                ? std::string(static_cast<const char*>(blob), static_cast<size_t>(n))
+                                : std::string());
                             break;
+                        }
+                        default: {
+                            // Text, by its byte length: it can contain NUL bytes
+                            const unsigned char* text = sqlite3_column_text(stmt, c);
+                            int n = sqlite3_column_bytes(stmt, c);
+                            row->entries[Value(name)] = Value(text
+                                ? std::string(reinterpret_cast<const char*>(text), static_cast<size_t>(n))
+                                : std::string());
+                            break;
+                        }
                     }
                 }
                 rows->elements.push_back(Value(row));
@@ -4512,7 +4754,7 @@ Interpreter::Interpreter(bool installErrorClasses) {
         }));
 
     sqliteMap->entries[Value("run")] = Value(makeNative("sqlite.run", -1,
-        [sqliteBind](const std::vector<Value>& args) -> Value {
+        [sqliteBind, sqlitePrepareOne](const std::vector<Value>& args) -> Value {
             if (args.size() < 2 || args.size() > 3)
                 throw RuntimeError("sqlite.run() expected (conn, sql, params?)", 0);
             auto* w = praia::getExternal<SqliteConn>(args[0], kSqliteTypeTag);
@@ -4521,12 +4763,8 @@ Interpreter::Interpreter(bool installErrorClasses) {
             if (!args[1].isString())
                 throw RuntimeError("sqlite.run() argument 2 must be a string", 0);
 
-            sqlite3_stmt* stmt = nullptr;
-            int rc = sqlite3_prepare_v2(w->conn, args[1].asString().c_str(), -1, &stmt, nullptr);
-            if (rc != SQLITE_OK) {
-                std::string err = sqlite3_errmsg(w->conn);
-                throw RuntimeError("SQL error: " + err, 0);
-            }
+            sqlite3_stmt* stmt = sqlitePrepareOne(w->conn, args[1].asString(), "sqlite.run");
+            int rc = SQLITE_OK;
 
             if (args.size() == 3) {
                 sqliteBind(stmt, args[2], "sqlite.run");

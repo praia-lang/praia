@@ -1,3 +1,4 @@
+#include <cctype>
 #include "../builtins.h"
 #include "../interpreter.h"
 #include "../praia_plugin.h"
@@ -49,14 +50,90 @@ struct SocketConn {
     SocketConn(SocketConn&&) = delete;
     SocketConn& operator=(SocketConn&&) = delete;
 
-    ssize_t write(const void* buf, size_t len) {
+    // Sends all of buf, or returns -1. A send can take only part of it;
+    // `sent`, if given, gets how many bytes went out either way.
+    ssize_t write(const void* buf, size_t len, size_t* sent = nullptr) {
+        // Under a deadline: send in pieces, each allowed only the time
+        // left, so a peer that stops reading can't stall the request
+        // past it
+        bool deadline = readDeadline != std::chrono::steady_clock::time_point::max();
+        const char* p = static_cast<const char*>(buf);
+        size_t done = 0;
+        if (sent) *sent = 0;
+        while (done < len) {
+            if (deadline) setSendTimeout(timeLeftUs(), readTimeoutMs);
+            size_t piece = deadline ? std::min<size_t>(len - done, 16384) : len - done;
+            ssize_t n = writeOnce(p + done, piece);
+            if (n <= 0) {
+                if (deadline && std::chrono::steady_clock::now() >= readDeadline)
+                    throw RuntimeError("HTTP total timeout exceeded", 0);
+                return -1;
+            }
+            done += static_cast<size_t>(n);
+            if (sent) *sent = done;
+        }
+        return static_cast<ssize_t>(done);
+    }
+
+    ssize_t writeOnce(const void* buf, size_t len) {
 #ifdef HAVE_OPENSSL
         if (ssl) return SSL_write(ssl, buf, static_cast<int>(len));
 #endif
         return ::send(fd, buf, len, 0);
     }
 
+    // Microseconds until readDeadline; throws once it has passed
+    long long timeLeftUs() const {
+        auto leftUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            readDeadline - std::chrono::steady_clock::now()).count();
+        if (leftUs <= 0) throw RuntimeError("HTTP total timeout exceeded", 0);
+        return leftUs;
+    }
+
+    void setSendTimeout(long long leftUs, int capMs) {
+        long long us = leftUs + 1000;
+        if (capMs > 0 && static_cast<long long>(capMs) * 1000 < us) us = static_cast<long long>(capMs) * 1000;
+        struct timeval tv;
+        tv.tv_sec = static_cast<time_t>(us / 1000000);
+        tv.tv_usec = static_cast<suseconds_t>(us % 1000000);
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+
+    // While a buffered request is in flight: the request's overall
+    // deadline (totalTimeout) and its per-read budget. Each read and
+    // write waits no longer than whatever is left, so a server trickling
+    // bytes can't keep the request alive past the deadline. max() = no
+    // deadline.
+    std::chrono::steady_clock::time_point readDeadline =
+        std::chrono::steady_clock::time_point::max();
+    int readTimeoutMs = 0;
+
     ssize_t read(void* buf, size_t len) {
+        ssize_t n = readOnce(buf, len);
+        // A read cut short by the deadline is the overall timeout, not
+        // the per-read one — say which
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            readDeadline != std::chrono::steady_clock::time_point::max() &&
+            std::chrono::steady_clock::now() >= readDeadline)
+            throw RuntimeError("HTTP total timeout exceeded", 0);
+        return n;
+    }
+
+    ssize_t readOnce(void* buf, size_t len) {
+        if (readDeadline != std::chrono::steady_clock::time_point::max()) {
+            auto leftUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                readDeadline - std::chrono::steady_clock::now()).count();
+            if (leftUs <= 0) throw RuntimeError("HTTP total timeout exceeded", 0);
+            // Rounded up a millisecond, so a read capped by the deadline
+            // never times out just before it (see read())
+            long long us = leftUs + 1000;
+            if (readTimeoutMs > 0 && static_cast<long long>(readTimeoutMs) * 1000 < us)
+                us = static_cast<long long>(readTimeoutMs) * 1000;
+            struct timeval tv;
+            tv.tv_sec = static_cast<time_t>(us / 1000000);
+            tv.tv_usec = static_cast<suseconds_t>(us % 1000000);
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
 #ifdef HAVE_OPENSSL
         if (ssl) return SSL_read(ssl, buf, static_cast<int>(len));
 #endif
@@ -269,7 +346,9 @@ static std::string sockaddrToString(const struct sockaddr* sa) {
 // blockPrivate: when true, refuses to connect if ANY resolved address is
 // private/loopback/link-local/reserved (SSRF protection). Re-applies per
 // call so the redirect loop in doHttpRequest naturally gates every hop.
-int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPrivate) {
+int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPrivate,
+                  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()) {
+    const bool hasDeadline = deadline != std::chrono::steady_clock::time_point::max();
     struct addrinfo hints = {};
     // AF_UNSPEC lets the resolver return both IPv4 and IPv6 records;
     // pre-Phase-2 this was hard-coded to AF_INET, which made IPv6-only
@@ -299,6 +378,15 @@ int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPr
 
     std::string lastErr;
     for (struct addrinfo* ai = ag.res; ai != nullptr; ai = ai->ai_next) {
+        // Every address shares the overall deadline, not a fresh
+        // connectTimeout each
+        int waitMs = timeoutMs;
+        if (hasDeadline) {
+            auto leftMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (leftMs <= 0) throw RuntimeError("HTTP total timeout exceeded", 0);
+            if (waitMs < 0 || waitMs > leftMs) waitMs = static_cast<int>(leftMs);
+        }
         praia::FdGuard sock(socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
         if (!sock) { lastErr = std::strerror(errno); continue; }
 
@@ -335,15 +423,17 @@ int connectToHost(const std::string& host, int port, int timeoutMs, bool blockPr
         pfd.revents = 0;
         int polled;
         do {
-            polled = poll(&pfd, 1, timeoutMs);
+            polled = poll(&pfd, 1, waitMs);
         } while (polled < 0 && errno == EINTR);
 
         if (polled == 0) {
+            if (hasDeadline && std::chrono::steady_clock::now() >= deadline)
+                throw RuntimeError("HTTP total timeout exceeded", 0);
             // Timed out on THIS address — try the next one rather
             // than giving up. Real-world: A and AAAA records often
             // both exist; one may be unreachable due to NAT64 or
             // missing v6 transit.
-            lastErr = "connect timed out after " + std::to_string(timeoutMs) + "ms";
+            lastErr = "connect timed out after " + std::to_string(waitMs) + "ms";
             continue;
         }
         if (polled < 0) {
@@ -514,11 +604,33 @@ static bool responseIsChunked(const std::shared_ptr<PraiaMap>& headers) {
     return false;
 }
 
-// Limits for incoming requests
-// No body-size cap — handlers/middleware (e.g. middleware.bodyLimit) decide policy.
-// A reverse proxy is the right place for DoS-grade limits.
+// Limits for incoming requests. The body cap and the per-request
+// deadline come from HttpServerOptions (server.listen's opts).
 static constexpr size_t MAX_HEADER_SIZE = 64 * 1024;   // 64 KB headers
-static constexpr int    RECV_TIMEOUT_SECS = 30;
+
+using RequestDeadline = std::chrono::steady_clock::time_point;
+
+// recv() bounded by the request's overall deadline: the socket timeout is
+// set to whatever time is left, so a client trickling one byte at a time
+// can't hold the (one-connection-at-a-time) server past the deadline.
+static ssize_t recvBefore(int client, char* buf, size_t len, RequestDeadline deadline) {
+    auto left = std::chrono::duration_cast<std::chrono::microseconds>(
+        deadline - std::chrono::steady_clock::now()).count();
+    if (left <= 0) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    struct timeval tv;
+    tv.tv_sec = static_cast<time_t>(left / 1000000);
+    tv.tv_usec = static_cast<suseconds_t>(left % 1000000);
+    if (tv.tv_sec == 0 && tv.tv_usec < 1000) tv.tv_usec = 1000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    return recv(client, buf, len, 0);
+}
+
+// Thrown when a request body exceeds HttpServerOptions::maxBodySize;
+// answered with 413.
+struct RequestBodyTooLarge {};
 
 // Collect ALL values of a header (one entry per occurrence). Lets us
 // detect duplicate Content-Length and Transfer-Encoding.
@@ -601,12 +713,12 @@ static void sendBadRequest(int client, const std::string& reason) {
 }
 
 // Drain N more bytes from the socket into `data`, appending to whatever
-// is already buffered. Returns false on EOF or socket error before
-// reaching `needed`. Caller is responsible for any per-fd timeout.
-static bool recvAtLeast(int client, std::string& data, size_t needed) {
+// is already buffered. Returns false on EOF, socket error or the deadline
+// passing before reaching `needed`.
+static bool recvAtLeast(int client, std::string& data, size_t needed, RequestDeadline deadline) {
     char buf[8192];
     while (data.size() < needed) {
-        ssize_t n = recv(client, buf, sizeof(buf), 0);
+        ssize_t n = recvBefore(client, buf, sizeof(buf), deadline);
         if (n <= 0) return false;
         data.append(buf, n);
     }
@@ -619,10 +731,10 @@ static bool recvAtLeast(int client, std::string& data, size_t needed) {
 // updates `pos` past the trailer terminator. Throws RuntimeError on any
 // protocol violation — caller catches and replies 400.
 //
-// Cap on total decoded size is the same MAX_CHUNKED_BODY constant below.
+// The decoded size is capped at `maxBody` (throws RequestBodyTooLarge).
 // Without it, an attacker can pour gigabytes of zeroes through chunked.
-static constexpr size_t MAX_CHUNKED_BODY = 64ull * 1024 * 1024;
-static std::string decodeChunkedBody(int client, std::string& data, size_t& pos) {
+static std::string decodeChunkedBody(int client, std::string& data, size_t& pos,
+                                     size_t maxBody, RequestDeadline deadline) {
     std::string body;
     while (true) {
         // Find the size-line terminator. recv more if needed.
@@ -632,7 +744,7 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
             // make us buffer forever waiting for \r\n.
             if (data.size() - pos > 1024)
                 throw RuntimeError("chunk size line too long", 0);
-            if (!recvAtLeast(client, data, data.size() + 1))
+            if (!recvAtLeast(client, data, data.size() + 1, deadline))
                 throw RuntimeError("connection closed mid-chunk-size", 0);
         }
         std::string sizeLine = data.substr(pos, eol - pos);
@@ -661,12 +773,10 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
         }
         // Subtractive check — body.size() + chunkSize as a forward sum
         // could wrap size_t when chunkSize is near SIZE_MAX. After this
-        // passes, chunkSize <= MAX_CHUNKED_BODY, so all later additions
+        // passes, chunkSize <= maxBody, so all later additions
         // involving chunkSize (`pos + chunkSize + 2` below) are bounded.
-        if (chunkSize > MAX_CHUNKED_BODY - body.size())
-            throw RuntimeError(
-                "chunked body exceeds server limit (" +
-                std::to_string(MAX_CHUNKED_BODY) + " bytes)", 0);
+        if (chunkSize > maxBody - body.size())
+            throw RequestBodyTooLarge{};
         if (chunkSize == 0) {
             // Drain trailer section: zero or more header-lines, then \r\n.
             // We discard trailer values — request handlers don't expect
@@ -676,7 +786,7 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
                 while ((eol = data.find("\r\n", pos)) == std::string::npos) {
                     if (data.size() - pos > 8192)
                         throw RuntimeError("chunk trailer line too long", 0);
-                    if (!recvAtLeast(client, data, data.size() + 1))
+                    if (!recvAtLeast(client, data, data.size() + 1, deadline))
                         throw RuntimeError("connection closed in trailers", 0);
                 }
                 if (eol == pos) { pos += 2; break; }   // empty line — done
@@ -687,7 +797,7 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
         // Need chunkSize + 2 bytes (data + \r\n).
         size_t needed = pos + chunkSize + 2;
         if (data.size() < needed) {
-            if (!recvAtLeast(client, data, needed))
+            if (!recvAtLeast(client, data, needed, deadline))
                 throw RuntimeError("connection closed mid-chunk-data", 0);
         }
         body.append(data, pos, chunkSize);
@@ -701,12 +811,11 @@ static std::string decodeChunkedBody(int client, std::string& data, size_t& pos)
 // Parse a raw HTTP request from a client socket.
 // Returns a PraiaMap with method, path, query, headers, body.
 // Also outputs the raw client fd for SSE use.
-std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
-    // Set a receive timeout so slow/idle clients don't block the server
-    struct timeval tv;
-    tv.tv_sec = RECV_TIMEOUT_SECS;
-    tv.tv_usec = 0;
-    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+std::shared_ptr<PraiaMap> readAndParseRequest(int client, const HttpServerOptions& opts) {
+    // One deadline for the whole request — headers and body — so a slow
+    // or idle client can't hold the server longer than requestTimeoutMs
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(opts.requestTimeoutMs);
 
     std::string data;
     // Read until we see the end of headers (or hit the header size cap).
@@ -719,14 +828,35 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
                 sendBadRequest(client, "headers exceed limit");
                 return nullptr;
             }
-            ssize_t n = recv(client, buf, sizeof(buf), 0);
-            if (n <= 0) return nullptr;   // EOF or error — drop quietly
+            ssize_t n = recvBefore(client, buf, sizeof(buf), deadline);
+            if (n <= 0) return nullptr;   // EOF, error or deadline — drop quietly
             data.append(buf, n);
         }
     }
 
     size_t hend = data.find("\r\n\r\n");
     std::string hdr = data.substr(0, hend);
+
+    // RFC 7230 §3.2.4: no whitespace between a field name and its colon,
+    // and every field line has a name. A request with "Transfer-Encoding :
+    // chunked" would otherwise be read as having no body framing at all.
+    {
+        size_t lineStart = hdr.find("\r\n");
+        while (lineStart != std::string::npos) {
+            lineStart += 2;
+            size_t lineEnd = hdr.find("\r\n", lineStart);
+            std::string line = hdr.substr(lineStart, lineEnd == std::string::npos
+                                                         ? std::string::npos
+                                                         : lineEnd - lineStart);
+            size_t colon = line.find(':');
+            if (colon == std::string::npos || colon == 0 ||
+                line.find_first_of(" \t") < colon) {
+                sendBadRequest(client, "malformed header line");
+                return nullptr;
+            }
+            lineStart = lineEnd;
+        }
+    }
 
     // ── Framing-header validation (RFC 7230 §3.3 / §3.3.3) ──
     //
@@ -783,7 +913,10 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
     if (chunked) {
         try {
             size_t pos = bodyStart;
-            reqBody = decodeChunkedBody(client, data, pos);
+            reqBody = decodeChunkedBody(client, data, pos, opts.maxBodySize, deadline);
+        } catch (const RequestBodyTooLarge&) {
+            sendHttpResponse(client, 413, "Payload Too Large\r\n", {});
+            return nullptr;
         } catch (RuntimeError& e) {
             sendBadRequest(client, std::string("chunked decode: ") + e.what());
             return nullptr;
@@ -793,12 +926,13 @@ std::shared_ptr<PraiaMap> readAndParseRequest(int client) {
             // parseContentLengthStrict caps overflow during parsing but
             // clen can still be near SIZE_MAX. Guard `bodyStart + clen`
             // before adding so we don't wrap and silently misread.
-            if (clen > std::numeric_limits<size_t>::max() - bodyStart) {
-                sendBadRequest(client, "Content-Length too large");
+            if (clen > opts.maxBodySize) {
+                // Refused before reading any of it
+                sendHttpResponse(client, 413, "Payload Too Large\r\n", {});
                 return nullptr;
             }
             size_t needed = bodyStart + clen;
-            if (!recvAtLeast(client, data, needed)) return nullptr;
+            if (!recvAtLeast(client, data, needed, deadline)) return nullptr;
             reqBody.assign(data, bodyStart, clen);
         }
     }
@@ -972,6 +1106,10 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
 
 } // anonymous namespace
 
+bool httpHeaderFieldSafe(const std::string& name, const std::string& value) {
+    return headerFieldSafe(name, value);
+}
+
 // Forward declaration: defined below the streaming helpers (HttpStreamState
 // + detectStreamMode + streamEnsure) because it leans on them. Reads the
 // full response off `conn` using the framed streaming decoder rather than
@@ -980,7 +1118,7 @@ bool sendHttpFileResponse(int client, int status, const std::string& path,
 // regardless of any framing headers (see detectStreamMode).
 static std::pair<ResponseHeaderFields, std::string>
 readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
-                   const std::string& method);
+                   const std::string& method, int64_t maxBody);
 
 // Forward declaration: is the response framed in a way that lets us
 // safely return its socket to a keepalive pool? Defined alongside
@@ -1036,6 +1174,73 @@ static std::string mergePaths(const praia::url::ParsedUrl& base,
     auto slash = base.path.rfind('/');
     if (slash == std::string::npos) return refPath;
     return base.path.substr(0, slash + 1) + refPath;
+}
+
+// Erases every header whose name matches `name` case-insensitively —
+// callers' header maps keep whatever casing the user wrote.
+static void eraseHeaderCI(std::unordered_map<std::string, std::string>& headers,
+                          const std::string& name) {
+    for (auto it = headers.begin(); it != headers.end();) {
+        bool match = it->first.size() == name.size() &&
+            std::equal(it->first.begin(), it->first.end(), name.begin(),
+                       [](char a, char b) {
+                           return std::tolower(static_cast<unsigned char>(a)) ==
+                                  std::tolower(static_cast<unsigned char>(b));
+                       });
+        it = match ? headers.erase(it) : std::next(it);
+    }
+}
+
+// Headers forwarded on a redirect to another origin unless the caller
+// opts into `redirectHeaders: "all"`: standard ones that describe the
+// request or the client, never credentials. Anything else — including
+// custom headers such as X-API-Key that may carry a secret — was meant
+// for the original host only.
+static bool isSafeCrossOriginHeader(const std::string& name) {
+    static const char* const kSafe[] = {
+        "accept", "accept-encoding", "accept-language", "user-agent",
+        "content-type", "content-length", "content-encoding", "content-language",
+        "cache-control", "pragma", "range", "if-match", "if-none-match",
+        "if-modified-since", "if-unmodified-since", "if-range",
+    };
+    std::string lower = name;
+    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* safe : kSafe)
+        if (lower == safe) return true;
+    return false;
+}
+
+// Same origin = same scheme, host (case-insensitive) and port.
+static bool isSameOrigin(const std::string& aUrl, const std::string& bUrl) {
+    ParsedUrl a = parseUrl(aUrl);
+    ParsedUrl b = parseUrl(bUrl);
+    auto lower = [](std::string h) {
+        for (auto& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return h;
+    };
+    return a.tls == b.tls && a.port == b.port && lower(a.host) == lower(b.host);
+}
+
+// Called on every redirect hop, after the 301/302/303 method switch has
+// dropped the body where it applies. Same-origin keeps every header and
+// the body. Cross-origin, unless the caller trusts redirects
+// (`redirectHeaders: "all"`): only isSafeCrossOriginHeader headers
+// survive, and a 307/308 that would resend a request body is refused —
+// the body (a login form, an API payload) was meant for the original
+// host just as much as its credential headers were.
+static void prepareRedirectHop(std::unordered_map<std::string, std::string>& headers,
+                               const std::string& body,
+                               const std::string& fromUrl,
+                               const std::string& toUrl,
+                               int status,
+                               const HttpOptions& opts) {
+    if (opts.redirectForwardAllHeaders || isSameOrigin(fromUrl, toUrl)) return;
+    if (!body.empty())
+        throw RuntimeError("HTTP redirect: refusing to resend the request body to another origin (" +
+                           std::to_string(status) + " to " + toUrl +
+                           "); pass redirectHeaders: \"all\" to allow it", 0);
+    for (auto it = headers.begin(); it != headers.end();)
+        it = isSafeCrossOriginHeader(it->first) ? std::next(it) : headers.erase(it);
 }
 
 // Resolve a redirect Location header against the base URL.
@@ -1156,13 +1361,51 @@ static void validateRequestParts(
     }
 }
 
+#ifdef HAVE_OPENSSL
+// SSL_connect, held to opts.deadline when there is one: the handshake
+// runs non-blocking and each wait is capped at the time left (and at
+// readTimeoutMs), so its several round trips can't outlast the deadline.
+// Returns SSL_connect's result; throws once the deadline passes.
+static int sslConnectBefore(SocketConn& conn, const HttpOptions& opts) {
+    if (opts.deadline == std::chrono::steady_clock::time_point::max()) return SSL_connect(conn.ssl);
+    int flags = fcntl(conn.fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(conn.fd, F_SETFL, flags | O_NONBLOCK) < 0) return SSL_connect(conn.ssl);
+    // Back to blocking for the reads and writes that follow (unless the
+    // socket was closed on the way out — its number may be reused)
+    struct RestoreFlags {
+        SocketConn& c;
+        int flags;
+        ~RestoreFlags() { if (c.fd >= 0) fcntl(c.fd, F_SETFL, flags); }
+    } restore{conn, flags};
+    while (true) {
+        int r = SSL_connect(conn.ssl);
+        if (r == 1) return r;
+        int err = SSL_get_error(conn.ssl, r);
+        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) return r;
+        auto leftMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            opts.deadline - std::chrono::steady_clock::now()).count() + 1;
+        if (leftMs <= 1) { conn.shutdown_close(); throw RuntimeError("HTTP total timeout exceeded", 0); }
+        int waitMs = static_cast<int>(std::min<long long>(leftMs, INT_MAX));
+        if (opts.readTimeoutMs > 0 && opts.readTimeoutMs < waitMs) waitMs = opts.readTimeoutMs;
+        struct pollfd pfd{conn.fd, static_cast<short>(err == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT), 0};
+        int polled;
+        do { polled = poll(&pfd, 1, waitMs); } while (polled < 0 && errno == EINTR);
+        if (polled == 0 && std::chrono::steady_clock::now() >= opts.deadline) {
+            conn.shutdown_close();
+            throw RuntimeError("HTTP total timeout exceeded", 0);
+        }
+        if (polled <= 0) return -1;   // read timeout or poll error: a failed handshake
+    }
+}
+#endif
+
 // Open a TCP socket + (for https) run the TLS handshake. Pulled out
 // of doOneHttpRequest so the keep-alive session path can call it
 // directly when its pool has no idle connection for the target host.
 // On any failure the conn's resources are cleaned up before throwing.
 static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
                              const HttpOptions& opts) {
-    conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs, opts.blockPrivateHosts);
+    conn.fd = connectToHost(p.host, p.port, opts.connectTimeoutMs, opts.blockPrivateHosts, opts.deadline);
     // After connect, apply the read/write timeout to the socket so
     // subsequent recv()/send() calls (and the SSL_read/SSL_write
     // wrappers around them) bound their wait.
@@ -1228,7 +1471,7 @@ static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
             }
         }
 
-        if (SSL_connect(conn.ssl) <= 0) {
+        if (sslConnectBefore(conn, opts) <= 0) {
             // Verification errors (expired cert, hostname mismatch, etc.)
             // surface as SSL_connect failures. Surface the verify result
             // if it explains the failure; otherwise generic message.
@@ -1258,6 +1501,13 @@ static void openSocketAndTls(SocketConn& conn, const ParsedUrl& p,
 // session wrapper catches this and retries once on a fresh socket; the
 // stateless wrapper never sees it (always passes isFreshSocket=true).
 struct HttpRetryOnFresh {};
+
+// The response is bigger than maxResponseSize. Still a RuntimeError for
+// the script, but a deterministic one: the retry path must not resend
+// the request on a fresh socket only to get the same answer.
+struct HttpResponseTooLarge : RuntimeError {
+    using RuntimeError::RuntimeError;
+};
 
 // RFC 7231 §4.2.2 — request methods whose intended effect is the same
 // whether the request fires once or many times. The retry path uses
@@ -1290,7 +1540,17 @@ static OneRequestResult doOneHttpRequestImpl(
     const std::string& method, const ParsedUrl& p,
     const std::string& body,
     const std::unordered_map<std::string, std::string>& extraHeaders,
-    bool wantKeepalive) {
+    bool wantKeepalive, const HttpOptions& opts) {
+
+    // Hold reads to the request's overall deadline while it's in flight;
+    // cleared afterwards so a pooled socket doesn't carry it to the next
+    // request
+    struct ReadDeadlineGuard {
+        SocketConn& c;
+        ~ReadDeadlineGuard() { c.readDeadline = std::chrono::steady_clock::time_point::max(); }
+    } readDeadlineGuard{conn};
+    conn.readDeadline = opts.deadline;
+    conn.readTimeoutMs = opts.readTimeoutMs;
 
     // Serialize straight to the wire — header validation already ran in
     // the caller (validateRequestParts) before any socket I/O.
@@ -1304,12 +1564,16 @@ static OneRequestResult doOneHttpRequestImpl(
         req += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     req += "\r\n" + body;
 
-    if (conn.write(req.c_str(), req.size()) < 0) {
+    size_t sent = 0;
+    if (conn.write(req.c_str(), req.size(), &sent) < 0) {
         // Reused-socket send failure is the classic stale-conn signature:
         // peer closed between the pool's last probe and our write. Signal
         // the wrapper to retry once on a fresh socket. Fresh-socket writes
-        // always surface as the original error.
-        if (!isFreshSocket) throw HttpRetryOnFresh{};
+        // always surface as the original error. Once part of the request
+        // is out, only a method that's safe to repeat is resent — the
+        // server may already be acting on a POST's first bytes.
+        if (!isFreshSocket && (sent == 0 || isIdempotentMethod(method)))
+            throw HttpRetryOnFresh{};
         throw RuntimeError("Failed to send HTTP request", 0);
     }
 
@@ -1320,9 +1584,11 @@ static OneRequestResult doOneHttpRequestImpl(
     ResponseHeaderFields fields;
     std::string respBody;
     try {
-        auto pair = readFramedResponse(conn, connPtr, method);
+        auto pair = readFramedResponse(conn, connPtr, method, opts.maxResponseSize);
         fields   = std::move(pair.first);
         respBody = std::move(pair.second);
+    } catch (const HttpResponseTooLarge&) {
+        throw;   // the server answered; a resend would get the same answer
     } catch (...) {
         // Retry on a reused socket only for idempotent methods. Even a
         // confirmed peer-side EOF before any response bytes is ambiguous
@@ -1330,6 +1596,9 @@ static OneRequestResult doOneHttpRequestImpl(
         // it, then hung up without responding — replaying a POST in
         // that case would double-commit. We match Python requests'
         // default policy: only the RFC-7231-idempotent verbs retry.
+        // Never once the overall deadline has passed: the retry would
+        // re-send the request with no time left to read the reply.
+        if (std::chrono::steady_clock::now() >= opts.deadline) throw;
         if (!isFreshSocket && isIdempotentMethod(method))
             throw HttpRetryOnFresh{};
         throw;
@@ -1369,7 +1638,7 @@ static Value doOneHttpRequest(const std::string& method, const std::string& url,
 
     auto r = doOneHttpRequestImpl(conn, /*isFreshSocket=*/true,
                                   method, p, body, extraHeaders,
-                                  /*wantKeepalive=*/false);
+                                  /*wantKeepalive=*/false, opts);
     return r.response;
 }
 
@@ -1622,7 +1891,7 @@ static Value httpSessionRequestOne(HttpSession& s, const std::string& method,
         try {
             auto r = doOneHttpRequestImpl(*conn, isFresh,
                                           method, p, body, headers,
-                                          /*wantKeepalive=*/true);
+                                          /*wantKeepalive=*/true, opts);
             if (r.keepalive) sessionReturnIdle(s, key, std::move(conn));
             else conn->shutdown_close();
             return r.response;
@@ -1670,6 +1939,7 @@ Value httpSessionRequest(const Value& session,
 
     while (true) {
         HttpOptions perReq = opts;
+        perReq.deadline = deadline;   // reads inside the response are held to it too
         if (opts.totalTimeoutMs > 0) {
             auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
@@ -1716,9 +1986,10 @@ Value httpSessionRequest(const Value& session,
               currentMethod != "GET" && currentMethod != "HEAD")) {
             currentMethod = "GET";
             currentBody.clear();
-            currentHeaders.erase("Content-Length");
-            currentHeaders.erase("Content-Type");
+            eraseHeaderCI(currentHeaders, "Content-Length");
+            eraseHeaderCI(currentHeaders, "Content-Type");
         }
+        prepareRedirectHop(currentHeaders, currentBody, currentUrl, newUrl, status, opts);
         currentUrl = newUrl;
         ++redirectCount;
     }
@@ -1743,6 +2014,7 @@ Value doHttpRequest(const std::string& method, const std::string& url,
         // Cap per-request timeouts at the remaining total budget so a
         // pathological mid-redirect server can't outlast the deadline.
         HttpOptions perReq = opts;
+        perReq.deadline = deadline;   // reads inside the response are held to it too
         if (opts.totalTimeoutMs > 0) {
             auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
@@ -1802,11 +2074,12 @@ Value doHttpRequest(const std::string& method, const std::string& url,
               currentMethod != "GET" && currentMethod != "HEAD")) {
             currentMethod = "GET";
             currentBody.clear();
-            currentHeaders.erase("Content-Length");
-            currentHeaders.erase("Content-Type");
+            eraseHeaderCI(currentHeaders, "Content-Length");
+            eraseHeaderCI(currentHeaders, "Content-Type");
             // (Transfer-Encoding would also need clearing for chunked
             //  bodies, but we don't currently emit chunked.)
         }
+        prepareRedirectHop(currentHeaders, currentBody, currentUrl, newUrl, status, opts);
         currentUrl = newUrl;
         ++redirectCount;
     }
@@ -2145,7 +2418,7 @@ static void readHeadersInto(SocketConn& conn, std::string& headerText,
 // expects shared ownership.
 static std::pair<ResponseHeaderFields, std::string>
 readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
-                   const std::string& method) {
+                   const std::string& method, int64_t maxBody) {
     std::string headerText, bodyPrefix;
     readHeadersInto(conn, headerText, bodyPrefix);
     std::string headerSection = (headerText.size() >= 4)
@@ -2161,12 +2434,30 @@ readFramedResponse(SocketConn& conn, const std::shared_ptr<SocketConn>& connPtr,
     state.scratchPos = 0;
     detectStreamMode(state, method);
 
+    // maxBody (maxResponseSize): a declared Content-Length over it fails
+    // before any of the body is read; otherwise the read stops as soon as
+    // the body passes it
+    auto tooLarge = [maxBody]() {
+        return HttpResponseTooLarge("HTTP response body exceeds maxResponseSize (" +
+                            std::to_string(maxBody) + " bytes); raise maxResponseSize "
+                            "or use http.openStream for large responses", 0);
+    };
+    if (maxBody > 0 && state.mode == HttpStreamState::Mode::ContentLength &&
+        state.contentRemaining > maxBody) {
+        state.conn.reset();
+        throw tooLarge();
+    }
+
     std::string body;
     while (true) {
         streamEnsure(state);
         if (state.bufPos >= state.buf.size()) break;
-        body.append(state.buf.data() + state.bufPos,
-                    state.buf.size() - state.bufPos);
+        size_t n = state.buf.size() - state.bufPos;
+        if (maxBody > 0 && body.size() + n > static_cast<size_t>(maxBody)) {
+            state.conn.reset();
+            throw tooLarge();
+        }
+        body.append(state.buf.data() + state.bufPos, n);
         state.bufPos = state.buf.size();
     }
 
@@ -2253,7 +2544,7 @@ Value httpOpenStream(const std::string& method, const std::string& url,
         }
 
         auto conn = std::make_shared<SocketConn>();
-        conn->fd = connectToHost(p.host, p.port, perReq.connectTimeoutMs, perReq.blockPrivateHosts);
+        conn->fd = connectToHost(p.host, p.port, perReq.connectTimeoutMs, perReq.blockPrivateHosts, deadline);
         setSocketTimeouts(conn->fd, perReq.readTimeoutMs);
 
 #ifdef HAVE_OPENSSL
@@ -2289,7 +2580,11 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                     X509_VERIFY_PARAM_set_hostflags(vp, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
                 }
             }
-            if (SSL_connect(conn->ssl) <= 0) {
+            // The handshake shares the overall deadline. Only the
+            // handshake: the stream's reads keep per-read readTimeout
+            // (conn->readDeadline stays unset).
+            perReq.deadline = deadline;
+            if (sslConnectBefore(*conn, perReq) <= 0) {
                 long vr = SSL_get_verify_result(conn->ssl);
                 conn->shutdown_close();
                 if (!perReq.insecure && vr != X509_V_OK) {
@@ -2401,9 +2696,10 @@ Value httpOpenStream(const std::string& method, const std::string& url,
                           currentMethod != "GET" && currentMethod != "HEAD")) {
                         currentMethod = "GET";
                         currentBody.clear();
-                        currentHeaders.erase("Content-Length");
-                        currentHeaders.erase("Content-Type");
+                        eraseHeaderCI(currentHeaders, "Content-Length");
+                        eraseHeaderCI(currentHeaders, "Content-Type");
                     }
+                    prepareRedirectHop(currentHeaders, currentBody, currentUrl, newUrl, status, opts);
                     currentUrl = newUrl;
                     ++redirectCount;
                     continue;
@@ -2416,6 +2712,11 @@ Value httpOpenStream(const std::string& method, const std::string& url,
         // method (or the state going out of scope) is responsible for
         // shutdown_close from here on. Release the guard so its
         // destructor doesn't double-close before the handle is even used.
+        //
+        // totalTimeoutMs only covered getting here: body reads get the
+        // caller's own readTimeoutMs (<= 0 = no limit), not what was
+        // left of the total
+        setSocketTimeouts(conn->fd, opts.readTimeoutMs);
         auto state = std::make_shared<HttpStreamState>();
         state->conn       = conn;
         state->status     = status;
@@ -2503,23 +2804,53 @@ Value httpOpenStream(const std::string& method, const std::string& url,
     }
 }
 
-void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) throw RuntimeError("Cannot create server socket", 0);
-    praia::setCloexec(fd);
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& interp,
+                      const HttpServerOptions& opts) {
+    int fd = -1;
+    std::string where = "port " + std::to_string(port);
+    if (opts.host.empty()) {
+        // Every IPv4 interface
+        fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) throw RuntimeError("Cannot create server socket", 0);
+        praia::setCloexec(fd);
+        int opt = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
+        struct sockaddr_in addr = {};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(port);
 
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(fd); throw RuntimeError("Cannot bind to port " + std::to_string(port), 0);
+        if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(fd); throw RuntimeError("Cannot bind to port " + std::to_string(port), 0);
+        }
+    } else {
+        // A specific address or host name (IPv4 or IPv6)
+        where = opts.host + ":" + std::to_string(port);
+        struct addrinfo hints = {};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_PASSIVE;
+        struct addrinfo* res = nullptr;
+        std::string portStr = std::to_string(port);
+        int gai = getaddrinfo(opts.host.c_str(), portStr.c_str(), &hints, &res);
+        if (gai != 0 || !res)
+            throw RuntimeError("Cannot resolve listen host \"" + opts.host + "\": " + gai_strerror(gai), 0);
+        for (auto* ai = res; ai; ai = ai->ai_next) {
+            fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd < 0) continue;
+            praia::setCloexec(fd);
+            int opt = 1;
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            if (bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+            close(fd);
+            fd = -1;
+        }
+        freeaddrinfo(res);
+        if (fd < 0) throw RuntimeError("Cannot bind to " + where, 0);
     }
     if (::listen(fd, 64) < 0) {
-        close(fd); throw RuntimeError("Cannot listen on port " + std::to_string(port), 0);
+        close(fd); throw RuntimeError("Cannot listen on " + where, 0);
     }
 
     // Install signal handler for graceful shutdown
@@ -2532,10 +2863,10 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
 
-    std::cout << "Server listening on port " << port << std::endl;
+    std::cout << "Server listening on " << where << std::endl;
 
     while (!g_shutdownRequested.load()) {
-        struct sockaddr_in ca;
+        struct sockaddr_storage ca;
         socklen_t cl = sizeof(ca);
         int client = accept(fd, (struct sockaddr*)&ca, &cl);
         if (client < 0) {
@@ -2543,8 +2874,17 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
             continue;
         }
         praia::setCloexec(client);
+        // Bound each blocked write of the response: a client that stops
+        // reading would otherwise hold the (one-at-a-time) server forever.
+        // A send that times out returns -1 and the send loops give up.
+        {
+            struct timeval stv;
+            stv.tv_sec = opts.requestTimeoutMs / 1000;
+            stv.tv_usec = (opts.requestTimeoutMs % 1000) * 1000;
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
+        }
 
-        auto req = readAndParseRequest(client);
+        auto req = readAndParseRequest(client, opts);
         if (!req) { close(client); continue; }
 
         // Check if the handler returns an SSE response
@@ -2615,16 +2955,21 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
                 respHeaders["Content-Type"] = "text/plain";
             }
         } catch (const ThrowSignal& t) {
+            // The details go to the server's stderr, not to the client:
+            // error text can carry file paths, SQL, or other internals.
             respStatus = 500;
-            respBody = "Error: " + t.value.toString();
+            respBody = "Internal Server Error";
+            respHeaders = {{"Content-Type", "text/plain"}};
+            std::cerr << "[http] handler error: " << t.value.toString() << std::endl;
         } catch (const RuntimeError& e) {
             respStatus = 500;
-            respBody = "Error: " + std::string(e.what());
+            respBody = "Internal Server Error";
+            respHeaders = {{"Content-Type", "text/plain"}};
+            std::cerr << "[http] handler error: " << e.what() << std::endl;
         }
 
         if (sseHandled) {
-            // SSE handler should have closed the socket; close again
-            // as a safety net (harmless if already closed).
+            // http.sse leaves the socket to us: this is its only close
             close(client);
             // afterResponse runs after socket close for SSE too
             for (auto& cb : afterCallbacks) {
@@ -2635,9 +2980,10 @@ void httpServerListen(int port, std::shared_ptr<Callable> handler, Interpreter& 
         }
         if (!streamFilePath.empty()) {
             if (!sendHttpFileResponse(client, respStatus, streamFilePath, respHeaders)) {
-                // File couldn't be opened — fall back to a 500.
-                sendHttpResponse(client, 500,
-                    "Error: cannot open file: " + streamFilePath,
+                // File couldn't be opened — fall back to a 500, without
+                // the path (logged instead).
+                std::cerr << "[http] cannot open file: " << streamFilePath << std::endl;
+                sendHttpResponse(client, 500, "Internal Server Error",
                     {{"Content-Type", "text/plain"}});
             }
         } else {
