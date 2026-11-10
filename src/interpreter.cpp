@@ -1635,7 +1635,7 @@ Value Interpreter::evaluate(const Expr* expr) {
 
         copyEnv = [&](const std::shared_ptr<Environment>& src) -> std::shared_ptr<Environment> {
             if (!src) return nullptr;
-            praia::checkStack();   // follows the parent chain recursively
+            praia::checkStack(e->line, e->column);   // follows the parent chain recursively
             void* key = static_cast<void*>(src.get());
             auto it = envVisited.find(key);
             if (it != envVisited.end()) return it->second;
@@ -1680,7 +1680,7 @@ Value Interpreter::evaluate(const Expr* expr) {
         };
 
         deepCopy = [&](const Value& v) -> Value {
-            praia::checkStack();   // a value too deep to copy fails the async call
+            praia::checkStack(e->line, e->column);   // a value too deep to copy fails the async call
             if (v.isMap()) {
                 void* key = static_cast<void*>(v.asMap().get());
                 auto it = valueVisited.find(key);
