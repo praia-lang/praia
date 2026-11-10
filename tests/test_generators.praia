@@ -175,4 +175,57 @@ testing.test("for-in still works with strings", lam{ in
     testing.expectEqual(result, ["a", "b", "c"], nil)
 })
 
+// A try that's open when the generator yields is still its own when it
+// resumes, and doesn't catch the caller's errors in between
+testing.test("try across a yield", lam{ in
+    func g() {
+        try {
+            yield 1
+            throw "inner"
+        } catch (e) {
+            yield "caught " + e
+        }
+        yield "after"
+    }
+    let it = g()
+    testing.expectEqual(it.next().value, 1, nil)
+    let outer = nil
+    try { throw "outer" } catch (e) { outer = e }
+    testing.expectEqual(outer, "outer", "the caller's catch, not the generator's")
+    testing.expectEqual(it.next().value, "caught inner", nil)
+    testing.expectEqual(it.next().value, "after", nil)
+    testing.expect(it.next().done, "done")
+})
+
+testing.test("nested tries across yields", lam{ in
+    func g() {
+        try {
+            try {
+                yield 1
+                throw "a"
+            } catch (e) {
+                yield "inner " + e
+                throw "b"
+            }
+        } catch (e) {
+            yield "outer " + e
+        }
+    }
+    let got = []
+    for (v in g()) { got.push(v) }
+    testing.expectEqual(got, [1, "inner a", "outer b"], nil)
+})
+
+testing.test("an abandoned generator's try doesn't catch later errors", lam{ in
+    func g() {
+        try { yield 1 } catch (e) { yield "generator caught " + e }
+    }
+    let it = g()
+    it.next()
+    it = nil
+    let msg = nil
+    try { throw "later" } catch (e) { msg = e }
+    testing.expectEqual(msg, "later", nil)
+})
+
 testing.done()

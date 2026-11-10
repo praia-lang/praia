@@ -523,10 +523,10 @@ struct VMScope {
     VM* vm;
     VM* prevVM;
     int savedFloor;
-    VMScope(VM* v) : vm(v), prevVM(VM::currentVM_), savedFloor(v->executeFloor_) {
+    VMScope(VM* v, int ownHandlers = 0) : vm(v), prevVM(VM::currentVM_), savedFloor(v->executeFloor_) {
         VM::currentVM_ = v;
         v->execHeap_ = &GcHeap::current();
-        v->executeFloor_ = static_cast<int>(v->exceptionHandlers.size());
+        v->executeFloor_ = static_cast<int>(v->exceptionHandlers.size()) - ownHandlers;
         v->executeDepth_++;
     }
     ~VMScope() {
@@ -753,7 +753,14 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
     genBaseFrame_ = genBase;
     genBaseStackTop_ = restoreBase;
 
-    auto result = execute(genBase);
+    // Its try blocks from before the yield, at where its frame and stack
+    // are now; they belong to this execute(), not to the caller's
+    for (auto& h : gen->savedHandlers)
+        exceptionHandlers.push_back({h.catchIp, genBase + h.frameOffset, restoreBase + h.stackOffset});
+    int ownHandlers = static_cast<int>(gen->savedHandlers.size());
+    gen->savedHandlers.clear();
+
+    auto result = execute(genBase, ownHandlers);
 
     currentGenerator_ = prevGen;
     genBaseFrame_ = prevGenBase;
@@ -1432,8 +1439,8 @@ VM::Result VM::runRepl(std::shared_ptr<CompiledFunction> script) {
     return execute();
 }
 
-VM::Result VM::execute(int baseFrameCount_) {
-    VMScope vmScope(this); // set thread-local current VM, restores on return
+VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
+    VMScope vmScope(this, ownHandlers); // set thread-local current VM, restores on return
 
     #define FRAME (frames[frameCount - 1])
     #define READ_BYTE() (*FRAME.ip++)
@@ -3328,6 +3335,19 @@ VM::Result VM::execute(int baseFrameCount_) {
             gen->savedFrameCount = frameCount - genBaseFrame_;
             gen->savedBaseSlot = baseSlot;
             gen->state = PraiaGenerator::State::SUSPENDED;
+
+            // Its open try blocks leave with it, so the caller's errors
+            // can't land in them while it's suspended (oldest first)
+            gen->savedHandlers.clear();
+            size_t keep = exceptionHandlers.size();
+            while (static_cast<int>(keep) > executeFloor_ &&
+                   exceptionHandlers[keep - 1].frameIndex >= genBaseFrame_)
+                keep--;
+            for (size_t i = keep; i < exceptionHandlers.size(); i++) {
+                auto& h = exceptionHandlers[i];
+                gen->savedHandlers.push_back({h.catchIp, h.frameIndex - genBaseFrame_, h.stackTop - baseSlot});
+            }
+            exceptionHandlers.resize(keep);
 
             // Restore VM to state before .next() was called
             closeUpvalues(&stack[baseSlot]);

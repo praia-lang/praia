@@ -348,6 +348,15 @@ struct PraiaGenerator {
     // prevent GC of closures/upvalues used by the generator
     std::vector<std::shared_ptr<void>> ownedResources;
 
+    // VM: the try blocks open in the generator when it yielded, relative
+    // to its first frame and stack slot; reinstalled when it resumes
+    struct SavedHandler {
+        const uint8_t* catchIp;
+        int frameOffset;
+        int stackOffset;
+    };
+    std::vector<SavedHandler> savedHandlers;
+
     ~PraiaGenerator();  // defined in interpreter_callables.cpp (needs Fiber complete type)
 
     // Eagerly release the fiber stack and captured environment once the

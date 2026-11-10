@@ -127,7 +127,9 @@ public:
     static VM* current() { return currentVM_; }
 
 public:
-    Result execute(int baseFrameCount = 0);
+    // `ownHandlers`: how many of the newest try handlers belong to this
+    // call (a resumed generator's) rather than to the caller
+    Result execute(int baseFrameCount = 0, int ownHandlers = 0);
 
     static thread_local VM* currentVM_; // public for VMScope RAII guard
     int executeFloor_ = 0; // handler stack floor for current execute() — handlers below this belong to outer calls
