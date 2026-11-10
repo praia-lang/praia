@@ -1635,6 +1635,7 @@ Value Interpreter::evaluate(const Expr* expr) {
 
         copyEnv = [&](const std::shared_ptr<Environment>& src) -> std::shared_ptr<Environment> {
             if (!src) return nullptr;
+            praia::checkStack();   // follows the parent chain recursively
             void* key = static_cast<void*>(src.get());
             auto it = envVisited.find(key);
             if (it != envVisited.end()) return it->second;
