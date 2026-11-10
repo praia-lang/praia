@@ -337,8 +337,8 @@ StmtPtr Parser::ifStatement() {
     consume(TokenType::LPAREN, "Expected '(' after 'if'");
     auto condition = expression();
     consume(TokenType::RPAREN, "Expected ')' after condition");
-    consume(TokenType::LBRACE, "Expected '{' after if condition");
-    auto thenBranch = block();
+    auto thenBranch = body("if condition");
+    skipSemicolonBeforeElse();
 
     auto stmt = std::make_unique<IfStmt>();
     stmt->line = ln;
@@ -350,8 +350,8 @@ StmtPtr Parser::ifStatement() {
         consume(TokenType::LPAREN, "Expected '(' after 'elif'");
         auto elifCond = expression();
         consume(TokenType::RPAREN, "Expected ')' after condition");
-        consume(TokenType::LBRACE, "Expected '{' after elif condition");
-        auto elifBody = block();
+        auto elifBody = body("elif condition");
+        skipSemicolonBeforeElse();
 
         IfStmt::ElifBranch branch;
         branch.condition = std::move(elifCond);
@@ -360,8 +360,7 @@ StmtPtr Parser::ifStatement() {
     }
 
     if (match(TokenType::ELSE)) {
-        consume(TokenType::LBRACE, "Expected '{' after 'else'");
-        stmt->elseBranch = block();
+        stmt->elseBranch = body("'else'");
     }
 
     return stmt;
@@ -461,21 +460,31 @@ ExprPtr Parser::matchExpression() {
     return expr;
 }
 
+// Counts a loop body as inside a loop, and stops counting it even when
+// parsing the body fails, so a stray `break` after it is still reported
+namespace {
+struct LoopDepthScope {
+    int& depth;
+    explicit LoopDepthScope(int& d) : depth(d) { ++depth; }
+    ~LoopDepthScope() { --depth; }
+};
+}
+
 StmtPtr Parser::whileStatement() {
     int ln = previous().line;
     int lnCol = previous().column;
     consume(TokenType::LPAREN, "Expected '(' after 'while'");
     auto condition = expression();
     consume(TokenType::RPAREN, "Expected ')' after condition");
-    consume(TokenType::LBRACE, "Expected '{' after while condition");
 
     auto stmt = std::make_unique<WhileStmt>();
     stmt->line = ln;
     stmt->column = lnCol;
     stmt->condition = std::move(condition);
-    loopDepth++;
-    stmt->body = block();
-    loopDepth--;
+    {
+        LoopDepthScope inLoop(loopDepth);
+        stmt->body = body("while condition");
+    }
     return stmt;
 }
 
@@ -508,31 +517,31 @@ StmtPtr Parser::forStatement() {
         // Range for: for (i in start..end)
         auto endExpr = expression();
         consume(TokenType::RPAREN, "Expected ')' after range");
-        consume(TokenType::LBRACE, "Expected '{' after for");
         auto stmt = std::make_unique<ForStmt>();
         stmt->line = ln;
         stmt->column = lnCol;
         stmt->varName = varName;
         stmt->start = std::move(iterExpr);
         stmt->end = std::move(endExpr);
-        loopDepth++;
-        stmt->body = block();
-        loopDepth--;
+        {
+            LoopDepthScope inLoop(loopDepth);
+            stmt->body = body("for");
+        }
         return stmt;
     }
 
     // For-in: for (item in array) or for ({key, value} in map)
     consume(TokenType::RPAREN, "Expected ')' after iterable");
-    consume(TokenType::LBRACE, "Expected '{' after for");
     auto stmt = std::make_unique<ForInStmt>();
     stmt->line = ln;
     stmt->column = lnCol;
     stmt->varName = varName;
     stmt->destructureKeys = destructureKeys;
     stmt->iterable = std::move(iterExpr);
-    loopDepth++;
-    stmt->body = block();
-    loopDepth--;
+    {
+        LoopDepthScope inLoop(loopDepth);
+        stmt->body = body("for");
+    }
     return stmt;
 }
 
@@ -731,8 +740,7 @@ StmtPtr Parser::ensureStatement() {
         consume(TokenType::RPAREN, "Expected ')' after condition");
         consume(TokenType::ELSE, "Expected 'else' after ensure condition");
     }
-    consume(TokenType::LBRACE, "Expected '{' after 'else'");
-    stmt->elseBody = block();
+    stmt->elseBody = body("'else'");
 
     // Enforce the guard contract: an else that falls through
     // would let post-`ensure` code run with the guarded
@@ -822,6 +830,46 @@ StmtPtr Parser::block() {
 
     consume(TokenType::RBRACE, "Expected '}'");
     return blk;
+}
+
+// Body of if/elif/else, while, for and ensure-else: a `{ ... }` block,
+// or a single statement as in C (`if (x) print(x)`). A single statement
+// is wrapped in a block, so the engines see the same shape either way.
+StmtPtr Parser::body(const std::string& what) {
+    if (match(TokenType::LBRACE)) return block();
+
+    // A declaration's scope would end right away, so it's a mistake
+    switch (peek().type) {
+        case TokenType::LET:
+        case TokenType::FUNC:
+        case TokenType::CLASS:
+        case TokenType::ENUM:
+        case TokenType::USE:
+        case TokenType::EXPORT:
+        case TokenType::AT:
+            throw error(peek(), "Expected '{' after " + what + " (a declaration needs braces)");
+        default:
+            break;
+    }
+    if (isAtEnd()) throw error(peek(), "Expected a statement or '{' after " + what);
+
+    // Only one statement is parsed, so pending_ isn't drained here: the
+    // decorator desugaring that queues statements there is rejected above
+    // (`@`). Anything else allowed here that queues statements would need
+    // them drained into blk, as block() does.
+    auto blk = std::make_unique<BlockStmt>();
+    blk->line = peek().line;
+    blk->column = peek().column;
+    blk->statements.push_back(statement());
+    return blk;
+}
+
+// `if (a) x = 1; else x = 2`: the `;` ends the braceless body, not the if
+void Parser::skipSemicolonBeforeElse() {
+    if (!check(TokenType::SEMICOLON)) return;
+    if (current + 1 >= static_cast<int>(tokens.size())) return;
+    TokenType next = tokens[current + 1].type;
+    if (next == TokenType::ELSE || next == TokenType::ELIF) advance();
 }
 
 // ── Expressions (precedence climbing) ────────────────────────

@@ -42,6 +42,8 @@ private:
     StmtPtr exportStatement();
     StmtPtr expressionStatement();
     StmtPtr block();
+    StmtPtr body(const std::string& what);
+    void skipSemicolonBeforeElse();
 
     // Expressions (ordered low → high precedence)
     ExprPtr expression();
