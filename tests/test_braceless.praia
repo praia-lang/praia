@@ -92,6 +92,8 @@ testing.test("parse errors", lam{ in
         ["while (true) func f() {}\n", "a declaration needs braces"],
         ["if (true)", "Expected a statement or '{'"],
         ["if (true) print(1) print(2)\n", "Expected ';' or newline"],
+        // A failed loop body still leaves the loop: the `break` after it is reported
+        ["while (true) let x = 1\nbreak\n", "'break' outside of loop"],
     ]
     for (engine in [[], ["--tree"]]) {
         for (c in cases) {

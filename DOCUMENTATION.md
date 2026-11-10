@@ -909,7 +909,7 @@ for (item in items) print(item)
 ```
 
 - The body is exactly one statement: `if (x) a() b()` is an error, and `b()` needs its own line or braces.
-- A declaration (`let`, `func`, `class`, `enum`) needs braces, since its scope would end right away.
+- A declaration (`let`, `func`, `class`, `enum`, `use`, `export`, or a decorated `@... func`) needs braces, since its scope would end right away.
 - An `else` belongs to the nearest `if`, so `if (a) if (b) x() else y()` runs `y()` when `a` is truthy and `b` isn't.
 - `else if (...)` works too, but `elif` is the usual spelling.
 

@@ -460,6 +460,16 @@ ExprPtr Parser::matchExpression() {
     return expr;
 }
 
+// Counts a loop body as inside a loop, and stops counting it even when
+// parsing the body fails, so a stray `break` after it is still reported
+namespace {
+struct LoopDepthScope {
+    int& depth;
+    explicit LoopDepthScope(int& d) : depth(d) { ++depth; }
+    ~LoopDepthScope() { --depth; }
+};
+}
+
 StmtPtr Parser::whileStatement() {
     int ln = previous().line;
     int lnCol = previous().column;
@@ -471,9 +481,10 @@ StmtPtr Parser::whileStatement() {
     stmt->line = ln;
     stmt->column = lnCol;
     stmt->condition = std::move(condition);
-    loopDepth++;
-    stmt->body = body("while condition");
-    loopDepth--;
+    {
+        LoopDepthScope inLoop(loopDepth);
+        stmt->body = body("while condition");
+    }
     return stmt;
 }
 
@@ -512,9 +523,10 @@ StmtPtr Parser::forStatement() {
         stmt->varName = varName;
         stmt->start = std::move(iterExpr);
         stmt->end = std::move(endExpr);
-        loopDepth++;
-        stmt->body = body("for");
-        loopDepth--;
+        {
+            LoopDepthScope inLoop(loopDepth);
+            stmt->body = body("for");
+        }
         return stmt;
     }
 
@@ -526,9 +538,10 @@ StmtPtr Parser::forStatement() {
     stmt->varName = varName;
     stmt->destructureKeys = destructureKeys;
     stmt->iterable = std::move(iterExpr);
-    loopDepth++;
-    stmt->body = body("for");
-    loopDepth--;
+    {
+        LoopDepthScope inLoop(loopDepth);
+        stmt->body = body("for");
+    }
     return stmt;
 }
 
@@ -840,6 +853,10 @@ StmtPtr Parser::body(const std::string& what) {
     }
     if (isAtEnd()) throw error(peek(), "Expected a statement or '{' after " + what);
 
+    // Only one statement is parsed, so pending_ isn't drained here: the
+    // decorator desugaring that queues statements there is rejected above
+    // (`@`). Anything else allowed here that queues statements would need
+    // them drained into blk, as block() does.
     auto blk = std::make_unique<BlockStmt>();
     blk->line = peek().line;
     blk->column = peek().column;
