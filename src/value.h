@@ -359,6 +359,11 @@ struct PraiaGenerator {
     // VM: its frames' pending defers, one list per frame from its first
     std::vector<std::vector<Value>> savedDefers;
 
+    // Tree-walker: sys.exit() ran in the body or a defer; the code is
+    // handed to whoever resumed it, outside the fiber
+    bool exited = false;
+    int exitCode = 0;
+
     ~PraiaGenerator();  // defined in interpreter_callables.cpp (needs Fiber complete type)
 
     // Eagerly release the fiber stack and captured environment once the

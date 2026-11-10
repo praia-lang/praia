@@ -746,6 +746,10 @@ void Interpreter::execute(const Stmt* stmt) {
                     gen->sendValue = Value();
                     gen->fiber->resume();
 
+                    if (gen->exited) {
+                        gen->releaseAfterCompletion();
+                        throw ExitSignal{gen->exitCode};
+                    }
                     if (!gen->errorMessage.empty()) {
                         std::string msg = gen->errorMessage;
                         gen->releaseAfterCompletion();
@@ -2000,6 +2004,10 @@ Value Interpreter::evaluate(const Expr* expr) {
                         gen->sendValue = args.empty() ? Value() : args[0];
                         gen->fiber->resume();
 
+                        if (gen->exited) {
+                            gen->releaseAfterCompletion();
+                            throw ExitSignal{gen->exitCode};
+                        }
                         if (!gen->errorMessage.empty()) {
                             std::string msg = gen->errorMessage;
                             gen->releaseAfterCompletion();

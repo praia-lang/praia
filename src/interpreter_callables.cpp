@@ -74,16 +74,22 @@ Value PraiaMethod::call(Interpreter& interp, const std::vector<Value>& args) {
             rest->elements.push_back(args[i]);
         methodEnv->define(decl->restParam, Value(rest));
     }
+    // Its own defer scope, run before the caller's environment comes
+    // back (as callBody does for functions)
+    interp.deferStacks_.push_back({});
     try {
         for (const auto& stmt : decl->body)
             interp.execute(stmt.get());
     } catch (const ReturnSignal& ret) {
+        interp.runDeferScope();
         interp.env = prevEnv;
         return ret.value;
     } catch (...) {
+        interp.runDeferScope();
         interp.env = prevEnv;
         throw;
     }
+    interp.runDeferScope();
     interp.env = prevEnv;
     return Value();
 }
@@ -248,6 +254,14 @@ Value makeGeneratorFromEnv(
             genInterp.runDeferScope();
         } catch (const ReturnSignal& ret) {
             genRaw->lastYielded = ret.value;
+            genRaw->done = true;
+            genRaw->state = PraiaGenerator::State::COMPLETED;
+            return;
+        } catch (const ExitSignal& ex) {
+            // Can't cross the fiber boundary itself: .next() / the for
+            // loop raises it again with this code
+            genRaw->exited = true;
+            genRaw->exitCode = ex.code;
             genRaw->done = true;
             genRaw->state = PraiaGenerator::State::COMPLETED;
             return;

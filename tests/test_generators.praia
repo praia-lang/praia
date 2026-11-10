@@ -292,4 +292,40 @@ testing.test("an abandoned generator doesn't run its defers", lam{ in
     testing.expectEqual(deferLog, [], nil)
 })
 
+testing.test("sys.exit() in a generator exits with its code", lam{ in
+    let cases = [
+        "func g() { yield 1; sys.exit(7) }\nlet it = g()\nit.next()\nit.next()\nprint(\"after\")",
+        "func g() { defer sys.exit(8); yield 1 }\nfor (x in g()) { }\nprint(\"after\")",
+    ]
+    for (engine in [[], ["--tree"]]) {
+        let r = sys.exec(["./praia", ...engine, "-c", cases[0]])
+        testing.expectEqual(r.exitCode, 7, "%{engine} from the body: %{r.stderr}")
+        let d = sys.exec(["./praia", ...engine, "-c", cases[1]])
+        testing.expectEqual(d.exitCode, 8, "%{engine} from a defer: %{d.stderr}")
+        testing.expect(!r.stdout.contains("after") && !d.stdout.contains("after"), "stopped there")
+    }
+})
+
+testing.test("resuming a generator with no frames left is an error, not a crash", lam{ in
+    func counter() {
+        let i = 0
+        while (true) {
+            yield i
+            i = i + 1
+        }
+    }
+    let it = counter()
+    it.next()
+    func deep(n) {
+        if (n == 0) { return it.next().value }
+        return deep(n - 1)
+    }
+    let overflowed = false
+    for (n in 240..300) {
+        try { deep(n) } catch (e) { overflowed = true }
+    }
+    testing.expect(overflowed, "ran out of frames")
+    testing.expect(it.next().value > 0, "the generator still works")
+})
+
 testing.done()

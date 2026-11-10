@@ -725,6 +725,12 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
         return Value(result);
     }
 
+    // Room for its frames (and their defer slots) before anything moves,
+    // so a failed resume leaves the caller and the generator as they were
+    size_t framesNeeded = std::max<size_t>(1, gen->savedDefers.size());
+    if (static_cast<size_t>(frameCount) + framesNeeded > static_cast<size_t>(FRAMES_MAX))
+        throw RuntimeError("Stack overflow (too many nested calls)", 0);
+
     int restoreBase = stackTop;
     for (auto& val : gen->savedStack) push(val);
 
