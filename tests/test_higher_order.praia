@@ -53,4 +53,21 @@ testing.test("closures capture variables", lam{ in
     testing.expectEqual(c(), 3, nil)
 })
 
+testing.test("a value thrown in a callback arrives unchanged", lam{ in
+    // Same value on both engines, not wrapped in an Error on the way
+    // through the native
+    let caught = []
+    try { map([1], lam{ x in throw {code: 8} }) } catch (e) { caught.push(e) }
+    try { filter([1], lam{ x in throw Err("f") }) } catch (e) { caught.push(e) }
+    try { [3, 1].sorted(lam{ a, b in throw "cmp" }) } catch (e) { caught.push(e) }
+    try { withCancel(CancellationToken(), lam{ in throw "boom" }) } catch (e) { caught.push(e) }
+    testing.expectEqual(caught, [{code: 8}, Err("f"), "cmp", "boom"], nil)
+})
+
+testing.test("a runtime error in a callback is still an Error", lam{ in
+    let caught = nil
+    try { map([1], lam{ x in 1 / 0 }) } catch (e) { caught = e }
+    testing.expect(caught is Error, "an Error instance")
+})
+
 testing.done()

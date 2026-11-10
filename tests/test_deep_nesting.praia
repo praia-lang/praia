@@ -1,0 +1,126 @@
+use "testing"
+
+// Deep code and deep data used to run the C++ stack out (a segfault or a
+// bus error). They now stop with a "Stack overflow" error the script can
+// catch, or a parse/compile error for code nested too deeply to read.
+
+func rec(n) {
+    if (n == 0) { return 0 }
+    return 1 + rec(n - 1)
+}
+
+func viaMap(n) {
+    if (n == 0) { return 0 }
+    return map([1], lam{ x in viaMap(n - 1) })[0]
+}
+
+func errorOf(fn) {
+    try {
+        fn()
+    } catch (e) {
+        return str(e)
+    }
+    return "no error"
+}
+
+testing.test("deep recursion is a catchable error", lam{ in
+    testing.expectContains(errorOf(lam{ in rec(100000) }), "Stack overflow", nil)
+    testing.expectEqual(rec(100), 100, "recursion still works afterwards")
+})
+
+testing.test("deep recursion through a native callback", lam{ in
+    testing.expectContains(errorOf(lam{ in viaMap(100000) }), "Stack overflow", nil)
+    testing.expectEqual(viaMap(20), 0, nil)
+})
+
+testing.test("deep recursion inside an async task", lam{ in
+    // Task threads have smaller stacks (512 KB on macOS): a debug build's
+    // tree-walker fits only about 9 calls there
+    let f = async lam{ in errorOf(lam{ in rec(100000) }) }()
+    testing.expectContains(await f, "Stack overflow", nil)
+    let g = async lam{ in errorOf(lam{ in viaMap(100000) }) }()
+    testing.expectContains(await g, "Stack overflow", nil)
+    let h = async lam{ in rec(3) }()
+    testing.expectEqual(await h, 3, nil)
+})
+
+testing.test("deep recursion inside a generator", lam{ in
+    // A tree-walker generator runs on its own 256 KB stack
+    func gen() {
+        yield errorOf(lam{ in rec(100000) })
+        yield "still running"
+    }
+    let g = gen()
+    testing.expectContains(g.next().value, "Stack overflow", nil)
+    testing.expectEqual(g.next().value, "still running", nil)
+})
+
+// Building a value this deep allocates once per level, which takes hours
+// under PRAIA_GC_STRESS (each allocation walks every live object)
+let deepDataTest = sys.env("PRAIA_GC_STRESS") ? testing.skip : testing.test
+
+func deepList(n) {
+    let h = nil
+    for (i in 0..n) { h = [h] }
+    return h
+}
+
+deepDataTest("str() of a value too deep to print", lam{ in
+    let s = str(deepList(200000))
+    testing.expect(s.startsWith("[[[["), "starts printing")
+    testing.expect(s.contains("..."), "leaves out the part too deep to print")
+})
+
+deepDataTest("a value too deep to copy into an async task", lam{ in
+    let h = deepList(200000)
+    func size(x) { return len(x) }
+    testing.expectContains(errorOf(lam{ in await async size(h) }), "Stack overflow", "as an argument")
+    testing.expectContains(errorOf(lam{ in await async lam{ in len(h) }() }), "Stack overflow", "captured")
+})
+
+testing.test("code nested too deeply is an error, not a crash", lam{ in
+    let dir = testing.tempDir()
+    let parens = path.join(dir, "parens.praia")
+    fs.write(parens, "print(" + "(" * 20000 + "1" + ")" * 20000 + ")\n")
+    let chain = path.join(dir, "chain.praia")
+    fs.write(chain, "let a = 1\nprint(a" + " + a" * 300000 + ")\n")
+    // Each reported once, not again by every enclosing level
+    // Deep enough not to fit even in the 64 MB stack GNU make gives the
+    // commands it runs (make test-gc-stress)
+    let sources = {
+        blocks: "let x = 0\n" + "if (true) { " * 100000 + "x = 1" + " }" * 100000 + "\n",
+        assignments: "let a = 0\n" + "a = " * 100000 + "1\n",
+        awaits: "print(" + "await " * 100000 + "1)\n",
+    }
+    let unreadable = [parens]
+    for ({key, value} in sources) {
+        let file = path.join(dir, key + ".praia")
+        fs.write(file, value)
+        unreadable.push(file)
+    }
+    for (engine in [[], ["--tree"]]) {
+        for (file in unreadable) {
+            // How deep the parser gets depends on the stack it's given, so
+            // a big enough one may read it all: then running it is what
+            // stops (or it just runs). Never a crash, never an error per level.
+            let r = sys.exec(["./praia", ...engine, file])
+            testing.expect(r.exitCode == 0 || r.exitCode == 2 || r.exitCode == 3,
+                "%{engine} %{file}: an error, not a crash (exit %{r.exitCode})")
+            if (r.exitCode != 0) {
+                testing.expect(r.stderr.contains("nested too deeply") || r.stderr.contains("Stack overflow"),
+                    "%{engine} %{file}: " + r.stderr.slice(0, 200))
+                let errors = filter(r.stderr.split("\n"), lam{ l in l.contains("rror") })
+                testing.expectEqual(len(errors), 1, "%{engine} %{file}: one error")
+            }
+        }
+        // A chain is read in a loop, so it parses; compiling it (VM) or
+        // running it (tree-walker) is what goes too deep
+        let c = sys.exec(["./praia", ...engine, chain])
+        testing.expect(c.exitCode == 2 || c.exitCode == 3,
+            "%{engine} chain: an error, not a crash (exit %{c.exitCode})")
+        testing.expect(c.stderr.contains("nested too deeply") || c.stderr.contains("Stack overflow"),
+            "%{engine} chain: " + c.stderr.slice(0, 200))
+    }
+})
+
+testing.done()

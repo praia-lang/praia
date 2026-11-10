@@ -140,4 +140,8 @@ private:
 
     void error(const std::string& msg, int line);
     bool hadError = false;
+
+    // Stops compiling once code nests too deeply for the stack; reports it once
+    bool tooDeep(int line);
+    bool nestedTooDeeply = false;
 };

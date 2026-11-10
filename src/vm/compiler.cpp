@@ -38,6 +38,14 @@ void Compiler::emitLoop(int loopStart, int line, int column) {
     emitU16(static_cast<uint16_t>(offset), line, column);
 }
 
+bool Compiler::tooDeep(int line) {
+    if (!nestedTooDeeply && praia::stackNearlyFull()) {
+        error("Code nested too deeply", line);
+        nestedTooDeeply = true;
+    }
+    return nestedTooDeeply;
+}
+
 void Compiler::error(const std::string& msg, int line) {
     std::cerr << "[line " << line << "] Compile error: " << msg << std::endl;
     hadError = true;
@@ -125,6 +133,7 @@ std::shared_ptr<CompiledFunction> Compiler::compile(const std::vector<StmtPtr>& 
 // ── Statement compilation ────────────────────────────────────
 
 void Compiler::compileStmt(const Stmt* stmt) {
+    if (tooDeep(stmt->line)) return;
     switch (stmt->type) {
     case StmtType::Expr:    compileExprStmt(static_cast<const ExprStmt*>(stmt)); break;
     case StmtType::Let:     compileLetStmt(static_cast<const LetStmt*>(stmt)); break;

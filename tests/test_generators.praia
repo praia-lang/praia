@@ -175,4 +175,157 @@ testing.test("for-in still works with strings", lam{ in
     testing.expectEqual(result, ["a", "b", "c"], nil)
 })
 
+// A try that's open when the generator yields is still its own when it
+// resumes, and doesn't catch the caller's errors in between
+testing.test("try across a yield", lam{ in
+    func g() {
+        try {
+            yield 1
+            throw "inner"
+        } catch (e) {
+            yield "caught " + e
+        }
+        yield "after"
+    }
+    let it = g()
+    testing.expectEqual(it.next().value, 1, nil)
+    let outer = nil
+    try { throw "outer" } catch (e) { outer = e }
+    testing.expectEqual(outer, "outer", "the caller's catch, not the generator's")
+    testing.expectEqual(it.next().value, "caught inner", nil)
+    testing.expectEqual(it.next().value, "after", nil)
+    testing.expect(it.next().done, "done")
+})
+
+testing.test("nested tries across yields", lam{ in
+    func g() {
+        try {
+            try {
+                yield 1
+                throw "a"
+            } catch (e) {
+                yield "inner " + e
+                throw "b"
+            }
+        } catch (e) {
+            yield "outer " + e
+        }
+    }
+    let got = []
+    for (v in g()) { got.push(v) }
+    testing.expectEqual(got, [1, "inner a", "outer b"], nil)
+})
+
+testing.test("an abandoned generator's try doesn't catch later errors", lam{ in
+    func g() {
+        try { yield 1 } catch (e) { yield "generator caught " + e }
+    }
+    let it = g()
+    it.next()
+    it = nil
+    let msg = nil
+    try { throw "later" } catch (e) { msg = e }
+    testing.expectEqual(msg, "later", nil)
+})
+
+// A generator's defers run when it finishes, as a function's do: not at
+// a yield, and not in whatever the caller runs while it's suspended
+let deferLog = []
+
+func otherCall() { return "other" }
+
+func deferring() {
+    defer deferLog.push("first")
+    yield 1
+    defer deferLog.push("second")
+    yield 2
+}
+
+testing.test("defers wait for the generator to finish", lam{ in
+    deferLog = []
+    let it = deferring()
+    it.next()
+    otherCall()
+    testing.expectEqual(deferLog, [], "not at the first yield")
+    it.next()
+    otherCall()
+    testing.expectEqual(deferLog, [], "not at the second yield")
+    testing.expect(it.next().done, "done")
+    testing.expectEqual(deferLog, ["second", "first"], "last registered first")
+})
+
+testing.test("defers run when a generator throws or returns", lam{ in
+    deferLog = []
+    func throwing() {
+        defer deferLog.push("thrown")
+        yield 1
+        throw "bad"
+    }
+    let t = throwing()
+    t.next()
+    testing.expectThrows(lam{ in t.next() }, nil)
+    func returning() {
+        defer deferLog.push("returned")
+        yield 1
+        return 9
+    }
+    let r = returning()
+    r.next()
+    testing.expectEqual(r.next().value, 9, nil)
+    testing.expectEqual(deferLog, ["thrown", "returned"], nil)
+})
+
+testing.test("defers run when a for loop finishes a generator", lam{ in
+    deferLog = []
+    let got = []
+    for (x in deferring()) { got.push(x) }
+    testing.expectEqual(got, [1, 2], nil)
+    testing.expectEqual(deferLog, ["second", "first"], nil)
+})
+
+testing.test("an abandoned generator doesn't run its defers", lam{ in
+    deferLog = []
+    let it = deferring()
+    it.next()
+    it = nil
+    otherCall()
+    testing.expectEqual(deferLog, [], nil)
+})
+
+testing.test("sys.exit() in a generator exits with its code", lam{ in
+    let cases = [
+        "func g() { yield 1; sys.exit(7) }\nlet it = g()\nit.next()\nit.next()\nprint(\"after\")",
+        "func g() { defer sys.exit(8); yield 1 }\nfor (x in g()) { }\nprint(\"after\")",
+    ]
+    for (engine in [[], ["--tree"]]) {
+        let r = sys.exec(["./praia", ...engine, "-c", cases[0]])
+        testing.expectEqual(r.exitCode, 7, "%{engine} from the body: %{r.stderr}")
+        let d = sys.exec(["./praia", ...engine, "-c", cases[1]])
+        testing.expectEqual(d.exitCode, 8, "%{engine} from a defer: %{d.stderr}")
+        testing.expect(!r.stdout.contains("after") && !d.stdout.contains("after"), "stopped there")
+    }
+})
+
+testing.test("resuming a generator with no frames left is an error, not a crash", lam{ in
+    func counter() {
+        let i = 0
+        while (true) {
+            yield i
+            i = i + 1
+        }
+    }
+    let it = counter()
+    it.next()
+    func deep(n) {
+        if (n == 0) { return it.next().value }
+        return deep(n - 1)
+    }
+    let overflowed = false
+    for (n in 240..300) {
+        try { deep(n) } catch (e) { overflowed = true }
+    }
+    testing.expect(overflowed, "ran out of frames")
+    testing.expect(it.next().value > 0, "the generator still works")
+})
+
 testing.done()

@@ -1501,6 +1501,8 @@ func fib(n) {
 print(fib(10))      // 55
 ```
 
+Calls can nest about 256 deep. Inside an async task or a generator, the tree-walker (`--tree`) runs on a smaller stack, so the limit there is lower. Going past it throws a `Stack overflow (too many nested calls)` error, which `try`/`catch` can catch like any other error.
+
 ### Functions as Values
 
 ```praia
@@ -1755,6 +1757,22 @@ func gen() {
 let g = gen()
 print(g.next())   // {value: 1, done: false}
 print(g.next())   // {value: 99, done: true}
+```
+
+### Errors and cleanup
+
+`try`/`catch` and `defer` work across `yield`. A `try` that's open when the generator yields still catches errors after it resumes, and it doesn't catch errors in the caller while the generator is suspended. A `defer` runs when the generator finishes, the same way a function's does: when it returns, runs off the end, or throws. It doesn't run at a `yield`. A generator that's abandoned before it finishes never runs its defers.
+
+```praia
+func numbered(items) {
+    defer print("done")      // after the last item, not at each yield
+    for (i in 0..len(items)) { yield "%{i}: %{items[i]}" }
+}
+
+for (line in numbered(["a", "b"])) { print(line) }
+// 0: a
+// 1: b
+// done
 ```
 
 ### Generator properties
@@ -2307,6 +2325,8 @@ let r = [1, 2, 3].reversed()      // [3, 2, 1], original unchanged
 let s = [3, 1, 2].sorted()        // [1, 2, 3]
 [3, 1, 2].sortInPlace()           // mutates receiver
 ```
+
+Sorting is stable: elements the comparator treats as equal keep their order. `sort()`, `.sorted()` and `.sortInPlace()` all work this way. A comparator that isn't a consistent order (one that always returns `true`, say) gives some order of the same elements rather than an error. If a comparator throws, `.sortInPlace()` leaves the array as it was.
 
 ---
 

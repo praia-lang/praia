@@ -75,6 +75,11 @@ private:
     bool isAtEnd() const;
     bool isNameToken(TokenType type) const;
     ParseError error(const Token& token, const std::string& message);
+    // Throws if the stack is nearly full. Once that happens nothing
+    // recovers: enclosing blocks and the top level stop parsing rather
+    // than report the same error again for each level.
+    void checkDepth(const char* message);
+    bool nestedTooDeeply = false;
     void synchronize();
     void consumeStatementSeparator();
 

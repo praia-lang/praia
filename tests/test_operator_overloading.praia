@@ -92,4 +92,54 @@ testing.test("operators on non-overloaded classes fall through", lam{ in
     testing.expect(a == a, "same reference")
 })
 
+// An error inside an overload goes to the caller's try, like one from any
+// other call (the VM used to treat it as fatal and exit silently)
+class Faulty {
+    func __add(o) { throw "boom" }
+    func __eq(o) { throw "no comparing" }
+    func __index(i) { throw "no indexing" }
+}
+
+class Endless {
+    func __add(o) { return Endless() + o }
+}
+
+testing.test("an error inside an operator overload can be caught", lam{ in
+    let f = Faulty()
+    let caught = []
+    try { f + 1 } catch (e) { caught.push(str(e)) }
+    try { f == 1 } catch (e) { caught.push(str(e)) }
+    try { f[0] } catch (e) { caught.push(str(e)) }
+    testing.expectEqual(len(caught), 3, nil)
+    testing.expectContains(caught[0], "boom", nil)
+    testing.expectContains(caught[1], "no comparing", nil)
+    testing.expectContains(caught[2], "no indexing", nil)
+})
+
+testing.test("a value thrown inside an overload arrives unchanged", lam{ in
+    class Thrower {
+        func __add(o) { throw {code: 7} }
+        func __eq(o) { throw Err("nope") }
+    }
+    let a = nil
+    try { Thrower() + 1 } catch (e) { a = e }
+    testing.expectEqual(type(a), "map", nil)
+    testing.expectEqual(a.code, 7, nil)
+    let b = nil
+    try { Thrower() == 1 } catch (e) { b = e }
+    testing.expectEqual(b, Err("nope"), nil)
+})
+
+testing.test("endless recursion through an operator overload can be caught", lam{ in
+    let msg = nil
+    try { Endless() + 1 } catch (e) { msg = str(e) }
+    testing.expectContains(msg, "Stack overflow", nil)
+})
+
+testing.test("an uncaught error inside an overload is reported", lam{ in
+    let r = sys.exec(["./praia", "-c", "class F { func __add(o) { throw \"boom\" } }\nprint(F() + 1)"])
+    testing.expectEqual(r.exitCode, 3, nil)
+    testing.expectContains(r.stderr, "boom", nil)
+})
+
 testing.done()

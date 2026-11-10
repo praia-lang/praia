@@ -1,0 +1,109 @@
+use "testing"
+
+// Freeing and comparing very deep or cyclic values used to recurse once
+// per level and overflow the stack
+
+// Deep enough to have crashed the old recursive code (it did at 50k).
+// Under PRAIA_GC_STRESS each allocation walks every live object, so a
+// chain that long would take hours; a short one still checks the
+// collector against the way chains are freed.
+let DEPTH = sys.env("PRAIA_GC_STRESS") ? 1000 : 50000
+
+class Node {
+    func init(next) { this.next = next }
+}
+
+testing.test("dropping a deep chain of maps", lam{ in
+    let head = nil
+    for (i in 0..DEPTH) { head = {next: head} }
+    head = nil
+    testing.expect(true, nil)
+})
+
+testing.test("dropping a deep chain of arrays", lam{ in
+    let head = nil
+    for (i in 0..DEPTH) { head = [i, head] }
+    head = nil
+    testing.expect(true, nil)
+})
+
+testing.test("dropping a deep chain of instances", lam{ in
+    let head = nil
+    for (i in 0..DEPTH) { head = Node(head) }
+    head = nil
+    testing.expect(true, nil)
+})
+
+testing.test("dropping a deep chain of tagged values", lam{ in
+    let head = None()
+    for (i in 0..DEPTH) { head = Cons(i, head) }
+    head = nil
+    testing.expect(true, nil)
+})
+
+testing.test("dropping a deep chain that's still partly referenced", lam{ in
+    let head = nil
+    let middle = nil
+    for (i in 0..DEPTH) {
+        head = [i, head]
+        if (i == DEPTH / 2) { middle = head }
+    }
+    head = nil
+    testing.expectEqual(middle[0], DEPTH / 2, "the shared half survives")
+    testing.expectEqual(middle[1][0], DEPTH / 2 - 1, nil)
+})
+
+testing.test("== on self-containing arrays and maps", lam{ in
+    let a = []
+    a.push(a)
+    let b = []
+    b.push(b)
+    testing.expect(a == b, "arrays")
+    testing.expect(a == a, "itself")
+    let m = {}
+    m.self = m
+    let n = {}
+    n.self = n
+    testing.expect(m == n, "maps")
+    let c = [1]
+    c.push(c)
+    let d = [2]
+    d.push(d)
+    testing.expect(c != d, "different contents")
+})
+
+testing.test("== on deep values", lam{ in
+    let a = nil
+    let b = nil
+    for (i in 0..DEPTH) {
+        a = [i, a]
+        b = [i, b]
+    }
+    testing.expect(a == b, "equal")
+    let c = nil
+    for (i in 0..DEPTH) { c = [i == 0 ? -1 : i, c] }
+    testing.expect(a != c, "differ at the deepest level")
+})
+
+testing.test("== on deep tagged values", lam{ in
+    let t = None()
+    let u = None()
+    for (i in 0..DEPTH) {
+        t = Cons(i, t)
+        u = Cons(i, u)
+    }
+    testing.expect(t == u, "tagged")
+})
+
+testing.test("== on ordinary nested values is unchanged", lam{ in
+    testing.expectEqual({a: [1, {b: 2}], c: Ok([3])}, {c: Ok([3]), a: [1, {b: 2}]}, nil)
+    testing.expect({a: [1, 2]} != {a: [1, 3]}, "nested difference")
+    testing.expect([1, [2]] != [1, [2], 3], "length")
+    testing.expect({a: 1} != {b: 1}, "keys")
+    testing.expect(Ok(1) != Err(1), "tags")
+    testing.expect([#{1, 2}] == [#{2, 1}], "sets inside arrays")
+    let shared = [1, 2]
+    testing.expect([shared, shared] == [[1, 2], [1, 2]], "shared parts")
+})
+
+testing.done()

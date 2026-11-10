@@ -549,6 +549,7 @@ void Interpreter::checkInterrupt(int line, int column) {
 
 void Interpreter::execute(const Stmt* stmt) {
     checkInterrupt(stmt->line, stmt->column);
+    praia::checkStack(stmt->line, stmt->column);
 
     switch (stmt->type) {
     case StmtType::Expr: {
@@ -745,6 +746,10 @@ void Interpreter::execute(const Stmt* stmt) {
                     gen->sendValue = Value();
                     gen->fiber->resume();
 
+                    if (gen->exited) {
+                        gen->releaseAfterCompletion();
+                        throw ExitSignal{gen->exitCode};
+                    }
                     if (!gen->errorMessage.empty()) {
                         std::string msg = gen->errorMessage;
                         gen->releaseAfterCompletion();
@@ -941,6 +946,7 @@ void Interpreter::execute(const Stmt* stmt) {
 
 Value Interpreter::evaluate(const Expr* expr) {
     checkInterrupt(expr->line, expr->column);
+    praia::checkStack(expr->line, expr->column);
 
     switch (expr->type) {
     // ── Literals ──
@@ -1183,18 +1189,20 @@ Value Interpreter::evaluate(const Expr* expr) {
             if (left.isString() && right.isInt()) {
                 int64_t n = right.asInt();
                 if (n < 0) throw RuntimeError("String repeat count cannot be negative", e->line, e->column);
-                std::string result;
-                result.reserve(left.asString().size() * n);
-                for (int64_t i = 0; i < n; i++) result += left.asString();
-                return Value(std::move(result));
+                try {
+                    return Value(repeatString(left.asString(), n));
+                } catch (RuntimeError& err) {
+                    throw RuntimeError(err.what(), e->line, e->column);
+                }
             }
             if (left.isInt() && right.isString()) {
                 int64_t n = left.asInt();
                 if (n < 0) throw RuntimeError("String repeat count cannot be negative", e->line, e->column);
-                std::string result;
-                result.reserve(right.asString().size() * n);
-                for (int64_t i = 0; i < n; i++) result += right.asString();
-                return Value(std::move(result));
+                try {
+                    return Value(repeatString(right.asString(), n));
+                } catch (RuntimeError& err) {
+                    throw RuntimeError(err.what(), e->line, e->column);
+                }
             }
             throw RuntimeError("Operands of '*' must be numbers, or string * int", e->line, e->column);
         case TokenType::SLASH:
@@ -1627,6 +1635,7 @@ Value Interpreter::evaluate(const Expr* expr) {
 
         copyEnv = [&](const std::shared_ptr<Environment>& src) -> std::shared_ptr<Environment> {
             if (!src) return nullptr;
+            praia::checkStack(e->line, e->column);   // follows the parent chain recursively
             void* key = static_cast<void*>(src.get());
             auto it = envVisited.find(key);
             if (it != envVisited.end()) return it->second;
@@ -1671,6 +1680,7 @@ Value Interpreter::evaluate(const Expr* expr) {
         };
 
         deepCopy = [&](const Value& v) -> Value {
+            praia::checkStack(e->line, e->column);   // a value too deep to copy fails the async call
             if (v.isMap()) {
                 void* key = static_cast<void*>(v.asMap().get());
                 auto it = valueVisited.find(key);
@@ -1995,6 +2005,10 @@ Value Interpreter::evaluate(const Expr* expr) {
                         gen->sendValue = args.empty() ? Value() : args[0];
                         gen->fiber->resume();
 
+                        if (gen->exited) {
+                            gen->releaseAfterCompletion();
+                            throw ExitSignal{gen->exitCode};
+                        }
                         if (!gen->errorMessage.empty()) {
                             std::string msg = gen->errorMessage;
                             gen->releaseAfterCompletion();

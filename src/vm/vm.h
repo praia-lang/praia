@@ -127,7 +127,9 @@ public:
     static VM* current() { return currentVM_; }
 
 public:
-    Result execute(int baseFrameCount = 0);
+    // `ownHandlers`: how many of the newest try handlers belong to this
+    // call (a resumed generator's) rather than to the caller
+    Result execute(int baseFrameCount = 0, int ownHandlers = 0);
 
     static thread_local VM* currentVM_; // public for VMScope RAII guard
     int executeFloor_ = 0; // handler stack floor for current execute() — handlers below this belong to outer calls
@@ -412,6 +414,11 @@ private:
     void recordUncaught(int line, int column);
 public:
     const std::string& lastError() const { return lastError_; }
+    // For a native whose call back into the VM failed: raises that
+    // failure again in the native's caller. A Praia `throw` comes out as
+    // the value thrown (a ThrowSignal, as the tree-walker does), anything
+    // else as a RuntimeError with its message.
+    [[noreturn]] void rethrowLastError(const char* fallback) const;
     void gcMarkRoots(GcHeap& heap);
 private:
     int gcCounter_ = 0;

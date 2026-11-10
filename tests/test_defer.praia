@@ -59,4 +59,31 @@ testing.test("defer with no defers is no-op", lam{ in
     testing.expectEqual(f(), 3, nil)
 })
 
+testing.test("a method's defers run when the method returns", lam{ in
+    let log = []
+    class Res {
+        func init(log) {
+            this.log = log
+            defer log.push("init defer")
+            log.push("init body")
+        }
+        func work() {
+            defer this.log.push("work defer")
+            this.log.push("work body")
+            return "used"
+        }
+        func fail() {
+            defer this.log.push("fail defer")
+            throw "bad"
+        }
+    }
+    let r = Res(log)
+    log.push("constructed")
+    let v = r.work()
+    log.push("returned " + v)
+    try { r.fail() } catch (e) { log.push("caught") }
+    testing.expectEqual(log, ["init body", "init defer", "constructed",
+        "work body", "work defer", "returned used", "fail defer", "caught"], nil)
+})
+
 testing.done()

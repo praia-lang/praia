@@ -55,6 +55,7 @@ static void printStmt(const Stmt* stmt, int level);
 
 static void printExpr(const Expr* expr, int level) {
     if (!expr) { printIndent(level); std::cout << "<null>\n"; return; }
+    if (praia::stackNearlyFull()) { printIndent(level); std::cout << "...\n"; return; }
 
     switch (expr->type) {
     case ExprType::Number: {
@@ -266,6 +267,7 @@ static void printExpr(const Expr* expr, int level) {
 
 static void printStmt(const Stmt* stmt, int level) {
     if (!stmt) { printIndent(level); std::cout << "<null>\n"; return; }
+    if (praia::stackNearlyFull()) { printIndent(level); std::cout << "...\n"; return; }
 
     switch (stmt->type) {
     case StmtType::Expr: {

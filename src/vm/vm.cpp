@@ -137,6 +137,7 @@ static std::pair<bool, Value> vmCallDunder(VM& vm, const Value& instance,
 // but lets different subtrees clone shared sub-objects independently.
 static Value deepCopyForTask(const Value& v,
                              std::unordered_map<void*, Value>& visited) {
+    praia::checkStack();   // a value too deep to copy fails the async call
     if (v.isCallable()) {
         auto* vmcc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
         if (vmcc) {
@@ -221,35 +222,38 @@ static Value deepCopyForTask(const Value& v,
 // deepCopyForTask. Necessary so closures *returned* from the task that get
 // invoked on the parent thread post-await can fall back to the right VM
 // (VM::current() is null on a non-executing thread).
-static void rewireForTaskVm(Value& v, VM* taskVm,
+static void rewireForTaskVm(Value& root, VM* taskVm,
                             std::unordered_set<void*>& visited) {
-    if (v.isCallable()) {
-        auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
-        if (vc) vc->vm = taskVm;
-    }
-    if (v.isMap()) {
-        void* p = static_cast<void*>(v.asMap().get());
-        if (visited.insert(p).second)
-            for (auto& [k, mv] : v.asMap()->entries)
-                rewireForTaskVm(mv, taskVm, visited);
-    }
-    if (v.isArray()) {
-        void* p = static_cast<void*>(v.asArray().get());
-        if (visited.insert(p).second)
-            for (auto& el : v.asArray()->elements)
-                rewireForTaskVm(el, taskVm, visited);
-    }
-    if (v.isTagged()) {
-        void* p = static_cast<void*>(v.asTagged().get());
-        if (visited.insert(p).second)
-            for (auto& el : v.asTagged()->values)
-                rewireForTaskVm(el, taskVm, visited);
-    }
-    if (v.isInstance()) {
-        void* p = static_cast<void*>(v.asInstance().get());
-        if (visited.insert(p).second)
-            for (auto& [k, fv] : v.asInstance()->fields)
-                rewireForTaskVm(fv, taskVm, visited);
+    // A work list, not recursion: it runs on the task's thread, whose
+    // stack (512 KB on macOS) may be far smaller than the one that copied
+    std::vector<Value*> work{&root};
+    while (!work.empty()) {
+        Value& v = *work.back();
+        work.pop_back();
+        if (v.isCallable()) {
+            auto* vc = dynamic_cast<VMClosureCallable*>(v.asCallable().get());
+            if (vc) vc->vm = taskVm;
+        }
+        if (v.isMap()) {
+            void* p = static_cast<void*>(v.asMap().get());
+            if (visited.insert(p).second)
+                for (auto& [k, mv] : v.asMap()->entries) work.push_back(&mv);
+        }
+        if (v.isArray()) {
+            void* p = static_cast<void*>(v.asArray().get());
+            if (visited.insert(p).second)
+                for (auto& el : v.asArray()->elements) work.push_back(&el);
+        }
+        if (v.isTagged()) {
+            void* p = static_cast<void*>(v.asTagged().get());
+            if (visited.insert(p).second)
+                for (auto& el : v.asTagged()->values) work.push_back(&el);
+        }
+        if (v.isInstance()) {
+            void* p = static_cast<void*>(v.asInstance().get());
+            if (visited.insert(p).second)
+                for (auto& [k, fv] : v.asInstance()->fields) work.push_back(&fv);
+        }
     }
 }
 
@@ -519,10 +523,10 @@ struct VMScope {
     VM* vm;
     VM* prevVM;
     int savedFloor;
-    VMScope(VM* v) : vm(v), prevVM(VM::currentVM_), savedFloor(v->executeFloor_) {
+    VMScope(VM* v, int ownHandlers = 0) : vm(v), prevVM(VM::currentVM_), savedFloor(v->executeFloor_) {
         VM::currentVM_ = v;
         v->execHeap_ = &GcHeap::current();
-        v->executeFloor_ = static_cast<int>(v->exceptionHandlers.size());
+        v->executeFloor_ = static_cast<int>(v->exceptionHandlers.size()) - ownHandlers;
         v->executeDepth_++;
     }
     ~VMScope() {
@@ -537,6 +541,7 @@ to call VM closures through the tree-walker's Callable interface.
 Uses VM::current() so closures returned from async tasks work correctly
 even after the task VM is destroyed. */
 Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
+    praia::checkStack();   // nests another VM::execute
     // Prefer VM::current() (always the live VM). Fall back to stored vm only
     // when there's no active execute() (tree-walker compatibility path).
     // Async-returned closures have vm=nullptr, so this always does the right thing.
@@ -570,8 +575,7 @@ Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
         // so a VM that keeps calling back — a server's handler — doesn't
         // creep toward stack overflow one failure at a time
         currentVm->setStackTop(savedStackTop);
-        throw RuntimeError(
-            currentVm->lastError().empty() ? "Callback failed" : currentVm->lastError(), 0);
+        currentVm->rethrowLastError("Callback failed");
     }
 
     return currentVm->pop();
@@ -721,6 +725,12 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
         return Value(result);
     }
 
+    // Room for its frames (and their defer slots) before anything moves,
+    // so a failed resume leaves the caller and the generator as they were
+    size_t framesNeeded = std::max<size_t>(1, gen->savedDefers.size());
+    if (static_cast<size_t>(frameCount) + framesNeeded > static_cast<size_t>(FRAMES_MAX))
+        throw RuntimeError("Stack overflow (too many nested calls)", 0);
+
     int restoreBase = stackTop;
     for (auto& val : gen->savedStack) push(val);
 
@@ -749,7 +759,17 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
     genBaseFrame_ = genBase;
     genBaseStackTop_ = restoreBase;
 
-    auto result = execute(genBase);
+    // Its try blocks from before the yield, at where its frame and stack
+    // are now; they belong to this execute(), not to the caller's
+    for (auto& h : gen->savedHandlers)
+        exceptionHandlers.push_back({h.catchIp, genBase + h.frameOffset, restoreBase + h.stackOffset});
+    int ownHandlers = static_cast<int>(gen->savedHandlers.size());
+    gen->savedHandlers.clear();
+    for (size_t i = 0; i < gen->savedDefers.size(); i++)
+        deferStack[genBase + i] = std::move(gen->savedDefers[i]);
+    gen->savedDefers.clear();
+
+    auto result = execute(genBase, ownHandlers);
 
     currentGenerator_ = prevGen;
     genBaseFrame_ = prevGenBase;
@@ -1044,6 +1064,11 @@ Value VM::lookupGlobal(const std::string& name) const {
     return globals[slot];
 }
 
+void VM::rethrowLastError(const char* fallback) const {
+    if (lastErrorWasThrow_) throw ThrowSignal{lastThrown_, lastErrorLine_, lastErrorColumn_};
+    throw RuntimeError(lastError_.empty() ? fallback : lastError_, 0);
+}
+
 void VM::unwindFramesAndRunDefers(int targetFrameCount) {
     // Mirrors the unwind loop in tryHandleError, but with no
     // handler to stop at — used on uncaught-error / sys.exit
@@ -1058,6 +1083,10 @@ void VM::unwindFramesAndRunDefers(int targetFrameCount) {
         }
         frameCount--;
     }
+    // The try blocks of the frames just removed go with them: left
+    // behind, a later error could jump into a frame that's gone
+    while (!exceptionHandlers.empty() && exceptionHandlers.back().frameIndex >= frameCount)
+        exceptionHandlers.pop_back();
 }
 
 void VM::runDefers(int frameIdx) {
@@ -1419,8 +1448,8 @@ VM::Result VM::runRepl(std::shared_ptr<CompiledFunction> script) {
     return execute();
 }
 
-VM::Result VM::execute(int baseFrameCount_) {
-    VMScope vmScope(this); // set thread-local current VM, restores on return
+VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
+    VMScope vmScope(this, ownHandlers); // set thread-local current VM, restores on return
 
     #define FRAME (frames[frameCount - 1])
     #define READ_BYTE() (*FRAME.ip++)
@@ -1452,6 +1481,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         return Result::RUNTIME_ERROR; \
     }
 
+    for (;;) {   // dispatch picks up here after a handler catches an error thrown below
     try {
     for (;;) {
         // Cross-thread post fast-path: a single acquire load per
@@ -1562,8 +1592,8 @@ VM::Result VM::execute(int baseFrameCount_) {
                 int64_t n = a.isInt() ? a.asInt() : b.asInt();
                 if (n < 0) { RUNTIME_ERR("String repeat count cannot be negative"); }
                 std::string result;
-                result.reserve(str.size() * n);
-                for (int64_t i = 0; i < n; i++) result += str;
+                try { result = repeatString(str, n); }
+                catch (const RuntimeError& err) { RUNTIME_ERR(err.what()); }
                 push(Value(std::move(result)));
                 break;
             }
@@ -2860,6 +2890,9 @@ VM::Result VM::execute(int baseFrameCount_) {
 
         case OpCode::OP_ASYNC_NAMED:
         case OpCode::OP_ASYNC: {
+            // Errors setting the task up (copying its arguments, captures
+            // and globals) are the script's to catch, like a native's
+            try {
             uint8_t argc = READ_BYTE();
 
             // For OP_ASYNC_NAMED, read the names constant and reorder args
@@ -3291,6 +3324,10 @@ VM::Result VM::execute(int baseFrameCount_) {
             retainInflightFuture(sharedFuture);
             push(Value(fut));
             break;
+            } catch (const RuntimeError& err) {
+                RUNTIME_ERR(err.what());   // a value too deep to copy, say
+            }
+            break;
         }
 
         case OpCode::OP_YIELD: {
@@ -3307,6 +3344,27 @@ VM::Result VM::execute(int baseFrameCount_) {
             gen->savedFrameCount = frameCount - genBaseFrame_;
             gen->savedBaseSlot = baseSlot;
             gen->state = PraiaGenerator::State::SUSPENDED;
+
+            // Its open try blocks leave with it, so the caller's errors
+            // can't land in them while it's suspended (oldest first)
+            gen->savedHandlers.clear();
+            size_t keep = exceptionHandlers.size();
+            while (static_cast<int>(keep) > executeFloor_ &&
+                   exceptionHandlers[keep - 1].frameIndex >= genBaseFrame_)
+                keep--;
+            for (size_t i = keep; i < exceptionHandlers.size(); i++) {
+                auto& h = exceptionHandlers[i];
+                gen->savedHandlers.push_back({h.catchIp, h.frameIndex - genBaseFrame_, h.stackTop - baseSlot});
+            }
+            exceptionHandlers.resize(keep);
+
+            // Its defers wait for it to finish too: left in their frame
+            // slots, whatever the caller runs there next would run them
+            gen->savedDefers.clear();
+            for (int f = genBaseFrame_; f < frameCount; f++) {
+                gen->savedDefers.push_back(std::move(deferStack[f]));
+                deferStack[f].clear();
+            }
 
             // Restore VM to state before .next() was called
             closeUpvalues(&stack[baseSlot]);
@@ -3345,11 +3403,32 @@ VM::Result VM::execute(int baseFrameCount_) {
         // Interpreter::interpret).
         unwindFramesAndRunDefers(baseFrameCount_);
         throw; // propagate sys.exit() to main
+    } catch (const ThrowSignal& sig) {
+        // A Praia `throw` from Praia code an instruction ran (an operator
+        // overload's body, see rethrowLastError): the same value goes to
+        // the script's try, or is reported as uncaught like OP_THROW does
+        if (frameCount > 0 && tryHandleError(sig.value)) continue;
+        int line = frameCount > 0 ? CURRENT_LINE() : sig.line;
+        int column = frameCount > 0 ? CURRENT_COLUMN() : sig.column;
+        lastError_ = sig.value.toString();
+        lastThrown_ = sig.value;
+        lastErrorWasThrow_ = true;
+        recordUncaught(line, column);
+        if (!suppressErrors_ && executeDepth_ <= 1) {
+            std::cerr << formatLocation(line, column) << " Uncaught error: " << lastError_ << std::endl;
+            std::cerr << formatStackTrace();
+        }
+        unwindFramesAndRunDefers(baseFrameCount_);
+        return Result::RUNTIME_ERROR;
     } catch (const RuntimeError& err) {
-        // Fatal error (e.g. stack overflow from push())
-        lastError_ = err.what();
-        lastErrorWasThrow_ = false;
-        recordUncaught(err.line, err.column);
+        // Thrown out of an instruction instead of raised with RUNTIME_ERR:
+        // an error in an operator overload's body (__add, __eq, ...), the
+        // stack guard, the value stack overflowing in push(). It goes to
+        // the script's try like any other error, or is reported.
+        if (frameCount > 0 && tryHandleError(praia::wrapRuntimeErrorForVm(*this, err))) continue;
+        if (err.line > 0) runtimeError(err.what(), err.line, err.column);
+        else if (frameCount > 0) runtimeError(err.what(), CURRENT_LINE(), CURRENT_COLUMN());
+        else runtimeError(err.what(), 0);
         unwindFramesAndRunDefers(baseFrameCount_);
         return Result::RUNTIME_ERROR;
     } catch (const std::exception& err) {
@@ -3369,6 +3448,7 @@ VM::Result VM::execute(int baseFrameCount_) {
         else runtimeError("unknown native error", 0);
         unwindFramesAndRunDefers(baseFrameCount_);
         return Result::RUNTIME_ERROR;
+    }
     }
 
     #undef FRAME

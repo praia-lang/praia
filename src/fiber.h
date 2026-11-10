@@ -21,6 +21,8 @@
 #include <memory>
 #include <sys/mman.h>
 
+#include "stack_guard.h"
+
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
 #endif
@@ -63,7 +65,11 @@ public:
         if (completed_ || !stack_) return;
         Fiber* prev = current_;
         current_ = this;
+        // The stack checks measure against this fiber's stack while it runs
+        praia::StackBounds prevStack = praia::fiberStack;
+        praia::fiberStack = {reinterpret_cast<uintptr_t>(stack_), stackSize_};
         swapcontext(&callerCtx_, &fiberCtx_);
+        praia::fiberStack = prevStack;
         current_ = prev;
     }
 

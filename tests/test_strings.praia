@@ -74,4 +74,19 @@ testing.test("string multiplication", lam{ in
     testing.expectEqual("hi" * 1, "hi", nil)
 })
 
+func repeatError(fn) {
+    try { fn() } catch (e) { return str(e) }
+    return "no error"
+}
+
+testing.test("a repeat too large to make is a catchable error", lam{ in
+    testing.expectContains(repeatError(lam{ in "ab" * 9223372036854775807 }), "too large", nil)
+    testing.expectContains(repeatError(lam{ in 9223372036854775807 * "ab" }), "too large", nil)
+    testing.expectContains(repeatError(lam{ in "ab".repeat(1e300) }), "too large", nil)
+    testing.expectContains(repeatError(lam{ in "ab".repeat(9223372036854775807) }), "too large", nil)
+    testing.expectContains(repeatError(lam{ in "ab".repeat(-1) }), "negative", nil)
+    testing.expectEqual("ab".repeat(2.7), "abab", nil)
+    testing.expectEqual("".repeat(1e18), "", nil)
+})
+
 testing.done()

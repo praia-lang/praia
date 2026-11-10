@@ -7,8 +7,19 @@
 
 struct Expr;
 struct Stmt;
-using ExprPtr = std::unique_ptr<Expr>;
-using StmtPtr = std::unique_ptr<Stmt>;
+
+// Frees syntax-tree nodes without recursing. The parser builds operator
+// chains (a + b + c + ...), call chains and elif chains in a loop, so a
+// long one is a tree as deep as it is long, and freeing it node by node
+// would recurse once per level. See praia::detail::freeAst below.
+struct AstDeleter {
+    AstDeleter() = default;
+    template <class T> AstDeleter(const std::default_delete<T>&) {}  // from make_unique
+    void operator()(Expr* e) const;
+    void operator()(Stmt* s) const;
+};
+using ExprPtr = std::unique_ptr<Expr, AstDeleter>;
+using StmtPtr = std::unique_ptr<Stmt, AstDeleter>;
 
 // --- Type tags for dispatch without dynamic_cast ---
 
@@ -401,3 +412,40 @@ struct ExportStmt : Stmt {
     ExportStmt() : Stmt(StmtType::Export) {}
     std::vector<std::string> names;
 };
+
+namespace praia::detail {
+// While one node is being freed, the nodes it owns are queued here instead
+// of freed inside it; the outermost free works through the queue
+struct AstQueue {
+    std::vector<Expr*> exprs;
+    std::vector<Stmt*> stmts;
+};
+inline thread_local AstQueue* astFreeing = nullptr;
+
+inline void freeAst(Expr* e, Stmt* s) {
+    if (astFreeing) {
+        if (e) astFreeing->exprs.push_back(e);
+        if (s) astFreeing->stmts.push_back(s);
+        return;
+    }
+    AstQueue queue;
+    astFreeing = &queue;
+    delete e;
+    delete s;
+    while (!queue.exprs.empty() || !queue.stmts.empty()) {
+        if (!queue.exprs.empty()) {
+            Expr* next = queue.exprs.back();
+            queue.exprs.pop_back();
+            delete next;
+        } else {
+            Stmt* next = queue.stmts.back();
+            queue.stmts.pop_back();
+            delete next;
+        }
+    }
+    astFreeing = nullptr;
+}
+} // namespace praia::detail
+
+inline void AstDeleter::operator()(Expr* e) const { praia::detail::freeAst(e, nullptr); }
+inline void AstDeleter::operator()(Stmt* s) const { praia::detail::freeAst(nullptr, s); }
