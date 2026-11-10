@@ -759,6 +759,9 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
         exceptionHandlers.push_back({h.catchIp, genBase + h.frameOffset, restoreBase + h.stackOffset});
     int ownHandlers = static_cast<int>(gen->savedHandlers.size());
     gen->savedHandlers.clear();
+    for (size_t i = 0; i < gen->savedDefers.size(); i++)
+        deferStack[genBase + i] = std::move(gen->savedDefers[i]);
+    gen->savedDefers.clear();
 
     auto result = execute(genBase, ownHandlers);
 
@@ -3348,6 +3351,14 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
                 gen->savedHandlers.push_back({h.catchIp, h.frameIndex - genBaseFrame_, h.stackTop - baseSlot});
             }
             exceptionHandlers.resize(keep);
+
+            // Its defers wait for it to finish too: left in their frame
+            // slots, whatever the caller runs there next would run them
+            gen->savedDefers.clear();
+            for (int f = genBaseFrame_; f < frameCount; f++) {
+                gen->savedDefers.push_back(std::move(deferStack[f]));
+                deferStack[f].clear();
+            }
 
             // Restore VM to state before .next() was called
             closeUpvalues(&stack[baseSlot]);

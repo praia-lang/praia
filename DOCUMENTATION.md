@@ -1759,6 +1759,22 @@ print(g.next())   // {value: 1, done: false}
 print(g.next())   // {value: 99, done: true}
 ```
 
+### Errors and cleanup
+
+`try`/`catch` and `defer` work across `yield`. A `try` that's open when the generator yields still catches errors after it resumes, and it doesn't catch errors in the caller while the generator is suspended. A `defer` runs when the generator finishes, the same way a function's does: when it returns, runs off the end, or throws. It doesn't run at a `yield`. A generator that's abandoned before it finishes never runs its defers.
+
+```praia
+func numbered(items) {
+    defer print("done")      // after the last item, not at each yield
+    for (i in 0..len(items)) { yield "%{i}: %{items[i]}" }
+}
+
+for (line in numbered(["a", "b"])) { print(line) }
+// 0: a
+// 1: b
+// done
+```
+
 ### Generator properties
 
 | Property/Method | Description |

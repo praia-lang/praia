@@ -356,6 +356,8 @@ struct PraiaGenerator {
         int stackOffset;
     };
     std::vector<SavedHandler> savedHandlers;
+    // VM: its frames' pending defers, one list per frame from its first
+    std::vector<std::vector<Value>> savedDefers;
 
     ~PraiaGenerator();  // defined in interpreter_callables.cpp (needs Fiber complete type)
 

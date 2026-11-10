@@ -350,6 +350,8 @@ private:
     // Defer stacks — one per function call. Each is a list of expressions
     // to evaluate in reverse order when the function exits.
     std::vector<std::vector<const Expr*>> deferStacks_;
+    // Pops the innermost defer stack and runs it, last registered first
+    void runDeferScope();
 
     // Pending "filled" mask for the next call. Bits set = positions actually
     // provided by the caller. Default (UINT64_MAX) means "all provided"

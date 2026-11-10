@@ -122,39 +122,39 @@ Value Interpreter::callBody(std::shared_ptr<Environment> callEnv,
     }
 
     deferStacks_.push_back({});
-    auto runDefers = [this]() {
-        if (deferStacks_.empty()) return;
-        auto defers = std::move(deferStacks_.back());
-        deferStacks_.pop_back();
-        for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
-            try {
-                evaluate(defers[i]);
-            } catch (const ExitSignal&) {
-                // `sys.exit(N)` from inside a defer must still
-                // propagate — same fix as runScriptDefers in
-                // interpreter.cpp and VM's runDefers ExitSignal arm.
-                throw;
-            } catch (...) {
-                // Other defer errors are swallowed so they can't
-                // mask the original throw we're unwinding from.
-            }
-        }
-    };
-
     try {
         runBody();
     } catch (const ReturnSignal& ret) {
-        runDefers();
+        runDeferScope();
         env = prevEnv;
         return ret.value;
     } catch (...) {
-        runDefers();
+        runDeferScope();
         env = prevEnv;
         throw;
     }
-    runDefers();
+    runDeferScope();
     env = prevEnv;
     return Value();
+}
+
+void Interpreter::runDeferScope() {
+    if (deferStacks_.empty()) return;
+    auto defers = std::move(deferStacks_.back());
+    deferStacks_.pop_back();
+    for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
+        try {
+            evaluate(defers[i]);
+        } catch (const ExitSignal&) {
+            // `sys.exit(N)` from inside a defer must still
+            // propagate — same fix as runScriptDefers in
+            // interpreter.cpp and VM's runDefers ExitSignal arm.
+            throw;
+        } catch (...) {
+            // Other defer errors are swallowed so they can't
+            // mask the original throw we're unwinding from.
+        }
+    }
 }
 
 Value PraiaLambda::call(Interpreter& interp, const std::vector<Value>& args) {
@@ -232,9 +232,20 @@ Value makeGeneratorFromEnv(
 
         genRaw->state = PraiaGenerator::State::RUNNING;
 
+        // The body's defers run when it finishes, however it finishes, as
+        // a function's do. This interpreter lasts as long as the
+        // generator, so they wait out each yield; an abandoned generator
+        // never finishes and never runs them.
+        genInterp.deferStacks_.push_back({});
         try {
-            for (const auto& stmt : *stmtsPtr)
-                genInterp.execute(stmt.get());
+            try {
+                for (const auto& stmt : *stmtsPtr)
+                    genInterp.execute(stmt.get());
+            } catch (...) {
+                genInterp.runDeferScope();
+                throw;
+            }
+            genInterp.runDeferScope();
         } catch (const ReturnSignal& ret) {
             genRaw->lastYielded = ret.value;
             genRaw->done = true;

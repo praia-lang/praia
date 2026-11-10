@@ -228,4 +228,68 @@ testing.test("an abandoned generator's try doesn't catch later errors", lam{ in
     testing.expectEqual(msg, "later", nil)
 })
 
+// A generator's defers run when it finishes, as a function's do: not at
+// a yield, and not in whatever the caller runs while it's suspended
+let deferLog = []
+
+func otherCall() { return "other" }
+
+func deferring() {
+    defer deferLog.push("first")
+    yield 1
+    defer deferLog.push("second")
+    yield 2
+}
+
+testing.test("defers wait for the generator to finish", lam{ in
+    deferLog = []
+    let it = deferring()
+    it.next()
+    otherCall()
+    testing.expectEqual(deferLog, [], "not at the first yield")
+    it.next()
+    otherCall()
+    testing.expectEqual(deferLog, [], "not at the second yield")
+    testing.expect(it.next().done, "done")
+    testing.expectEqual(deferLog, ["second", "first"], "last registered first")
+})
+
+testing.test("defers run when a generator throws or returns", lam{ in
+    deferLog = []
+    func throwing() {
+        defer deferLog.push("thrown")
+        yield 1
+        throw "bad"
+    }
+    let t = throwing()
+    t.next()
+    testing.expectThrows(lam{ in t.next() }, nil)
+    func returning() {
+        defer deferLog.push("returned")
+        yield 1
+        return 9
+    }
+    let r = returning()
+    r.next()
+    testing.expectEqual(r.next().value, 9, nil)
+    testing.expectEqual(deferLog, ["thrown", "returned"], nil)
+})
+
+testing.test("defers run when a for loop finishes a generator", lam{ in
+    deferLog = []
+    let got = []
+    for (x in deferring()) { got.push(x) }
+    testing.expectEqual(got, [1, 2], nil)
+    testing.expectEqual(deferLog, ["second", "first"], nil)
+})
+
+testing.test("an abandoned generator doesn't run its defers", lam{ in
+    deferLog = []
+    let it = deferring()
+    it.next()
+    it = nil
+    otherCall()
+    testing.expectEqual(deferLog, [], nil)
+})
+
 testing.done()
