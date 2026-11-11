@@ -736,10 +736,16 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
 
     // Reopen its closures' upvalues on the restored slots, with any value
     // set through them while it was suspended. Lowest first: its slots are
-    // above every open one, so prepending keeps the list sorted
+    // above every open one, so prepending keeps the list sorted. Under the
+    // lock when another thread made them (a generator from a finished
+    // task), as writeUpvalue does
     for (auto it = gen->savedUpvalues.rbegin(); it != gen->savedUpvalues.rend(); ++it) {
         ObjUpvalue* uv = it->upvalue;
         Value* slot = &stack[restoreBase + it->slot];
+        Value old = std::move(*slot); // the saved copy, released after the lock
+        std::unique_lock<std::mutex> lk;
+        if (uv->owner.load(std::memory_order_relaxed) != execHeap_)
+            lk = std::unique_lock<std::mutex>(GcHeap::upvalueMutex());
         *slot = std::move(uv->closed);
         uv->closed = Value();
         uv->location = slot;
@@ -841,6 +847,11 @@ ObjUpvalue* VM::captureUpvalue(Value* local) {
 void VM::closeUpvalues(Value* last) {
     while (openUpvalues && openUpvalues->location >= last) {
         ObjUpvalue* upvalue = openUpvalues;
+        // Another thread's (a resumed generator from a finished task) is
+        // closed under the lock, as writeUpvalue writes it
+        std::unique_lock<std::mutex> lk;
+        if (upvalue->owner.load(std::memory_order_relaxed) != execHeap_)
+            lk = std::unique_lock<std::mutex>(GcHeap::upvalueMutex());
         upvalue->closed = *upvalue->location;
         upvalue->location = &upvalue->closed;
         openUpvalues = upvalue->next;

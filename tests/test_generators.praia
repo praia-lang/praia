@@ -368,6 +368,14 @@ testing.test("closures in a generator share its variables across yields", lam{ i
     fns[0]()
     testing.expectEqual(c.next().value, 3, nil)
     testing.expectEqual(fns[1](), 3, nil)
+
+    // Started in a task, resumed here after the task has finished
+    let pair = await async lam{ in
+        let tg = gen()
+        return [tg, tg.next().value]
+    }()
+    testing.expectEqual(pair[0].next().value, 2, "a task's generator, inside")
+    testing.expectEqual(pair[1](), 2, "a task's generator, outside")
 })
 
 testing.done()
