@@ -1941,7 +1941,9 @@ Value httpSessionRequest(const Value& session,
         HttpOptions perReq = opts;
         perReq.deadline = deadline;   // reads inside the response are held to it too
         if (opts.totalTimeoutMs > 0) {
-            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            // Rounded up: a read timeout taken from this mustn't end just
+            // before the deadline, or hitting it isn't a total timeout
+            auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
             if (remaining <= 0)
                 throw RuntimeError("HTTP total timeout exceeded", 0);
@@ -2016,7 +2018,9 @@ Value doHttpRequest(const std::string& method, const std::string& url,
         HttpOptions perReq = opts;
         perReq.deadline = deadline;   // reads inside the response are held to it too
         if (opts.totalTimeoutMs > 0) {
-            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            // Rounded up: a read timeout taken from this mustn't end just
+            // before the deadline, or hitting it isn't a total timeout
+            auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
             if (remaining <= 0)
                 throw RuntimeError("HTTP total timeout exceeded", 0);
@@ -2519,7 +2523,9 @@ Value httpOpenStream(const std::string& method, const std::string& url,
     while (true) {
         HttpOptions perReq = opts;
         if (opts.totalTimeoutMs > 0) {
-            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            // Rounded up: a read timeout taken from this mustn't end just
+            // before the deadline, or hitting it isn't a total timeout
+            auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
             if (remaining <= 0)
                 throw RuntimeError("HTTP total timeout exceeded", 0);
