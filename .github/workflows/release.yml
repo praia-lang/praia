@@ -168,6 +168,7 @@ jobs:
              src/token.h \
              src/fiber.h \
              src/signal_state.h \
+             src/stack_guard.h \
              dist/lib/praia/include/
           cp README.md LICENSE dist/ 2>/dev/null || true
 

@@ -220,6 +220,7 @@ install:
 	cp $(SRC_DIR)/token.h $(DESTDIR)$(LIBDIR)/include/
 	cp $(SRC_DIR)/fiber.h $(DESTDIR)$(LIBDIR)/include/
 	cp $(SRC_DIR)/signal_state.h $(DESTDIR)$(LIBDIR)/include/
+	cp $(SRC_DIR)/stack_guard.h $(DESTDIR)$(LIBDIR)/include/
 	install -d $(DESTDIR)$(LIBDIR)/grains
 	cp -R grains/* $(DESTDIR)$(LIBDIR)/grains/
 	# One-release migration: prior installs put sand at $(LIBDIR)/sand.
