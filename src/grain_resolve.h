@@ -211,8 +211,9 @@ inline std::string resolveGrainPath(const std::string& importPath,
     }
 
     // 5. Bundled stdlib grains + system-global ext_grains. A binary built
-    // with LIBDIR but run before it's installed there (the release build's
-    // test run) still finds the grains next to it.
+    // with LIBDIR but not installed there yet still finds the grains it
+    // came with: in a release tarball extracted in place they're in
+    // <bindir>/lib/praia/, and in a source checkout in <bindir>/grains/.
     if (g_praiaLibDir) {
         auto r = tryResolveGrain(fs::path(g_praiaLibDir) / "ext_grains", importPath);
         if (!r.empty()) return r;
@@ -220,7 +221,12 @@ inline std::string resolveGrainPath(const std::string& importPath,
         if (!r.empty()) return r;
     }
     if (!g_praiaInstallDir.empty()) {
-        auto r = tryResolveGrain(fs::path(g_praiaInstallDir) / "grains", importPath);
+        fs::path bundled = fs::path(g_praiaInstallDir) / "lib" / "praia";
+        auto r = tryResolveGrain(bundled / "ext_grains", importPath);
+        if (!r.empty()) return r;
+        r = tryResolveGrain(bundled / "grains", importPath);
+        if (!r.empty()) return r;
+        r = tryResolveGrain(fs::path(g_praiaInstallDir) / "grains", importPath);
         if (!r.empty()) return r;
     }
 

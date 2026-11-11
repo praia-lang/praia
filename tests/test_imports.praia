@@ -223,6 +223,28 @@ testing.test("an ordinary missing grain gets no stopped-search hint", lam{ in
     }
 })
 
+testing.test("a binary finds the grains in lib/praia/ next to it", lam{ in
+    // The layout of a release tarball extracted in place: praia, then
+    // lib/praia/grains/ and lib/praia/ext_grains/ beside it
+    let root = testing.tempDir("praia-bundle-")
+    fs.mkdir(root + "/dist/lib/praia/grains")
+    fs.mkdir(root + "/dist/lib/praia/ext_grains")
+    fs.mkdir(root + "/work")
+    sys.exec(["chmod", "755", root + "/dist", root + "/work"])
+    fs.copy(praiaBin, root + "/dist/praia")
+    sys.exec(["chmod", "755", root + "/dist/praia"])
+    fs.write(root + "/dist/lib/praia/grains/bundled_xyz.praia", "let who = \"bundled\"\nexport { who }\n")
+    fs.write(root + "/dist/lib/praia/ext_grains/global_xyz.praia", "let who = \"global\"\nexport { who }\n")
+    fs.write(root + "/work/run.praia", "use \"bundled_xyz\"\nuse \"global_xyz\"\nprint(bundled_xyz.who, global_xyz.who)\n")
+    for (e in engines) {
+        let args = [root + "/dist/praia"]
+        for (a in e) { args.push(a) }
+        args.push(root + "/work/run.praia")
+        let r = sys.exec(args, 10000)
+        testing.expectEqual(r.stdout.strip(), "bundled global", "%{e}: %{r.stderr}")
+    }
+})
+
 testing.test("praia -c still uses the current directory's grains", lam{ in
     let r = runIn(cwdFixtures + "/project", ["-c", "use \"lib\"\nprint(lib.who)"])
     testing.expectEqual(r.stdout, "project lib", r.stderr)
