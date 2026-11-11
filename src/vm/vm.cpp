@@ -734,6 +734,20 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
     int restoreBase = stackTop;
     for (auto& val : gen->savedStack) push(val);
 
+    // Reopen its closures' upvalues on the restored slots, with any value
+    // set through them while it was suspended. Lowest first: its slots are
+    // above every open one, so prepending keeps the list sorted
+    for (auto it = gen->savedUpvalues.rbegin(); it != gen->savedUpvalues.rend(); ++it) {
+        ObjUpvalue* uv = it->upvalue;
+        Value* slot = &stack[restoreBase + it->slot];
+        *slot = std::move(uv->closed);
+        uv->closed = Value();
+        uv->location = slot;
+        uv->next = openUpvalues;
+        openUpvalues = uv;
+    }
+    gen->savedUpvalues.clear();
+
     auto* closure = static_cast<ObjClosure*>(gen->vmClosure);
     int genBase = frameCount;
     auto& frame = frames[frameCount++];
@@ -3365,6 +3379,14 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
                 gen->savedDefers.push_back(std::move(deferStack[f]));
                 deferStack[f].clear();
             }
+
+            // Closures made in it keep sharing its variables: their
+            // upvalues are closed while it's suspended (they can still be
+            // called) and reopened on its slots when it resumes. The open
+            // list is sorted top down, so its upvalues come first
+            gen->savedUpvalues.clear();
+            for (ObjUpvalue* uv = openUpvalues; uv && uv->location >= &stack[baseSlot]; uv = uv->next)
+                gen->savedUpvalues.push_back({uv, static_cast<int>(uv->location - &stack[baseSlot])});
 
             // Restore VM to state before .next() was called
             closeUpvalues(&stack[baseSlot]);

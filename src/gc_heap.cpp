@@ -797,6 +797,7 @@ void GcHeap::sweep() {
                 gen->lastYielded = Value();
                 gen->sendValue = Value();
                 gen->savedStack.clear();
+                gen->savedUpvalues.clear();
                 gen->ownedResources.clear();
                 gen->fiber.reset();
                 gen->fiberEnv.reset();

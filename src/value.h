@@ -22,6 +22,7 @@ struct PraiaSet;
 struct PraiaInstance;
 struct PraiaFuture;
 struct PraiaGenerator;
+struct ObjUpvalue;
 struct PraiaTagged;
 struct PraiaExternal;
 class Interpreter;
@@ -356,6 +357,11 @@ struct PraiaGenerator {
         int stackOffset;
     };
     std::vector<SavedHandler> savedHandlers;
+    // VM: the upvalues open on its stack when it yielded (closed while
+    // it's suspended), with their slot relative to its first; reopened
+    // when it resumes
+    struct SavedUpvalue { ObjUpvalue* upvalue; int slot; };
+    std::vector<SavedUpvalue> savedUpvalues;
     // VM: its frames' pending defers, one list per frame from its first
     std::vector<std::vector<Value>> savedDefers;
 

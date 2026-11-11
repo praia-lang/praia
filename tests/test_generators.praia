@@ -328,4 +328,46 @@ testing.test("resuming a generator with no frames left is an error, not a crash"
     testing.expect(it.next().value > 0, "the generator still works")
 })
 
+testing.test("closures in a generator share its variables across yields", lam{ in
+    func gen() {
+        let x = 1
+        let get = lam{ in x }
+        yield get
+        x = 2
+        yield get()
+        let set = lam{ v in x = v }
+        yield set
+        yield x
+        x = 3
+    }
+    let g = gen()
+    let get = g.next().value
+    testing.expectEqual(get(), 1, "before resuming")
+    testing.expectEqual(g.next().value, 2, "set inside, read inside")
+    testing.expectEqual(get(), 2, "set inside, read outside")
+    let set = g.next().value
+    set(9)
+    testing.expectEqual(get(), 9, "set outside while suspended")
+    testing.expectEqual(g.next().value, 9, "set outside, read inside")
+    testing.expect(g.next().done, "finished")
+    testing.expectEqual(get(), 3, "the final value, after it finished")
+
+    // Made before a loop that yields, sharing a counter
+    func counter() {
+        let n = 0
+        let inc = lam{ in n += 1 }
+        let peek = lam{ in n }
+        yield [inc, peek]
+        while (true) { yield n }
+    }
+    let c = counter()
+    let fns = c.next().value
+    fns[0]()
+    testing.expectEqual(c.next().value, 1, nil)
+    fns[0]()
+    fns[0]()
+    testing.expectEqual(c.next().value, 3, nil)
+    testing.expectEqual(fns[1](), 3, nil)
+})
+
 testing.done()
