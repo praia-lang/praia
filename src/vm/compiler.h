@@ -5,6 +5,7 @@
 #include "chunk.h"
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct CompiledFunction {
@@ -62,6 +63,7 @@ private:
         bool isGenerator = false;
         std::vector<LoopContext> loops;
         std::vector<FinallyEntry> finallyStack; // enclosing finally bodies for return/break/continue
+        std::unordered_map<std::string, uint16_t> identifiers; // name -> its constant (identifierConstant)
     };
 
     CompilerState* current = nullptr;

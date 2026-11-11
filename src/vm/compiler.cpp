@@ -16,8 +16,15 @@ void Compiler::emitConstant(Value value, int line, int column) {
     emitU16(idx, line, column);
 }
 
+// One constant per name and function, however often the name is used:
+// a long run of code reading the same few variables would otherwise
+// fill the chunk's 65535 constants
 uint16_t Compiler::identifierConstant(const std::string& name) {
-    return currentChunk().addConstant(Value(name));
+    auto it = current->identifiers.find(name);
+    if (it != current->identifiers.end()) return it->second;
+    uint16_t idx = currentChunk().addConstant(Value(name));
+    current->identifiers.emplace(name, idx);
+    return idx;
 }
 
 int Compiler::emitJump(OpCode op, int line, int column) {
@@ -120,7 +127,14 @@ std::shared_ptr<CompiledFunction> Compiler::compile(const std::vector<StmtPtr>& 
     addLocal("");
 
     for (auto& stmt : program) {
-        compileStmt(stmt.get());
+        // A chunk out of constants throws from deep inside: report it
+        // like any other compile error, at the statement being compiled
+        try {
+            compileStmt(stmt.get());
+        } catch (const RuntimeError& e) {
+            error(e.what(), stmt->line);
+            break;
+        }
     }
 
     emit(OpCode::OP_NIL, 0);

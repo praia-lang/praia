@@ -72,10 +72,16 @@ deepDataTest("str() of a value too deep to print", lam{ in
 })
 
 deepDataTest("a value too deep to copy into an async task", lam{ in
-    let h = deepList(200000)
+    // Built and copied inside a task, on its small fixed-size stack: the
+    // main thread's stack depends on the machine, and one big enough
+    // copies the whole value
     func size(x) { return len(x) }
-    testing.expectContains(errorOf(lam{ in await async size(h) }), "Stack overflow", "as an argument")
-    testing.expectContains(errorOf(lam{ in await async lam{ in len(h) }() }), "Stack overflow", "captured")
+    let errors = await async lam{ in
+        let h = deepList(200000)
+        return [errorOf(lam{ in await async size(h) }), errorOf(lam{ in await async lam{ in len(h) }() })]
+    }()
+    testing.expectContains(errors[0], "Stack overflow", "as an argument")
+    testing.expectContains(errors[1], "Stack overflow", "captured")
 })
 
 testing.test("code nested too deeply is an error, not a crash", lam{ in
@@ -114,13 +120,35 @@ testing.test("code nested too deeply is an error, not a crash", lam{ in
             }
         }
         // A chain is read in a loop, so it parses; compiling it (VM) or
-        // running it (tree-walker) is what goes too deep
+        // running it (tree-walker) is what goes too deep, unless the
+        // stack is big enough to run it
         let c = sys.exec(["./praia", ...engine, chain])
-        testing.expect(c.exitCode == 2 || c.exitCode == 3,
+        testing.expect(c.exitCode == 0 || c.exitCode == 2 || c.exitCode == 3,
             "%{engine} chain: an error, not a crash (exit %{c.exitCode})")
-        testing.expect(c.stderr.contains("nested too deeply") || c.stderr.contains("Stack overflow"),
-            "%{engine} chain: " + c.stderr.slice(0, 200))
+        if (c.exitCode == 0) {
+            testing.expectEqual(c.stdout.strip(), "300001", "%{engine} chain")
+        } else {
+            testing.expect(c.stderr.contains("nested too deeply") || c.stderr.contains("Stack overflow"),
+                "%{engine} chain: " + c.stderr.slice(0, 200))
+        }
     }
+})
+
+testing.test("too many constants is a compile error, not a crash", lam{ in
+    let dir = testing.tempDir()
+    let nums = path.join(dir, "nums.praia")
+    let src = ""
+    for (i in 0..70000) { src += "print(" + str(i) + ")\n" }
+    fs.write(nums, src)
+    let r = sys.exec(["./praia", nums])
+    testing.expectEqual(r.exitCode, 2, r.stderr.slice(0, 200))
+    testing.expectContains(r.stderr, "Compile error: Too many constants", nil)
+
+    // A name used over and over takes one constant
+    let names = path.join(dir, "names.praia")
+    fs.write(names, "let a = 0\nlet b = 1\n" + "a = b\n" * 70000 + "print(a)\n")
+    let n = sys.exec(["./praia", names])
+    testing.expectEqual(n.stdout.strip(), "1", n.stderr.slice(0, 200))
 })
 
 testing.done()
