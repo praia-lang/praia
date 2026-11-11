@@ -177,14 +177,22 @@ jobs:
         # via re2). Without bundling, users hit "Library not loaded" unless they
         # have the same homebrew packages installed at the same paths. dylibbundler
         # copies every non-system dylib (recursively) into dist/lib/praia/dylibs/
-        # and rewrites the binary + each bundled dylib's load paths to use
-        # @executable_path/../lib/praia/dylibs/, so the install layout becomes
-        # self-contained: bin/praia + lib/praia/dylibs/*.dylib.
+        # and rewrites the binary + each bundled dylib's load paths to
+        # @rpath/. The binary then gets two rpaths, so it finds them both
+        # installed (bin/praia + lib/praia/dylibs/) and run straight from the
+        # extracted tarball (praia + lib/praia/dylibs/). This runs before
+        # signing, which covers the added load commands.
         run: |
           mkdir -p dist/lib/praia/dylibs
           dylibbundler -od -b -x dist/praia \
             -d dist/lib/praia/dylibs/ \
-            -p '@executable_path/../lib/praia/dylibs/'
+            -p '@rpath/'
+          install_name_tool \
+            -add_rpath '@executable_path/../lib/praia/dylibs' \
+            -add_rpath '@executable_path/lib/praia/dylibs' \
+            dist/praia
+          echo "--- rpaths ---"
+          otool -l dist/praia | grep -A2 LC_RPATH | grep path
           echo "--- post-bundle otool -L ---"
           otool -L dist/praia
           if otool -L dist/praia | grep -q '/opt/homebrew\|/usr/local/Cellar'; then
@@ -198,10 +206,10 @@ jobs:
         # library the binary links against into dist/lib/praia/lib/, then patchelf
         # the binary's RPATH so it looks there first. Skip glibc/libstdc++/libgcc
         # — those must match the system kernel and aren't safe to ship.
-        # RPATH is "$ORIGIN/../lib/praia/lib" so it resolves correctly *after*
-        # install (binary at /usr/local/bin/praia, libs at /usr/local/lib/praia/lib).
-        # In the CI staged layout (dist/praia + dist/lib/...) ldd will report
-        # "not found" — that's expected; we verify via patchelf --print-rpath.
+        # RPATH has "$ORIGIN/../lib/praia/lib" so it resolves correctly
+        # after install (binary at /usr/local/bin/praia, libs at
+        # /usr/local/lib/praia/lib), and "$ORIGIN/lib/praia/lib" for running
+        # straight from the extracted tarball (praia + lib/praia/lib/).
         run: |
           mkdir -p dist/lib/praia/lib
           ldd dist/praia | awk '/=>/ && $3 ~ /^\// { print $3 }' | while read lib; do
@@ -215,7 +223,7 @@ jobs:
                 ;;
             esac
           done
-          patchelf --set-rpath '$ORIGIN/../lib/praia/lib' dist/praia
+          patchelf --set-rpath '$ORIGIN/../lib/praia/lib:$ORIGIN/lib/praia/lib' dist/praia
           # Bundled .so files set RPATH to $ORIGIN so transitive deps resolve
           # to the same bundle dir (e.g. libssl finds libcrypto next to it).
           for so in dist/lib/praia/lib/*.so*; do
@@ -226,7 +234,7 @@ jobs:
           ls -la dist/lib/praia/lib/
           echo "--- binary RPATH ---"
           patchelf --print-rpath dist/praia
-          if [ "$(patchelf --print-rpath dist/praia)" != '$ORIGIN/../lib/praia/lib' ]; then
+          if [ "$(patchelf --print-rpath dist/praia)" != '$ORIGIN/../lib/praia/lib:$ORIGIN/lib/praia/lib' ]; then
             echo "ERROR: RPATH was not set correctly on the binary" >&2
             exit 1
           fi
@@ -350,14 +358,19 @@ jobs:
         # stdlib grain resolution, the sand wrapper, and the plugin
         # headers + dlopen path. Catches breakage in the staging step
         # (missing files, wrong layout, broken wrapper) *before* the
-        # artifact reaches a user. We install rather than running
-        # in-place because the release binary's grain resolver only
-        # checks the baked LIBDIR — the same path users follow when
-        # they extract a tarball with `sudo tar -C /usr/local -xzf …`.
+        # artifact reaches a user. It first runs the extracted tarball
+        # in place (bundled libs and grains found next to the binary),
+        # then installs to the baked LIBDIR — the same path users follow
+        # when they extract a tarball with `sudo tar -C /usr/local -xzf …`.
         run: |
           set -euo pipefail
           SMOKE=$(mktemp -d -t praia-smoke.XXXXXX)
           tar xzf praia-${{ matrix.target }}.tar.gz -C "$SMOKE"
+
+          echo "── running in place ──"
+          "$SMOKE/praia" -c 'use "strings"
+          print("in place:", crypto.sha256("a").slice(0, 8))' | grep "in place: ca978112"
+          "$SMOKE/sand" --version | grep -i "sand"
 
           echo "── installing to /usr/local ──"
           sudo install -d /usr/local/bin /usr/local/lib/praia
