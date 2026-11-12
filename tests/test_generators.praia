@@ -328,4 +328,105 @@ testing.test("resuming a generator with no frames left is an error, not a crash"
     testing.expect(it.next().value > 0, "the generator still works")
 })
 
+testing.test("closures in a generator share its variables across yields", lam{ in
+    func gen() {
+        let x = 1
+        let get = lam{ in x }
+        yield get
+        x = 2
+        yield get()
+        let set = lam{ v in x = v }
+        yield set
+        yield x
+        x = 3
+    }
+    let g = gen()
+    let get = g.next().value
+    testing.expectEqual(get(), 1, "before resuming")
+    testing.expectEqual(g.next().value, 2, "set inside, read inside")
+    testing.expectEqual(get(), 2, "set inside, read outside")
+    let set = g.next().value
+    set(9)
+    testing.expectEqual(get(), 9, "set outside while suspended")
+    testing.expectEqual(g.next().value, 9, "set outside, read inside")
+    testing.expect(g.next().done, "finished")
+    testing.expectEqual(get(), 3, "the final value, after it finished")
+
+    // Made before a loop that yields, sharing a counter
+    func counter() {
+        let n = 0
+        let inc = lam{ in n += 1 }
+        let peek = lam{ in n }
+        yield [inc, peek]
+        while (true) { yield n }
+    }
+    let c = counter()
+    let fns = c.next().value
+    fns[0]()
+    testing.expectEqual(c.next().value, 1, nil)
+    fns[0]()
+    fns[0]()
+    testing.expectEqual(c.next().value, 3, nil)
+    testing.expectEqual(fns[1](), 3, nil)
+
+    // Started in a task, resumed here after the task has finished
+    let pair = await async lam{ in
+        let tg = gen()
+        return [tg, tg.next().value]
+    }()
+    testing.expectEqual(pair[0].next().value, 2, "a task's generator, inside")
+    testing.expectEqual(pair[1](), 2, "a task's generator, outside")
+
+    // Its closure dropped before the task ends: the generator alone keeps
+    // the captured variable alive (freed with the task's bag, before)
+    func yieldsClosure() {
+        let y = 1
+        yield lam{ in y }
+        y = 5
+        yield y
+    }
+    let lone = await async lam{ in
+        let tg = yieldsClosure()
+        tg.next()
+        return tg
+    }()
+    testing.expectEqual(lone.next().value, 5, "a task's generator, closure dropped")
+
+    // A closure made here, while it runs on a finished task's variable,
+    // keeps that variable alive after the generator is gone
+    func maker() {
+        let y = 1
+        yield lam{ in y }
+        y = 4
+        yield lam{ in y }
+        y = 6
+        yield 0
+    }
+    let fromTask = await async lam{ in
+        let tg = maker()
+        tg.next()
+        return tg
+    }()
+    let late = fromTask.next().value
+    fromTask.next()
+    fromTask = nil
+    testing.expectEqual(late(), 6, "a closure made while it was borrowed")
+})
+
+testing.test("resuming a generator in another task while it's shared is an error (VM)", lam{ in
+    // Its closures share its variables with the thread it last ran on,
+    // which owns them while it's running. The tree-walker shares them
+    let src = "func shared() {\n    let x = 1\n    yield lam{ in x }\n    x = 2\n    yield x\n}\n" +
+        "let sg = shared()\nlet peek = sg.next().value\n" +
+        "print(await async lam{ in try { return sg.next().value } catch (e) { return str(e) } }())\n" +
+        "print(sg.next().value, peek())\n" +
+        "func plain() { yield 1\nyield 2 }\nlet pg = plain()\npg.next()\n" +
+        "print(await async lam{ in pg.next().value }())\n"
+    let r = sys.exec(["./praia", "-c", src])
+    let out = r.stdout.split("\n")
+    testing.expectContains(out[0], "Can't resume a generator in another task", r.stderr)
+    testing.expectEqual(out[1], "2 2", "still resumes where it ran")
+    testing.expectEqual(out[2], "2", "one without shared variables resumes anywhere")
+})
+
 testing.done()

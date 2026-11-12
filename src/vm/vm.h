@@ -13,6 +13,7 @@
 #include <vector>
 
 class GcHeap;
+struct TaskOwnership;
 
 // Upvalue: heap-allocated box for captured variables
 struct ObjUpvalue {
@@ -23,6 +24,10 @@ struct ObjUpvalue {
     // GcHeap::upvalueMutex; any other thread takes the lock. Null once
     // its task has ended and the upvalue is in the task's bag.
     std::atomic<const GcHeap*> owner;
+    // The bag of the task that made it, which owns it once the task ends:
+    // a closure capturing it holds the bag (see OP_CLOSURE). Set before
+    // it's shared, and empty outside tasks
+    std::weak_ptr<TaskOwnership> bag;
 
     ObjUpvalue(Value* slot, const GcHeap* ownerHeap)
         : location(slot), next(nullptr), owner(ownerHeap) {}
@@ -60,6 +65,9 @@ struct VMClosureCallable : Callable {
     ObjClosure* closure;
     std::shared_ptr<ObjClosure> ownedPrototype; // keeps compiler prototypes alive (constant pool entries)
     std::shared_ptr<TaskOwnership> taskOwnership; // keeps async task closures/upvalues alive
+    // Bags of the upvalues it captured from other tasks (a closure from a
+    // finished task, a generator resumed from one): its own doesn't hold them
+    std::vector<std::shared_ptr<TaskOwnership>> borrowedOwnership;
     class VM* vm = nullptr; // set when closure is created during VM execution
     VMClosureCallable(ObjClosure* c) : closure(c) {}
     Value call(Interpreter&, const std::vector<Value>& args) override;
@@ -278,6 +286,16 @@ private:
 
     // Open upvalues (linked list, ordered by stack slot desc)
     ObjUpvalue* openUpvalues = nullptr;
+    // Upvalues of a resumed generator that a finished task made, claimed
+    // from its bag: reopened on this VM's stack and owned by this thread
+    // until they close (see resumeGenerator)
+    struct BorrowedUpvalue {
+        ObjUpvalue* upvalue;
+        int slot;                                // index into stack
+        std::shared_ptr<TaskOwnership> bag;      // where it lives
+    };
+    std::vector<BorrowedUpvalue> borrowed_;
+    const BorrowedUpvalue* findBorrowed(const ObjUpvalue* uv) const;
     ObjUpvalue* captureUpvalue(Value* local);
     void closeUpvalues(Value* last);
 

@@ -502,6 +502,7 @@ void GcHeap::forEachChild(void* obj, GcNodeKind kind, F& f) {
             visitValue(gen->lastYielded, true, f);
             visitValue(gen->sendValue, true, f);
             for (auto& v : gen->savedStack) visitValue(v, true, f);
+            for (auto& s : gen->savedUpvalues) visitPtr(s.bag, GcNodeKind::TaskOwnership, true, f);
             visitPtr(gen->fiberEnv, GcNodeKind::Environment, true, f);
             break;
         }
@@ -546,6 +547,8 @@ void GcHeap::forEachChild(void* obj, GcNodeKind kind, F& f) {
                         visitValue(constant, false, f);
                 }
                 visitPtr(vmcc->taskOwnership, GcNodeKind::TaskOwnership, true, f);
+                for (auto& bag : vmcc->borrowedOwnership)
+                    visitPtr(bag, GcNodeKind::TaskOwnership, true, f);
             }
             // NativeFunction: captures live inside std::function and
             // can't be enumerated. Anything it captures therefore shows
@@ -797,6 +800,7 @@ void GcHeap::sweep() {
                 gen->lastYielded = Value();
                 gen->sendValue = Value();
                 gen->savedStack.clear();
+                gen->savedUpvalues.clear();
                 gen->ownedResources.clear();
                 gen->fiber.reset();
                 gen->fiberEnv.reset();

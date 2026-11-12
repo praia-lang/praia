@@ -144,6 +144,7 @@ static Value deepCopyForTask(const Value& v,
             auto clone = std::make_shared<VMClosureCallable>(vmcc->closure);
             clone->ownedPrototype = vmcc->ownedPrototype;
             clone->taskOwnership = vmcc->taskOwnership; // made by an earlier task
+            clone->borrowedOwnership = vmcc->borrowedOwnership;
             clone->vm = nullptr; // rewireForTaskVm sets this to &taskVm
             return Value(std::static_pointer_cast<Callable>(clone));
         }
@@ -361,9 +362,11 @@ VM::TaskSeed VM::captureTaskSeed(VM* snapVm, const std::vector<Value>* roots) co
                         // Another live thread's upvalue it writes (and
                         // closes) without the lock, so it can't be read —
                         // every global instead
+                        // (checked under the lock: a resumed generator
+                        // claims a finished task's upvalue under it)
+                        std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
                         auto* owner = uv->owner.load(std::memory_order_acquire);
                         if (owner != &GcHeap::current() && owner != nullptr) { all = true; break; }
-                        std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
                         work.push_back(*uv->location);
                     }
                 } else if (auto* bm = dynamic_cast<VMBoundMethod*>(c.get())) {
@@ -559,6 +562,7 @@ Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
     self->vm = currentVm;
     self->ownedPrototype = ownedPrototype;
     self->taskOwnership = taskOwnership;
+    self->borrowedOwnership = borrowedOwnership;
     currentVm->push(Value(std::static_pointer_cast<Callable>(self)));
     for (auto& arg : args) currentVm->push(arg);
 
@@ -731,8 +735,48 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
     if (static_cast<size_t>(frameCount) + framesNeeded > static_cast<size_t>(FRAMES_MAX))
         throw RuntimeError("Stack overflow (too many nested calls)", 0);
 
+    // Its closures' variables are read and written without the lock by
+    // the thread that owns them. Another thread that's still running can't
+    // share them, so resuming it there is an error (before anything moves,
+    // so it can still be resumed where it ran)
+    for (auto& s : gen->savedUpvalues) {
+        if (s.upvalue->owner.load(std::memory_order_acquire) == execHeap_) continue;
+        std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
+        if (s.upvalue->owner.load(std::memory_order_acquire) != nullptr)
+            throw RuntimeError("Can't resume a generator in another task while the task (or "
+                               "main program) it last ran in is still running: its closures "
+                               "share its variables", 0);
+    }
+
     int restoreBase = stackTop;
     for (auto& val : gen->savedStack) push(val);
+
+    // Reopen its closures' upvalues on the restored slots, with any value
+    // set through them while it was suspended. Lowest first: its slots are
+    // above every open one, so prepending keeps the list sorted.
+    // An open upvalue is read and written without the lock, which only its
+    // owner may do: a finished task's (no owner) is claimed under the lock
+    // and handed back when it closes (see borrowed_)
+    for (auto it = gen->savedUpvalues.rbegin(); it != gen->savedUpvalues.rend(); ++it) {
+        ObjUpvalue* uv = it->upvalue;
+        int index = restoreBase + it->slot;
+        Value* slot = &stack[index];
+        Value old = std::move(*slot); // the saved copy, released after the lock
+        {
+            std::unique_lock<std::mutex> lk;
+            if (uv->owner.load(std::memory_order_acquire) != execHeap_) {
+                lk = std::unique_lock<std::mutex>(GcHeap::upvalueMutex());
+                uv->owner.store(execHeap_, std::memory_order_release);
+                borrowed_.push_back({uv, index, std::move(it->bag)});
+            }
+            *slot = std::move(uv->closed);
+            uv->closed = Value();
+            uv->location = slot;
+        }
+        uv->next = openUpvalues;
+        openUpvalues = uv;
+    }
+    gen->savedUpvalues.clear();
 
     auto* closure = static_cast<ObjClosure*>(gen->vmClosure);
     int genBase = frameCount;
@@ -816,6 +860,7 @@ ObjUpvalue* VM::captureUpvalue(Value* local) {
 
     allUpvalues.push_back(std::make_unique<ObjUpvalue>(local, execHeap_));
     auto* created = allUpvalues.back().get();
+    created->bag = taskBag_;
     created->next = upvalue;
 
     if (prevUpvalue) prevUpvalue->next = created;
@@ -831,6 +876,20 @@ void VM::closeUpvalues(Value* last) {
         upvalue->location = &upvalue->closed;
         openUpvalues = upvalue->next;
     }
+    if (borrowed_.empty()) return;
+    // Claimed ones go back to having no owner, under the lock as claimed
+    std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
+    std::erase_if(borrowed_, [&](const BorrowedUpvalue& b) {
+        if (&stack[b.slot] < last) return false;
+        b.upvalue->owner.store(nullptr, std::memory_order_release);
+        return true;
+    });
+}
+
+const VM::BorrowedUpvalue* VM::findBorrowed(const ObjUpvalue* uv) const {
+    for (auto& b : borrowed_)
+        if (b.upvalue == uv) return &b;
+    return nullptr;
 }
 
 void VM::writeUpvalue(ObjUpvalue* uv, Value v) {
@@ -2126,6 +2185,15 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
             auto wrapper = std::make_shared<VMClosureCallable>(closure);
             wrapper->vm = this;
             wrapper->taskOwnership = taskBag_;   // null outside task VMs
+            // Upvalues from another task (inherited from a closure it made,
+            // or borrowed by a resumed generator) live in that task's bag
+            for (auto* uv : closure->upvalues) {
+                auto bag = uv->bag.lock();
+                if (!bag || bag == taskBag_) continue;
+                auto& held = wrapper->borrowedOwnership;
+                if (std::find(held.begin(), held.end(), bag) == held.end())
+                    held.push_back(std::move(bag));
+            }
             push(Value(std::static_pointer_cast<Callable>(wrapper)));
             break;
         }
@@ -3173,6 +3241,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
                             taskVm.allUpvalues.push_back(
                                 std::make_unique<ObjUpvalue>(nullptr, &GcHeap::current()));
                             auto* uv = taskVm.allUpvalues.back().get();
+                            uv->bag = taskVm.taskBag_;
                             uv->closed = upvalueSnapshot[i];
                             uv->location = &uv->closed;
                             closure->upvalues[i] = uv;
@@ -3364,6 +3433,19 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
             for (int f = genBaseFrame_; f < frameCount; f++) {
                 gen->savedDefers.push_back(std::move(deferStack[f]));
                 deferStack[f].clear();
+            }
+
+            // Closures made in it keep sharing its variables: their
+            // upvalues are closed while it's suspended (they can still be
+            // called) and reopened on its slots when it resumes. The open
+            // list is sorted top down, so its upvalues come first. Each
+            // keeps the task bag it lives in: this task's, or the one it
+            // was claimed from
+            gen->savedUpvalues.clear();
+            for (ObjUpvalue* uv = openUpvalues; uv && uv->location >= &stack[baseSlot]; uv = uv->next) {
+                auto* b = findBorrowed(uv);
+                gen->savedUpvalues.push_back({uv, static_cast<int>(uv->location - &stack[baseSlot]),
+                                              b ? b->bag : taskBag_});
             }
 
             // Restore VM to state before .next() was called
