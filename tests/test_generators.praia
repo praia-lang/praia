@@ -391,6 +391,45 @@ testing.test("closures in a generator share its variables across yields", lam{ i
         return tg
     }()
     testing.expectEqual(lone.next().value, 5, "a task's generator, closure dropped")
+
+    // A closure made here, while it runs on a finished task's variable,
+    // keeps that variable alive after the generator is gone
+    func maker() {
+        let y = 1
+        yield lam{ in y }
+        y = 4
+        yield lam{ in y }
+        y = 6
+        yield 0
+    }
+    let fromTask = await async lam{ in
+        let tg = maker()
+        tg.next()
+        return tg
+    }()
+    let late = fromTask.next().value
+    fromTask.next()
+    fromTask = nil
+    testing.expectEqual(late(), 6, "a closure made while it was borrowed")
+
+    // Made here, resumed in tasks while this thread still owns its
+    // variables: they stay linked through every yield
+    func shared() {
+        let x = 1
+        yield lam{ in x }
+        x = 2
+        yield x
+        x += 10
+        yield x
+        yield x
+    }
+    let sg = shared()
+    let peek = sg.next().value
+    testing.expectEqual(await async lam{ in sg.next().value }(), 2, nil)
+    testing.expectEqual(peek(), 2, "after a task resumed it")
+    testing.expectEqual(await async lam{ in sg.next().value }(), 12, nil)
+    testing.expectEqual(peek(), 12, "after a second task resumed it")
+    testing.expectEqual(sg.next().value, 12, "resumed here again")
 })
 
 testing.done()

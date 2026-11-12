@@ -23,9 +23,6 @@ struct ObjUpvalue {
     // GcHeap::upvalueMutex; any other thread takes the lock. Null once
     // its task has ended and the upvalue is in the task's bag.
     std::atomic<const GcHeap*> owner;
-    // Claimed from a finished task's bag by a resumed generator (see
-    // VM::resumeGenerator): `owner` goes back to null when it closes
-    bool lent = false;
 
     ObjUpvalue(Value* slot, const GcHeap* ownerHeap)
         : location(slot), next(nullptr), owner(ownerHeap) {}
@@ -63,6 +60,9 @@ struct VMClosureCallable : Callable {
     ObjClosure* closure;
     std::shared_ptr<ObjClosure> ownedPrototype; // keeps compiler prototypes alive (constant pool entries)
     std::shared_ptr<TaskOwnership> taskOwnership; // keeps async task closures/upvalues alive
+    // Bags of the upvalues it captured from a generator resumed on another
+    // thread (see VM::BorrowedUpvalue): its own task's bag doesn't hold them
+    std::vector<std::shared_ptr<TaskOwnership>> borrowedOwnership;
     class VM* vm = nullptr; // set when closure is created during VM execution
     VMClosureCallable(ObjClosure* c) : closure(c) {}
     Value call(Interpreter&, const std::vector<Value>& args) override;
@@ -281,6 +281,19 @@ private:
 
     // Open upvalues (linked list, ordered by stack slot desc)
     ObjUpvalue* openUpvalues = nullptr;
+    // Upvalues of a resumed generator that another thread made, in use on
+    // this VM's stack until they close (see resumeGenerator). Claimed: one
+    // with no owner left (its task ended), reopened here and owned by this
+    // thread until it closes. Not claimed: its owner is still running, so
+    // the slot is a copy, written back under the lock when it closes.
+    struct BorrowedUpvalue {
+        ObjUpvalue* upvalue;
+        int slot;                                // index into stack
+        std::shared_ptr<TaskOwnership> bag;      // where it lives
+        bool claimed;
+    };
+    std::vector<BorrowedUpvalue> borrowed_;
+    const BorrowedUpvalue* findBorrowed(const ObjUpvalue* uv) const;
     ObjUpvalue* captureUpvalue(Value* local);
     void closeUpvalues(Value* last);
 

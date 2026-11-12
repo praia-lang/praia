@@ -144,6 +144,7 @@ static Value deepCopyForTask(const Value& v,
             auto clone = std::make_shared<VMClosureCallable>(vmcc->closure);
             clone->ownedPrototype = vmcc->ownedPrototype;
             clone->taskOwnership = vmcc->taskOwnership; // made by an earlier task
+            clone->borrowedOwnership = vmcc->borrowedOwnership;
             clone->vm = nullptr; // rewireForTaskVm sets this to &taskVm
             return Value(std::static_pointer_cast<Callable>(clone));
         }
@@ -740,23 +741,25 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
     // set through them while it was suspended. Lowest first: its slots are
     // above every open one, so prepending keeps the list sorted.
     // An open upvalue is read and written without the lock, which only its
-    // owner may do: a finished task's (no owner) is claimed under the lock
-    // and handed back when it closes (see ObjUpvalue::lent). A live
-    // thread's can't be taken from it, so it stays closed and the
-    // generator works on its own copy until it yields
+    // owner may do. One another thread made is borrowed (see borrowed_):
+    // claimed if that thread's task has ended, or else synced through a
+    // copy, read here and written back when it closes
     for (auto it = gen->savedUpvalues.rbegin(); it != gen->savedUpvalues.rend(); ++it) {
         ObjUpvalue* uv = it->upvalue;
-        Value* slot = &stack[restoreBase + it->slot];
+        int index = restoreBase + it->slot;
+        Value* slot = &stack[index];
         Value old = std::move(*slot); // the saved copy, released after the lock
         {
             std::unique_lock<std::mutex> lk;
-            auto* owner = uv->owner.load(std::memory_order_acquire);
-            if (owner != execHeap_) {
+            if (uv->owner.load(std::memory_order_acquire) != execHeap_) {
                 lk = std::unique_lock<std::mutex>(GcHeap::upvalueMutex());
-                owner = uv->owner.load(std::memory_order_acquire);
-                if (owner != nullptr) { *slot = std::move(old); continue; }
-                uv->lent = true;
+                if (uv->owner.load(std::memory_order_acquire) != nullptr) {
+                    *slot = uv->closed;
+                    borrowed_.push_back({uv, index, std::move(it->bag), false});
+                    continue;
+                }
                 uv->owner.store(execHeap_, std::memory_order_release);
+                borrowed_.push_back({uv, index, std::move(it->bag), true});
             }
             *slot = std::move(uv->closed);
             uv->closed = Value();
@@ -846,6 +849,8 @@ ObjUpvalue* VM::captureUpvalue(Value* local) {
     }
 
     if (upvalue && upvalue->location == local) return upvalue;
+    for (auto& b : borrowed_)
+        if (!b.claimed && &stack[b.slot] == local) return b.upvalue;
 
     allUpvalues.push_back(std::make_unique<ObjUpvalue>(local, execHeap_));
     auto* created = allUpvalues.back().get();
@@ -860,18 +865,33 @@ ObjUpvalue* VM::captureUpvalue(Value* local) {
 void VM::closeUpvalues(Value* last) {
     while (openUpvalues && openUpvalues->location >= last) {
         ObjUpvalue* upvalue = openUpvalues;
-        // One a resumed generator claimed goes back to having no owner,
-        // under the lock as it was claimed
-        std::unique_lock<std::mutex> lk;
-        if (upvalue->lent) lk = std::unique_lock<std::mutex>(GcHeap::upvalueMutex());
         upvalue->closed = *upvalue->location;
         upvalue->location = &upvalue->closed;
         openUpvalues = upvalue->next;
-        if (upvalue->lent) {
-            upvalue->lent = false;
-            upvalue->owner.store(nullptr, std::memory_order_release);
-        }
     }
+    if (borrowed_.empty()) return;
+    // Borrowed ones go back: a claimed one to having no owner, a synced
+    // one gets the slot's value, written under the lock as writeUpvalue
+    // does for an upvalue this thread doesn't own
+    std::vector<Value> released; // old values, released after the lock
+    {
+        std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
+        std::erase_if(borrowed_, [&](const BorrowedUpvalue& b) {
+            if (&stack[b.slot] < last) return false;
+            if (b.claimed) {
+                b.upvalue->owner.store(nullptr, std::memory_order_release);
+            } else {
+                released.push_back(std::exchange(b.upvalue->closed, stack[b.slot]));
+            }
+            return true;
+        });
+    }
+}
+
+const VM::BorrowedUpvalue* VM::findBorrowed(const ObjUpvalue* uv) const {
+    for (auto& b : borrowed_)
+        if (b.upvalue == uv) return &b;
+    return nullptr;
 }
 
 void VM::writeUpvalue(ObjUpvalue* uv, Value v) {
@@ -2167,6 +2187,12 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
             auto wrapper = std::make_shared<VMClosureCallable>(closure);
             wrapper->vm = this;
             wrapper->taskOwnership = taskBag_;   // null outside task VMs
+            if (!borrowed_.empty()) {
+                for (auto* uv : closure->upvalues) {
+                    auto* b = findBorrowed(uv);
+                    if (b && b->bag) wrapper->borrowedOwnership.push_back(b->bag);
+                }
+            }
             push(Value(std::static_pointer_cast<Callable>(wrapper)));
             break;
         }
@@ -3410,17 +3436,18 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
             // Closures made in it keep sharing its variables: their
             // upvalues are closed while it's suspended (they can still be
             // called) and reopened on its slots when it resumes. The open
-            // list is sorted top down, so its upvalues come first
+            // list is sorted top down, so its upvalues come first; borrowed
+            // ones it only has a copy of come after. Each keeps the task
+            // bag it lives in: this task's, or the one it was borrowed with
             gen->savedUpvalues.clear();
-            for (ObjUpvalue* uv = openUpvalues; uv && uv->location >= &stack[baseSlot]; uv = uv->next)
-                gen->savedUpvalues.push_back({uv, static_cast<int>(uv->location - &stack[baseSlot])});
-            // A task's upvalues move to its bag when the task ends; the
-            // generator holds the bag so they outlive the task while it's
-            // suspended (one claimed from an earlier task's bag is held
-            // already, from when it yielded there)
-            if (taskBag_ && !gen->savedUpvalues.empty() &&
-                std::find(gen->taskBags.begin(), gen->taskBags.end(), taskBag_) == gen->taskBags.end())
-                gen->taskBags.push_back(taskBag_);
+            for (ObjUpvalue* uv = openUpvalues; uv && uv->location >= &stack[baseSlot]; uv = uv->next) {
+                auto* b = findBorrowed(uv);
+                gen->savedUpvalues.push_back({uv, static_cast<int>(uv->location - &stack[baseSlot]),
+                                              b ? b->bag : taskBag_});
+            }
+            for (auto& b : borrowed_)
+                if (!b.claimed && b.slot >= baseSlot)
+                    gen->savedUpvalues.push_back({b.upvalue, b.slot - baseSlot, b.bag});
 
             // Restore VM to state before .next() was called
             closeUpvalues(&stack[baseSlot]);

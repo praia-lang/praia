@@ -358,13 +358,16 @@ struct PraiaGenerator {
         int stackOffset;
     };
     std::vector<SavedHandler> savedHandlers;
-    // VM: the upvalues open on its stack when it yielded (closed while
-    // it's suspended), with their slot relative to its first; reopened
-    // when it resumes
-    struct SavedUpvalue { ObjUpvalue* upvalue; int slot; };
+    // VM: the upvalues on its stack when it yielded (closed while it's
+    // suspended), with their slot relative to its first and the task bag
+    // they live in (null: a VM that outlives it), held so they outlive
+    // that task; reopened when it resumes
+    struct SavedUpvalue {
+        ObjUpvalue* upvalue;
+        int slot;
+        std::shared_ptr<TaskOwnership> bag;
+    };
     std::vector<SavedUpvalue> savedUpvalues;
-    // VM: the task bags those upvalues live in, held while it can resume
-    std::vector<std::shared_ptr<TaskOwnership>> taskBags;
     // VM: its frames' pending defers, one list per frame from its first
     std::vector<std::vector<Value>> savedDefers;
 
