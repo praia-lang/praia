@@ -10,6 +10,7 @@
 #include "../string_distance.h"
 #include "../unicode.h"
 #include <algorithm>
+#include <bit>
 #include <optional>
 #include <cstdio>          // std::fprintf in drainPosted's error logging
 #include <atomic>
@@ -755,7 +756,7 @@ Value VM::resumeGenerator(std::shared_ptr<PraiaGenerator> gen, Value sendVal) {
                 lk = std::unique_lock<std::mutex>(GcHeap::upvalueMutex());
                 if (uv->owner.load(std::memory_order_acquire) != nullptr) {
                     *slot = uv->closed;
-                    borrowed_.push_back({uv, index, std::move(it->bag), false});
+                    borrowed_.push_back({uv, index, std::move(it->bag), false, *slot});
                     continue;
                 }
                 uv->owner.store(execHeap_, std::memory_order_release);
@@ -862,6 +863,15 @@ ObjUpvalue* VM::captureUpvalue(Value* local) {
     return created;
 }
 
+// The same value, not just an equal one: the same object, or the same
+// bits for a float (so a NaN left alone counts as unchanged)
+static bool sameValue(const Value& a, const Value& b) {
+    if (a.data.index() != b.data.index()) return false;
+    if (auto* d = std::get_if<double>(&a.data))
+        return std::bit_cast<uint64_t>(*d) == std::bit_cast<uint64_t>(std::get<double>(b.data));
+    return a.data == b.data;
+}
+
 void VM::closeUpvalues(Value* last) {
     while (openUpvalues && openUpvalues->location >= last) {
         ObjUpvalue* upvalue = openUpvalues;
@@ -871,8 +881,8 @@ void VM::closeUpvalues(Value* last) {
     }
     if (borrowed_.empty()) return;
     // Borrowed ones go back: a claimed one to having no owner, a synced
-    // one gets the slot's value, written under the lock as writeUpvalue
-    // does for an upvalue this thread doesn't own
+    // one gets the slot's value if the generator changed it, written under
+    // the lock as writeUpvalue does for an upvalue this thread doesn't own
     std::vector<Value> released; // old values, released after the lock
     {
         std::lock_guard<std::mutex> lk(GcHeap::upvalueMutex());
@@ -880,7 +890,7 @@ void VM::closeUpvalues(Value* last) {
             if (&stack[b.slot] < last) return false;
             if (b.claimed) {
                 b.upvalue->owner.store(nullptr, std::memory_order_release);
-            } else {
+            } else if (!sameValue(stack[b.slot], b.copied)) {
                 released.push_back(std::exchange(b.upvalue->closed, stack[b.slot]));
             }
             return true;

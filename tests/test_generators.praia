@@ -430,6 +430,27 @@ testing.test("closures in a generator share its variables across yields", lam{ i
     testing.expectEqual(await async lam{ in sg.next().value }(), 12, nil)
     testing.expectEqual(peek(), 12, "after a second task resumed it")
     testing.expectEqual(sg.next().value, 12, "resumed here again")
+
+    // Set here while a task runs it: the task's untouched copy doesn't
+    // overwrite it when the generator yields
+    let started = Queue()
+    let go = Queue()
+    func waits() {
+        let w = 1
+        yield lam{ v in w = v }
+        started.send(true)
+        go.recv()
+        yield "ran"
+        yield w
+    }
+    let wg = waits()
+    let setW = wg.next().value
+    let running = async lam{ in wg.next().value }()
+    started.recv()
+    setW(9)
+    go.send(true)
+    testing.expectEqual(await running, "ran", nil)
+    testing.expectEqual(wg.next().value, 9, "set here while a task ran it")
 })
 
 testing.done()

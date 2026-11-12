@@ -285,12 +285,14 @@ private:
     // this VM's stack until they close (see resumeGenerator). Claimed: one
     // with no owner left (its task ended), reopened here and owned by this
     // thread until it closes. Not claimed: its owner is still running, so
-    // the slot is a copy, written back under the lock when it closes.
+    // the slot is a copy, written back under the lock when it closes if
+    // the generator changed it (else a newer value its owner set stays).
     struct BorrowedUpvalue {
         ObjUpvalue* upvalue;
         int slot;                                // index into stack
         std::shared_ptr<TaskOwnership> bag;      // where it lives
         bool claimed;
+        Value copied = Value();                  // not claimed: the value read in
     };
     std::vector<BorrowedUpvalue> borrowed_;
     const BorrowedUpvalue* findBorrowed(const ObjUpvalue* uv) const;
