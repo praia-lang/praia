@@ -23,6 +23,9 @@ struct ObjUpvalue {
     // GcHeap::upvalueMutex; any other thread takes the lock. Null once
     // its task has ended and the upvalue is in the task's bag.
     std::atomic<const GcHeap*> owner;
+    // Claimed from a finished task's bag by a resumed generator (see
+    // VM::resumeGenerator): `owner` goes back to null when it closes
+    bool lent = false;
 
     ObjUpvalue(Value* slot, const GcHeap* ownerHeap)
         : location(slot), next(nullptr), owner(ownerHeap) {}

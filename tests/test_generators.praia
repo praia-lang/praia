@@ -376,6 +376,21 @@ testing.test("closures in a generator share its variables across yields", lam{ i
     }()
     testing.expectEqual(pair[0].next().value, 2, "a task's generator, inside")
     testing.expectEqual(pair[1](), 2, "a task's generator, outside")
+
+    // Its closure dropped before the task ends: the generator alone keeps
+    // the captured variable alive (freed with the task's bag, before)
+    func yieldsClosure() {
+        let y = 1
+        yield lam{ in y }
+        y = 5
+        yield y
+    }
+    let lone = await async lam{ in
+        let tg = yieldsClosure()
+        tg.next()
+        return tg
+    }()
+    testing.expectEqual(lone.next().value, 5, "a task's generator, closure dropped")
 })
 
 testing.done()

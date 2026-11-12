@@ -23,6 +23,7 @@ struct PraiaInstance;
 struct PraiaFuture;
 struct PraiaGenerator;
 struct ObjUpvalue;
+struct TaskOwnership;
 struct PraiaTagged;
 struct PraiaExternal;
 class Interpreter;
@@ -362,6 +363,8 @@ struct PraiaGenerator {
     // when it resumes
     struct SavedUpvalue { ObjUpvalue* upvalue; int slot; };
     std::vector<SavedUpvalue> savedUpvalues;
+    // VM: the task bags those upvalues live in, held while it can resume
+    std::vector<std::shared_ptr<TaskOwnership>> taskBags;
     // VM: its frames' pending defers, one list per frame from its first
     std::vector<std::vector<Value>> savedDefers;
 

@@ -502,6 +502,7 @@ void GcHeap::forEachChild(void* obj, GcNodeKind kind, F& f) {
             visitValue(gen->lastYielded, true, f);
             visitValue(gen->sendValue, true, f);
             for (auto& v : gen->savedStack) visitValue(v, true, f);
+            for (auto& bag : gen->taskBags) visitPtr(bag, GcNodeKind::TaskOwnership, true, f);
             visitPtr(gen->fiberEnv, GcNodeKind::Environment, true, f);
             break;
         }
@@ -798,6 +799,7 @@ void GcHeap::sweep() {
                 gen->sendValue = Value();
                 gen->savedStack.clear();
                 gen->savedUpvalues.clear();
+                gen->taskBags.clear();
                 gen->ownedResources.clear();
                 gen->fiber.reset();
                 gen->fiberEnv.reset();
