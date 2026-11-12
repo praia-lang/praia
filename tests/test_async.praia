@@ -327,4 +327,17 @@ testing.test("async task gets its own copy of a tagged value's contents", lam{ i
     match (t) { Ok(arr) { testing.expectEqual(len(arr), 2, "caller's array unchanged") } }
 })
 
+testing.test("a closure made by a task's closure keeps the task's variables", lam{ in
+    func make() {
+        let x = 41
+        return lam{ in lam{ in x + 1 } }
+    }
+    let outer = await async make()
+    let inner = outer()
+    outer = nil
+    let junk = []
+    for (i in 0..2000) { junk.push([i]) }
+    testing.expectEqual(inner(), 42, nil)
+})
+
 testing.done()

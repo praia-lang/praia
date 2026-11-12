@@ -860,6 +860,7 @@ ObjUpvalue* VM::captureUpvalue(Value* local) {
 
     allUpvalues.push_back(std::make_unique<ObjUpvalue>(local, execHeap_));
     auto* created = allUpvalues.back().get();
+    created->bag = taskBag_;
     created->next = upvalue;
 
     if (prevUpvalue) prevUpvalue->next = created;
@@ -2184,11 +2185,14 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
             auto wrapper = std::make_shared<VMClosureCallable>(closure);
             wrapper->vm = this;
             wrapper->taskOwnership = taskBag_;   // null outside task VMs
-            if (!borrowed_.empty()) {
-                for (auto* uv : closure->upvalues) {
-                    auto* b = findBorrowed(uv);
-                    if (b && b->bag) wrapper->borrowedOwnership.push_back(b->bag);
-                }
+            // Upvalues from another task (inherited from a closure it made,
+            // or borrowed by a resumed generator) live in that task's bag
+            for (auto* uv : closure->upvalues) {
+                auto bag = uv->bag.lock();
+                if (!bag || bag == taskBag_) continue;
+                auto& held = wrapper->borrowedOwnership;
+                if (std::find(held.begin(), held.end(), bag) == held.end())
+                    held.push_back(std::move(bag));
             }
             push(Value(std::static_pointer_cast<Callable>(wrapper)));
             break;
@@ -3237,6 +3241,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
                             taskVm.allUpvalues.push_back(
                                 std::make_unique<ObjUpvalue>(nullptr, &GcHeap::current()));
                             auto* uv = taskVm.allUpvalues.back().get();
+                            uv->bag = taskVm.taskBag_;
                             uv->closed = upvalueSnapshot[i];
                             uv->location = &uv->closed;
                             closure->upvalues[i] = uv;
