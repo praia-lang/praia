@@ -14,6 +14,7 @@
 #pragma clang diagnostic pop
 #endif
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -52,7 +53,7 @@ public:
         // this size costs far more than a generator does. It's given the
         // top: the fiber starts there and grows down into the rest of the
         // mapping, which the stack checks measure (see resume)
-        constexpr size_t contextStack = 64 * 1024;
+        const size_t contextStack = std::min<size_t>(64 * 1024, stackSize_);
         fiberCtx_.uc_stack.ss_sp = stack_ + stackSize_ - contextStack;
         fiberCtx_.uc_stack.ss_size = contextStack;
 #else
