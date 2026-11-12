@@ -109,7 +109,7 @@ with a fresh interpreter, and reports pass/fail counts. Test files use the
 use "testing"
 
 testing.test("addition", lam{ in
-    testing.assertEqual(1 + 1, 2, nil)
+    testing.expectEqual(1 + 1, 2, nil)
 })
 
 testing.done()
