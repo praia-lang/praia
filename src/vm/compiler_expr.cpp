@@ -202,7 +202,7 @@ void Compiler::compileCallExpr(const CallExpr* expr) {
                 uint16_t nameIdx = currentChunk().addConstant(Value(id->name));
                 emit(OpCode::OP_TAG_OR_CALL, expr->line, expr->column);
                 emitU16(nameIdx, expr->line, expr->column);
-                emit(static_cast<uint8_t>(expr->args.size()), expr->line, expr->column);
+                emitArgCount(expr->args.size(), expr->line, expr->column);
                 return;
             }
         }
@@ -250,11 +250,11 @@ void Compiler::compileCallExpr(const CallExpr* expr) {
             namesArr->elements.push_back(Value(n));
         uint16_t namesIdx = currentChunk().addConstant(Value(namesArr));
         emit(OpCode::OP_CALL_NAMED, expr->line, expr->column);
-        emit(static_cast<uint8_t>(expr->args.size()), expr->line, expr->column);
+        emitArgCount(expr->args.size(), expr->line, expr->column);
         emitU16(namesIdx, expr->line, expr->column);
     } else {
         emit(OpCode::OP_CALL, expr->line, expr->column);
-        emit(static_cast<uint8_t>(expr->args.size()), expr->line, expr->column);
+        emitArgCount(expr->args.size(), expr->line, expr->column);
     }
 }
 
@@ -479,7 +479,7 @@ void Compiler::compileMatchExpr(const MatchExpr* expr) {
                     emitU16(lenNameIdx, ln, col);
                     emit(OpCode::OP_SWAP, ln, col); // → [..., subject, len, values]
                     emit(OpCode::OP_CALL, ln, col);
-                    emit(static_cast<uint8_t>(1), ln, col); // → [..., subject, length]
+                    emitArgCount(1, ln, col); // → [..., subject, length]
                     emit(OpCode::OP_CONSTANT, ln, col);
                     emitU16(currentChunk().addConstant(
                         Value(static_cast<int64_t>(call->args.size()))), ln, col);
@@ -626,17 +626,17 @@ void Compiler::compilePipeExpr(const PipeExpr* expr) {
                 namesArr->elements.push_back(Value(n));
             uint16_t namesIdx = currentChunk().addConstant(Value(namesArr));
             emit(OpCode::OP_CALL_NAMED, expr->line, expr->column);
-            emit(static_cast<uint8_t>(totalArgs), expr->line, expr->column);
+            emitArgCount(totalArgs, expr->line, expr->column);
             emitU16(namesIdx, expr->line, expr->column);
         } else {
             emit(OpCode::OP_CALL, expr->line, expr->column);
-            emit(static_cast<uint8_t>(totalArgs), expr->line, expr->column);
+            emitArgCount(totalArgs, expr->line, expr->column);
         }
     } else {
         compileExpr(expr->right.get());
         compileExpr(expr->left.get());
         emit(OpCode::OP_CALL, expr->line, expr->column);
-        emit(1, expr->line, expr->column);
+        emitArgCount(1, expr->line, expr->column);
     }
 }
 
@@ -673,12 +673,12 @@ void Compiler::compilePipeTryExpr(const PipeTryExpr* expr) {
         for (auto& arg : call->args) compileExpr(arg.get());
         int totalArgs = static_cast<int>(call->args.size()) + 1;
         emit(OpCode::OP_CALL, expr->line, expr->column);
-        emit(static_cast<uint8_t>(totalArgs), expr->line, expr->column);
+        emitArgCount(totalArgs, expr->line, expr->column);
     } else {
         compileExpr(expr->right.get());
         emit(OpCode::OP_SWAP, expr->line, expr->column);
         emit(OpCode::OP_CALL, expr->line, expr->column);
-        emit(1, expr->line, expr->column);
+        emitArgCount(1, expr->line, expr->column);
     }
 
     // Patch jump-over
@@ -980,11 +980,11 @@ void Compiler::compileAsyncExpr(const AsyncExpr* expr) {
             namesArr->elements.push_back(Value(n));
         uint16_t namesIdx = currentChunk().addConstant(Value(namesArr));
         emit(OpCode::OP_ASYNC_NAMED, expr->line, expr->column);
-        emit(static_cast<uint8_t>(call->args.size()), expr->line, expr->column);
+        emitArgCount(call->args.size(), expr->line, expr->column);
         emitU16(namesIdx, expr->line, expr->column);
     } else {
         emit(OpCode::OP_ASYNC, expr->line, expr->column);
-        emit(static_cast<uint8_t>(call->args.size()), expr->line, expr->column);
+        emitArgCount(call->args.size(), expr->line, expr->column);
     }
 }
 

@@ -1966,7 +1966,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
 
         // ── Functions ──
         case OpCode::OP_CALL: {
-            uint8_t argc = READ_BYTE();
+            uint16_t argc = READ_U16();
             Value callee = peek(argc);
             if (!callValue(callee, argc, CURRENT_LINE())) FAIL_AND_DRAIN_DEFERS();
             break;
@@ -1986,7 +1986,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
         }
 
         case OpCode::OP_CALL_NAMED: {
-            uint8_t argc = READ_BYTE();
+            uint16_t argc = READ_U16();
             uint16_t namesIdx = READ_U16();
             Value namesVal = FRAME.chunk().constants[namesIdx];
             auto& namesArr = namesVal.asArray()->elements;
@@ -2844,7 +2844,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
             // through to constructing a tagged value named "Deque" — see
             // the cross-grain isolation regression in tests.
             std::string tagName = READ_STRING();
-            uint8_t argc = READ_BYTE();
+            uint16_t argc = READ_U16();
             VM* gvm = (FRAME.chunk().homeVm && !isTaskVm_) ? FRAME.chunk().homeVm : this;
             int gslot = gvm->findGlobalSlot(tagName);
             if (gslot >= 0 && gvm->isTaskVm_ && !gvm->loadedMask_[gslot]) gvm->lazyLoadGlobal(gslot);
@@ -2961,7 +2961,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
             // Errors setting the task up (copying its arguments, captures
             // and globals) are the script's to catch, like a native's
             try {
-            uint8_t argc = READ_BYTE();
+            uint16_t argc = READ_U16();
 
             // For OP_ASYNC_NAMED, read the names constant and reorder args
             // before entering the shared async dispatch.

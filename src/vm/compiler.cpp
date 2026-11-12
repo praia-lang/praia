@@ -10,6 +10,12 @@ void Compiler::emit(OpCode op, int line, int column) { currentChunk().write(op, 
 void Compiler::emit(uint8_t byte, int line, int column) { currentChunk().write(byte, line, column); }
 void Compiler::emitU16(uint16_t val, int line, int column) { currentChunk().writeU16(val, line, column); }
 
+// A call's argument count (OP_CALL and the other calls: [argc:16])
+void Compiler::emitArgCount(size_t argc, int line, int column) {
+    if (argc > UINT16_MAX) error("Too many arguments in one call (max 65535)", line);
+    emitU16(static_cast<uint16_t>(argc), line, column);
+}
+
 void Compiler::emitConstant(Value value, int line, int column) {
     uint16_t idx = currentChunk().addConstant(std::move(value));
     emit(OpCode::OP_CONSTANT, line, column);
@@ -235,7 +241,7 @@ void Compiler::compileLetStmt(const LetStmt* stmt) {
                     emitU16(static_cast<uint16_t>(arrSlot), stmt->line, stmt->column);
                     emitConstant(Value(static_cast<int64_t>(i)), stmt->line, stmt->column);
                     emit(OpCode::OP_CALL, stmt->line, stmt->column);
-                    emit(2, stmt->line, stmt->column);
+                    emitArgCount(2, stmt->line, stmt->column);
                 } else {
                     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
                     emitU16(static_cast<uint16_t>(arrSlot), stmt->line, stmt->column);
@@ -277,7 +283,7 @@ void Compiler::compileLetStmt(const LetStmt* stmt) {
                     emit(OpCode::OP_BUILD_ARRAY, stmt->line, stmt->column);
                     emitU16(static_cast<uint16_t>(extractedKeys.size()), stmt->line, stmt->column);
                     emit(OpCode::OP_CALL, stmt->line, stmt->column);
-                    emit(2, stmt->line, stmt->column);
+                    emitArgCount(2, stmt->line, stmt->column);
                 } else {
                     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
                     emitU16(static_cast<uint16_t>(mapSlot), stmt->line, stmt->column);
@@ -402,7 +408,7 @@ void Compiler::compileForStmt(const ForStmt* stmt) {
         emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
         emitU16(static_cast<uint16_t>(slot), stmt->line, stmt->column);
         emit(OpCode::OP_CALL, stmt->line, stmt->column);
-        emit(1, stmt->line, stmt->column);
+        emitArgCount(1, stmt->line, stmt->column);
         emit(OpCode::OP_SET_LOCAL, stmt->line, stmt->column);
         emitU16(static_cast<uint16_t>(slot), stmt->line, stmt->column);
         emit(OpCode::OP_POP, stmt->line, stmt->column);
@@ -474,7 +480,7 @@ void Compiler::compileForInStmt(const ForInStmt* stmt) {
     emitU16(identifierConstant("__iterEntries"), stmt->line, stmt->column);
     compileExpr(stmt->iterable.get());
     emit(OpCode::OP_CALL, stmt->line, stmt->column);
-    emit(1, stmt->line, stmt->column);
+    emitArgCount(1, stmt->line, stmt->column);
     addLocal("__iter__");
     int iterSlot = resolveLocal(current, "__iter__");
 
@@ -499,7 +505,7 @@ void Compiler::compileForInStmt(const ForInStmt* stmt) {
     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
     emitU16(static_cast<uint16_t>(idxSlot), stmt->line, stmt->column);
     emit(OpCode::OP_CALL, stmt->line, stmt->column);
-    emit(2, stmt->line, stmt->column);
+    emitArgCount(2, stmt->line, stmt->column);
     // Store result in pre-allocated local
     emit(OpCode::OP_SET_LOCAL, stmt->line, stmt->column);
     emitU16(static_cast<uint16_t>(resultSlot), stmt->line, stmt->column);
@@ -886,7 +892,7 @@ void Compiler::compileClassStmt(const ClassStmt* stmt) {
                 compileExpr(method.decorators[i].get());
                 emit(OpCode::OP_SWAP, method.line);
                 emit(OpCode::OP_CALL, method.line);
-                emit(1, method.line);
+                emitArgCount(1, method.line);
             }
             emit(OpCode::OP_STATIC_METHOD, method.line);
             emitU16(identifierConstant(method.name), method.line);

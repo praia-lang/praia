@@ -70,4 +70,21 @@ testing.test("rest param with defaults", lam{ in
     testing.expectEqual(f(1), [1, 10, []], nil)
 })
 
+testing.test("calls with more than 255 arguments", lam{ in
+    // Written out, since no one types 300 arguments; run on the VM, whose
+    // calls used to keep the count in a byte
+    let nums = []
+    for (i in 0..300) { nums.push(str(i)) }
+    let args = nums.join(", ")
+    let file = path.join(testing.tempDir(), "args.praia")
+    fs.write(file, "func f(...xs) { return len(xs) }\n" +
+        "class C { func m(...xs) { return len(xs) } }\n" +
+        "print(f(" + args + "))\n" +
+        "print(C().m(" + args + "))\n" +
+        "print(1 |> f(" + args + "))\n" +
+        "print(len(str(Pt(" + args + "))))\n")
+    let r = sys.exec(["./praia", file])
+    testing.expectEqual(r.stdout, "300\n300\n301\n1392", r.stderr)
+})
+
 testing.done()

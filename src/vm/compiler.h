@@ -134,6 +134,7 @@ private:
     void emit(OpCode op, int line, int column = 0);
     void emit(uint8_t byte, int line, int column = 0);
     void emitU16(uint16_t val, int line, int column = 0);
+    void emitArgCount(size_t argc, int line, int column = 0);
     void emitConstant(Value value, int line, int column = 0);
     int emitJump(OpCode op, int line, int column = 0);
     void patchJump(int offset);
