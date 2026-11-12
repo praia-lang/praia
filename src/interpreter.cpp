@@ -1781,7 +1781,9 @@ Value Interpreter::evaluate(const Expr* expr) {
                 taskInterp.setStrictDeprecations(taskStrictDeprecations);
                 taskInterp.pendingArgsFilled_ = namedArgsMask;
                 GcHeap::current().disable(); // task interpreters are short-lived
-                return callable->call(taskInterp, argsCopy);
+                // On a fiber: the thread's stack is too small for the
+                // tree-walker's recursion (see Fiber::DEFAULT_STACK_SIZE)
+                return Fiber::run<Value>([&] { return callable->call(taskInterp, argsCopy); });
             }).share();
         lendScope.started = true;
 

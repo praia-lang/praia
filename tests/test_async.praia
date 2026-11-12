@@ -340,4 +340,9 @@ testing.test("a closure made by a task's closure keeps the task's variables", la
     testing.expectEqual(inner(), 42, nil)
 })
 
+testing.test("a task recurses as deep as the main program", lam{ in
+    func rec(n) { if (n == 0) { return 0 } return 1 + rec(n - 1) }
+    testing.expectEqual(await async rec(150), 150, nil)
+})
+
 testing.done()

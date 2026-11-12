@@ -34,8 +34,8 @@ testing.test("deep recursion through a native callback", lam{ in
 })
 
 testing.test("deep recursion inside an async task", lam{ in
-    // Task threads have smaller stacks (512 KB on macOS): a debug build's
-    // tree-walker fits only about 9 calls there
+    // VM task threads have smaller stacks (512 KB on macOS); a tree-walker
+    // task runs on its own 8 MB stack
     let f = async lam{ in errorOf(lam{ in rec(100000) }) }()
     testing.expectContains(await f, "Stack overflow", nil)
     let g = async lam{ in errorOf(lam{ in viaMap(100000) }) }()
@@ -45,7 +45,7 @@ testing.test("deep recursion inside an async task", lam{ in
 })
 
 testing.test("deep recursion inside a generator", lam{ in
-    // A tree-walker generator runs on its own 256 KB stack
+    // A tree-walker generator runs on its own 8 MB stack
     func gen() {
         yield errorOf(lam{ in rec(100000) })
         yield "still running"
@@ -72,7 +72,7 @@ deepDataTest("str() of a value too deep to print", lam{ in
 })
 
 deepDataTest("a value too deep to copy into an async task", lam{ in
-    // Built and copied inside a task, on its small fixed-size stack: the
+    // Built and copied inside a task, on its fixed-size stack: the
     // main thread's stack depends on the machine, and one big enough
     // copies the whole value
     func size(x) { return len(x) }
