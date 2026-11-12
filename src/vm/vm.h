@@ -281,28 +281,16 @@ private:
 
     // Open upvalues (linked list, ordered by stack slot desc)
     ObjUpvalue* openUpvalues = nullptr;
-    // Upvalues of a resumed generator that another thread made, in use on
-    // this VM's stack until they close (see resumeGenerator). Claimed: one
-    // with no owner left (its task ended), reopened here and owned by this
-    // thread until it closes. Not claimed: its owner is still running, so
-    // the slot is a copy, written back under the lock when it closes if
-    // the generator changed it (else a newer value its owner set stays).
+    // Upvalues of a resumed generator that a finished task made, claimed
+    // from its bag: reopened on this VM's stack and owned by this thread
+    // until they close (see resumeGenerator)
     struct BorrowedUpvalue {
         ObjUpvalue* upvalue;
         int slot;                                // index into stack
         std::shared_ptr<TaskOwnership> bag;      // where it lives
-        bool claimed;
-        Value copied = Value();                  // not claimed: the value read in
     };
     std::vector<BorrowedUpvalue> borrowed_;
     const BorrowedUpvalue* findBorrowed(const ObjUpvalue* uv) const;
-    // Where an upvalue's value is on this thread: a synced one's is the
-    // generator's slot while it runs here, so its closures see the local
-    Value* upvalueLocation(ObjUpvalue* uv) {
-        for (auto& b : borrowed_)
-            if (!b.claimed && b.upvalue == uv) return &stack[b.slot];
-        return uv->location;
-    }
     ObjUpvalue* captureUpvalue(Value* local);
     void closeUpvalues(Value* last);
 

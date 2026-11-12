@@ -3295,6 +3295,8 @@ await f
 print(m)              // {} — the task mutated its own copy
 ```
 
+Generators are the exception to copying: a task gets the same generator, not a copy. A generator whose locals are captured by closures can't be resumed in another task while the task (or main program) it last ran in is still running, because those closures share its variables. Calling `next()` there throws. Resume it where it ran, or once that task has finished. A generator with no captured locals can be resumed anywhere. (`--tree` mode allows it.)
+
 To communicate, use:
 
 - **`SharedMap`** — cross-task key-value store. Use this when async tasks need shared state by key (progress trackers, job state, caches).

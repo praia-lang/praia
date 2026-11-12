@@ -411,64 +411,22 @@ testing.test("closures in a generator share its variables across yields", lam{ i
     fromTask.next()
     fromTask = nil
     testing.expectEqual(late(), 6, "a closure made while it was borrowed")
+})
 
-    // Made here, resumed in tasks while this thread still owns its
-    // variables: they stay linked through every yield
-    func shared() {
-        let x = 1
-        yield lam{ in x }
-        x = 2
-        yield x
-        x += 10
-        yield x
-        yield x
-    }
-    let sg = shared()
-    let peek = sg.next().value
-    testing.expectEqual(await async lam{ in sg.next().value }(), 2, nil)
-    testing.expectEqual(peek(), 2, "after a task resumed it")
-    testing.expectEqual(await async lam{ in sg.next().value }(), 12, nil)
-    testing.expectEqual(peek(), 12, "after a second task resumed it")
-    testing.expectEqual(sg.next().value, 12, "resumed here again")
-
-    // Set here while a task runs it: the task's untouched copy doesn't
-    // overwrite it when the generator yields
-    let started = Queue()
-    let go = Queue()
-    func waits() {
-        let w = 1
-        yield lam{ v in w = v }
-        started.send(true)
-        go.recv()
-        yield "ran"
-        yield w
-    }
-    let wg = waits()
-    let setW = wg.next().value
-    let running = async lam{ in wg.next().value }()
-    started.recv()
-    setW(9)
-    go.send(true)
-    testing.expectEqual(await running, "ran", nil)
-    testing.expectEqual(wg.next().value, 9, "set here while a task ran it")
-
-    // Run in a task, its closures and its local agree before the yield
-    func midRun() {
-        let m = 1
-        let get = lam{ in m }
-        let set = lam{ v in m = v }
-        let inc = lam{ in m++ }
-        yield get
-        m = 2
-        let seen = get()
-        set(7)
-        inc()
-        yield [seen, m]
-    }
-    let mg = midRun()
-    let getM = mg.next().value
-    testing.expectEqual(await async lam{ in mg.next().value }(), [2, 8], "in a task")
-    testing.expectEqual(getM(), 8, "written back when it yielded")
+testing.test("resuming a generator in another task while it's shared is an error (VM)", lam{ in
+    // Its closures share its variables with the thread it last ran on,
+    // which owns them while it's running. The tree-walker shares them
+    let src = "func shared() {\n    let x = 1\n    yield lam{ in x }\n    x = 2\n    yield x\n}\n" +
+        "let sg = shared()\nlet peek = sg.next().value\n" +
+        "print(await async lam{ in try { return sg.next().value } catch (e) { return str(e) } }())\n" +
+        "print(sg.next().value, peek())\n" +
+        "func plain() { yield 1\nyield 2 }\nlet pg = plain()\npg.next()\n" +
+        "print(await async lam{ in pg.next().value }())\n"
+    let r = sys.exec(["./praia", "-c", src])
+    let out = r.stdout.split("\n")
+    testing.expectContains(out[0], "Can't resume a generator in another task", r.stderr)
+    testing.expectEqual(out[1], "2 2", "still resumes where it ran")
+    testing.expectEqual(out[2], "2", "one without shared variables resumes anywhere")
 })
 
 testing.done()
