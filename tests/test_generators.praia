@@ -429,4 +429,10 @@ testing.test("resuming a generator in another task while it's shared is an error
     testing.expectEqual(out[2], "2", "one without shared variables resumes anywhere")
 })
 
+testing.test("a generator recurses as deep as the main program", lam{ in
+    func rec(n) { if (n == 0) { return 0 } return 1 + rec(n - 1) }
+    func gen() { yield rec(150) }
+    testing.expectEqual(gen().next().value, 150, nil)
+})
+
 testing.done()

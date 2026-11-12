@@ -5,9 +5,9 @@
 // the parser and compiler descending into nested code, natives calling
 // back into the VM, printing or copying a deeply nested value. A count of
 // calls can't say when that runs out: frames are bigger in a debug build,
-// async tasks run on 512 KB thread stacks (macOS) and tree-walker
-// generators on 256 KB fibers. So these places ask how close the stack
-// itself is to its end, and stop with an error while a reserve is left.
+// and VM async tasks run on 512 KB thread stacks (macOS). So these places
+// ask how close the stack itself is to its end, and stop with an error
+// while a reserve is left.
 
 #include <pthread.h>
 

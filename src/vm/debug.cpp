@@ -37,11 +37,11 @@ static int jumpInstruction(const char* name, int sign, const Chunk& chunk, int o
 
 // [argc:8] [names_idx:16]
 static int callNamedInstruction(const char* name, const Chunk& chunk, int offset) {
-    uint8_t argc = chunk.code[offset + 1];
-    uint16_t namesIdx = (chunk.code[offset + 2] << 8) | chunk.code[offset + 3];
-    std::cout << std::left << std::setw(20) << name << " argc=" << (int)argc
+    uint16_t argc = (chunk.code[offset + 1] << 8) | chunk.code[offset + 2];
+    uint16_t namesIdx = (chunk.code[offset + 3] << 8) | chunk.code[offset + 4];
+    std::cout << std::left << std::setw(20) << name << " argc=" << argc
               << " names=" << namesIdx << "\n";
-    return offset + 4;
+    return offset + 5;
 }
 
 // [name_idx:16] [argc:8]
@@ -51,6 +51,15 @@ static int invokeInstruction(const char* name, const Chunk& chunk, int offset) {
     std::cout << std::left << std::setw(20) << name << " " << nameIdx
               << " '" << chunk.constants[nameIdx].toString() << "' argc=" << (int)argc << "\n";
     return offset + 4;
+}
+
+// [name_idx:16] [argc:16]
+static int tagOrCallInstruction(const char* name, const Chunk& chunk, int offset) {
+    uint16_t nameIdx = (chunk.code[offset + 1] << 8) | chunk.code[offset + 2];
+    uint16_t argc = (chunk.code[offset + 3] << 8) | chunk.code[offset + 4];
+    std::cout << std::left << std::setw(20) << name << " " << nameIdx
+              << " '" << chunk.constants[nameIdx].toString() << "' argc=" << argc << "\n";
+    return offset + 5;
 }
 
 // [path_idx:16] [alias_idx:16]
@@ -161,7 +170,7 @@ int disassembleInstruction(const Chunk& chunk, int offset) {
         case OpCode::OP_POP_JUMP_IF_FALSE: return jumpInstruction("OP_POP_JUMP_IF_FALSE", 1, chunk, offset);
 
         // Functions
-        case OpCode::OP_CALL:           return byteInstruction("OP_CALL", chunk, offset);
+        case OpCode::OP_CALL:           return u16Instruction("OP_CALL", chunk, offset);
         case OpCode::OP_CALL_SPREAD:    return simpleInstruction("OP_CALL_SPREAD", offset);
         case OpCode::OP_CALL_NAMED:     return callNamedInstruction("OP_CALL_NAMED", chunk, offset);
         case OpCode::OP_RETURN:         return simpleInstruction("OP_RETURN", offset);
@@ -221,14 +230,14 @@ int disassembleInstruction(const Chunk& chunk, int offset) {
         case OpCode::OP_THROW:          return simpleInstruction("OP_THROW", offset);
         case OpCode::OP_DEFER:          return simpleInstruction("OP_DEFER", offset);
         case OpCode::OP_BUILD_TAGGED:   return invokeInstruction("OP_BUILD_TAGGED", chunk, offset);
-        case OpCode::OP_TAG_OR_CALL:    return invokeInstruction("OP_TAG_OR_CALL", chunk, offset);
+        case OpCode::OP_TAG_OR_CALL:    return tagOrCallInstruction("OP_TAG_OR_CALL", chunk, offset);
         case OpCode::OP_RUN_DEFERS:     return simpleInstruction("OP_RUN_DEFERS", offset);
 
         // Generators
         case OpCode::OP_YIELD:          return simpleInstruction("OP_YIELD", offset);
 
         // Advanced
-        case OpCode::OP_ASYNC:          return byteInstruction("OP_ASYNC", chunk, offset);
+        case OpCode::OP_ASYNC:          return u16Instruction("OP_ASYNC", chunk, offset);
         case OpCode::OP_ASYNC_NAMED:    return callNamedInstruction("OP_ASYNC_NAMED", chunk, offset);
         case OpCode::OP_AWAIT:          return simpleInstruction("OP_AWAIT", offset);
         case OpCode::OP_IMPORT:         return importInstruction("OP_IMPORT", chunk, offset);

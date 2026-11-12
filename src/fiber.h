@@ -14,9 +14,11 @@
 #pragma clang diagnostic pop
 #endif
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <sys/mman.h>
@@ -29,22 +31,35 @@
 
 class Fiber {
 public:
-    static constexpr size_t DEFAULT_STACK_SIZE = 262144; // 256KB
+    // As much as a main thread gets: the tree-walker uses several KB of
+    // C++ stack per Praia call (tens of KB in a debug build). Only the
+    // pages it touches take memory
+    static constexpr size_t DEFAULT_STACK_SIZE = 8 * 1024 * 1024;
 
     Fiber(std::function<void()> body, size_t stackSize = DEFAULT_STACK_SIZE)
         : body_(std::move(body)), stackSize_(stackSize) {
         // Allocate stack with mmap for proper alignment and guard page potential
         stack_ = static_cast<uint8_t*>(
             mmap(nullptr, stackSize_, PROT_READ | PROT_WRITE,
-                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
         if (stack_ == MAP_FAILED) {
             stack_ = nullptr;
             return;
         }
 
         getcontext(&fiberCtx_);
+#if defined(__APPLE__)
+        // makecontext here zeroes all the stack it's given, which for one
+        // this size costs far more than a generator does. It's given the
+        // top: the fiber starts there and grows down into the rest of the
+        // mapping, which the stack checks measure (see resume)
+        const size_t contextStack = std::min<size_t>(64 * 1024, stackSize_);
+        fiberCtx_.uc_stack.ss_sp = stack_ + stackSize_ - contextStack;
+        fiberCtx_.uc_stack.ss_size = contextStack;
+#else
         fiberCtx_.uc_stack.ss_sp = stack_;
         fiberCtx_.uc_stack.ss_size = stackSize_;
+#endif
         fiberCtx_.uc_link = nullptr;
 
         // makecontext only accepts int args; split the Fiber* into two halves
@@ -79,6 +94,24 @@ public:
     }
 
     bool isCompleted() const { return completed_; }
+
+    // Runs body to completion on a fiber's stack and returns what it
+    // returns (or rethrows what it throws): gives a thread with a small
+    // stack, like an async task's (512 KB on macOS), a main thread's room.
+    // Runs it in place if the stack can't be mapped
+    template <class T, class F>
+    static T run(F&& body) {
+        T result;
+        std::exception_ptr error;
+        Fiber fiber([&] {
+            try { result = body(); }
+            catch (...) { error = std::current_exception(); }
+        });
+        if (!fiber.stack_) return body();
+        fiber.resume();
+        if (error) std::rethrow_exception(error);
+        return result;
+    }
 
 private:
     static void fiberEntry(unsigned int lo, unsigned int hi) {

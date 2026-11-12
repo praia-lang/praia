@@ -68,9 +68,9 @@ enum class OpCode : uint8_t {
     OP_POP_JUMP_IF_FALSE, // [offset:16] pop then jump
 
     // ── Functions ──
-    OP_CALL,            // [argc:8]
+    OP_CALL,            // [argc:16]
     OP_CALL_SPREAD,     // stack: [callee, argsArray] — call with spread args
-    OP_CALL_NAMED,      // [argc:8] [names_idx:16] — call with named arguments
+    OP_CALL_NAMED,      // [argc:16] [names_idx:16] — call with named arguments
     OP_RETURN,
     OP_CLOSURE,         // [fn_idx:16] followed by upvalue descriptors
     OP_GET_UPVALUE,     // [slot:16]
@@ -112,12 +112,12 @@ enum class OpCode : uint8_t {
 
     // ── Tagged values ──
     OP_BUILD_TAGGED,    // [name_idx:16] [argc:8] — build tagged value from stack args
-    OP_TAG_OR_CALL,     // [name_idx:16] [argc:8] — if callee is callable, call; else build tagged
+    OP_TAG_OR_CALL,     // [name_idx:16] [argc:16] — if callee is callable, call; else build tagged
 
     // ── Advanced ──
     OP_YIELD,           // yield value from generator
-    OP_ASYNC,           // [argc:8]
-    OP_ASYNC_NAMED,     // [argc:8] [names_idx:16] — async call with named arguments
+    OP_ASYNC,           // [argc:16]
+    OP_ASYNC_NAMED,     // [argc:16] [names_idx:16] — async call with named arguments
     OP_AWAIT,
     OP_IMPORT,          // [path_idx:16] [alias_idx:16]
     OP_EXPORT,          // [count:8] followed by count name indices
