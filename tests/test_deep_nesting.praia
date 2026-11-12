@@ -151,4 +151,21 @@ testing.test("too many constants is a compile error, not a crash", lam{ in
     testing.expectEqual(n.stdout.strip(), "1", n.stderr.slice(0, 200))
 })
 
+testing.test("code too long to jump over is a compile error, not a wrong jump", lam{ in
+    // The VM's jumps reach 65535 bytes; past that one used to wrap
+    // around and run the wrong code
+    let dir = testing.tempDir()
+    let body = "    x = x + a\n" * 8000
+    let skip = path.join(dir, "skip.praia")
+    fs.write(skip, "let x = 0\nlet a = 1\nif (false) {\n" + body + "}\nprint(x)\n")
+    let r = sys.exec(["./praia", skip])
+    testing.expectEqual(r.exitCode, 2, r.stderr.slice(0, 200))
+    testing.expectContains(r.stderr, "[line 3] Compile error: Too much code to jump over", nil)
+
+    let loop = path.join(dir, "loop.praia")
+    fs.write(loop, "let x = 0\nlet a = 1\nwhile (x < 1) {\n" + body + "}\nprint(x)\n")
+    let l = sys.exec(["./praia", loop])
+    testing.expectContains(l.stderr, "Compile error: Loop body too large", nil)
+})
+
 testing.done()

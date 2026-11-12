@@ -40,14 +40,19 @@ int Compiler::emitJump(OpCode op, int line, int column) {
     return currentChunk().size() - 2;
 }
 
+// Jump distances are 16 bits: code too long to jump over is an error
+// (reported at the jump's line), not a jump that wraps around
 void Compiler::patchJump(int offset) {
     int jump = currentChunk().size() - offset - 2;
+    if (jump > UINT16_MAX)
+        error("Too much code to jump over (max 65535 bytes)", currentChunk().getLine(offset));
     currentChunk().patchU16(offset, static_cast<uint16_t>(jump));
 }
 
 void Compiler::emitLoop(int loopStart, int line, int column) {
     emit(OpCode::OP_JUMP_BACK, line, column);
     int offset = currentChunk().size() - loopStart + 2;
+    if (offset > UINT16_MAX) error("Loop body too large (max 65535 bytes)", line);
     emitU16(static_cast<uint16_t>(offset), line, column);
 }
 

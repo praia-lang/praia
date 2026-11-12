@@ -659,10 +659,7 @@ void Compiler::compilePipeTryExpr(const PipeTryExpr* expr) {
     emitU16(0, expr->line, expr->column);
 
     // Patch catch offset
-    int catchTarget = static_cast<int>(currentChunk().code.size());
-    int catchOffset = catchTarget - catchSlot - 2;
-    currentChunk().code[catchSlot] = static_cast<uint8_t>((catchOffset >> 8) & 0xFF);
-    currentChunk().code[catchSlot + 1] = static_cast<uint8_t>(catchOffset & 0xFF);
+    patchJump(catchSlot);
 
     // Catch block: error is on stack. Call handler with it.
     if (expr->right->type == ExprType::Call) {
@@ -682,10 +679,7 @@ void Compiler::compilePipeTryExpr(const PipeTryExpr* expr) {
     }
 
     // Patch jump-over
-    int afterCatch = static_cast<int>(currentChunk().code.size());
-    int jumpDist = afterCatch - jumpOverSlot - 2;
-    currentChunk().code[jumpOverSlot] = static_cast<uint8_t>((jumpDist >> 8) & 0xFF);
-    currentChunk().code[jumpOverSlot + 1] = static_cast<uint8_t>(jumpDist & 0xFF);
+    patchJump(jumpOverSlot);
 }
 
 // ── Phase 3+ stubs ──────────────────────────────────────────
