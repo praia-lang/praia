@@ -3139,7 +3139,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
                 bool isConstructor = (initVmcc != nullptr);
 
                 // Arity check — must match callClosure's behavior
-                if (static_cast<int>(args.size()) > arity) {
+                if (fn->restParam.empty() && static_cast<int>(args.size()) > arity) {
                     std::string errName = klass ? klass->className : fn->name;
                     RUNTIME_ERR(errName + "() expected at most " + std::to_string(arity) +
                         " " + argStr(arity) + " but got " + std::to_string(args.size()));
@@ -3228,10 +3228,17 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
                         if (!receiverCopy.isNil())
                             rewireForTaskVm(receiverCopy, &taskVm, rewireVisited);
 
-                        // Pad args to match arity
-                        std::vector<Value> paddedArgs = args;
+                        // Pad args to match arity, and collect any past it
+                        // into the rest parameter's array, as callClosure does
+                        size_t fixed = std::min(args.size(), static_cast<size_t>(arity));
+                        std::vector<Value> paddedArgs(args.begin(), args.begin() + fixed);
                         while (static_cast<int>(paddedArgs.size()) < arity)
                             paddedArgs.push_back(Value());
+                        if (!fn->restParam.empty()) {
+                            auto rest = gcNew<PraiaArray>();
+                            rest->elements.assign(args.begin() + fixed, args.end());
+                            paddedArgs.push_back(Value(rest));
+                        }
 
                         taskVm.allClosures.push_back(std::make_unique<ObjClosure>(fn));
                         auto* closure = taskVm.allClosures.back().get();

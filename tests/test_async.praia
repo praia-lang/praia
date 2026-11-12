@@ -345,4 +345,17 @@ testing.test("a task recurses as deep as the main program", lam{ in
     testing.expectEqual(await async rec(150), 150, nil)
 })
 
+testing.test("async on a function with a rest parameter", lam{ in
+    func f(...xs) { return xs }
+    testing.expectEqual(await async f(1, 2, 3), [1, 2, 3], nil)
+    testing.expectEqual(await async f(), [], nil)
+    func g(a, ...rest) { return [a, rest] }
+    testing.expectEqual(await async g(1, 2, 3), [1, [2, 3]], nil)
+    testing.expectEqual(await async g(1), [1, []], nil)
+    class C { func m(...xs) { return len(xs) } }
+    testing.expectEqual(await async C().m(1, 2), 2, "method")
+    class D { func init(...xs) { this.n = len(xs) } }
+    testing.expectEqual((await async D(1, 2, 3)).n, 3, "constructor")
+})
+
 testing.done()
