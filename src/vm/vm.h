@@ -296,6 +296,13 @@ private:
     };
     std::vector<BorrowedUpvalue> borrowed_;
     const BorrowedUpvalue* findBorrowed(const ObjUpvalue* uv) const;
+    // Where an upvalue's value is on this thread: a synced one's is the
+    // generator's slot while it runs here, so its closures see the local
+    Value* upvalueLocation(ObjUpvalue* uv) {
+        for (auto& b : borrowed_)
+            if (!b.claimed && b.upvalue == uv) return &stack[b.slot];
+        return uv->location;
+    }
     ObjUpvalue* captureUpvalue(Value* local);
     void closeUpvalues(Value* last);
 

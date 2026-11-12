@@ -451,6 +451,24 @@ testing.test("closures in a generator share its variables across yields", lam{ i
     go.send(true)
     testing.expectEqual(await running, "ran", nil)
     testing.expectEqual(wg.next().value, 9, "set here while a task ran it")
+
+    // Run in a task, its closures and its local agree before the yield
+    func midRun() {
+        let m = 1
+        let get = lam{ in m }
+        let set = lam{ v in m = v }
+        let inc = lam{ in m++ }
+        yield get
+        m = 2
+        let seen = get()
+        set(7)
+        inc()
+        yield [seen, m]
+    }
+    let mg = midRun()
+    let getM = mg.next().value
+    testing.expectEqual(await async lam{ in mg.next().value }(), [2, 8], "in a task")
+    testing.expectEqual(getM(), 8, "written back when it yielded")
 })
 
 testing.done()

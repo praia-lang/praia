@@ -563,6 +563,7 @@ Value VMClosureCallable::call(Interpreter&, const std::vector<Value>& args) {
     self->vm = currentVm;
     self->ownedPrototype = ownedPrototype;
     self->taskOwnership = taskOwnership;
+    self->borrowedOwnership = borrowedOwnership;
     currentVm->push(Value(std::static_pointer_cast<Callable>(self)));
     for (auto& arg : args) currentVm->push(arg);
 
@@ -905,6 +906,10 @@ const VM::BorrowedUpvalue* VM::findBorrowed(const ObjUpvalue* uv) const {
 }
 
 void VM::writeUpvalue(ObjUpvalue* uv, Value v) {
+    if (!borrowed_.empty()) {
+        Value* loc = upvalueLocation(uv);
+        if (loc != uv->location) { *loc = std::move(v); return; } // our stack
+    }
     if (uv->owner.load(std::memory_order_relaxed) == execHeap_) {
         *uv->location = std::move(v);
         return;
@@ -1954,7 +1959,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
         case OpCode::OP_POST_DEC_UPVALUE: {
             uint16_t slot = READ_U16();
             auto* uv = FRAME.closure->upvalues[slot];
-            Value val = *uv->location;
+            Value val = *upvalueLocation(uv);
             if (!val.isNumber()) { RUNTIME_ERR("Postfix operator requires a number"); }
             push(val);
             bool inc = static_cast<OpCode>(instruction) == OpCode::OP_POST_INC_UPVALUE;
@@ -2209,7 +2214,8 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
 
         case OpCode::OP_GET_UPVALUE: {
             uint16_t slot = READ_U16();
-            push(*FRAME.closure->upvalues[slot]->location);
+            auto* uv = FRAME.closure->upvalues[slot];
+            push(borrowed_.empty() ? *uv->location : *upvalueLocation(uv));
             break;
         }
 
@@ -3185,7 +3191,7 @@ VM::Result VM::execute(int baseFrameCount_, int ownHandlers) {
                 std::vector<Value> upvalueSnapshot;
                 for (int i = 0; i < closureSrc->upvalueCount; i++) {
                     auto* uv = closureSrc->upvalues[i];
-                    upvalueSnapshot.push_back(uv ? deepCopyForTask(*uv->location, visited) : Value());
+                    upvalueSnapshot.push_back(uv ? deepCopyForTask(*upvalueLocation(uv), visited) : Value());
                 }
 
                 // For bound methods, deep-copy the receiver so the task
