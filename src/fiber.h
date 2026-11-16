@@ -29,6 +29,21 @@
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 
+// ASan tracks one stack per thread: each switch onto or off a fiber's
+// stack has to tell it, or it misreads the frames there
+#if defined(__SANITIZE_ADDRESS__)
+#define PRAIA_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define PRAIA_ASAN 1
+#endif
+#endif
+
+#ifdef PRAIA_ASAN
+#include <sanitizer/asan_interface.h>
+#include <sanitizer/common_interface_defs.h>
+#endif
+
 class Fiber {
 public:
     // As much as a main thread gets: the tree-walker uses several KB of
@@ -70,7 +85,13 @@ public:
     }
 
     ~Fiber() {
-        if (stack_) munmap(stack_, stackSize_);
+        if (!stack_) return;
+#ifdef PRAIA_ASAN
+        // A generator dropped while suspended never unwinds, leaving its
+        // frames' redzones poisoned for whatever is mapped here next
+        __asan_unpoison_memory_region(stack_, stackSize_);
+#endif
+        munmap(stack_, stackSize_);
     }
 
     Fiber(const Fiber&) = delete;
@@ -83,14 +104,20 @@ public:
         // The stack checks measure against this fiber's stack while it runs
         praia::StackBounds prevStack = praia::fiberStack;
         praia::fiberStack = {reinterpret_cast<uintptr_t>(stack_), stackSize_};
+        void* fake = nullptr;
+        switchStart(&fake, stack_, stackSize_);
         swapcontext(&callerCtx_, &fiberCtx_);
+        switchFinish(fake, nullptr, nullptr);
         praia::fiberStack = prevStack;
         current_ = prev;
     }
 
     static void suspend() {
         Fiber* self = current_;
+        void* fake = nullptr;
+        switchStart(&fake, self->callerBottom_, self->callerSize_);
         swapcontext(&self->fiberCtx_, &self->callerCtx_);
+        switchFinish(fake, &self->callerBottom_, &self->callerSize_);
     }
 
     bool isCompleted() const { return completed_; }
@@ -117,10 +144,34 @@ private:
     static void fiberEntry(unsigned int lo, unsigned int hi) {
         auto ptr = static_cast<uintptr_t>(lo) | (static_cast<uintptr_t>(hi) << 32);
         Fiber* self = reinterpret_cast<Fiber*>(ptr);
+        switchFinish(nullptr, &self->callerBottom_, &self->callerSize_);
         self->body_();
         self->completed_ = true;
+        // No fake stack to save: this fiber never runs again
+        switchStart(nullptr, self->callerBottom_, self->callerSize_);
         swapcontext(&self->fiberCtx_, &self->callerCtx_);
     }
+
+    // Tell ASan about a switch to the stack at bottom, then that it's
+    // done, learning the stack switched from. No-ops in a normal build
+    static void switchStart(void** fake, const void* bottom, size_t size) {
+#ifdef PRAIA_ASAN
+        __sanitizer_start_switch_fiber(fake, bottom, size);
+#else
+        (void)fake; (void)bottom; (void)size;
+#endif
+    }
+    static void switchFinish(void* fake, const void** bottom, size_t* size) {
+#ifdef PRAIA_ASAN
+        __sanitizer_finish_switch_fiber(fake, bottom, size);
+#else
+        (void)fake; (void)bottom; (void)size;
+#endif
+    }
+
+    // The stack this fiber was last switched in from, for switching back
+    const void* callerBottom_ = nullptr;
+    size_t callerSize_ = 0;
 
     ucontext_t callerCtx_{};
     ucontext_t fiberCtx_{};

@@ -430,9 +430,11 @@ testing.test("resuming a generator in another task while it's shared is an error
 })
 
 testing.test("a generator recurses as deep as the main program", lam{ in
+    // 100: deep for a 256 KB stack, and within an 8 MB one even in an
+    // ASan build, whose frames are several times the size
     func rec(n) { if (n == 0) { return 0 } return 1 + rec(n - 1) }
-    func gen() { yield rec(150) }
-    testing.expectEqual(gen().next().value, 150, nil)
+    func gen() { yield rec(100) }
+    testing.expectEqual(gen().next().value, 100, nil)
 })
 
 testing.done()
