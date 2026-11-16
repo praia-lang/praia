@@ -4,20 +4,17 @@ let finished = false
 print("A random number from 1 to 10 has been generated. Try to guess it.")
 
 while (finished == false) {
-		let guess = sys.input("Your guess: ").toNum()
+    let guess = sys.input("Your guess: ").toNum()
 
-		if (guess > toGuess) {
-				print("Too high, try again.")
-		}
-		elif (guess < toGuess) {
-				print("Too low, try again")
-		}
-		elif (guess == toGuess) {
-				print("Correct!")
-				finished = true
-		}
-		else {
-				print("error")
-				finished = true
-		}
+    if (guess > toGuess) {
+        print("Too high, try again.")
+    } elif (guess < toGuess) {
+        print("Too low, try again")
+    } elif (guess == toGuess) {
+        print("Correct!")
+        finished = true
+    } else {
+        print("error")
+        finished = true
+    }
 }
