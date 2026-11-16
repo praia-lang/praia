@@ -1,6 +1,7 @@
 build/
 build_install/
 build_fuzz/
+build_asan/
 fuzz/corpus/
 fuzz/crashes/
 praia

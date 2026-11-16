@@ -163,7 +163,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR) $(BUILD_DIR)/vm $(BUILD_DIR)/builtins
 
 clean:
-	rm -rf $(BUILD_DIR) $(INSTALL_BUILD_DIR) $(TARGET) $(SRC_DIR)/version.h
+	rm -rf $(BUILD_DIR) $(INSTALL_BUILD_DIR) $(ASAN_BUILD_DIR) $(TARGET) $(SRC_DIR)/version.h
 
 # ── Install / Uninstall ──
 # Usage: make install PREFIX=/usr/local
@@ -252,6 +252,22 @@ test: $(TARGET) test-input
 test-gc-stress: $(TARGET)
 	PRAIA_GC_STRESS=1 ./$(TARGET) test
 	PRAIA_GC_STRESS=1 ./$(TARGET) --tree test
+
+# The same runs on a build with AddressSanitizer, in build_asan/. The tests
+# run ./praia, so that's what it builds; it's removed after, so the next
+# `make` relinks the normal build. Leak checking is off: memory still held
+# at exit isn't what this looks for
+ASAN_BUILD_DIR = build_asan
+ASAN_OPT = -O1 -g -fsanitize=address -fno-omit-frame-pointer
+test-asan:
+	rm -f $(TARGET)
+	$(MAKE) BUILD_DIR=$(ASAN_BUILD_DIR) OPT='$(ASAN_OPT)'
+	@status=0; export ASAN_OPTIONS=detect_leaks=0; \
+	./$(TARGET) test || status=1; \
+	./$(TARGET) --tree test || status=1; \
+	PRAIA_GC_STRESS=1 ./$(TARGET) test || status=1; \
+	PRAIA_GC_STRESS=1 ./$(TARGET) --tree test || status=1; \
+	rm -f $(TARGET); exit $$status
 
 # Integration test for sys.input — needs piped stdin, so runs outside `praia test`.
 test-input: $(TARGET)
@@ -366,4 +382,4 @@ fuzz-run:
 	    -artifact_prefix=fuzz/crashes/$(TARGET)/ \
 	    -print_final_stats=1
 
-.PHONY: all clean install uninstall test test-input test-gc-stress plugin
+.PHONY: all clean install uninstall test test-input test-gc-stress test-asan plugin

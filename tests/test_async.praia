@@ -341,8 +341,10 @@ testing.test("a closure made by a task's closure keeps the task's variables", la
 })
 
 testing.test("a task recurses as deep as the main program", lam{ in
+    // 100: deep for a 512 KB thread stack, and within an 8 MB one even
+    // in an ASan build, whose frames are several times the size
     func rec(n) { if (n == 0) { return 0 } return 1 + rec(n - 1) }
-    testing.expectEqual(await async rec(150), 150, nil)
+    testing.expectEqual(await async rec(100), 100, nil)
 })
 
 testing.test("async on a function with a rest parameter", lam{ in

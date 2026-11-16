@@ -99,6 +99,7 @@ make
 make test                 # run the test suite in tests/
 ./praia test              # same thing
 ./praia test path/to/dir  # point at a different directory
+make test-asan            # the suite under AddressSanitizer
 ```
 
 `praia test` discovers `test_*.praia` files in the given directory, runs each

@@ -20,6 +20,13 @@ jobs:
     strategy:
       matrix:
         os: [macos-15, ubuntu-24.04]
+        asan: [false]
+        # The suite under AddressSanitizer, on both engines and GC stress.
+        # Setting asan (a matrix key) makes this its own job rather than
+        # merging into the ubuntu one
+        include:
+          - os: ubuntu-24.04
+            asan: true
 
     runs-on: ${{ matrix.os }}
 
@@ -102,16 +109,24 @@ jobs:
           sudo apt-get install -y libreadline-dev libsqlite3-dev libutf8proc-dev libre2-dev
 
       - name: Build
+        if: ${{ !matrix.asan }}
         run: make
 
       - name: Test (VM — default)
+        if: ${{ !matrix.asan }}
         run: ./praia test
 
       - name: Test (tree-walker)
+        if: ${{ !matrix.asan }}
         run: ./praia --tree test
 
       - name: Test (GC stress, both engines)
+        if: ${{ !matrix.asan }}
         run: make test-gc-stress
+
+      - name: Test (AddressSanitizer)
+        if: matrix.asan
+        run: make test-asan
 
   # Coverage-guided fuzz regression. For each parser target, build the
   # fuzz binary and run for ~60 s against the committed seeds. Any crash
