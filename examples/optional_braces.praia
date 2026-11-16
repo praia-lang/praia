@@ -1,0 +1,54 @@
+// if/elif/else, while, for and ensure-else can take a single
+// statement as their body, leaving out the braces
+
+// ── if / elif / else on one line ──
+func grade(score) {
+    if (score >= 90) return "A" elif (score >= 80) return "B" else return "C"
+}
+print("grade(95):", grade(95))
+print("grade(72):", grade(72))
+
+// ── Bodies on the next line ──
+let done = false
+if (done)
+    print("finished")
+else
+    print("still going")
+
+// ── A `;` before else/elif is allowed ──
+let x = -4
+if (x < 0) x = -x; else x = x * 2
+print("x:", x)
+
+// ── Loops ──
+let i = 0
+while (i < 3) i += 1
+print("i:", i)
+
+for (n in [1, 2, 3]) print("n:", n)
+
+let odd = []
+for (v in 1..10) if (v % 2 == 0) continue else odd.push(v)
+print("odd:", odd)
+
+// ── ensure-else ──
+func describe(user) {
+    ensure (user != nil) else return "nobody"
+    ensure let name = user.name else return "no name"
+    return "user %{name}"
+}
+print(describe(nil))
+print(describe({}))
+print(describe({name: "Ana"}))
+
+// ── else binds to the nearest if ──
+let a = true
+let b = false
+if (a) if (b) print("a and b") else print("a, not b")
+
+// A declaration still needs braces, since its scope would end right away:
+//   if (true) let y = 1      // error
+if (true) {
+    let y = 1
+    print("y:", y)
+}
